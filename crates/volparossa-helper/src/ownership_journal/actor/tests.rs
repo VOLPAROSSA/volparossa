@@ -26,6 +26,14 @@ use super::super::{
 use super::*;
 
 const TEST_WAIT: Duration = Duration::from_secs(2);
+// Fsync-heavy fixtures and executor-start tests must outlive the coordination wait even when
+// parallel journal persistence delays the actor thread. Production and the default timeout tests
+// retain their separately reviewed bounds.
+const TEST_DURABLE_IO_WAIT: Duration = Duration::from_millis(2_500);
+
+fn io_deadline() -> HardDeadline {
+    HardDeadline::after(TEST_DURABLE_IO_WAIT).expect("durable test deadline")
+}
 
 #[derive(Clone, Copy)]
 enum ExecutorMode {
@@ -1559,54 +1567,55 @@ fn dropped_replies_do_not_cancel_durable_transitions_and_exact_retries_recover()
     let first_intent = durable_intent(3);
     drop(
         client
-            .register_pending(first_intent.clone())
+            .register_pending_until(first_intent.clone(), io_deadline())
             .expect("admit lost register reply"),
     );
     let first_key = actor
-        .register_intent(first_intent)
+        .register_intent_until(first_intent, io_deadline())
         .expect("exact register retry returns key");
     assert_eq!(format!("{first_key:?}"), "DurableOwnershipKey(<redacted>)");
     let anchor = durable_anchor(3);
     drop(
         client
-            .mark_custody_pending(
+            .mark_custody_pending_until(
                 first_key.coordinates,
                 anchor,
                 custody_binding_for_test(anchor).expect("custody binding"),
+                io_deadline(),
             )
             .expect("admit lost custody reply"),
     );
     actor
-        .arm_prepare(&first_key, anchor)
+        .arm_prepare_until(&first_key, anchor, io_deadline())
         .expect("exact arm retry succeeds");
     drop(
         client
-            .confirm_cleanup_pending(first_key.coordinates)
+            .confirm_cleanup_pending_until(first_key.coordinates, io_deadline())
             .expect("admit lost cleanup reply"),
     );
     actor
-        .confirm_cleanup(&first_key)
+        .confirm_cleanup_until(&first_key, io_deadline())
         .expect("exact cleanup retry succeeds");
     drop(
         client
-            .confirm_manager_absent_pending(first_key.coordinates)
+            .confirm_manager_absent_pending_until(first_key.coordinates, io_deadline())
             .expect("admit lost manager-absence reply"),
     );
     actor
-        .confirm_manager_absent(&first_key)
+        .confirm_manager_absent_until(&first_key, io_deadline())
         .expect("exact manager-absence retry succeeds");
 
     let second_intent = durable_intent(4);
     let second_key = actor
-        .register_intent(second_intent)
+        .register_intent_until(second_intent, io_deadline())
         .expect("register second intent");
     drop(
         client
-            .retire_pending(second_key.coordinates)
+            .retire_pending_until(second_key.coordinates, io_deadline())
             .expect("admit lost retire reply"),
     );
     actor
-        .retire_never_dispatched(&second_key)
+        .retire_never_dispatched_until(&second_key, io_deadline())
         .expect("exact retire retry succeeds");
     let observations = observations.lock().expect("executor observations");
     assert_eq!(observations.calls, 2);
@@ -1718,7 +1727,10 @@ fn late_recovery_after_caller_drop_fences_admission_without_publishing_absent() 
         .arm_prepare(&key, durable_anchor(25))
         .expect("arm late fixture");
     let client = actor.client.as_ref().expect("actor client");
-    let deadline = HardDeadline::after(Duration::from_millis(20)).expect("short deadline");
+    // The actor must enter the executor before this intentional late-completion boundary. Real
+    // journal fsyncs from parallel tests can delay scheduling on CI, so the admission window must
+    // exceed the bounded gate wait rather than relying on a 20 ms scheduling race.
+    let deadline = io_deadline();
     let pending = client
         .confirm_cleanup_pending_until(key.coordinates, deadline)
         .expect("accept cleanup before deadline");
@@ -1781,7 +1793,8 @@ fn interposed_transitions_and_wrong_keys_reject_without_changing_durable_bytes()
         .register_intent(durable_intent(6))
         .expect("register arm fixture");
     let anchor = durable_anchor(6);
-    actor.arm_prepare(&armed_key, anchor).expect("arm fixture");
+    let armed = actor.arm_prepare_until(&armed_key, anchor, io_deadline());
+    armed.expect("arm fixture");
     actor
         .confirm_cleanup(&armed_key)
         .expect("confirm fixture cleanup");
@@ -2328,8 +2341,7 @@ fn timed_out_operation_fences_queue_and_drop_never_waits_forever_for_executor() 
         .arm_prepare(&second, durable_anchor(12))
         .expect("arm second intent");
     let client = actor.client.as_ref().expect("actor client");
-    let first_deadline =
-        HardDeadline::after(Duration::from_millis(20)).expect("short recovery deadline");
+    let first_deadline = io_deadline();
     let first_reply = client
         .confirm_cleanup_pending_until(first.coordinates, first_deadline)
         .expect("admit blocked recovery");

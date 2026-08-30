@@ -238,11 +238,14 @@ key/public-underlay/listen-port tuple to the dual-signed exit endpoint and insta
 relay-signed relay-exit peer. Relay atomically binds both prepared local tuples to the relay-signed
 endpoints, installs only the client-request peer and nested exit-signed peer on their respective
 roles, and rolls back the complete pair on failure. Every lease uses only its helper-derived `/128`
-route and retains the activation counter baseline. Commit re-proves the complete lease set and
-requires a handshake no older than activation plus strict RX/TX growth for every lease before
-entering Committed; neither Relay leg commits alone. Destroy likewise releases ownership only after
-the complete pair is absent. Multi-path routing, Relay forwarding and every usable datapath remain
-unavailable.
+route and retains the activation counter baseline. Relay activation additionally replaces the
+policy-drop baseline with two exact ifindex- and `/128`-bound accept rules guarded by one singleton
+timeout set and realtime cutoff, followed by terminal drop. Commit re-proves the complete lease set,
+requires a handshake no older than activation plus strict RX/TX growth for every lease and, for
+Relay, growth of both forwarding counters; neither leg commits alone. Destroy restores policy-drop
+before removing the interfaces and proves the complete pair and fence absent. This remains an
+isolated helper-internal single-path seam. Multi-path routing, a production route-manager caller,
+transport, ingress and every usable product datapath remain unavailable.
 
 The disposable helper-boundary gate exercises these singleton roles sequentially in private
 namespaces. The Client cycle creates a temporary relay-side peer, carries bounded ICMPv6 across the
@@ -252,12 +255,17 @@ fixture exactly, requires an identical cached Commit retry and destroys the cont
 exact-main [run 33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
 `1ca51fe0d2a2be855adb182e85c229d1d12bc017` retained the fresh worker/namespace proof as artifact
 [9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271),
-over a distinct `vpre0` relay-to-exit leg before Exit Commit retry and Destroy. These sequential legs
-prove no trusted selection/policy authority, simultaneous two-leg
-route, Relay forwarding, transport descriptor, ingress, usable VPN/datapath or crash recovery. The
-unit-tested Relay endpoint pair has no retained KVM/CI proof yet. Its cryptographically bound
-request/response authority is not an independent discovery/connection trust anchor. Keys are never
-persisted and are destroyed with the worker context; the fixed alpha score remains **11/100 (11%)**.
+over a distinct `vpre0` relay-to-exit leg before Exit Commit retry and Destroy. Retained exact-main
+run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc` separately proves one simultaneous
+Relay endpoint pair, before forwarding was implemented. Current non-retained branch smoke [run
+33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
+`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` proves bounded `::1` to `::4` traffic through both live
+WireGuard legs, growth of all four peer counter views and both nftables forwarding counters, Commit
+retry, teardown and unchanged host state. It retains no artifact and proves no trusted
+selection/policy authority, production simultaneous route, transport descriptor, ingress, usable
+VPN/datapath or crash recovery. Its cryptographically bound request/response authority is not an
+independent discovery/connection trust anchor. Keys are never persisted and are destroyed with the
+worker context; the fixed alpha score remains **11/100 (11%)**.
 
 ## Privileged helper boundary
 
@@ -275,6 +283,9 @@ For one signed path, forwarding is permitted only between the derived client-fac
 WireGuard interfaces, for the exact overlay prefix, within the reservation lifetime and rate limits.
 Rules deny traffic to relay host addresses, unrelated overlay prefixes, other contexts, physical
 interfaces, and NAT/Internet egress. Default input/forward behavior for that context is deny.
+The current helper implements this fence for its exact single-path Relay pair with two direction
+rules bound to the derived interface indices and `/128` peers, one singleton kernel-timeout lease,
+one realtime cutoff and a terminal drop. It does not yet make that pair a product route.
 
 ## Client interception and leak prevention
 
@@ -307,6 +318,17 @@ absence. Exact `Absent` tombstones remain in a 1024-entry runtime-lifetime ledge
 protocol exists. Tag 28 itself retries exact Pending/Owned cleanup; tag 29 is an independent
 process-wide cleanup operation, neither part of route reconciliation nor an ACK.
 
+External requests carry Unix expiries. On the first accepted Bind/Prepare intent the helper freezes
+matching process-local `CLOCK_BOOTTIME` setup and hard deadlines and carries them through the exact
+engine/backend/worker lineage. Admission and post-backend commit require both clocks to remain within
+their half-open windows, retries never refresh either deadline, and the reaper retires on either
+boundary. The Relay fence combines the signed realtime cutoff with a conservative kernel-jiffies
+timeout derived from the frozen hard deadline. Ordinary suspend and ordinary realtime rollback
+therefore fail closed. Only an already-compromised host root able to both suspend the host and roll
+`CLOCK_REALTIME` back sufficiently can leave a short post-resume race until serialized cleanup;
+containment against such host-root compromise is outside this boundary. The KVM proof did not
+exercise suspend/resume or realtime mutation.
+
 Cleanup is idempotent and scoped by context/runtime ownership. It removes MP paths before
 interfaces, rules/routes before namespaces, temporary keys and sockets, and finally the ownership
 record. It must tolerate missing objects and retry partial kernel failures without touching objects
@@ -326,8 +348,9 @@ two-leg probe producer does not exist. The actor-linearized candidate snapshot a
 described above are dormant and report no production-usable candidates. The no-argument production
 helper can now execute the exact Client/Exit-singleton-or-Relay-pair
 Bind/Prepare/Activate/Probe-Commit/Destroy subset. The retained gate exercises Client and Exit
-sequentially in private namespaces; the Relay-pair KVM/CI proof remains pending. The production
-manager does not call
+sequentially in private namespaces and retained run 33301595311 proves the simultaneous Relay pair
+before forwarding. Non-retained run 33306523739 proves the current exact single-path cross-leg fence,
+traffic, counter evidence, teardown and host-state boundary. The production manager does not call
 that helper-backed transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
 cleanup-token or socket publication and shuts down after engine cleanup. It may settle only
 never-dispatched `Intent` records; its refusing executor leaves `MayOwnPrepare` byte-identical and
@@ -342,8 +365,8 @@ proves the Client-only client-to-relay leg. Retained run 33296892632 at
 `1ca51fe0d2a2be855adb182e85c229d1d12bc017`, artifact 9727739271, separately proves the Exit
 relay-to-exit leg; both cover
 bounded ICMPv6, recent handshake, strict RX/TX growth, cached Commit retry, normal process-owned
-Destroy and sequential capacity reuse. They have no trusted selection/policy authority,
-simultaneous two-leg route, Relay forwarding, transport descriptor, ingress, usable VPN/datapath or
-crash/restart recovery. Relay pair unit tests are not retained live-kernel evidence. None of these
-results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
+Destroy and sequential capacity reuse. They have no trusted selection/policy authority, production
+simultaneous route, transport descriptor, ingress, usable VPN/datapath or crash/restart recovery. The
+forwarding proof is non-retained branch smoke, not retained exact-main or acceptance evidence. None
+of these results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).

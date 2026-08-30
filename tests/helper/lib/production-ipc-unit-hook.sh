@@ -66,6 +66,26 @@ functional_exit_relay_state=absent
 functional_exit_relay_ifindex=
 functional_exit_relay_exit_address=
 functional_fixture_shape=single
+functional_pair_client_keeper_state=absent
+functional_pair_client_keeper_pid=
+functional_pair_client_keeper_starttime=
+functional_pair_client_namespace_identity=
+functional_pair_client_link_state=absent
+functional_pair_client_ifindex=
+functional_pair_client_public_key=
+functional_pair_client_listen_port=
+functional_pair_client_worker_address=
+functional_pair_client_peer_address=
+functional_pair_exit_keeper_state=absent
+functional_pair_exit_keeper_pid=
+functional_pair_exit_keeper_starttime=
+functional_pair_exit_namespace_identity=
+functional_pair_exit_link_state=absent
+functional_pair_exit_ifindex=
+functional_pair_exit_public_key=
+functional_pair_exit_listen_port=
+functional_pair_exit_worker_address=
+functional_pair_exit_peer_address=
 
 fail() {
     printf 'production IPC unit hook failed: %s\n' "$1" >&2
@@ -1923,6 +1943,45 @@ relay_wireguard_snapshot() {
         "$hook_handshake_line" "$hook_transfer_line" "$hook_expected_key"
 }
 
+functional_peer_wireguard_snapshot() {
+    [ "$#" -eq 5 ] || return 1
+    hook_peer_pid=$1
+    hook_peer_starttime=$2
+    hook_peer_namespace_identity=$3
+    hook_peer_interface=$4
+    hook_peer_expected_key=$5
+    functional_peer_keeper_is_exact \
+        "$hook_peer_pid" "$hook_peer_starttime" \
+        "$hook_peer_namespace_identity" || return 1
+    hook_handshake_line=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" \
+            latest-handshakes 2>/dev/null) || return 1
+    hook_transfer_line=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" transfer 2>/dev/null) || return 1
+    wireguard_snapshot_from_lines \
+        "$hook_handshake_line" "$hook_transfer_line" "$hook_peer_expected_key"
+}
+
+functional_relay_pair_client_wireguard_snapshot() {
+    [ "$#" -eq 1 ] || return 1
+    functional_peer_wireguard_snapshot \
+        "$functional_pair_client_keeper_pid" \
+        "$functional_pair_client_keeper_starttime" \
+        "$functional_pair_client_namespace_identity" \
+        "$functional_relay" "$1"
+}
+
+functional_relay_pair_exit_wireguard_snapshot() {
+    [ "$#" -eq 1 ] || return 1
+    functional_peer_wireguard_snapshot \
+        "$functional_pair_exit_keeper_pid" \
+        "$functional_pair_exit_keeper_starttime" \
+        "$functional_pair_exit_namespace_identity" \
+        "$functional_exit_relay" "$1"
+}
+
 wireguard_snapshot_has_growth() {
     [ "$#" -eq 2 ] || return 1
     /usr/bin/awk -v baseline="$1" -v current="$2" '
@@ -2674,33 +2733,858 @@ remove_functional_exit_relay_fixture() {
     forget_functional_exit_relay_fixture
 }
 
-create_functional_relay_pair_fixtures() {
-    [ "$#" -eq 8 ] || return 1
-    functional_fixture_shape=single
-    if ! create_functional_relay_fixture "$1" "$2" "$3" "$4"; then
-        remove_functional_relay_fixture || return 1
-        return 1
-    fi
-    functional_fixture_shape=pair
-    if create_functional_exit_relay_fixture "$5" "$6" "$7" "$8"; then
-        if functional_relay_fixture_is_exact \
-            "$functional_relay_ifindex" "$1" "$2" "$3" "$4"; then
+functional_direct_child_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_peer_pid=$1
+    number_is_safe "$hook_peer_pid" || return 1
+    [ -f "/proc/$hook_peer_pid/status" ] \
+        && [ ! -L "/proc/$hook_peer_pid/status" ] || return 1
+    /usr/bin/awk -v expected_pid="$hook_peer_pid" -v expected_parent="$$" '
+        $1 == "Pid:" {
+            pid_records++
+            if (NF != 2 || $2 != expected_pid) invalid = 1
+        }
+        $1 == "PPid:" {
+            parent_records++
+            if (NF != 2 || $2 != expected_parent) invalid = 1
+        }
+        END {
+            if (invalid || pid_records != 1 || parent_records != 1) exit 1
+        }
+    ' "/proc/$hook_peer_pid/status"
+}
+
+functional_peer_keeper_is_exact() {
+    [ "$#" -eq 3 ] || return 1
+    hook_peer_pid=$1
+    hook_peer_starttime=$2
+    hook_peer_namespace_identity=$3
+    number_is_safe "$hook_peer_pid" \
+        && kernel_object_number_is_safe "$hook_peer_starttime" \
+        && kernel_object_identity_is_safe \
+            "$hook_peer_namespace_identity" || return 1
+    functional_direct_child_is_exact "$hook_peer_pid" || return 1
+    [ "$(capture_process_starttime "$hook_peer_pid")" = \
+        "$hook_peer_starttime" ] || return 1
+    [ "$(readlink "/proc/$hook_peer_pid/exe" 2>/dev/null)" = \
+        /usr/bin/sleep ] || return 1
+    hook_observed_namespace=$(stat -Lc '%d:%i' \
+        "/proc/$hook_peer_pid/ns/net" 2>/dev/null) || return 1
+    [ "$hook_observed_namespace" = "$hook_peer_namespace_identity" ] \
+        || return 1
+    hook_parent_namespace=$(stat -Lc '%d:%i' \
+        /proc/self/ns/net 2>/dev/null) || return 1
+    kernel_object_identity_is_safe "$hook_parent_namespace" \
+        && [ "$hook_parent_namespace" != \
+            "$hook_peer_namespace_identity" ]
+}
+
+launch_functional_peer_keeper() {
+    hook_peer_keeper_pid=
+    hook_peer_keeper_starttime=
+    hook_peer_keeper_namespace_identity=
+    /usr/bin/unshare --net -- /usr/bin/sleep 3600 \
+        </dev/null >/dev/null 2>&1 &
+    hook_peer_keeper_pid=$!
+    number_is_safe "$hook_peer_keeper_pid" || return 1
+    hook_parent_namespace=$(stat -Lc '%d:%i' \
+        /proc/self/ns/net 2>/dev/null) || return 1
+    kernel_object_identity_is_safe "$hook_parent_namespace" || return 1
+    hook_peer_wait_attempt=0
+    while :; do
+        hook_peer_keeper_starttime=$(capture_process_starttime \
+            "$hook_peer_keeper_pid" 2>/dev/null) || hook_peer_keeper_starttime=
+        hook_peer_keeper_namespace_identity=$(stat -Lc '%d:%i' \
+            "/proc/$hook_peer_keeper_pid/ns/net" 2>/dev/null) \
+            || hook_peer_keeper_namespace_identity=
+        hook_peer_executable=$(readlink \
+            "/proc/$hook_peer_keeper_pid/exe" 2>/dev/null) \
+            || hook_peer_executable=
+        if kernel_object_number_is_safe "$hook_peer_keeper_starttime" \
+            && kernel_object_identity_is_safe \
+                "$hook_peer_keeper_namespace_identity" \
+            && [ "$hook_peer_keeper_namespace_identity" != \
+                "$hook_parent_namespace" ] \
+            && [ "$hook_peer_executable" = /usr/bin/sleep ] \
+            && functional_direct_child_is_exact \
+                "$hook_peer_keeper_pid"; then
             return 0
         fi
+        kill -0 "$hook_peer_keeper_pid" 2>/dev/null || return 1
+        hook_peer_wait_attempt=$((hook_peer_wait_attempt + 1))
+        [ "$hook_peer_wait_attempt" -lt 200 ] || return 1
+        sleep 0.01
+    done
+}
+
+retire_functional_peer_keeper() {
+    [ "$#" -eq 4 ] || return 1
+    hook_peer_state=$1
+    hook_peer_pid=$2
+    hook_peer_starttime=$3
+    hook_peer_namespace_identity=$4
+    hook_peer_requires_term_status=no
+    case $hook_peer_state in
+        absent) return 0 ;;
+        launching)
+            number_is_safe "$hook_peer_pid" || return 1
+            functional_direct_child_is_exact "$hook_peer_pid" \
+                || return 1
+            ;;
+        ready)
+            functional_peer_keeper_is_exact \
+                "$hook_peer_pid" "$hook_peer_starttime" \
+                "$hook_peer_namespace_identity" || return 1
+            hook_peer_requires_term_status=yes
+            ;;
+        *) return 1 ;;
+    esac
+    kill -TERM "$hook_peer_pid" 2>/dev/null || return 1
+    if wait "$hook_peer_pid"; then
+        hook_peer_wait_status=0
+    else
+        hook_peer_wait_status=$?
     fi
-    remove_functional_exit_relay_fixture || return 1
-    functional_fixture_shape=single
-    remove_functional_relay_fixture || return 1
+    if [ "$hook_peer_requires_term_status" = yes ]; then
+        [ "$hook_peer_wait_status" -eq 143 ] || return 1
+    else
+        [ "$hook_peer_wait_status" -ne 127 ] || return 1
+    fi
+    [ ! -e "/proc/$hook_peer_pid" ] \
+        && [ ! -L "/proc/$hook_peer_pid" ]
+}
+
+canonical_expanded_ipv6_address() {
+    [ "$#" -eq 1 ] || return 1
+    hook_expanded_ipv6_address=$1
+    case $hook_expanded_ipv6_address in
+        ''|*[!0-9a-f:]*) return 1 ;;
+    esac
+    [ "${#hook_expanded_ipv6_address}" -eq 39 ] || return 1
+    printf '%s\n' "$hook_expanded_ipv6_address" | /usr/bin/awk -F: '
+        function canonical_group(group) {
+            sub(/^0+/, "", group)
+            return group == "" ? "0" : group
+        }
+        NR == 1 {
+            if (NF != 8) {
+                invalid = 1
+                next
+            }
+            for (position = 1; position <= 8; position++) {
+                if (length($position) != 4 \
+                    || $position !~ /^[0-9a-f]+$/) invalid = 1
+            }
+            if (invalid) next
+
+            run_start = 0
+            run_length = 0
+            best_start = 0
+            best_length = 0
+            for (position = 1; position <= 9; position++) {
+                if (position <= 8 && $position == "0000") {
+                    if (run_start == 0) run_start = position
+                    run_length++
+                } else {
+                    if (run_length > best_length) {
+                        best_start = run_start
+                        best_length = run_length
+                    }
+                    run_start = 0
+                    run_length = 0
+                }
+            }
+            if (best_length < 2) {
+                best_start = 0
+                best_length = 0
+            }
+
+            canonical = ""
+            position = 1
+            while (position <= 8) {
+                if (position == best_start) {
+                    canonical = canonical == "" ? "::" : canonical "::"
+                    position += best_length
+                    continue
+                }
+                group = canonical_group($position)
+                if (canonical == "" || substr(canonical, length(canonical), 1) == ":") {
+                    canonical = canonical group
+                } else {
+                    canonical = canonical ":" group
+                }
+                position++
+            }
+            if (canonical !~ /^[0-9a-f:]+$/ \
+                || index(canonical, ":") == 0 \
+                || length(canonical) < 2 \
+                || length(canonical) > 39) invalid = 1
+            accepted++
+        }
+        NR > 1 { invalid = 1 }
+        END {
+            if (invalid || NR != 1 || accepted != 1) exit 1
+            print canonical
+        }
+    '
+}
+
+functional_pair_parent_wireguard_is_exact() {
+    [ "$#" -eq 9 ] || return 1
+    hook_peer_interface=$1
+    hook_peer_alias=$2
+    hook_peer_ifindex=$3
+    hook_peer_public_key=$4
+    hook_peer_listen_port=$5
+    hook_worker_public_key=$6
+    hook_worker_listen_port=$7
+    hook_worker_address=$8
+    hook_cross_address=$9
+    hook_canonical_worker_address=$(canonical_expanded_ipv6_address \
+        "$hook_worker_address") || return 1
+    hook_canonical_cross_address=$(canonical_expanded_ipv6_address \
+        "$hook_cross_address") || return 1
+    /usr/sbin/ip -details -json link show dev \
+        "$hook_peer_interface" 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg name "$hook_peer_interface" \
+            --arg alias "$hook_peer_alias" \
+            --argjson ifindex "$hook_peer_ifindex" '
+              type == "array" and length == 1
+              and .[0].ifname == $name
+              and .[0].ifindex == $ifindex
+              and .[0].ifalias == $alias
+              and .[0].linkinfo.info_kind == "wireguard"
+            ' >/dev/null 2>&1 || return 1
+    [ "$(/usr/bin/wg show "$hook_peer_interface" \
+        public-key 2>/dev/null)" = "$hook_peer_public_key" ] || return 1
+    [ "$(/usr/bin/wg show "$hook_peer_interface" \
+        listen-port 2>/dev/null)" = "$hook_peer_listen_port" ] || return 1
+    [ "$(/usr/bin/wg show "$hook_peer_interface" \
+        fwmark 2>/dev/null)" = off ] || return 1
+    [ "$(/usr/bin/wg show "$hook_peer_interface" \
+        peers 2>/dev/null)" = "$hook_worker_public_key" ] || return 1
+    hook_expected_peer_field=$(printf '%s\t%s:%s' \
+        "$hook_worker_public_key" "$functional_underlay_address" \
+        "$hook_worker_listen_port") || return 1
+    [ "$(/usr/bin/wg show "$hook_peer_interface" \
+        endpoints 2>/dev/null)" = "$hook_expected_peer_field" ] || return 1
+    hook_allowed_ips=$(/usr/bin/wg show "$hook_peer_interface" \
+        allowed-ips 2>/dev/null) || return 1
+    printf '%s\n' "$hook_allowed_ips" | /usr/bin/awk -F '\t' \
+        -v expected_key="$hook_worker_public_key" \
+        -v first="$hook_canonical_worker_address/128" \
+        -v second="$hook_canonical_cross_address/128" '
+          NR == 1 && NF == 2 && $1 == expected_key {
+              count = split($2, address, " ")
+              if (count == 2 \
+                  && ((address[1] == first && address[2] == second) \
+                      || (address[1] == second && address[2] == first))) valid = 1
+          }
+          END { if (NR != 1 || !valid) exit 1 }
+        ' || return 1
+    hook_expected_peer_field=$(printf '%s\t%s' \
+        "$hook_worker_public_key" "$functional_peer_keepalive") || return 1
+    [ "$(/usr/bin/wg show "$hook_peer_interface" \
+        persistent-keepalive 2>/dev/null)" = \
+        "$hook_expected_peer_field" ]
+}
+
+configure_functional_relay_pair_wireguard() {
+    [ "$#" -eq 4 ] || return 1
+    emit_functional_relay_private_key \
+        | /usr/bin/wg set "$functional_relay" \
+            listen-port "$functional_relay_listen_port" \
+            private-key /dev/stdin \
+            peer "$1" \
+            allowed-ips "$3/128,$4/128" \
+            endpoint "$functional_underlay_address:$2" \
+            persistent-keepalive "$functional_peer_keepalive"
+}
+
+configure_functional_exit_relay_pair_wireguard() {
+    [ "$#" -eq 4 ] || return 1
+    emit_functional_exit_relay_private_key \
+        | /usr/bin/wg set "$functional_exit_relay" \
+            listen-port "$functional_exit_relay_listen_port" \
+            private-key /dev/stdin \
+            peer "$1" \
+            allowed-ips "$3/128,$4/128" \
+            endpoint "$functional_underlay_address:$2" \
+            persistent-keepalive "$functional_peer_keepalive"
+}
+
+configure_functional_pair_peer_namespace() {
+    [ "$#" -eq 7 ] || return 1
+    hook_peer_pid=$1
+    hook_peer_starttime=$2
+    hook_peer_namespace_identity=$3
+    hook_peer_interface=$4
+    hook_peer_local_address=$5
+    hook_worker_address=$6
+    hook_cross_address=$7
+    functional_peer_keeper_is_exact \
+        "$hook_peer_pid" "$hook_peer_starttime" \
+        "$hook_peer_namespace_identity" || return 1
+    # shellcheck disable=SC2016
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip link set dev lo up || return 1
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip -6 address add "$hook_peer_local_address/128" \
+            dev "$hook_peer_interface" nodad || return 1
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip link set dev "$hook_peer_interface" up || return 1
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip -6 route add "$hook_worker_address/128" \
+            dev "$hook_peer_interface" proto static metric 1024 || return 1
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip -6 route add "$hook_cross_address/128" \
+            dev "$hook_peer_interface" proto static metric 1024
+}
+
+functional_pair_peer_fixture_is_exact() {
+    [ "$#" -eq 13 ] || return 1
+    hook_peer_pid=$1
+    hook_peer_starttime=$2
+    hook_peer_namespace_identity=$3
+    hook_peer_interface=$4
+    hook_peer_alias=$5
+    hook_peer_ifindex=$6
+    hook_peer_public_key=$7
+    hook_peer_listen_port=$8
+    hook_worker_public_key=$9
+    shift 9
+    hook_worker_listen_port=$1
+    hook_peer_local_address=$2
+    hook_worker_address=$3
+    hook_cross_address=$4
+    hook_canonical_worker_address=$(canonical_expanded_ipv6_address \
+        "$hook_worker_address") || return 1
+    hook_canonical_cross_address=$(canonical_expanded_ipv6_address \
+        "$hook_cross_address") || return 1
+    functional_peer_keeper_is_exact \
+        "$hook_peer_pid" "$hook_peer_starttime" \
+        "$hook_peer_namespace_identity" || return 1
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip -details -json link show 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg name "$hook_peer_interface" \
+            --arg alias "$hook_peer_alias" \
+            --argjson ifindex "$hook_peer_ifindex" '
+              type == "array" and length == 2
+              and any(.[];
+                    .ifname == "lo" and (.flags | index("UP")) != null)
+              and any(.[];
+                    .ifname == $name
+                    and .ifindex == $ifindex
+                    and .ifalias == $alias
+                    and .linkinfo.info_kind == "wireguard"
+                    and (.flags | index("UP")) != null)
+              and all(.[]; .ifname == "lo" or .ifname == $name)
+            ' >/dev/null 2>&1 || return 1
+    hook_peer_address_hex=$(printf '%s' "$hook_peer_local_address" \
+        | /usr/bin/tr -d ':') || return 1
+    # shellcheck disable=SC2016
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/awk \
+            -v expected_address="$hook_peer_address_hex" \
+            -v expected_interface="$hook_peer_interface" '
+              $6 == expected_interface {
+                  records++
+                  if ($1 == expected_address && $3 == "80" && $4 == "00") matches++
+              }
+              END { if (records != 1 || matches != 1) exit 1 }
+            ' /proc/net/if_inet6 || return 1
+    for hook_route_address in \
+        "$hook_canonical_worker_address" "$hook_canonical_cross_address"; do
+        hook_route_destination=$(/usr/bin/nsenter \
+            --net="/proc/$hook_peer_pid/ns/net" -- \
+            /usr/sbin/ip -6 -json route show table main \
+                exact "$hook_route_address/128" 2>/dev/null \
+            | activated_route_destination \
+                "$hook_peer_interface" 2>/dev/null) || return 1
+        [ "$hook_route_destination" = "$hook_route_address" ] || return 1
+    done
+    hook_default_routes=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip -6 -json route show table main default 2>/dev/null) \
+        || return 1
+    [ "$hook_default_routes" = '[]' ] || return 1
+    hook_public_key=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" public-key 2>/dev/null) \
+        || return 1
+    [ "$hook_public_key" = "$hook_peer_public_key" ] || return 1
+    hook_listen_port=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" listen-port 2>/dev/null) \
+        || return 1
+    [ "$hook_listen_port" = "$hook_peer_listen_port" ] || return 1
+    hook_peer_field=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" peers 2>/dev/null) || return 1
+    [ "$hook_peer_field" = "$hook_worker_public_key" ] || return 1
+    hook_expected_peer_field=$(printf '%s\t%s:%s' \
+        "$hook_worker_public_key" "$functional_underlay_address" \
+        "$hook_worker_listen_port") || return 1
+    hook_peer_field=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" endpoints 2>/dev/null) \
+        || return 1
+    [ "$hook_peer_field" = "$hook_expected_peer_field" ] || return 1
+    hook_peer_field=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" allowed-ips 2>/dev/null) \
+        || return 1
+    printf '%s\n' "$hook_peer_field" | /usr/bin/awk -F '\t' \
+        -v expected_key="$hook_worker_public_key" \
+        -v first="$hook_canonical_worker_address/128" \
+        -v second="$hook_canonical_cross_address/128" '
+          NR == 1 && NF == 2 && $1 == expected_key {
+              count = split($2, address, " ")
+              if (count == 2 \
+                  && ((address[1] == first && address[2] == second) \
+                      || (address[1] == second && address[2] == first))) valid = 1
+          }
+          END { if (NR != 1 || !valid) exit 1 }
+        ' || return 1
+    hook_expected_peer_field=$(printf '%s\t%s' \
+        "$hook_worker_public_key" "$functional_peer_keepalive") || return 1
+    hook_peer_field=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" \
+            persistent-keepalive 2>/dev/null) || return 1
+    [ "$hook_peer_field" = "$hook_expected_peer_field" ] || return 1
+    hook_peer_field=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" \
+            latest-handshakes 2>/dev/null) || return 1
+    wireguard_counter_line_is_exact \
+        "$hook_peer_field" "$hook_worker_public_key" 2 || return 1
+    hook_peer_field=$(/usr/bin/nsenter \
+        --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/bin/wg show "$hook_peer_interface" transfer 2>/dev/null) \
+        || return 1
+    wireguard_counter_line_is_exact \
+        "$hook_peer_field" "$hook_worker_public_key" 3
+}
+
+functional_pair_parent_namespace_is_exact() {
+    /usr/sbin/ip -details -json link show 2>/dev/null \
+        | /usr/bin/jq -e --arg underlay "$functional_underlay" '
+          type == "array" and length == 2
+          and any(.[]; .ifname == "lo")
+          and any(.[];
+                .ifname == $underlay
+                and .linkinfo.info_kind == "dummy"
+                and (.flags | index("UP")) != null)
+          and all(.[]; .ifname == "lo" or .ifname == $underlay)
+        ' >/dev/null 2>&1
+}
+
+functional_relay_pair_fixtures_are_exact() {
+    functional_pair_parent_namespace_is_exact || return 1
+    functional_pair_peer_fixture_is_exact \
+        "$functional_pair_client_keeper_pid" \
+        "$functional_pair_client_keeper_starttime" \
+        "$functional_pair_client_namespace_identity" \
+        "$functional_relay" "$functional_relay_alias" \
+        "$functional_pair_client_ifindex" \
+        "$functional_relay_public_key" "$functional_relay_listen_port" \
+        "$functional_pair_client_public_key" \
+        "$functional_pair_client_listen_port" \
+        "$functional_pair_client_peer_address" \
+        "$functional_pair_client_worker_address" \
+        "$functional_pair_exit_peer_address" || return 1
+    functional_pair_peer_fixture_is_exact \
+        "$functional_pair_exit_keeper_pid" \
+        "$functional_pair_exit_keeper_starttime" \
+        "$functional_pair_exit_namespace_identity" \
+        "$functional_exit_relay" "$functional_exit_relay_alias" \
+        "$functional_pair_exit_ifindex" \
+        "$functional_exit_relay_public_key" \
+        "$functional_exit_relay_listen_port" \
+        "$functional_pair_exit_public_key" \
+        "$functional_pair_exit_listen_port" \
+        "$functional_pair_exit_peer_address" \
+        "$functional_pair_exit_worker_address" \
+        "$functional_pair_client_peer_address"
+}
+
+functional_pair_moved_link_ifindex() {
+    [ "$#" -eq 2 ] || return 1
+    hook_peer_pid=$1
+    hook_peer_interface=$2
+    number_is_safe "$hook_peer_pid" || return 1
+    case $hook_peer_interface in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${#hook_peer_interface}" -le 15 ] || return 1
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip -details -json link show dev \
+            "$hook_peer_interface" 2>/dev/null \
+        | /usr/bin/jq -e -r --arg name "$hook_peer_interface" '
+              select(
+                  type == "array" and length == 1
+                  and .[0].ifname == $name
+                  and (.[0].ifindex | type) == "number"
+                  and .[0].ifindex == (.[0].ifindex | floor)
+                  and .[0].ifindex >= 1
+                  and .[0].ifindex <= 4294967294
+                  and .[0].linkinfo.info_kind == "wireguard"
+              )
+              | .[0].ifindex
+            '
+}
+
+build_functional_relay_pair_fixtures() {
+    [ "$#" -eq 8 ] || return 1
+    functional_pair_client_public_key=$1
+    functional_pair_client_listen_port=$2
+    functional_pair_client_worker_address=$3
+    functional_pair_client_peer_address=$4
+    functional_pair_exit_public_key=$5
+    functional_pair_exit_listen_port=$6
+    functional_pair_exit_worker_address=$7
+    functional_pair_exit_peer_address=$8
+    functional_relay_client_address=$3
+    functional_exit_relay_exit_address=$7
+    functional_fixture_shape=pair
+
+    functional_pair_client_keeper_state=launching
+    if launch_functional_peer_keeper; then
+        functional_pair_client_keeper_pid=$hook_peer_keeper_pid
+        functional_pair_client_keeper_starttime=$hook_peer_keeper_starttime
+        functional_pair_client_namespace_identity=$hook_peer_keeper_namespace_identity
+        functional_pair_client_keeper_state=ready
+    else
+        functional_pair_client_keeper_pid=$hook_peer_keeper_pid
+        return 1
+    fi
+    functional_pair_exit_keeper_state=launching
+    if launch_functional_peer_keeper; then
+        functional_pair_exit_keeper_pid=$hook_peer_keeper_pid
+        functional_pair_exit_keeper_starttime=$hook_peer_keeper_starttime
+        functional_pair_exit_namespace_identity=$hook_peer_keeper_namespace_identity
+        functional_pair_exit_keeper_state=ready
+    else
+        functional_pair_exit_keeper_pid=$hook_peer_keeper_pid
+        return 1
+    fi
+    [ "$functional_pair_client_namespace_identity" != \
+        "$functional_pair_exit_namespace_identity" ] || return 1
+
+    functional_relay_ifindex=
+    functional_relay_state=adding
+    add_functional_relay_link || return 1
+    capture_functional_relay_ifindex || return 1
+    functional_relay_ifindex=$hook_captured_relay_ifindex
+    functional_relay_state=created
+    functional_relay_identity_is_exact "$functional_relay_ifindex" || return 1
+    mark_functional_relay_link || return 1
+    functional_relay_state=marked
+    configure_functional_relay_pair_wireguard \
+        "$1" "$2" "$3" "$8" || return 1
+    functional_pair_parent_wireguard_is_exact \
+        "$functional_relay" "$functional_relay_alias" \
+        "$functional_relay_ifindex" "$functional_relay_public_key" \
+        "$functional_relay_listen_port" "$1" "$2" "$3" "$8" || return 1
+    functional_pair_client_link_state=parent
+
+    functional_exit_relay_ifindex=
+    functional_exit_relay_state=adding
+    add_functional_exit_relay_link || return 1
+    capture_functional_exit_relay_ifindex || return 1
+    functional_exit_relay_ifindex=$hook_captured_exit_relay_ifindex
+    functional_exit_relay_state=created
+    functional_exit_relay_identity_is_exact \
+        "$functional_exit_relay_ifindex" || return 1
+    mark_functional_exit_relay_link || return 1
+    functional_exit_relay_state=marked
+    configure_functional_exit_relay_pair_wireguard \
+        "$5" "$6" "$7" "$4" || return 1
+    functional_pair_parent_wireguard_is_exact \
+        "$functional_exit_relay" "$functional_exit_relay_alias" \
+        "$functional_exit_relay_ifindex" \
+        "$functional_exit_relay_public_key" \
+        "$functional_exit_relay_listen_port" "$5" "$6" "$7" "$4" \
+        || return 1
+    functional_pair_exit_link_state=parent
+
+    functional_peer_keeper_is_exact \
+        "$functional_pair_client_keeper_pid" \
+        "$functional_pair_client_keeper_starttime" \
+        "$functional_pair_client_namespace_identity" || return 1
+    functional_pair_client_ifindex=$functional_relay_ifindex
+    /usr/sbin/ip link set dev "$functional_relay" \
+        netns "$functional_pair_client_keeper_pid" || return 1
+    functional_pair_client_link_state=moved
+    hook_pair_moved_ifindex=$(functional_pair_moved_link_ifindex \
+        "$functional_pair_client_keeper_pid" "$functional_relay") || return 1
+    number_is_safe "$hook_pair_moved_ifindex" \
+        && [ "$hook_pair_moved_ifindex" = \
+            "$functional_pair_client_ifindex" ] || return 1
+    configure_functional_pair_peer_namespace \
+        "$functional_pair_client_keeper_pid" \
+        "$functional_pair_client_keeper_starttime" \
+        "$functional_pair_client_namespace_identity" \
+        "$functional_relay" "$4" "$3" "$8" || return 1
+
+    functional_peer_keeper_is_exact \
+        "$functional_pair_exit_keeper_pid" \
+        "$functional_pair_exit_keeper_starttime" \
+        "$functional_pair_exit_namespace_identity" || return 1
+    functional_pair_exit_ifindex=$functional_exit_relay_ifindex
+    /usr/sbin/ip link set dev "$functional_exit_relay" \
+        netns "$functional_pair_exit_keeper_pid" || return 1
+    functional_pair_exit_link_state=moved
+    hook_pair_moved_ifindex=$(functional_pair_moved_link_ifindex \
+        "$functional_pair_exit_keeper_pid" "$functional_exit_relay") || return 1
+    number_is_safe "$hook_pair_moved_ifindex" \
+        && [ "$hook_pair_moved_ifindex" = \
+            "$functional_pair_exit_ifindex" ] || return 1
+    configure_functional_pair_peer_namespace \
+        "$functional_pair_exit_keeper_pid" \
+        "$functional_pair_exit_keeper_starttime" \
+        "$functional_pair_exit_namespace_identity" \
+        "$functional_exit_relay" "$8" "$7" "$4" || return 1
+    functional_relay_pair_fixtures_are_exact
+}
+
+create_functional_relay_pair_fixtures() {
+    [ "$#" -eq 8 ] || return 1
+    for hook_pair_public_key in "$1" "$5"; do
+        case $hook_pair_public_key in
+            ''|'(none)'|*[!A-Za-z0-9+/=]*) return 1 ;;
+        esac
+        [ "${#hook_pair_public_key}" -eq 44 ] \
+            && [ "$hook_pair_public_key" != "$functional_relay_public_key" ] \
+            && [ "$hook_pair_public_key" != \
+                "$functional_exit_relay_public_key" ] || return 1
+    done
+    [ "$1" != "$5" ] || return 1
+    for hook_pair_port in "$2" "$6"; do
+        number_is_safe "$hook_pair_port" \
+            && [ "$hook_pair_port" -le 65535 ] || return 1
+    done
+    [ "$2" != "$6" ] || return 1
+    for hook_pair_address in "$3" "$4" "$7" "$8"; do
+        case $hook_pair_address in
+            ''|*[!0-9a-f:]*) return 1 ;;
+        esac
+        [ "${#hook_pair_address}" -eq 39 ] || return 1
+    done
+    [ "$3" != "$4" ] && [ "$3" != "$7" ] && [ "$3" != "$8" ] \
+        && [ "$4" != "$7" ] && [ "$4" != "$8" ] \
+        && [ "$7" != "$8" ] || return 1
+    [ "$functional_fixture_shape" = single ] \
+        && [ "$functional_relay_state" = absent ] \
+        && [ "$functional_exit_relay_state" = absent ] \
+        && [ "$functional_pair_client_keeper_state" = absent ] \
+        && [ "$functional_pair_exit_keeper_state" = absent ] \
+        && functional_relay_link_is_absent \
+        && functional_exit_relay_link_is_absent || return 1
+    if build_functional_relay_pair_fixtures "$@"; then
+        return 0
+    fi
+    remove_functional_relay_pair_fixtures || return 1
     return 1
+}
+
+functional_pair_peer_link_identity_is_exact() {
+    [ "$#" -eq 7 ] || return 1
+    hook_peer_pid=$1
+    hook_peer_starttime=$2
+    hook_peer_namespace_identity=$3
+    hook_peer_interface=$4
+    hook_peer_alias=$5
+    hook_peer_ifindex=$6
+    hook_peer_state=$7
+    [ "$hook_peer_state" = moved ] || return 1
+    functional_peer_keeper_is_exact \
+        "$hook_peer_pid" "$hook_peer_starttime" \
+        "$hook_peer_namespace_identity" || return 1
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip -details -json link show dev \
+            "$hook_peer_interface" 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg name "$hook_peer_interface" \
+            --arg alias "$hook_peer_alias" \
+            --argjson ifindex "$hook_peer_ifindex" '
+              type == "array" and length == 1
+              and .[0].ifname == $name
+              and .[0].ifindex == $ifindex
+              and .[0].ifalias == $alias
+              and .[0].linkinfo.info_kind == "wireguard"
+            ' >/dev/null 2>&1
+}
+
+functional_pair_peer_link_is_absent() {
+    [ "$#" -eq 4 ] || return 1
+    hook_peer_pid=$1
+    hook_peer_interface=$2
+    hook_worker_address=$3
+    hook_cross_address=$4
+    if /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip link show dev "$hook_peer_interface" \
+            >/dev/null 2>&1; then
+        return 1
+    fi
+    for hook_route_address in "$hook_worker_address" "$hook_cross_address"; do
+        hook_route=$(/usr/bin/nsenter \
+            --net="/proc/$hook_peer_pid/ns/net" -- \
+            /usr/sbin/ip -6 -json route show table main \
+                exact "$hook_route_address/128" 2>/dev/null) || return 1
+        [ "$hook_route" = '[]' ] || return 1
+    done
+}
+
+remove_functional_relay_pair_exit_fixture() {
+    case $functional_pair_exit_link_state in
+        absent|parent)
+            remove_functional_exit_relay_fixture || return 1
+            ;;
+        moved)
+            functional_pair_peer_link_identity_is_exact \
+                "$functional_pair_exit_keeper_pid" \
+                "$functional_pair_exit_keeper_starttime" \
+                "$functional_pair_exit_namespace_identity" \
+                "$functional_exit_relay" "$functional_exit_relay_alias" \
+                "$functional_pair_exit_ifindex" \
+                "$functional_pair_exit_link_state" || return 1
+            if /usr/bin/nsenter \
+                --net="/proc/$functional_pair_exit_keeper_pid/ns/net" -- \
+                /usr/sbin/ip link delete dev "$functional_exit_relay"; then
+                functional_pair_exit_link_state=deleted
+            elif functional_pair_peer_link_is_absent \
+                "$functional_pair_exit_keeper_pid" \
+                "$functional_exit_relay" \
+                "$functional_pair_exit_worker_address" \
+                "$functional_pair_client_peer_address"; then
+                functional_pair_exit_link_state=deleted
+            else
+                return 1
+            fi
+            functional_pair_peer_link_is_absent \
+                "$functional_pair_exit_keeper_pid" \
+                "$functional_exit_relay" \
+                "$functional_pair_exit_worker_address" \
+                "$functional_pair_client_peer_address" || return 1
+            forget_functional_exit_relay_fixture
+            ;;
+        deleted)
+            functional_peer_keeper_is_exact \
+                "$functional_pair_exit_keeper_pid" \
+                "$functional_pair_exit_keeper_starttime" \
+                "$functional_pair_exit_namespace_identity" || return 1
+            functional_pair_peer_link_is_absent \
+                "$functional_pair_exit_keeper_pid" \
+                "$functional_exit_relay" \
+                "$functional_pair_exit_worker_address" \
+                "$functional_pair_client_peer_address" || return 1
+            forget_functional_exit_relay_fixture
+            ;;
+        *) return 1 ;;
+    esac
+    functional_pair_exit_link_state=absent
+    retire_functional_peer_keeper \
+        "$functional_pair_exit_keeper_state" \
+        "$functional_pair_exit_keeper_pid" \
+        "$functional_pair_exit_keeper_starttime" \
+        "$functional_pair_exit_namespace_identity" || return 1
+    functional_pair_exit_keeper_state=absent
+    functional_pair_exit_keeper_pid=
+    functional_pair_exit_keeper_starttime=
+    functional_pair_exit_namespace_identity=
+    functional_pair_exit_ifindex=
+}
+
+remove_functional_relay_pair_client_fixture() {
+    case $functional_pair_client_link_state in
+        absent|parent)
+            remove_functional_relay_fixture || return 1
+            ;;
+        moved)
+            functional_pair_peer_link_identity_is_exact \
+                "$functional_pair_client_keeper_pid" \
+                "$functional_pair_client_keeper_starttime" \
+                "$functional_pair_client_namespace_identity" \
+                "$functional_relay" "$functional_relay_alias" \
+                "$functional_pair_client_ifindex" \
+                "$functional_pair_client_link_state" || return 1
+            if /usr/bin/nsenter \
+                --net="/proc/$functional_pair_client_keeper_pid/ns/net" -- \
+                /usr/sbin/ip link delete dev "$functional_relay"; then
+                functional_pair_client_link_state=deleted
+            elif functional_pair_peer_link_is_absent \
+                "$functional_pair_client_keeper_pid" "$functional_relay" \
+                "$functional_pair_client_worker_address" \
+                "$functional_pair_exit_peer_address"; then
+                functional_pair_client_link_state=deleted
+            else
+                return 1
+            fi
+            functional_pair_peer_link_is_absent \
+                "$functional_pair_client_keeper_pid" "$functional_relay" \
+                "$functional_pair_client_worker_address" \
+                "$functional_pair_exit_peer_address" || return 1
+            forget_functional_relay_fixture
+            ;;
+        deleted)
+            functional_peer_keeper_is_exact \
+                "$functional_pair_client_keeper_pid" \
+                "$functional_pair_client_keeper_starttime" \
+                "$functional_pair_client_namespace_identity" || return 1
+            functional_pair_peer_link_is_absent \
+                "$functional_pair_client_keeper_pid" "$functional_relay" \
+                "$functional_pair_client_worker_address" \
+                "$functional_pair_exit_peer_address" || return 1
+            forget_functional_relay_fixture
+            ;;
+        *) return 1 ;;
+    esac
+    functional_pair_client_link_state=absent
+    retire_functional_peer_keeper \
+        "$functional_pair_client_keeper_state" \
+        "$functional_pair_client_keeper_pid" \
+        "$functional_pair_client_keeper_starttime" \
+        "$functional_pair_client_namespace_identity" || return 1
+    functional_pair_client_keeper_state=absent
+    functional_pair_client_keeper_pid=
+    functional_pair_client_keeper_starttime=
+    functional_pair_client_namespace_identity=
+    functional_pair_client_ifindex=
+}
+
+functional_relay_pair_fixtures_are_absent() {
+    [ "$functional_pair_client_keeper_state" = absent ] \
+        && [ -z "$functional_pair_client_keeper_pid" ] \
+        && [ "$functional_pair_client_link_state" = absent ] \
+        && [ "$functional_pair_exit_keeper_state" = absent ] \
+        && [ -z "$functional_pair_exit_keeper_pid" ] \
+        && [ "$functional_pair_exit_link_state" = absent ] \
+        && [ "$functional_relay_state" = absent ] \
+        && [ "$functional_exit_relay_state" = absent ] \
+        && functional_relay_link_is_absent \
+        && functional_exit_relay_link_is_absent
 }
 
 # shellcheck disable=SC2120
 remove_functional_relay_pair_fixtures() {
     [ "$#" -eq 0 ] || return 1
     functional_fixture_shape=pair
-    remove_functional_exit_relay_fixture || return 1
+    remove_functional_relay_pair_exit_fixture || return 1
+    remove_functional_relay_pair_client_fixture || return 1
+    functional_pair_client_public_key=
+    functional_pair_client_listen_port=
+    functional_pair_client_worker_address=
+    functional_pair_client_peer_address=
+    functional_pair_exit_public_key=
+    functional_pair_exit_listen_port=
+    functional_pair_exit_worker_address=
+    functional_pair_exit_peer_address=
     functional_fixture_shape=single
-    remove_functional_relay_fixture
+    functional_relay_pair_fixtures_are_absent
 }
 
 worker_wireguard_is_absent() {
@@ -3637,34 +4521,23 @@ run_functional_client_lease_probe() {
         "$hook_functional_pair_exit_listen_port" \
         "$hook_functional_pair_exit_local_address" \
         "$hook_functional_pair_exit_peer_address" || return 1
-    hook_functional_pair_relay_client_baseline=$(relay_wireguard_snapshot \
-        "$functional_relay" \
+    hook_functional_pair_relay_client_baseline=$( \
+        functional_relay_pair_client_wireguard_snapshot \
         "$hook_functional_pair_client_public_key") || return 1
-    hook_functional_pair_relay_exit_baseline=$(relay_wireguard_snapshot \
-        "$functional_exit_relay" \
+    hook_functional_pair_relay_exit_baseline=$( \
+        functional_relay_pair_exit_wireguard_snapshot \
         "$hook_functional_pair_exit_public_key") || return 1
 
     advance_start_failure_stage functional-relay-pair-traffic || return 1
-    /usr/bin/ping -6 -n -I "$functional_relay" -c 1 -W 3 \
-        "$hook_functional_pair_client_local_address" >/dev/null 2>&1 &
-    hook_functional_pair_client_ping_pid=$!
-    number_is_safe "$hook_functional_pair_client_ping_pid" || return 1
-    /usr/bin/ping -6 -n -I "$functional_exit_relay" -c 1 -W 3 \
-        "$hook_functional_pair_exit_local_address" >/dev/null 2>&1 &
-    hook_functional_pair_exit_ping_pid=$!
-    number_is_safe "$hook_functional_pair_exit_ping_pid" || return 1
-    if wait "$hook_functional_pair_client_ping_pid"; then
-        hook_functional_pair_client_ping_status=0
-    else
-        hook_functional_pair_client_ping_status=$?
-    fi
-    if wait "$hook_functional_pair_exit_ping_pid"; then
-        hook_functional_pair_exit_ping_status=0
-    else
-        hook_functional_pair_exit_ping_status=$?
-    fi
-    [ "$hook_functional_pair_client_ping_status" -eq 0 ] \
-        && [ "$hook_functional_pair_exit_ping_status" -eq 0 ] || return 1
+    functional_peer_keeper_is_exact \
+        "$functional_pair_client_keeper_pid" \
+        "$functional_pair_client_keeper_starttime" \
+        "$functional_pair_client_namespace_identity" || return 1
+    /usr/bin/nsenter \
+        --net="/proc/$functional_pair_client_keeper_pid/ns/net" -- \
+        /usr/bin/ping -6 -n -I "$functional_relay" -c 1 -W 3 \
+            "$hook_functional_pair_exit_peer_address" \
+            >/dev/null 2>&1 || return 1
     hook_functional_wait_attempt=0
     while :; do
         hook_functional_pair_client_current=$(worker_wireguard_snapshot \
@@ -3673,11 +4546,11 @@ run_functional_client_lease_probe() {
         hook_functional_pair_exit_current=$(worker_wireguard_snapshot \
             7 "$hook_functional_pair_relay_exit_interface" \
             "$functional_exit_relay_public_key") || return 1
-        hook_functional_pair_relay_client_current=$(relay_wireguard_snapshot \
-            "$functional_relay" \
+        hook_functional_pair_relay_client_current=$( \
+            functional_relay_pair_client_wireguard_snapshot \
             "$hook_functional_pair_client_public_key") || return 1
-        hook_functional_pair_relay_exit_current=$(relay_wireguard_snapshot \
-            "$functional_exit_relay" \
+        hook_functional_pair_relay_exit_current=$( \
+            functional_relay_pair_exit_wireguard_snapshot \
             "$hook_functional_pair_exit_public_key") || return 1
         if wireguard_snapshot_has_growth \
             "$hook_functional_pair_client_baseline" \
@@ -3697,18 +4570,7 @@ run_functional_client_lease_probe() {
         [ "$hook_functional_wait_attempt" -lt 100 ] || return 1
         sleep 0.05
     done
-    functional_relay_fixture_is_exact \
-        "$functional_relay_ifindex" \
-        "$hook_functional_pair_client_public_key" \
-        "$hook_functional_pair_client_listen_port" \
-        "$hook_functional_pair_client_local_address" \
-        "$hook_functional_pair_client_peer_address" || return 1
-    functional_exit_relay_fixture_is_exact \
-        "$functional_exit_relay_ifindex" \
-        "$hook_functional_pair_exit_public_key" \
-        "$hook_functional_pair_exit_listen_port" \
-        "$hook_functional_pair_exit_local_address" \
-        "$hook_functional_pair_exit_peer_address" || return 1
+    functional_relay_pair_fixtures_are_exact || return 1
     worker_activated_wireguard_is_exact \
         7 "$hook_functional_pair_relay_client_interface" \
         "$hook_functional_pair_client_peer_address" \
@@ -3722,7 +4584,7 @@ run_functional_client_lease_probe() {
     advance_start_failure_stage functional-relay-pair-cleanup || return 1
     # shellcheck disable=SC2119
     remove_functional_relay_pair_fixtures || return 1
-    functional_fixture_shape=single
+    functional_relay_pair_fixtures_are_absent || return 1
     worker_activated_wireguard_is_exact \
         7 "$hook_functional_pair_relay_client_interface" \
         "$hook_functional_pair_client_peer_address" \

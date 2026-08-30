@@ -5,11 +5,13 @@
 //! capability, descriptor, credential, dedicated non-root identity and post-install clone/fork
 //! confinement before the parent can register the worker. The child then implements exact,
 //! fail-atomic `WireGuard` Prepare/Activate/Probe-Commit/Destroy inside its anonymous namespace,
-//! including exact peers, main-table `/128` routes, handshakes and counter readback. The Relay pair
-//! proves two independent endpoint leases; it does not enable forwarding between them. Retirement
-//! owns only the exact leader, and bootstrap does not independently attest descendant absence
-//! before filter installation. Durable journal/systemd custody, crash/restart recovery, transports
-//! and datapaths remain disconnected.
+//! including exact peers, main-table `/128` routes, handshakes and counter readback. A Relay worker
+//! starts behind an empty policy-drop nftables baseline, enables worker-local IPv6 forwarding,
+//! activates only two exact reservation-bound directions after both links are proven, and commits
+//! only after both forwarding counters grow. Indeterminate fence ownership terminates the worker
+//! and its namespace. Retirement owns only the exact leader, and bootstrap does not independently
+//! attest descendant absence. Durable restart recovery, transports and end-to-end datapaths remain
+//! disconnected.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -25,7 +27,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -45,6 +47,7 @@ use nix::{
 };
 use rand_core::{OsRng, RngCore};
 use rustix::io::fcntl_dupfd_cloexec;
+use rustix::time::{ClockId, clock_gettime};
 use socket2::{Domain, Socket};
 use thiserror::Error;
 use tokio::{
@@ -87,7 +90,10 @@ use volparossa_routing::ContextRole as RoutingContextRole;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 use zeroize::Zeroizing;
 
+mod forwarding_bootstrap;
 mod functional_backend;
+mod ipv6_forwarding;
+mod relay_fence;
 pub(crate) use functional_backend::functional_alpha_lease_backend;
 
 pub(crate) const INTERNAL_WORKER_V3_ARGUMENT: &str = "--internal-worker-v3";
@@ -158,6 +164,8 @@ struct WorkerSpawnBinding<'a> {
     parent_identity: InitialProcessIdentity,
     worker_identity: crate::worker_sandbox::WorkerIdentity,
     context_id: ContextId,
+    context_role: RoutingContextRole,
+    path_id: u8,
     generation: u64,
     retained_environment: Option<(&'a str, &'a str)>,
     deadline: HardDeadline,
@@ -199,6 +207,10 @@ enum WorkerV3Error {
     SystemdCustodyInput(#[from] crate::systemd_fdstore::FdStoreError),
     #[error("worker systemd custody publication failed")]
     SystemdCustodyPublication(#[from] crate::systemd_fdstore::PublicationFailure),
+    #[error("worker IPv6 forwarding bootstrap failed")]
+    Ipv6ForwardingBootstrap(#[from] forwarding_bootstrap::Ipv6ForwardingBootstrapError),
+    #[error("worker Relay fence failed")]
+    RelayFence(#[from] relay_fence::RelayFenceError),
 }
 
 impl From<WorkerSpawnAdmissionError> for WorkerV3Error {
@@ -225,6 +237,8 @@ enum HandshakeKind {
 struct HandshakeRecord {
     kind: HandshakeKind,
     context_id: ContextId,
+    context_role: RoutingContextRole,
+    path_id: u8,
     generation: u64,
     challenge: [u8; 32],
     parent_pid: u32,
@@ -232,16 +246,19 @@ struct HandshakeRecord {
     proof_hash: [u8; 32],
     worker_uid: u32,
     worker_gid: u32,
+    monotonic_deadline_ns: u64,
 }
 
 impl HandshakeRecord {
-    const LENGTH: usize = 120;
+    const LENGTH: usize = 128;
 
     fn encode(self) -> [u8; Self::LENGTH] {
         let mut encoded = [0_u8; Self::LENGTH];
         encoded[0..8].copy_from_slice(INTERNAL_WORKER_MAGIC);
         encoded[8..12].copy_from_slice(&INTERNAL_WORKER_PROTOCOL_VERSION.to_be_bytes());
         encoded[12] = self.kind as u8;
+        encoded[13] = encode_handshake_context_role(self.context_role);
+        encoded[14] = self.path_id;
         encoded[16..32].copy_from_slice(&self.context_id);
         encoded[32..40].copy_from_slice(&self.generation.to_be_bytes());
         encoded[40..72].copy_from_slice(&self.challenge);
@@ -250,13 +267,14 @@ impl HandshakeRecord {
         encoded[80..112].copy_from_slice(&self.proof_hash);
         encoded[112..116].copy_from_slice(&self.worker_uid.to_be_bytes());
         encoded[116..120].copy_from_slice(&self.worker_gid.to_be_bytes());
+        encoded[120..128].copy_from_slice(&self.monotonic_deadline_ns.to_be_bytes());
         encoded
     }
 
     fn decode(encoded: &[u8]) -> Result<Self, WorkerV3Error> {
         if encoded.len() != Self::LENGTH
             || encoded.get(0..8) != Some(INTERNAL_WORKER_MAGIC.as_slice())
-            || encoded.get(13..16) != Some([0_u8; 3].as_slice())
+            || encoded[15] != 0
         {
             return Err(WorkerV3Error::Authentication);
         }
@@ -273,9 +291,12 @@ impl HandshakeRecord {
             6 => HandshakeKind::SandboxReady,
             _ => return Err(WorkerV3Error::Authentication),
         };
+        let context_role = decode_handshake_context_role(encoded[13])?;
         let record = Self {
             kind,
             context_id: read_array(encoded, 16)?,
+            context_role,
+            path_id: encoded[14],
             generation: u64::from_be_bytes(read_array(encoded, 32)?),
             challenge: read_array(encoded, 40)?,
             parent_pid: u32::from_be_bytes(read_array(encoded, 72)?),
@@ -283,14 +304,17 @@ impl HandshakeRecord {
             proof_hash: read_array(encoded, 80)?,
             worker_uid: u32::from_be_bytes(read_array(encoded, 112)?),
             worker_gid: u32::from_be_bytes(read_array(encoded, 116)?),
+            monotonic_deadline_ns: u64::from_be_bytes(read_array(encoded, 120)?),
         };
         if record.context_id.iter().all(|byte| *byte == 0)
+            || !(1..=8).contains(&record.path_id)
             || record.generation == 0
             || record.challenge.iter().all(|byte| *byte == 0)
             || record.parent_pid <= 1
             || record.child_pid == 0
             || crate::worker_sandbox::WorkerIdentity::new(record.worker_uid, record.worker_gid)
                 .is_err()
+            || record.monotonic_deadline_ns == 0
             || (matches!(
                 record.kind,
                 HandshakeKind::ParentHello
@@ -342,6 +366,24 @@ impl HandshakeRecord {
             kind: HandshakeKind::SandboxReady,
             ..self
         }
+    }
+}
+
+fn encode_handshake_context_role(role: RoutingContextRole) -> u8 {
+    match role {
+        RoutingContextRole::Client => 1,
+        RoutingContextRole::Relay => 2,
+        RoutingContextRole::Exit => 3,
+        RoutingContextRole::Unspecified => std::process::abort(),
+    }
+}
+
+fn decode_handshake_context_role(encoded: u8) -> Result<RoutingContextRole, WorkerV3Error> {
+    match encoded {
+        1 => Ok(RoutingContextRole::Client),
+        2 => Ok(RoutingContextRole::Relay),
+        3 => Ok(RoutingContextRole::Exit),
+        _ => Err(WorkerV3Error::Authentication),
     }
 }
 
@@ -528,16 +570,21 @@ fn parent_handshake(
     let WorkerSpawnBinding {
         worker_identity,
         context_id,
+        context_role,
+        path_id,
         generation,
         retained_environment: _,
         deadline,
         ..
     } = binding;
     ensure_worker_deadline(deadline)?;
+    let monotonic_deadline_ns = deadline.monotonic_expiry_nanos()?;
     let parent_pid = std::process::id();
     let hello = HandshakeRecord {
         kind: HandshakeKind::ParentHello,
         context_id,
+        context_role,
+        path_id,
         generation,
         challenge,
         parent_pid,
@@ -545,6 +592,7 @@ fn parent_handshake(
         proof_hash: [0; 32],
         worker_uid: worker_identity.uid(),
         worker_gid: worker_identity.gid(),
+        monotonic_deadline_ns,
     };
     let expected_after_drop =
         parent_handshake_before_drop(process, sandbox_observation, hello, binding)?;
@@ -740,12 +788,39 @@ fn spawn_with_command_until(
     retained_environment: Option<(&str, &str)>,
     deadline: HardDeadline,
 ) -> Result<AuthenticatedWorker, WorkerV3Error> {
+    spawn_with_command_for_context_until(
+        command,
+        parent_identity,
+        worker_identity,
+        context_id,
+        RoutingContextRole::Client,
+        1,
+        generation,
+        retained_environment,
+        deadline,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_with_command_for_context_until(
+    command: Command,
+    parent_identity: InitialProcessIdentity,
+    worker_identity: crate::worker_sandbox::WorkerIdentity,
+    context_id: ContextId,
+    context_role: RoutingContextRole,
+    path_id: u8,
+    generation: u64,
+    retained_environment: Option<(&str, &str)>,
+    deadline: HardDeadline,
+) -> Result<AuthenticatedWorker, WorkerV3Error> {
     ensure_worker_deadline(deadline)?;
     let parent_network_namespace = crate::worker_sandbox::current_network_namespace_identity()?;
     let binding = WorkerSpawnBinding {
         parent_identity,
         worker_identity,
         context_id,
+        context_role,
+        path_id,
         generation,
         retained_environment,
         deadline,
@@ -774,6 +849,8 @@ fn spawn_with_command_fixture(
         parent_identity,
         worker_identity,
         context_id,
+        context_role: RoutingContextRole::Client,
+        path_id: 1,
         generation,
         retained_environment,
         deadline,
@@ -790,6 +867,8 @@ fn spawn_with_command_mode(
     if geteuid().as_raw() != binding.parent_identity.uid
         || getegid().as_raw() != binding.parent_identity.gid
         || binding.context_id.iter().all(|byte| *byte == 0)
+        || binding.context_role == RoutingContextRole::Unspecified
+        || !(1..=8).contains(&binding.path_id)
         || binding.generation == 0
     {
         return Err(WorkerV3Error::Authentication);
@@ -852,6 +931,8 @@ fn spawn_with_command_locked(
         parent_identity: _,
         worker_identity,
         context_id,
+        context_role: _,
+        path_id: _,
         generation,
         retained_environment,
         deadline,
@@ -969,9 +1050,21 @@ fn spawn_worker_v3_until(
     reservation: GenerationReservation,
     deadline: HardDeadline,
 ) -> Result<SpawnedWorker, WorkerSpawnFailure> {
+    spawn_worker_v3_for_context_until(reservation, RoutingContextRole::Client, 1, deadline)
+}
+
+fn spawn_worker_v3_for_context_until(
+    reservation: GenerationReservation,
+    context_role: RoutingContextRole,
+    path_id: u8,
+    deadline: HardDeadline,
+) -> Result<SpawnedWorker, WorkerSpawnFailure> {
     let result = (|| {
         ensure_worker_deadline(deadline)?;
-        if !geteuid().is_root() {
+        if !geteuid().is_root()
+            || context_role == RoutingContextRole::Unspecified
+            || !(1..=8).contains(&path_id)
+        {
             return Err(WorkerV3Error::Authentication);
         }
         // Linux `/proc/self/exe` reopens the exact running image inode, avoiding pathname replacement
@@ -981,7 +1074,7 @@ fn spawn_worker_v3_until(
         let account = crate::runtime::pinned_production_worker_identity()?;
         let worker_identity =
             crate::worker_sandbox::WorkerIdentity::new(account.uid(), account.gid())?;
-        spawn_with_command_until(
+        spawn_with_command_for_context_until(
             command,
             InitialProcessIdentity {
                 uid: 0,
@@ -989,6 +1082,8 @@ fn spawn_worker_v3_until(
             },
             worker_identity,
             reservation.context_id,
+            context_role,
+            path_id,
             reservation.generation,
             None,
             deadline,
@@ -1152,6 +1247,7 @@ fn run_child(required_user: u32, required_group: u32) -> Result<(), WorkerV3Erro
             )?)
         },
         |prepared, identity| Ok(prepared.finish(identity)?),
+        production_worker_network_bootstrap,
         child_loop,
     )
 }
@@ -1167,6 +1263,7 @@ fn run_child_with_fixture_sandbox(
         required_group,
         |_| Ok(()),
         move |(), _| Ok(snapshot),
+        |_, _, _, _, _| Ok(WorkerNetworkBootstrap::Fixture),
         fixture_memory_child_loop,
     )
 }
@@ -1217,12 +1314,65 @@ fn prepare_child_channel(
     ))
 }
 
-fn run_child_with_sandbox<P, B, F>(
+/// Affine network-policy authority established while the anonymous worker is still root.
+enum WorkerNetworkBootstrap {
+    NonRelay,
+    RelayRestricted(relay_fence::RestrictedPolicyDrop),
+    #[cfg(test)]
+    Fixture,
+}
+
+fn production_worker_network_bootstrap(
+    parent_network_namespace: crate::worker_sandbox::NetworkNamespaceIdentity,
+    route_context_id: ContextId,
+    role: RoutingContextRole,
+    path_id: u8,
+    deadline: HardDeadline,
+) -> Result<WorkerNetworkBootstrap, WorkerV3Error> {
+    match role {
+        RoutingContextRole::Client | RoutingContextRole::Exit => {
+            Ok(WorkerNetworkBootstrap::NonRelay)
+        }
+        RoutingContextRole::Relay => {
+            let worker_network_namespace =
+                crate::worker_sandbox::current_network_namespace_identity()?;
+            let namespace = relay_fence::RelayFenceNamespaceAuthority::new(
+                parent_network_namespace,
+                worker_network_namespace,
+            )?;
+            let pristine = relay_fence::observe_pristine_relay_fence(namespace, deadline)
+                .map_err(|failure| WorkerV3Error::RelayFence(failure.source))?;
+            let identity =
+                relay_fence::RelayFenceIdentity::derive(route_context_id, u32::from(path_id))?;
+            let restricted = relay_fence::create_relay_fence_baseline(pristine, identity, deadline)
+                .map_err(|failure| WorkerV3Error::RelayFence(failure.source))?;
+            forwarding_bootstrap::enable_ipv6_forwarding_before_identity_drop(
+                parent_network_namespace,
+                worker_network_namespace,
+                deadline,
+            )?;
+            Ok(WorkerNetworkBootstrap::RelayRestricted(restricted))
+        }
+        RoutingContextRole::Unspecified => Err(WorkerV3Error::Authentication),
+    }
+}
+
+type WorkerOperationLoop = fn(
+    &Socket,
+    ExpectedUnixCredentials,
+    ContextId,
+    RoutingContextRole,
+    u8,
+    WorkerNetworkBootstrap,
+) -> Result<(), WorkerV3Error>;
+
+fn run_child_with_sandbox<P, B, F, N>(
     required_user: u32,
     required_group: u32,
     begin_sandbox: B,
     finish_sandbox: F,
-    operation_loop: fn(&Socket, ExpectedUnixCredentials, ContextId) -> Result<(), WorkerV3Error>,
+    bootstrap_network: N,
+    operation_loop: WorkerOperationLoop,
 ) -> Result<(), WorkerV3Error>
 where
     B: FnOnce(crate::worker_sandbox::NetworkNamespaceIdentity) -> Result<P, WorkerV3Error>,
@@ -1230,6 +1380,13 @@ where
         P,
         crate::worker_sandbox::WorkerIdentity,
     ) -> Result<crate::worker_sandbox::WorkerSandboxSnapshot, WorkerV3Error>,
+    N: FnOnce(
+        crate::worker_sandbox::NetworkNamespaceIdentity,
+        ContextId,
+        RoutingContextRole,
+        u8,
+        HardDeadline,
+    ) -> Result<WorkerNetworkBootstrap, WorkerV3Error>,
 {
     let (channel, initial_parent, child_pid, parent_network_namespace) =
         prepare_child_channel(required_user)?;
@@ -1254,6 +1411,16 @@ where
     if HandshakeRecord::decode(&encoded)? != hello.namespace_pinned() {
         return Err(WorkerV3Error::Authentication);
     }
+    let bootstrap_deadline =
+        HardDeadline::from_monotonic_expiry_nanos(hello.monotonic_deadline_ns, SPAWN_TIMEOUT)?;
+    bootstrap_deadline.ensure_remaining()?;
+    let network_bootstrap = bootstrap_network(
+        parent_network_namespace,
+        hello.context_id,
+        hello.context_role,
+        hello.path_id,
+        bootstrap_deadline,
+    )?;
 
     let sandbox_snapshot = finish_sandbox(prepared_sandbox, worker_identity)?;
     // Linux clears PR_SET_PDEATHSIG during a credential transition. Restore it before the child
@@ -1308,7 +1475,14 @@ where
         return Err(WorkerV3Error::Authentication);
     }
     send_credential_record(&channel, &accepted.sandbox_ready().encode())?;
-    operation_loop(&channel, expected_parent, hello.context_id)
+    operation_loop(
+        &channel,
+        expected_parent,
+        hello.context_id,
+        hello.context_role,
+        hello.path_id,
+        network_bootstrap,
+    )
 }
 
 #[cfg(test)]
@@ -1316,6 +1490,9 @@ fn fixture_memory_child_loop(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
     bound_context: ContextId,
+    bound_role: RoutingContextRole,
+    _bound_path_id: u8,
+    _network_bootstrap: WorkerNetworkBootstrap,
 ) -> Result<(), WorkerV3Error> {
     let mut initialised = false;
     loop {
@@ -1324,7 +1501,10 @@ fn fixture_memory_child_loop(
         let (result, outcome, exit) = match operation {
             internal_worker_request::Operation::Initialise(initialise) => {
                 let route_context_id = context_id(&initialise.route_context_id)?;
-                if initialised || route_context_id != bound_context {
+                if initialised
+                    || route_context_id != bound_context
+                    || routing_context_role(initialise.role) != Some(bound_role)
+                {
                     (InternalWorkerResult::Conflict, None, false)
                 } else {
                     initialised = true;
@@ -1559,8 +1739,21 @@ enum WorkerLeaseLifecycle {
 struct WorkerContext<Kernel> {
     route_context_id: ContextId,
     role: RoutingContextRole,
+    bound_path_id: Option<u8>,
+    relay_fence: Option<WorkerRelayFence>,
     kernel: Kernel,
     lease: Option<WorkerLeaseLifecycle>,
+}
+
+enum WorkerRelayFence {
+    NonRelay,
+    Restricted(relay_fence::RestrictedPolicyDrop),
+    Active {
+        authority: Box<relay_fence::ActiveRelayFence>,
+        activation_baseline: Option<relay_fence::RelayFenceCounters>,
+    },
+    #[cfg(test)]
+    Fixture,
 }
 
 enum WorkerPrepareOutcome {
@@ -1571,11 +1764,32 @@ enum WorkerPrepareOutcome {
 enum WorkerActivateOutcome {
     Activated(Vec<ActivatedLease>),
     Failed(InternalWorkerResult),
+    Terminate,
+}
+
+enum RelayFenceActivationOutcome {
+    Ready,
+    Recoverable,
+    Terminate,
+}
+
+enum RelayFenceDeactivationOutcome {
+    Restricted,
+    Retryable,
+    Terminate,
 }
 
 enum WorkerProbeOutcome {
     Committed(Vec<ProbedLease>),
     Failed(InternalWorkerResult),
+    Terminate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelayForwardingGrowth {
+    Grew,
+    NoGrowth,
+    Terminate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1583,16 +1797,53 @@ enum WorkerDestroyOutcome {
     Destroyed,
     NoAdoptedLease,
     CleanupIncomplete,
+    Terminate,
 }
 
 impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
+    #[cfg(test)]
     const fn new(route_context_id: ContextId, role: RoutingContextRole, kernel: Kernel) -> Self {
         Self {
             route_context_id,
             role,
+            bound_path_id: None,
+            relay_fence: Some(if matches!(role, RoutingContextRole::Relay) {
+                WorkerRelayFence::Fixture
+            } else {
+                WorkerRelayFence::NonRelay
+            }),
             kernel,
             lease: None,
         }
+    }
+
+    fn new_bound(
+        route_context_id: ContextId,
+        role: RoutingContextRole,
+        path_id: u8,
+        bootstrap: WorkerNetworkBootstrap,
+        kernel: Kernel,
+    ) -> Option<Self> {
+        let relay_fence = match (role, bootstrap) {
+            (
+                RoutingContextRole::Client | RoutingContextRole::Exit,
+                WorkerNetworkBootstrap::NonRelay,
+            ) => WorkerRelayFence::NonRelay,
+            (RoutingContextRole::Relay, WorkerNetworkBootstrap::RelayRestricted(restricted)) => {
+                WorkerRelayFence::Restricted(restricted)
+            }
+            #[cfg(test)]
+            (_, WorkerNetworkBootstrap::Fixture) => WorkerRelayFence::Fixture,
+            _ => return None,
+        };
+        Some(Self {
+            route_context_id,
+            role,
+            bound_path_id: Some(path_id),
+            relay_fence: Some(relay_fence),
+            kernel,
+            lease: None,
+        })
     }
 
     fn prepare(
@@ -1608,6 +1859,12 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         else {
             return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
         };
+        if self
+            .bound_path_id
+            .is_some_and(|path_id| resources.iter().any(|resource| resource.key().0 != path_id))
+        {
+            return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
+        }
         if self
             .kernel
             .preflight_exact_owned_wireguard(&resources, deadline)
@@ -1681,6 +1938,13 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 listen_port: u32::from(proof.listen_port),
             });
         }
+        if matches!(
+            self.relay_fence.as_ref(),
+            Some(WorkerRelayFence::Restricted(_))
+        ) && !prove_relay_ipv6_forwarding(&ownerships, deadline)
+        {
+            return self.fail_prepare_after_ownership(ownerships, deadline);
+        }
         self.lease = Some(WorkerLeaseLifecycle::Prepared(ownerships));
         WorkerPrepareOutcome::Prepared(prepared)
     }
@@ -1726,6 +1990,13 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             )
             | None => return WorkerActivateOutcome::Failed(InternalWorkerResult::Conflict),
         };
+        match self.activate_relay_forwarding_fence(&ownerships, operation, deadline) {
+            RelayFenceActivationOutcome::Ready => {}
+            RelayFenceActivationOutcome::Recoverable => {
+                return self.fail_activation_after_ownership(ownerships, deadline);
+            }
+            RelayFenceActivationOutcome::Terminate => return WorkerActivateOutcome::Terminate,
+        }
         let mut activated = Vec::with_capacity(ownerships.len());
         for (index, (peer, prepared)) in validated.into_iter().enumerate() {
             let activation = self.kernel.activate_wireguard(
@@ -1761,6 +2032,95 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         }
         self.lease = Some(WorkerLeaseLifecycle::Activated(ownerships));
         WorkerActivateOutcome::Activated(activated)
+    }
+
+    fn activate_relay_forwarding_fence(
+        &mut self,
+        ownerships: &[WorkerLeaseOwnership],
+        operation: &ActivateLeases,
+        deadline: HardDeadline,
+    ) -> RelayFenceActivationOutcome {
+        let Some(state) = self.relay_fence.take() else {
+            return RelayFenceActivationOutcome::Terminate;
+        };
+        let WorkerRelayFence::Restricted(restricted) = state else {
+            let ready = matches!(
+                (&state, self.role),
+                (
+                    WorkerRelayFence::NonRelay,
+                    RoutingContextRole::Client | RoutingContextRole::Exit
+                )
+            );
+            #[cfg(test)]
+            let ready = ready || matches!(&state, WorkerRelayFence::Fixture);
+            self.relay_fence = Some(state);
+            return if ready {
+                RelayFenceActivationOutcome::Ready
+            } else {
+                RelayFenceActivationOutcome::Recoverable
+            };
+        };
+        let ([relay_client, relay_exit], [relay_client_activation, _]) =
+            (ownerships, operation.leases.as_slice())
+        else {
+            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+            return RelayFenceActivationOutcome::Recoverable;
+        };
+        let (Some(relay_client_proof), Some(relay_exit_proof), Some(now_unix)) =
+            (relay_client.proof, relay_exit.proof, current_unix_seconds())
+        else {
+            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+            return RelayFenceActivationOutcome::Recoverable;
+        };
+        let specification = relay_fence::RelayFenceSpec::derive(
+            restricted.identity(),
+            relay_client_proof.ifindex,
+            relay_exit_proof.ifindex,
+            relay_client_activation.maximum_up_mbps,
+            relay_client_activation.maximum_down_mbps,
+            relay_client_activation.hard_expires_at_unix,
+            now_unix,
+        );
+        let Ok(specification) = specification else {
+            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+            return RelayFenceActivationOutcome::Recoverable;
+        };
+        let Some(maximum_live_gate_timeout) =
+            relay_gate_timeout(operation.hard_expires_at_boottime_ns, deadline)
+        else {
+            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+            return RelayFenceActivationOutcome::Recoverable;
+        };
+        let active = match relay_fence::activate_relay_fence_rules(
+            restricted,
+            specification,
+            maximum_live_gate_timeout,
+            deadline,
+        ) {
+            Ok(active) => active,
+            Err(failure) => {
+                return match failure.authority {
+                    relay_fence::RelayFenceActivateAuthority::Restricted(restricted) => {
+                        self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                        RelayFenceActivationOutcome::Recoverable
+                    }
+                    relay_fence::RelayFenceActivateAuthority::Indeterminate(_) => {
+                        self.relay_fence = None;
+                        RelayFenceActivationOutcome::Terminate
+                    }
+                };
+            }
+        };
+        let activation_baseline = relay_fence::verify_active_relay_fence(&active, deadline).ok();
+        self.relay_fence = Some(WorkerRelayFence::Active {
+            authority: Box::new(active),
+            activation_baseline,
+        });
+        if activation_baseline.is_some() {
+            RelayFenceActivationOutcome::Ready
+        } else {
+            RelayFenceActivationOutcome::Recoverable
+        }
     }
 
     fn probe_commit(
@@ -1815,6 +2175,13 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 transmitted_bytes: proof.transmitted_bytes,
             });
         }
+        match self.prove_relay_forwarding_growth(deadline) {
+            RelayForwardingGrowth::Grew => {}
+            RelayForwardingGrowth::NoGrowth => {
+                return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+            }
+            RelayForwardingGrowth::Terminate => return WorkerProbeOutcome::Terminate,
+        }
         let ownerships = match self.lease.take() {
             Some(WorkerLeaseLifecycle::Activated(ownerships)) => ownerships,
             Some(
@@ -1828,11 +2195,48 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         WorkerProbeOutcome::Committed(probed)
     }
 
+    fn prove_relay_forwarding_growth(&self, deadline: HardDeadline) -> RelayForwardingGrowth {
+        match self.relay_fence.as_ref() {
+            Some(WorkerRelayFence::NonRelay) if !matches!(self.role, RoutingContextRole::Relay) => {
+                RelayForwardingGrowth::Grew
+            }
+            Some(WorkerRelayFence::Active {
+                authority,
+                activation_baseline: Some(baseline),
+            }) => {
+                let proof = relay_fence::verify_active_relay_fence(authority, deadline)
+                    .map(|current| current.both_allowed_directions_grew_since(baseline));
+                classify_relay_forwarding_growth(&proof)
+            }
+            #[cfg(test)]
+            Some(WorkerRelayFence::Fixture) => RelayForwardingGrowth::Grew,
+            Some(
+                WorkerRelayFence::NonRelay
+                | WorkerRelayFence::Restricted(_)
+                | WorkerRelayFence::Active {
+                    activation_baseline: None,
+                    ..
+                },
+            )
+            | None => RelayForwardingGrowth::Terminate,
+        }
+    }
+
     fn fail_activation_after_ownership(
         &mut self,
         ownerships: Vec<WorkerLeaseOwnership>,
         deadline: HardDeadline,
     ) -> WorkerActivateOutcome {
+        match self.restrict_relay_forwarding_fence(deadline) {
+            RelayFenceDeactivationOutcome::Restricted => {}
+            RelayFenceDeactivationOutcome::Retryable => {
+                self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
+                return WorkerActivateOutcome::Failed(InternalWorkerResult::CleanupIncomplete);
+            }
+            RelayFenceDeactivationOutcome::Terminate => {
+                return WorkerActivateOutcome::Terminate;
+            }
+        }
         if cleanup_worker_resources(&mut self.kernel, &ownerships, deadline) {
             drop(ownerships);
             WorkerActivateOutcome::Failed(InternalWorkerResult::Kernel)
@@ -1842,11 +2246,55 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         }
     }
 
+    fn restrict_relay_forwarding_fence(
+        &mut self,
+        deadline: HardDeadline,
+    ) -> RelayFenceDeactivationOutcome {
+        let Some(state) = self.relay_fence.take() else {
+            return RelayFenceDeactivationOutcome::Terminate;
+        };
+        let WorkerRelayFence::Active {
+            authority,
+            activation_baseline,
+        } = state
+        else {
+            self.relay_fence = Some(state);
+            return RelayFenceDeactivationOutcome::Restricted;
+        };
+        match relay_fence::deactivate_relay_fence_rules(*authority, deadline) {
+            Ok(restricted) => {
+                self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                RelayFenceDeactivationOutcome::Restricted
+            }
+            Err(failure) => match failure.authority {
+                relay_fence::RelayFenceDeactivateAuthority::Active(authority) => {
+                    self.relay_fence = Some(WorkerRelayFence::Active {
+                        authority,
+                        activation_baseline,
+                    });
+                    RelayFenceDeactivationOutcome::Retryable
+                }
+                relay_fence::RelayFenceDeactivateAuthority::Indeterminate(_) => {
+                    self.relay_fence = None;
+                    RelayFenceDeactivationOutcome::Terminate
+                }
+            },
+        }
+    }
+
     fn destroy(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
         let Some(lifecycle) = self.lease.take() else {
-            // This says only that the child adopted no resource. A parent may already have moved
-            // a birth link into this namespace, so it is not kernel-absence evidence.
-            return WorkerDestroyOutcome::NoAdoptedLease;
+            // A parent may already have moved a birth link into this namespace, so no adopted
+            // lease is not link-absence evidence. A production Relay therefore keeps its policy-
+            // drop baseline installed and exits successfully; confirmed process/namespace death
+            // performs the only safe cleanup without opening an unfenced forwarding window.
+            return match self.relay_fence.as_ref() {
+                Some(WorkerRelayFence::Restricted(_)) => WorkerDestroyOutcome::Destroyed,
+                Some(WorkerRelayFence::NonRelay) => WorkerDestroyOutcome::NoAdoptedLease,
+                #[cfg(test)]
+                Some(WorkerRelayFence::Fixture) => WorkerDestroyOutcome::NoAdoptedLease,
+                Some(WorkerRelayFence::Active { .. }) | None => WorkerDestroyOutcome::Terminate,
+            };
         };
         let ownerships = match lifecycle {
             WorkerLeaseLifecycle::Prepared(ownerships)
@@ -1854,13 +2302,78 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             | WorkerLeaseLifecycle::Committed(ownerships)
             | WorkerLeaseLifecycle::CleanupRequired(ownerships) => ownerships,
         };
-        if cleanup_worker_resources(&mut self.kernel, &ownerships, deadline) {
-            drop(ownerships);
-            WorkerDestroyOutcome::Destroyed
-        } else {
-            self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
-            WorkerDestroyOutcome::CleanupIncomplete
+        match self.restrict_relay_forwarding_fence(deadline) {
+            RelayFenceDeactivationOutcome::Restricted => {}
+            RelayFenceDeactivationOutcome::Retryable => {
+                self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
+                return WorkerDestroyOutcome::CleanupIncomplete;
+            }
+            RelayFenceDeactivationOutcome::Terminate => {
+                return WorkerDestroyOutcome::Terminate;
+            }
         }
+        if !cleanup_worker_resources(&mut self.kernel, &ownerships, deadline) {
+            self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
+            return WorkerDestroyOutcome::CleanupIncomplete;
+        }
+        match self.retire_relay_forwarding_fence(deadline) {
+            WorkerDestroyOutcome::Destroyed => {
+                drop(ownerships);
+                WorkerDestroyOutcome::Destroyed
+            }
+            WorkerDestroyOutcome::CleanupIncomplete => {
+                self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
+                WorkerDestroyOutcome::CleanupIncomplete
+            }
+            WorkerDestroyOutcome::Terminate | WorkerDestroyOutcome::NoAdoptedLease => {
+                WorkerDestroyOutcome::Terminate
+            }
+        }
+    }
+
+    fn retire_relay_forwarding_fence(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
+        let Some(state) = self.relay_fence.take() else {
+            return WorkerDestroyOutcome::Terminate;
+        };
+        match state {
+            WorkerRelayFence::Restricted(restricted) => {
+                match relay_fence::retire_relay_fence_baseline(restricted, deadline) {
+                    Ok(_retired) => WorkerDestroyOutcome::Destroyed,
+                    Err(failure) => match failure.authority {
+                        relay_fence::RelayFenceRetireAuthority::Restricted(restricted) => {
+                            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                            WorkerDestroyOutcome::CleanupIncomplete
+                        }
+                        relay_fence::RelayFenceRetireAuthority::Indeterminate(_) => {
+                            WorkerDestroyOutcome::Terminate
+                        }
+                    },
+                }
+            }
+            WorkerRelayFence::NonRelay => {
+                self.relay_fence = Some(WorkerRelayFence::NonRelay);
+                WorkerDestroyOutcome::Destroyed
+            }
+            #[cfg(test)]
+            WorkerRelayFence::Fixture => {
+                self.relay_fence = Some(WorkerRelayFence::Fixture);
+                WorkerDestroyOutcome::Destroyed
+            }
+            active @ WorkerRelayFence::Active { .. } => {
+                self.relay_fence = Some(active);
+                WorkerDestroyOutcome::CleanupIncomplete
+            }
+        }
+    }
+}
+
+fn classify_relay_forwarding_growth(
+    proof: &Result<bool, relay_fence::RelayFenceError>,
+) -> RelayForwardingGrowth {
+    match proof {
+        Ok(true) => RelayForwardingGrowth::Grew,
+        Ok(false) => RelayForwardingGrowth::NoGrowth,
+        Err(_) => RelayForwardingGrowth::Terminate,
     }
 }
 
@@ -1934,6 +2447,33 @@ fn validate_worker_activation(
     {
         return None;
     }
+    match context_role {
+        RoutingContextRole::Relay => {
+            let [relay_client, relay_exit] = operation.leases.as_slice() else {
+                return None;
+            };
+            if relay_client.maximum_up_mbps == 0
+                || relay_client.maximum_down_mbps == 0
+                || relay_client.maximum_up_mbps > volparossa_routing::MAX_HELPER_RATE_MBPS
+                || relay_client.maximum_down_mbps > volparossa_routing::MAX_HELPER_RATE_MBPS
+                || relay_client.maximum_up_mbps != relay_exit.maximum_up_mbps
+                || relay_client.maximum_down_mbps != relay_exit.maximum_down_mbps
+                || relay_client.hard_expires_at_unix != relay_exit.hard_expires_at_unix
+            {
+                return None;
+            }
+        }
+        RoutingContextRole::Client | RoutingContextRole::Exit => {
+            if operation
+                .leases
+                .iter()
+                .any(|lease| lease.maximum_up_mbps != 0 || lease.maximum_down_mbps != 0)
+            {
+                return None;
+            }
+        }
+        RoutingContextRole::Unspecified => return None,
+    }
 
     let mut validated = Vec::with_capacity(expected.len());
     for ((lease, ownership), (expected_role, expected_internal_role)) in operation
@@ -1952,6 +2492,7 @@ fn validate_worker_activation(
         if ownership.resource.key() != (u8::try_from(lease.path_id).ok()?, expected_role)
             || lease.role != expected_internal_role as i32
             || routing_endpoint_role(lease.role) != Some(expected_role)
+            || lease.hard_expires_at_unix != ownership.resource.hard_expires_at_unix()
             || lease.peer_public_key.len() != 32
             || lease.peer_public_key.iter().all(|byte| *byte == 0)
             || lease.allowed_prefixes.len() != 1
@@ -2080,6 +2621,87 @@ fn parse_internal_udp_endpoint(value: &InternalUdpEndpoint) -> Option<InternetSo
         .then_some(InternetSocketAddr::new(address, port))
 }
 
+fn current_unix_seconds() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|age| age.as_secs())
+}
+
+fn relay_gate_timeout(
+    hard_expires_at_boottime_ns: u64,
+    deadline: HardDeadline,
+) -> Option<Duration> {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    const MAXIMUM_LIFETIME: Duration = Duration::from_secs(15 * 60);
+
+    // Reserve the complete remaining worker-operation budget before sampling BOOTTIME. A timeout
+    // installed at any successful commit point can therefore never outlive the frozen boundary.
+    let operation_budget = deadline.remaining().ok()?;
+    let now = clock_gettime(ClockId::Boottime);
+    let seconds = u64::try_from(now.tv_sec).ok()?;
+    let nanoseconds = u64::try_from(now.tv_nsec).ok()?;
+    if nanoseconds >= NANOS_PER_SECOND {
+        return None;
+    }
+    let now_nanos = seconds
+        .checked_mul(NANOS_PER_SECOND)?
+        .checked_add(nanoseconds)?;
+    let remaining_nanos = hard_expires_at_boottime_ns.checked_sub(now_nanos)?;
+    let maximum_live = Duration::from_nanos(remaining_nanos).checked_sub(operation_budget)?;
+    (!maximum_live.is_zero() && maximum_live <= MAXIMUM_LIFETIME).then_some(maximum_live)
+}
+
+#[cfg(test)]
+fn test_boottime_expiry() -> u64 {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    let now = clock_gettime(ClockId::Boottime);
+    u64::try_from(now.tv_sec)
+        .expect("nonnegative test boottime")
+        .checked_mul(NANOS_PER_SECOND)
+        .and_then(|value| value.checked_add(u64::try_from(now.tv_nsec).ok()?))
+        .and_then(|value| value.checked_add(60 * NANOS_PER_SECOND))
+        .expect("bounded test boottime expiry")
+}
+
+fn prove_relay_ipv6_forwarding(
+    ownerships: &[WorkerLeaseOwnership],
+    deadline: HardDeadline,
+) -> bool {
+    let [relay_client, relay_exit] = ownerships else {
+        return false;
+    };
+    let Some(relay_client_ifindex) = relay_client.proof.map(|proof| proof.ifindex) else {
+        return false;
+    };
+    let Some(relay_exit_ifindex) = relay_exit.proof.map(|proof| proof.ifindex) else {
+        return false;
+    };
+    let Ok(relay_client_selector) =
+        ipv6_forwarding::Ipv6NetconfSelector::interface(relay_client_ifindex)
+    else {
+        return false;
+    };
+    let Ok(relay_exit_selector) =
+        ipv6_forwarding::Ipv6NetconfSelector::interface(relay_exit_ifindex)
+    else {
+        return false;
+    };
+    [
+        ipv6_forwarding::Ipv6NetconfSelector::all(),
+        ipv6_forwarding::Ipv6NetconfSelector::default(),
+        relay_client_selector,
+        relay_exit_selector,
+    ]
+    .into_iter()
+    .all(|selector| {
+        matches!(
+            ipv6_forwarding::observe_ipv6_forwarding(selector, deadline),
+            Ok(ipv6_forwarding::Ipv6ForwardingState::Enabled)
+        )
+    })
+}
+
 fn cleanup_worker_resources(
     kernel: &mut impl WorkerNamespaceKernel,
     ownerships: &[WorkerLeaseOwnership],
@@ -2131,15 +2753,21 @@ type ChildOperationOutcome = (
 
 fn initialise_child_context(
     context: &mut Option<WorkerContext<NamespaceKernel>>,
+    network_bootstrap: &mut Option<WorkerNetworkBootstrap>,
     initialise: &InitialiseContext,
     bound_context: ContextId,
+    bound_role: RoutingContextRole,
+    bound_path_id: u8,
     deadline: HardDeadline,
 ) -> Result<ChildOperationOutcome, WorkerV3Error> {
     let route_context_id = context_id(&initialise.route_context_id)?;
     let Some(role) = routing_context_role(initialise.role) else {
         return Err(WorkerV3Error::Invalid);
     };
-    if functional_worker_endpoint_roles(role).is_none() {
+    if functional_worker_endpoint_roles(role).is_none()
+        || role != bound_role
+        || !(1..=8).contains(&bound_path_id)
+    {
         return Ok((InternalWorkerResult::Invalid, None, false));
     }
     if context.is_some() || route_context_id != bound_context {
@@ -2150,7 +2778,13 @@ fn initialise_child_context(
         Ok(kernel)
     }) {
         Ok(kernel) => {
-            *context = Some(WorkerContext::new(route_context_id, role, kernel));
+            let bootstrap = network_bootstrap
+                .take()
+                .ok_or(WorkerV3Error::Authentication)?;
+            let worker_context =
+                WorkerContext::new_bound(route_context_id, role, bound_path_id, bootstrap, kernel)
+                    .ok_or(WorkerV3Error::Authentication)?;
+            *context = Some(worker_context);
             Ok((
                 InternalWorkerResult::Ok,
                 Some(internal_worker_response::Outcome::Initialised(
@@ -2211,6 +2845,7 @@ fn activate_child_context(
             false,
         ),
         WorkerActivateOutcome::Failed(result) => (result, None, false),
+        WorkerActivateOutcome::Terminate => return Err(WorkerV3Error::Ambiguous),
     })
 }
 
@@ -2235,6 +2870,7 @@ fn probe_commit_child_context(
             false,
         ),
         WorkerProbeOutcome::Failed(result) => (result, None, false),
+        WorkerProbeOutcome::Terminate => return Err(WorkerV3Error::Ambiguous),
     })
 }
 
@@ -2265,6 +2901,7 @@ fn destroy_child_context(
         WorkerDestroyOutcome::CleanupIncomplete => {
             (InternalWorkerResult::CleanupIncomplete, None, false)
         }
+        WorkerDestroyOutcome::Terminate => return Err(WorkerV3Error::Ambiguous),
     })
 }
 
@@ -2272,16 +2909,26 @@ fn child_loop(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
     bound_context: ContextId,
+    bound_role: RoutingContextRole,
+    bound_path_id: u8,
+    network_bootstrap: WorkerNetworkBootstrap,
 ) -> Result<(), WorkerV3Error> {
     let mut context: Option<WorkerContext<NamespaceKernel>> = None;
+    let mut network_bootstrap = Some(network_bootstrap);
     let mut keys = OsWorkerKeySource;
     loop {
         let (request, deadline) = receive_deadline_bound_worker_request(channel, expected_parent)?;
         let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
         let (result, outcome, exit) = match operation {
-            internal_worker_request::Operation::Initialise(initialise) => {
-                initialise_child_context(&mut context, initialise, bound_context, deadline)?
-            }
+            internal_worker_request::Operation::Initialise(initialise) => initialise_child_context(
+                &mut context,
+                &mut network_bootstrap,
+                initialise,
+                bound_context,
+                bound_role,
+                bound_path_id,
+                deadline,
+            )?,
             internal_worker_request::Operation::PrepareLeases(prepare) => {
                 prepare_child_context(&mut context, prepare, &mut keys, bound_context, deadline)?
             }
@@ -6571,6 +7218,27 @@ impl WorkerCoordinator {
         self.reserve_spawn_register_with_until(context_id, ttl, deadline, spawn_worker_v3_until)
     }
 
+    fn reserve_spawn_register_for_context_until(
+        &self,
+        context_id: ContextId,
+        context_role: RoutingContextRole,
+        path_id: u8,
+        ttl: Duration,
+        deadline: HardDeadline,
+    ) -> WorkerLifecycleAdmission {
+        if context_role == RoutingContextRole::Unspecified || !(1..=8).contains(&path_id) {
+            return WorkerLifecycleAdmission::Rejected(WorkerV3Error::Invalid);
+        }
+        self.reserve_spawn_register_with_until(
+            context_id,
+            ttl,
+            deadline,
+            move |reservation, deadline| {
+                spawn_worker_v3_for_context_until(reservation, context_role, path_id, deadline)
+            },
+        )
+    }
+
     fn reserve_spawn_register_with_until<Spawn>(
         &self,
         context_id: ContextId,
@@ -8614,6 +9282,7 @@ mod tests {
         .expect("client worker specification");
         ActivateLeases {
             route_context_id: route_context_id.to_vec(),
+            hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases: vec![crate::internal_protocol::LeaseActivation {
                 path_id: 1,
                 role: InternalEndpointRole::Client as i32,
@@ -8627,6 +9296,9 @@ mod tests {
                     prefix_length: 128,
                 }],
                 persistent_keepalive_seconds: 25,
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                hard_expires_at_unix: 200,
             }],
         }
     }
@@ -8682,6 +9354,7 @@ mod tests {
         .expect("exit worker specification");
         ActivateLeases {
             route_context_id: route_context_id.to_vec(),
+            hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases: vec![crate::internal_protocol::LeaseActivation {
                 path_id: 1,
                 role: InternalEndpointRole::Exit as i32,
@@ -8695,6 +9368,9 @@ mod tests {
                     prefix_length: 128,
                 }],
                 persistent_keepalive_seconds: 25,
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                hard_expires_at_unix: 200,
             }],
         }
     }
@@ -8799,11 +9475,15 @@ mod tests {
                         prefix_length: 128,
                     }],
                     persistent_keepalive_seconds: 25,
+                    maximum_up_mbps: 100,
+                    maximum_down_mbps: 100,
+                    hard_expires_at_unix: 200,
                 }
             })
             .collect();
         ActivateLeases {
             route_context_id: route_context_id.to_vec(),
+            hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases,
         }
     }
@@ -9162,6 +9842,20 @@ mod tests {
         let mut cross_local_key = valid.clone();
         cross_local_key.leases[0].peer_public_key = local_public_keys[1].to_vec();
         substitutions.push(cross_local_key);
+        let mut zero_rate = valid.clone();
+        zero_rate.leases[0].maximum_up_mbps = 0;
+        substitutions.push(zero_rate);
+        let mut unequal_rate = valid.clone();
+        unequal_rate.leases[1].maximum_down_mbps += 1;
+        substitutions.push(unequal_rate);
+        let mut unequal_expiry = valid.clone();
+        unequal_expiry.leases[1].hard_expires_at_unix += 1;
+        substitutions.push(unequal_expiry);
+        let mut wrong_resource_expiry = valid.clone();
+        for lease in &mut wrong_resource_expiry.leases {
+            lease.hard_expires_at_unix += 1;
+        }
+        substitutions.push(wrong_resource_expiry);
         let mut wrong_route = valid;
         wrong_route.leases[1].allowed_prefixes[0].address[15] ^= 1;
         substitutions.push(wrong_route);
@@ -9177,6 +9871,85 @@ mod tests {
             ));
             assert_eq!(context.kernel.calls, before);
         }
+    }
+
+    #[test]
+    fn relay_gate_timeout_is_bounded_by_frozen_boottime_and_operation_budget() {
+        let hard_expiry = test_boottime_expiry();
+        let timeout = relay_gate_timeout(
+            hard_expiry,
+            HardDeadline::after(Duration::from_secs(1)).expect("operation deadline"),
+        )
+        .expect("conservative live-gate timeout");
+        assert!(timeout > Duration::from_secs(58));
+        assert!(timeout < Duration::from_secs(60));
+        assert!(relay_gate_timeout(1, worker_deadline()).is_none());
+    }
+
+    #[test]
+    fn relay_fence_verification_errors_and_missing_authority_terminate_the_worker() {
+        assert_eq!(
+            classify_relay_forwarding_growth(&Ok(true)),
+            RelayForwardingGrowth::Grew
+        );
+        assert_eq!(
+            classify_relay_forwarding_growth(&Ok(false)),
+            RelayForwardingGrowth::NoGrowth
+        );
+        assert_eq!(
+            classify_relay_forwarding_growth(&Err(relay_fence::RelayFenceError::UnexpectedPolicy)),
+            RelayForwardingGrowth::Terminate
+        );
+
+        let route_context_id = [0xbc; 16];
+        let baseline = WireguardV3PeerProof {
+            latest_handshake_unix: 100,
+            latest_handshake_nanoseconds: 0,
+            received_bytes: 10,
+            transmitted_bytes: 20,
+        };
+        let complete = WireguardV3PeerProof {
+            latest_handshake_unix: 150,
+            latest_handshake_nanoseconds: 1,
+            received_bytes: 11,
+            transmitted_bytes: 21,
+        };
+        let mut context = WorkerContext::new(
+            route_context_id,
+            RoutingContextRole::Relay,
+            FakeWorkerKernel {
+                activation_proofs: VecDeque::from([baseline, baseline]),
+                probe_proofs: VecDeque::from([complete, complete]),
+                ..FakeWorkerKernel::default()
+            },
+        );
+        let mut keys = SequenceWorkerKeySource {
+            private_keys: VecDeque::from([[0xbd; 32], [0xbe; 32]]),
+        };
+        assert!(matches!(
+            context.prepare(
+                &worker_relay_prepare(route_context_id, 0xbf),
+                &mut keys,
+                worker_deadline(),
+            ),
+            WorkerPrepareOutcome::Prepared(_)
+        ));
+        assert!(matches!(
+            context.activate(&worker_relay_activate(route_context_id), worker_deadline()),
+            WorkerActivateOutcome::Activated(_)
+        ));
+        context.relay_fence = None;
+        assert!(matches!(
+            context.probe_commit(
+                &worker_relay_probe(route_context_id, 149),
+                worker_deadline(),
+            ),
+            WorkerProbeOutcome::Terminate
+        ));
+        assert!(matches!(
+            context.lease,
+            Some(WorkerLeaseLifecycle::Activated(_))
+        ));
     }
 
     #[test]
@@ -10057,6 +10830,12 @@ mod tests {
         let mut duplicate = worker_activate(route_context_id);
         duplicate.leases.push(duplicate.leases[0].clone());
         substitutions.push(duplicate);
+        let mut nonzero_rate = worker_activate(route_context_id);
+        nonzero_rate.leases[0].maximum_up_mbps = 1;
+        substitutions.push(nonzero_rate);
+        let mut wrong_expiry = worker_activate(route_context_id);
+        wrong_expiry.leases[0].hard_expires_at_unix += 1;
+        substitutions.push(wrong_expiry);
 
         for substitution in substitutions {
             assert!(matches!(
@@ -10407,6 +11186,8 @@ mod tests {
                 parent_identity: current_initial_identity(),
                 worker_identity: current_worker_identity(),
                 context_id,
+                context_role: RoutingContextRole::Client,
+                path_id: 1,
                 generation,
                 retained_environment: Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
                 deadline: HardDeadline::after(HANDSHAKE_TIMEOUT).expect("spawn deadline"),
@@ -10447,6 +11228,8 @@ mod tests {
                 parent_identity: current_initial_identity(),
                 worker_identity: current_worker_identity(),
                 context_id,
+                context_role: RoutingContextRole::Client,
+                path_id: 1,
                 generation,
                 retained_environment: Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
                 deadline: HardDeadline::after(timeout).expect("fixture spawn deadline"),
@@ -10618,6 +11401,8 @@ mod tests {
                 parent_identity: current_initial_identity(),
                 worker_identity: current_worker_identity(),
                 context_id: [15; 16],
+                context_role: RoutingContextRole::Client,
+                path_id: 1,
                 generation: 1,
                 retained_environment: Some((CHILD_FIXTURE_ENVIRONMENT, "connect")),
                 deadline: HardDeadline::after(SPAWN_TIMEOUT).expect("spawn deadline"),
@@ -11430,6 +12215,8 @@ mod tests {
         let record = HandshakeRecord {
             kind: HandshakeKind::ParentHello,
             context_id: [7; 16],
+            context_role: RoutingContextRole::Relay,
+            path_id: 3,
             generation: 9,
             challenge: [11; 32],
             parent_pid: 42,
@@ -11437,6 +12224,7 @@ mod tests {
             proof_hash: [0; 32],
             worker_uid: 1_001,
             worker_gid: 1_002,
+            monotonic_deadline_ns: 1_234_567_890,
         };
         let encoded = record.encode();
         assert_eq!(
@@ -11460,12 +12248,21 @@ mod tests {
         );
 
         let mut invalid = vec![encoded[..encoded.len() - 1].to_vec()];
-        for index in [0, 8, 12, 13] {
+        for index in [0, 8, 12, 13, 14, 15] {
             let mut changed = encoded.to_vec();
             changed[index] ^= 0xff;
             invalid.push(changed);
         }
-        for range in [16..32, 32..40, 40..72, 72..76, 76..80, 112..116, 116..120] {
+        for range in [
+            16..32,
+            32..40,
+            40..72,
+            72..76,
+            76..80,
+            112..116,
+            116..120,
+            120..128,
+        ] {
             let mut changed = encoded.to_vec();
             changed[range].fill(0);
             invalid.push(changed);
@@ -11504,6 +12301,8 @@ mod tests {
         let hello = HandshakeRecord {
             kind: HandshakeKind::ParentHello,
             context_id: [7; 16],
+            context_role: RoutingContextRole::Relay,
+            path_id: 3,
             generation: 9,
             challenge: [11; 32],
             parent_pid: 42,
@@ -11511,10 +12310,11 @@ mod tests {
             proof_hash: [0; 32],
             worker_uid: 1_001,
             worker_gid: 1_002,
+            monotonic_deadline_ns: 1_234_567_890,
         };
         let accepted = hello.sandbox_accepted([13; 32]);
         for expected in [accepted, accepted.sandbox_ready()] {
-            for index in [12, 16, 32, 40, 72, 76, 80, 112, 116] {
+            for index in [12, 13, 14, 16, 32, 40, 72, 76, 80, 112, 116, 120] {
                 let mut mutated = expected.encode();
                 mutated[index] ^= 1;
                 match HandshakeRecord::decode(&mutated) {
@@ -11829,6 +12629,8 @@ mod tests {
                     parent_identity: current_initial_identity(),
                     worker_identity: current_worker_identity(),
                     context_id: [45; 16],
+                    context_role: RoutingContextRole::Client,
+                    path_id: 1,
                     generation: 1,
                     retained_environment: None,
                     deadline,
@@ -15675,7 +16477,7 @@ mod tests {
             .find("prctl::set_dumpable(false)")
             .expect("post-observation core-dump disablement");
         let loop_entry = bootstrap
-            .rfind("operation_loop(&channel")
+            .rfind("operation_loop(")
             .expect("selected child-loop entry");
         assert!(proof < accepted && accepted < dumpable && dumpable < ready && ready < loop_entry);
     }
@@ -15700,6 +16502,9 @@ mod tests {
         let namespace_pinned = child
             .find("hello.namespace_pinned()")
             .expect("child namespace-pin acknowledgement");
+        let network_bootstrap = child
+            .find("let network_bootstrap = bootstrap_network(")
+            .expect("root network-policy bootstrap");
         let finish = child
             .find("finish_sandbox(prepared_sandbox, worker_identity)?")
             .expect("child identity drop");
@@ -15717,7 +16522,8 @@ mod tests {
         assert!(
             begin < namespace_ready
                 && namespace_ready < namespace_pinned
-                && namespace_pinned < finish
+                && namespace_pinned < network_bootstrap
+                && network_bootstrap < finish
                 && finish < pdeath_restore
                 && pdeath_restore < pdeath_readback
                 && pdeath_readback < child_hello
@@ -15762,6 +16568,32 @@ mod tests {
         let after_pin_ack = &parent[pin_ack..];
         assert!(!after_pin_ack.contains("expected_before_drop"));
         assert_eq!(after_pin_ack.matches("expected_after_drop").count(), 6);
+    }
+
+    #[test]
+    fn source_installs_relay_policy_drop_before_enabling_forwarding() {
+        let source = include_str!("worker_v3.rs");
+        let start = source
+            .find("fn production_worker_network_bootstrap(")
+            .expect("production network bootstrap");
+        let end = source[start..]
+            .find("\ntype WorkerOperationLoop")
+            .map(|offset| start + offset)
+            .expect("production network bootstrap boundary");
+        let bootstrap = &source[start..end];
+        let namespace = bootstrap
+            .find("RelayFenceNamespaceAuthority::new(")
+            .expect("namespace authority");
+        let pristine = bootstrap
+            .find("observe_pristine_relay_fence(")
+            .expect("pristine ruleset proof");
+        let restricted = bootstrap
+            .find("create_relay_fence_baseline(")
+            .expect("policy-drop baseline");
+        let forwarding = bootstrap
+            .find("enable_ipv6_forwarding_before_identity_drop(")
+            .expect("worker-local forwarding bootstrap");
+        assert!(namespace < pristine && pristine < restricted && restricted < forwarding);
     }
 
     #[test]

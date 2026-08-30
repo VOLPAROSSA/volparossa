@@ -364,17 +364,19 @@ capacity ledger tunnel-established. Real helper-owned endpoint preparation, read
 activation, handshake/counter proof, route supervision, and cleanup remain required before a
 production datapath can be claimed.
 
-The helper's retained disposable evidence proves two sequential singleton lifecycles, not one
-simultaneous route. Its Client cycle carries bounded ICMPv6 over a client-to-relay WireGuard leg;
-its later Exit cycle starts a fresh worker and namespace and carries bounded ICMPv6 over a separate
-relay-to-exit WireGuard leg. Each fixture is removed exactly before its
-`CommitLeaseBatch`, so Commit proves the retained recent role-specific handshake and strict-counter
-result, not a currently live peer. There is no simultaneous Client/Relay/Exit topology, Relay
-context, forwarding or `RelayProbeResult`, and the self-contained identities are not trusted
-selection or policy authority. A unit-tested production helper slice can now atomically manage the
-ordered `RelayClient` + `RelayExit` endpoint pair and requires both endpoint proofs before Commit,
-but it installs no cross-leg forwarding and has no retained KVM/CI proof yet. These independent
-endpoint-lifecycle facts therefore do not change the production two-leg
+The helper's retained singleton evidence proves two sequential lifecycles, not one simultaneous
+route. Its Client cycle carries bounded ICMPv6 over a client-to-relay WireGuard leg; its later Exit
+cycle starts a fresh worker and namespace and carries bounded ICMPv6 over a separate relay-to-exit
+WireGuard leg. Each fixture is removed exactly before its `CommitLeaseBatch`, so Commit proves the
+retained recent role-specific handshake and strict-counter result, not a currently live peer.
+Retained exact-main run 33301595311 additionally proves one simultaneous ordered `RelayClient` +
+`RelayExit` endpoint-pair lifecycle, but predates cross-leg forwarding. Current non-retained branch
+smoke [run 33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
+`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` proves bounded ICMPv6 through both live WireGuard legs,
+both nftables forwarding counters, all four peer counter views, Commit retry, teardown and the
+unchanged-host-state fence. It remains a self-contained single-path helper fixture: there is no
+production Client/Relay/Exit route manager, `RelayProbeResult`, trusted selection/policy authority,
+transport or ingress. These scoped helper facts therefore do not change the production two-leg
 `ProbeEvidenceUnavailable` boundary.
 
 Unprivileged endpoint leases contain only helper-returned public endpoints and opaque non-secret
@@ -408,9 +410,9 @@ rejected before dispatch.
 | Operation | Typed effect |
 |---|---|
 | `PrepareLeaseBatch` | prepare the exact role/cardinality set for paths 1–8 and return only opaque non-secret handles plus helper-owned public evidence |
-| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one Client/Exit singleton or the exact ordered Relay pair and verifies all applicable signed authority before deriving privileged state |
-| `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease; the production functional-alpha backend commits a Relay pair only after both lease proofs pass |
-| `DestroyContext` | idempotently remove one context and all contained state |
+| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one Client/Exit singleton or the exact ordered Relay pair, verifies all applicable signed authority and, for Relay, activates the exact helper-internal two-direction forwarding fence |
+| `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease; Relay additionally requires growth of both exact forwarding counters and commits only when every proof passes |
+| `DestroyContext` | idempotently remove one context and all contained state; Relay first restores policy-drop and proves the active fence absent |
 | `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
 | `RemoveMptcpEndpoint` | remove one exact owned MPTCP endpoint; currently returns `Unavailable` in production |
 | `AcquireTransportSocket` | tag 27: bind one committed context/path/role to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production currently returns `Unavailable` before network work |
@@ -500,9 +502,11 @@ an expired, never-dispatched intent into `Absent`, retry cleanup for an exact Pe
 destroy an exact still-Prepared/Quarantined owned generation. Activated or Committed state cannot be
 removed through this operation.
 
-Route-context setup and hard-expiry windows are half-open: admission and commit require
-`now < expiry`; equality is expired, and cleanup/reconciliation becomes eligible at
-`now >= expiry`. An operation that already linearized before a boundary may still return its exact
+Route-context setup and hard-expiry windows are half-open on both the original Unix/realtime and
+frozen process-local BOOTTIME deadlines: equality on either is expired for helper admission,
+post-backend commit and reaping. The agent cannot observe the helper-local BOOTTIME deadline and
+initiates tag-28 reconciliation only at `now >= setup_expires_at_unix`. An operation that already
+linearized before a boundary may still return its exact
 cached response; that is not fresh admission and makes no new backend call. An exact tag-28 retry is
 the intentional exception to the normal response-cache rule: it re-evaluates the retained lineage
 and current target state rather than replaying a generic cached success. An `Absent` proof remains in
@@ -510,6 +514,18 @@ a runtime-lifetime in-memory ledger capped at 1024 records because there is no a
 ACK; capacity exhaustion rejects new intents instead of evicting proof. Tag 28 itself retries exact
 Pending/Owned cleanup. Tag 29 `CleanupOwned` is an independent process-wide cleanup operation, not
 part of per-route reconciliation or an ACK, and does not release an `Absent` tombstone.
+
+The external wire continues to carry Unix expiries only. At the first accepted Bind/Prepare intent,
+the helper freezes matching process-local `CLOCK_BOOTTIME` setup and hard deadlines and carries them
+affinely through engine, backend and worker ownership. Prepare, Activate, Commit, descriptor
+acquisition and their post-backend commits require both their Unix and frozen BOOTTIME windows to
+remain open; the reaper retires on either boundary. Retries never refresh either deadline. The live
+Relay fence combines its realtime cutoff with a kernel-jiffies timeout derived conservatively from
+the frozen hard deadline. This fails closed across ordinary suspend or ordinary realtime rollback.
+Only an already-compromised host root able to both suspend the host and roll `CLOCK_REALTIME` back
+sufficiently can leave a short post-resume race until serialized cleanup; containment against such
+host-root compromise is not claimed. The KVM proof did not exercise suspend/resume or realtime
+mutation.
 
 `TransportSocketReady` and `IngressSocketReady` start a second, bounded ancillary phase. The server
 sends exactly one FD plus a 32-byte domain-separated BLAKE3 binding in one `SCM_RIGHTS` message; the
@@ -562,14 +578,17 @@ local tuple to the dual-signed exit endpoint and then installs and reads back on
 relay-exit peer. Relay binds both prepared local tuples to the relay grant, installs only the
 client-request peer and nested exit-signed peer on their respective leases, and rolls back the
 complete pair on any partial failure. Every lease installs its helper-derived `/128` route and
-retains that readback as the activation counter baseline. `CommitLeaseBatch` sends one correlated
-internal Probe/Commit, requires every handshake to be no older than activation and strict RX/TX
-growth for every lease, independently revalidates the complete proof, transitions only the exact
-singleton or pair to Committed and caches
-the successful receipt for an identical retry. `AcquireTransportSocket` remains `Unavailable`, and
-no datapath is connected. Relay pair activation installs no forwarding or relay fence, and no
-production route manager calls this backend. The exact proof contract and remaining live-kernel
-work are recorded in [Privileged helper protocol v3](HELPER_V3.md).
+retains that readback as the activation counter baseline. Relay activation also replaces the
+policy-drop baseline with two exact ifindex- and `/128`-bound cross-leg accept rules guarded by one
+singleton timeout set and realtime cutoff, followed by terminal drop. `CommitLeaseBatch` sends one
+correlated internal Probe/Commit, requires every handshake to be no older than activation, strict
+RX/TX growth for every lease and, for Relay, growth of both exact forwarding-rule counters. It
+independently revalidates the complete proof, transitions only the exact singleton or pair to
+Committed and caches the successful receipt for an identical retry. Destroy restores policy-drop
+before removing the interfaces and proves the fence absent. `AcquireTransportSocket` remains
+`Unavailable`; this is an isolated helper-internal single-path seam, and no production route
+manager, transport or ingress calls it. The exact proof contract and remaining live-kernel work are
+recorded in [Privileged helper protocol v3](HELPER_V3.md).
 
 The disposable production-IPC producer exercises that implemented subset sequentially. Its first
 cycle runs Client Bind/Prepare/Activate, including an identical cached Activate retry, then pauses at
@@ -593,8 +612,14 @@ recovery. Exact-main [run
 33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
 `1ca51fe0d2a2be855adb182e85c229d1d12bc017` retained this Exit proof as artifact
 [9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271).
-The branch Relay-pair KVM/CI proof remains pending and non-retained; unit tests alone are not
-live-kernel or A01--A15 evidence. The fixed alpha score remains **11/100 (11%)**.
+Retained exact-main run 33301595311 at
+`0095b113e450a0ab29da853fafa53b2b130f05fc` separately proves the simultaneous Relay endpoint pair
+before forwarding was implemented. Non-retained branch smoke [run
+33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
+`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` proves the current exact cross-leg Relay fence, bounded
+traffic, correlated WireGuard and nftables counter growth, Commit retry, teardown and unchanged host
+state. It publishes no artifact and is not live product-route or A01--A15 evidence. The fixed alpha
+score remains **11/100 (11%)**.
 
 Tags 35 and 28 provide only same-process ambiguity containment. The functional-alpha request path
 consumes tag 35's closed plan, which is directly convertible to the journal's canonical

@@ -38,17 +38,23 @@ The v3 route-context lifecycle is:
    `RelayClient` installs only the client-request endpoint, while `RelayExit` installs only the
    nested exit-signed endpoint. The client peer key must also equal the copy signed by the relay,
    every local/peer key and socket tuple must be distinct, and the rate limits and complete signed
-   scope must agree across the pair. Only those role-specific verified endpoints are projected into
-   privileged state. The bytes and complete frame remain bounded by the 128 KiB ceiling.
+   scope must agree across the pair. Before either Relay link exists, the child creates an empty
+   policy-drop baseline. Relay Activate atomically replaces it with the two exact, direction-bound
+   forwarding rules, singleton timeout, realtime cutoff and terminal drop. Only those role-specific
+   verified endpoints and that derived fence are projected into privileged state. The bytes and
+   complete frame remain bounded by the 128 KiB ceiling.
 3. `CommitLeaseBatch` presents the same opaque handles and identities. Success is permitted only
    after a correlated kernel probe proves a recent handshake and strict growth of both RX and TX
    counters relative to the activation baseline for every lease. A Relay-pair Commit is atomic:
-   neither leg commits unless both proofs pass in the same operation.
+   neither leg commits unless both lease proofs and both forwarding-counter growth proofs pass in
+   the same operation.
 4. `AcquireTransportSocket` requests one descriptor for an exact committed context, lease path,
    endpoint role, closed transport kind and concrete address tuple. The descriptor is transferred
    separately and is not representable in protobuf.
-5. `DestroyContext` removes one exact owned context. Repeated destruction is successful and reports
-   whether a context existed. Cleanup ambiguity quarantines the context rather than claiming success.
+5. `DestroyContext` removes one exact owned context. Relay Destroy first restores policy-drop and
+   proves the active fence absent before deleting the links and retiring the baseline. Repeated
+   destruction is successful and reports whether a context existed. Cleanup ambiguity quarantines
+   the context rather than claiming success.
 
 Before step 1, the HelperClient constructs the exact canonical Prepare frame, request ID, and digest.
 It sends tag-35 `BindHelperRuntime(Some(PrepareIntent))`, validates the non-secret per-process runtime
@@ -65,9 +71,13 @@ defence, not a server-side session authorization rule.
 
 Role cardinality is exact for every path: client has one client endpoint, relay has one client-facing
 and one exit-facing endpoint, and exit has one exit endpoint. Path identifiers are 1 through 8.
-Setup expiry is at most 30 seconds and hard expiry at most 15 minutes. Both intervals are half-open:
-admission and commit require `now < expiry`, while equality is expired and permits reaping or exact
-reconciliation. The engine limits contexts and its idempotency cache; a normal exact request retry
+Setup expiry is at most 30 seconds and hard expiry at most 15 minutes. At the first accepted tag-35
+intent the helper samples `CLOCK_BOOTTIME` before exact high-resolution `CLOCK_REALTIME` and freezes
+process-local setup and hard BOOTTIME deadlines. Both intervals are half-open on both clocks:
+admission, every post-backend commit and reaping treat equality on either the original wall deadline
+or its frozen BOOTTIME deadline as expired. Exact retries reuse those frozen deadlines and cannot
+refresh them after wall-clock rollback. The external wire remains unchanged and carries only the
+Unix expiries. The engine limits contexts and its idempotency cache; a normal exact request retry
 returns the cached response, while request-ID reuse with different bytes is rejected. Tag 28 is the
 documented exception: each exact retry re-evaluates its retained lineage and target state instead of
 replaying a generic response-cache entry. An operation already linearized before a boundary may still
@@ -75,6 +85,14 @@ return an exact cached response; this is not fresh admission and performs no new
 configuration can permit a 30-60 minute context, but that is not authority for the helper: production
 must cap the requested hard expiry to the signed reservation grant, currently at most 15 minutes. No
 signed lease-renewal operation exists yet.
+
+The Relay fence has two independent kernel cutoffs. Its singleton live-key timeout is jiffies-based
+and resists realtime rollback; the realtime expression is the earlier cutoff across normal suspend.
+The jiffies timeout alone does not prove that suspend time elapsed. If suspend crosses expiry and an
+already-compromised host root also rolls `CLOCK_REALTIME` backward, already-active forwarding can
+remain usable after resume until the serialized BOOTTIME-aware reaper obtains the operation gate and
+destroys the exact worker namespace. The KVM proof does not exercise suspend/resume. This is not a
+containment claim against compromised host root, which can already rewrite or starve host networking.
 
 The active v3 agent API has no private-key input or output and no caller-selected interface name,
 local overlay address, allowed prefix, listen port, filesystem path, sysctl, command, or nftables expression.
@@ -157,18 +175,23 @@ and reads back exactly the signed relay-client peer; Exit activation first requi
 prepared local tuple to equal the dual-signed exit tuple and then installs and reads back exactly
 the relay-signed relay-exit peer. Relay activation atomically installs the client-request peer on
 the relay-client lease and the nested exit-signed peer on the relay-exit lease, after binding both
-prepared local tuples to the relay-signed endpoints. Every lease uses only its helper-derived
-main-table IPv6 `/128` link route and retains that readback as the activation counter baseline.
+prepared local tuples to the relay-signed endpoints. Before either link exists, the worker creates a
+generation-pinned empty policy-drop nftables baseline. Activate enables IPv6 forwarding only inside
+that namespace and atomically installs two exact `/128` direction rules bound to the authenticated
+input/output ifindices, source/destination pair, byte rates, singleton timeout and independent
+realtime cutoff, followed by a terminal drop. Every lease uses only its helper-derived main-table
+IPv6 `/128` link route and retains that readback as the activation counter baseline.
 `CommitLeaseBatch` projects the engine's exact activated-at time into one internal
 `ProbeCommitLeases` request. The child re-proves every exact lease and peer, requires every handshake
 to be no older than activation, requires both RX and TX to have grown strictly beyond every
-baseline, and advances only the complete singleton or pair to Committed. The backend and
+baseline, and for Relay additionally requires strict growth of both forwarding counters. It
+advances only the complete singleton or pair to Committed. The backend and
 engine independently revalidate that proof before returning the exact `CommittedLeaseBatch`; an
 identical external Commit retry is served by the bounded exact-response cache. Destroy sends the
-exact child operation from either Activated or Committed state, deletes the complete lease set, and
-succeeds only after worker termination, reap and registry purge. The backend permits no second live
-context. The Relay pair creates two independently terminating endpoint legs in one worker namespace;
-it installs no cross-leg forwarding or relay fence. Transport
+exact child operation from either Activated or Committed state, first restores Relay policy-drop,
+deletes the complete lease set, proves fence absence, and succeeds only after worker termination,
+reap and registry purge. The backend permits no second live context. This is one helper-internal,
+single-path Relay-forwarding seam. Transport
 acquisition, multi-path routing and every usable datapath remain explicitly `Unavailable`; shutdown
 succeeds only with empty backend state and confirmed coordinator cleanup. The periodic driver uses an owned,
 cancellation-safe engine supervisor with nonzero domain-separated exact-lineage correlation; it
@@ -916,12 +939,21 @@ growth at both peer views. The hook deletes `vpre0` by its retained alias, ifind
 lineage, proves its route and link absent while the worker state remains unchanged, and only then
 releases the probe for Exit Commit plus byte-identical retry and exact Destroy.
 
-The retained Relay-pair implementation defines a third, separately spawned worker/namespace cycle
-for the exact ordered `RelayClient` + `RelayExit` pair. Exact-main run 33301595311 at
+The older retained proof used a third, separately spawned worker/namespace cycle for the exact
+ordered `RelayClient` + `RelayExit` pair. Exact-main run 33301595311 at
 `0095b113e450a0ab29da853fafa53b2b130f05fc` proved both simultaneous local Relay endpoints, both
 independent handshakes, strict RX/TX growth, pair Commit plus retry and complete pair Destroy, and
 retained artifact 9729172274. Packets terminate independently at the two Relay interfaces; the
-fixture installs no cross-leg forwarding and cannot prove a relay datapath.
+retained fixture installed no cross-leg forwarding and could not prove a relay datapath.
+
+Non-retained exact-head
+[run 33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
+`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` subsequently exercised the production helper's exact
+Relay pair with one cross-leg `::1` to `::4` ICMPv6 round trip. It required strict growth of both
+nftables forwarding counters and all four WireGuard peer views, pair Commit plus retry, exact
+fixture/context cleanup and unchanged enumerated host state. The non-main workflow retained no PASS
+artifact; this is not retained exact-main, installed-package, restart, route-manager, transport,
+ingress, usable-VPN or A01--A15 evidence.
 
 After all three cycles, the hook requires zero helper children and no helper FD retaining a
 worker namespace or any foreign worker network namespace. Each retired process pin must be terminal
@@ -948,11 +980,11 @@ The subsequent Exit cycle has retained, host-revalidated exact-main evidence fro
 `1ca51fe0d2a2be855adb182e85c229d1d12bc017`, artifact
 [9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271).
 All three retained cycles use self-contained fixture signers, not trusted selection or policy
-authority. The retained Relay pair proves two simultaneous endpoint leases, both independent
-handshakes, RX/TX-counter growth, pair Commit plus retry and cleanup, but does not prove a
-simultaneous two-leg route, Relay forwarding, transport descriptor, ingress, usable
-VPN/datapath, crash/restart recovery, A01--A15 acceptance result or alpha-score increase; the fixed
-score remains **11/100 (11%)**.
+authority. The older retained Relay pair proves two simultaneous endpoint leases but no forwarding;
+the newer non-retained run proves forwarding only inside that isolated worker. Neither proves a
+production Client/Relay/Exit route, transport descriptor, ingress, usable VPN/datapath,
+crash/restart recovery, A01--A15 acceptance result or alpha-score increase; the fixed score remains
+**11/100 (11%)**.
 
 The first transient proof unit intentionally differs from the shipped production unit in every
 following respect:
@@ -1120,12 +1152,13 @@ the pinned child `NEWNET` before Prepare. Client activation installs only the ve
 peer. Exit activation additionally matches its helper-prepared key, public underlay and listen port
 to the dual-signed exit endpoint and installs only the verified relay-exit peer. Relay activation
 binds both prepared local tuples to the relay grant, installs only the exact client-request peer and
-nested exit-signed peer on their respective roles, and rolls back the complete pair on failure.
-Every lease installs its helper-derived `/128` link route and retains the activation counters.
-Commit requires a recent handshake plus strict RX/TX growth for every lease; neither Relay leg can
-commit alone. Destroy likewise deletes and proves absence of the complete pair before ownership is
-released. No Relay forwarding is installed.
-Nftables, sysctl, socket-factory operations and every usable datapath remain rejected. The public `HelperEngine::new`
+nested exit-signed peer on their respective roles, activates the exact two-direction nftables fence
+described above, and rolls back the complete pair on failure. Every lease installs its helper-derived
+`/128` link route and retains the activation counters. Commit requires a recent handshake plus strict
+RX/TX growth for every lease and both Relay forwarding counters; neither leg can commit alone.
+Destroy restores policy-drop before deleting and proving absence of the complete pair and fence.
+Transport socket factories, ingress/interception and every usable product datapath remain rejected.
+The public `HelperEngine::new`
 constructor remains unavailable and does not select this backend.
 
 A separate bounded registry now reserves a non-copyable monotonic generation token before spawn or
@@ -1291,10 +1324,11 @@ no production route manager calls it. The production engine supervises cancellat
 PLAN -> CALL -> COMMIT/rollback transactions: it
 reserves and revalidates state under `EngineState`, while every backend call runs without that mutex
 held. The narrow backend implements real complete-batch Prepare, Activate, correlated Probe/Commit,
-and Destroy. Relay operations are fail-atomic and both proofs must pass before pair Commit. It
-returns `Unavailable` for transport acquisition, and the engine rejects client ingress as
-`Unavailable` before backend dispatch. It has no production route-manager caller and installs no
-Relay forwarding. This process-lifetime composition is not full production readiness.
+and Destroy. Relay operations are fail-atomic, install the exact two-direction fence, and both lease
+and forwarding proofs must pass before pair Commit. It returns `Unavailable` for transport
+acquisition, and the engine rejects client ingress as `Unavailable` before backend dispatch. It has
+no production route-manager caller. This scoped helper-internal forwarding composition is not full
+production readiness.
 
 ### Affine asynchronous engine/backend boundary
 
@@ -1306,7 +1340,8 @@ before future construction and during polling becomes a join failure while the e
 exact rollback authority.
 
 The stable backend lineage binds the helper runtime, route context, initial Prepare generation and
-request ID/digest, and both Unix expiries. Activate and Commit rotate the engine operation generation
+request ID/digest, both Unix expiries and both process-local frozen BOOTTIME deadlines. Activate and
+Commit rotate the engine operation generation
 without rotating that lineage. Each call additionally binds the exact operation sequence, current
 generation, prior phase, kind, request ID/digest, backend phase/action, and one monotonic absolute
 deadline. A completion must echo that complete binding. Substitution is ambiguous; an owned
@@ -1485,8 +1520,8 @@ exact manager-absence composition, and cross-runtime proof needed to settle that
 This same-runtime reconciliation path remains containment rather than crash recovery. The
 functional-alpha production adapter can Prepare, Activate, Probe/Commit and Destroy one Client/Exit
 singleton or one exact Relay endpoint pair, but no production route-manager caller drives it and
-there is no transport descriptor, cross-leg Relay forwarding, simultaneous end-to-end route,
-ingress or usable VPN datapath.
+there is no transport descriptor, simultaneous production Client/Relay/Exit route, ingress or
+usable VPN datapath. Cross-leg forwarding exists only inside the isolated single-path Relay worker.
 
 ## Namespace-local transport descriptor
 
@@ -1612,16 +1647,20 @@ evidence from run 33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`; the
 lifecycle has retained exact-main evidence from run 33296892632 at
 `1ca51fe0d2a2be855adb182e85c229d1d12bc017`; and Relay-pair run 33301595311 at
 `0095b113e450a0ab29da853fafa53b2b130f05fc` retained the simultaneous endpoint-pair proof. Those
-scoped results are not staged-package, simultaneous-route, forwarding, restart or acceptance
-evidence.
+retained scoped results predate Relay forwarding and are not staged-package, simultaneous-route,
+restart or acceptance evidence. Non-retained branch smoke [run
+33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
+`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` subsequently proved bounded `::1` to `::4` ICMPv6
+cross-leg forwarding through the exact two WireGuard interfaces, growth of all four WireGuard peer
+counter views and both nftables forwarding counters, Commit plus identical retry, complete teardown,
+and the enumerated unchanged-host-state fence. That branch smoke deliberately retained no artifact,
+does not join a production route manager, transport or ingress, and does not change the alpha score.
 
 - validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
   the final worker must retain only `CAP_NET_ADMIN`;
-- extend the retained exact-main Relay endpoint-pair lifecycle with an exact cross-leg forwarding
-  fence and live traffic proof; the present retained result proves both endpoints but no forwarding;
 - extend the asynchronous `HelperEngine` backend beyond the current
   Client/Exit-singleton-or-Relay-pair
   Prepare/Activate/Probe-Commit/Destroy path: descriptor acquisition, cached-descriptor cleanup and
@@ -1635,11 +1674,10 @@ evidence.
   duplicate, truncated or ambiguous dumps;
 - extend the exact single-path Relay endpoint pair to every selected path while preserving complete
   batch preflight, rollback, proof and cleanup;
-- derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
-- add a Relay forwarding fence and cross-leg forwarding, then join the separately retained Client
-  and Exit singleton baselines and the retained Relay endpoint pair into one simultaneous
-  client-to-relay-to-exit route with correlated handshake/RX/TX Commit proof for every selected
-  path;
+- join the scoped single-path helper-internal Relay fence with the separately retained Client and Exit
+  foundations under one production route manager, extend it to every selected path, and prove one
+  simultaneous production client-to-relay-to-exit route with correlated handshake, WireGuard,
+  forwarding-counter, transport, ingress and cleanup evidence;
 - connect the durable two-step settlement only after restart-stable pidfd/namespace custody, exact
   old-worker death, and a real namespace/kernel cleanup backend can prove the transition to
   `CleanupConfirmed`; then authority-order the dormant exact-name manager removal and its stable
@@ -1666,5 +1704,5 @@ evidence.
   crash cleanup, packet traversal, privacy, and proof that the development host is unchanged.
 
 Until those items pass, production route preparation and client ingress remain deliberately
-unavailable and no tunnel, interception, reservation, transport, capacity, or datapath-active claim
-is justified.
+unavailable. The isolated helper-internal Relay forwarding proof does not justify a product tunnel,
+interception, reservation, transport, capacity, or datapath-active claim.

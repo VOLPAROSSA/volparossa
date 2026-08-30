@@ -4,11 +4,13 @@
 //! RelayClient+RelayExit pair. It uses the real authenticated worker, a real anonymous network
 //! namespace and kernel `WireGuard` UAPI. Activate verifies the signed role-specific local and peer
 //! authority, then installs and reads back the complete exact peer set plus its main-table IPv6
-//! `/128` link routes. Probe-Commit requires a recent handshake and strict bidirectional counter
-//! growth from every activation baseline. The Relay pair does not enable forwarding between its
-//! two interfaces. This seam does not claim a usable datapath or crash/restart recovery. Durable
-//! journal and systemd descriptor-store composition stay closed until their affine recovery path
-//! is complete.
+//! `/128` link routes. A Relay worker starts behind a policy-drop baseline, enables forwarding only
+//! inside its exact private namespace, and atomically admits the two context-bound directions with
+//! authenticated rate and hard-expiry bounds. Probe-Commit requires a recent handshake plus strict
+//! `WireGuard` and forwarding-counter growth on both legs. This seam proves only helper-internal
+//! Relay forwarding; it does not yet claim a complete client-to-destination datapath or durable
+//! crash/restart recovery. Durable journal and systemd descriptor-store composition stay closed
+//! until their affine recovery path is complete.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -17,6 +19,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use rustix::time::{ClockId, clock_gettime};
 use volparossa_protocol::{
     ClientSessionCapability, ExitReservation, ProtocolError, RelayAuthorization, RelayReservation,
     RelayReservationRequest, ReplayCache, TimePolicy, VerifiedControlMessage, WireguardEndpoint,
@@ -64,6 +67,8 @@ const STAGE_ACTIVATE: u8 = 3;
 const STAGE_DESTROY: u8 = 4;
 const STAGE_PROBE_COMMIT: u8 = 5;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
+/// Outer call budget reserved for exact process reap and immediate namespace-pin release.
+const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
 /// Install the deliberately narrow process-owned backend used only by the production server.
 pub(crate) fn functional_alpha_lease_backend() -> Arc<dyn AsyncLeaseBackend> {
@@ -100,6 +105,8 @@ struct OpenLineageKey {
     prepare_operation_digest: [u8; 32],
     setup_expires_at_unix: u64,
     hard_expires_at_unix: u64,
+    setup_expires_at_boottime_ns: u64,
+    hard_expires_at_boottime_ns: u64,
 }
 
 impl From<BackendLineage> for OpenLineageKey {
@@ -112,6 +119,8 @@ impl From<BackendLineage> for OpenLineageKey {
             prepare_operation_digest: value.prepare_operation_digest,
             setup_expires_at_unix: value.setup_expires_at_unix,
             hard_expires_at_unix: value.hard_expires_at_unix,
+            setup_expires_at_boottime_ns: value.setup_expires_at_boottime_ns,
+            hard_expires_at_boottime_ns: value.hard_expires_at_boottime_ns,
         }
     }
 }
@@ -179,9 +188,14 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<PreparedKernelLease>, BackendError> {
         let (key, context_role, leases, context_ttl) =
             validate_prepare_batch_binding(binding, &value)?;
+        let path_id = leases
+            .first()
+            .and_then(|lease| u8::try_from(lease.path_id).ok())
+            .ok_or(BackendError::Invalid)?;
         let deadline = prepare_deadline(binding)?;
-        let underlay =
-            collect_consistent_direct_underlay(deadline).map_err(|_| BackendError::Unavailable)?;
+        let operation_deadline = worker_operation_deadline(deadline)?;
+        let underlay = collect_consistent_direct_underlay(operation_deadline)
+            .map_err(|_| BackendError::Unavailable)?;
         let wireguard = leases
             .iter()
             .map(|lease| process_owned_resource(key, lease))
@@ -200,17 +214,25 @@ impl FunctionalAlphaLeaseBackend {
         let prepare = internal_prepare_batch_plan(&wireguard, key, &leases)?;
 
         self.reserve_entry(key, context_role, wireguard, prepare, underlay)?;
-        self.admit_worker(key, context_ttl, deadline).await?;
-        if let Err(error) = self.retain_recovery_source(key, deadline) {
+        self.admit_worker(
+            key,
+            context_role,
+            path_id,
+            context_ttl,
+            operation_deadline,
+            deadline,
+        )
+        .await?;
+        if let Err(error) = self.retain_recovery_source(key, operation_deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
-        if let Err(error) = self.initialise_child(key, &value, deadline).await {
+        if let Err(error) = self.initialise_child(key, &value, operation_deadline).await {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
-        if let Err(error) = self.create_birth_links(key, deadline) {
+        if let Err(error) = self.create_birth_links(key, operation_deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
-        let prepared = match self.prepare_child(key, &leases, deadline).await {
+        let prepared = match self.prepare_child(key, &leases, operation_deadline).await {
             Ok(prepared) => prepared,
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
@@ -272,12 +294,19 @@ impl FunctionalAlphaLeaseBackend {
     async fn admit_worker(
         &self,
         key: OpenLineageKey,
+        context_role: ContextRole,
+        path_id: u8,
         context_ttl: Duration,
-        deadline: HardDeadline,
+        operation_deadline: HardDeadline,
+        cleanup_deadline: HardDeadline,
     ) -> Result<(), BackendError> {
-        let admission =
-            self.coordinator
-                .reserve_spawn_register_until(key.context_id, context_ttl, deadline);
+        let admission = self.coordinator.reserve_spawn_register_for_context_until(
+            key.context_id,
+            context_role,
+            path_id,
+            context_ttl,
+            operation_deadline,
+        );
         match admission {
             WorkerLifecycleAdmission::Registered(worker) => {
                 let mut state = lock_state(&self.state);
@@ -295,7 +324,7 @@ impl FunctionalAlphaLeaseBackend {
                     let mut state = lock_state(&self.state);
                     exact_entry_mut(&mut state, key)?.worker = Some(ownership);
                 }
-                Err(if self.cleanup_exact(key, deadline, false).await {
+                Err(if self.cleanup_exact(key, cleanup_deadline, false).await {
                     definite_worker_error(&error)
                 } else {
                     BackendError::CleanupIncomplete
@@ -466,6 +495,10 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<KernelCounters>, BackendError> {
         let (key, activations) = validate_activate_batch_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
+        let operation_deadline = match worker_operation_deadline(deadline) {
+            Ok(deadline) => deadline,
+            Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
+        };
         let now_ms = unix_milliseconds()?;
         let (prepared, plan) = {
             let state = lock_state(&self.state);
@@ -497,7 +530,10 @@ impl FunctionalAlphaLeaseBackend {
                 )?,
             )
         };
-        let counters = match self.activate_child(key, &prepared, plan, deadline).await {
+        let counters = match self
+            .activate_child(key, &prepared, plan, operation_deadline)
+            .await
+        {
             Ok(counters) => counters,
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
@@ -577,6 +613,10 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<KernelCounters>, BackendError> {
         let (key, commits, activated_at_unix) = validate_probe_batch_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
+        let operation_deadline = match worker_operation_deadline(deadline) {
+            Ok(deadline) => deadline,
+            Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
+        };
         let activated = {
             let state = lock_state(&self.state);
             let entry = exact_entry(state.as_ref(), key)?;
@@ -615,7 +655,7 @@ impl FunctionalAlphaLeaseBackend {
         );
         let execution = self
             .coordinator
-            .execute_until(key.context_id, generation, request, deadline)
+            .execute_until(key.context_id, generation, request, operation_deadline)
             .await;
         let proof = match execution {
             Ok(execution) => {
@@ -703,10 +743,12 @@ impl FunctionalAlphaLeaseBackend {
                     route_context_id: key.context_id.to_vec(),
                 }),
             );
-            let _ = self
-                .coordinator
-                .execute_until(key.context_id, generation, destroy, deadline)
-                .await;
+            if let Ok(destroy_deadline) = worker_operation_deadline(deadline) {
+                let _ = self
+                    .coordinator
+                    .execute_until(key.context_id, generation, destroy, destroy_deadline)
+                    .await;
+            }
         }
 
         let worker = {
@@ -721,7 +763,20 @@ impl FunctionalAlphaLeaseBackend {
                 .coordinator
                 .settle_and_terminate_lifecycle_until(worker, deadline)
             {
-                WorkerGenerationReap::Confirmed(_) => {}
+                WorkerGenerationReap::Confirmed(_) => {
+                    // Process death alone does not destroy an anonymous network namespace while
+                    // duplicated recovery descriptors still pin it. Consume those descriptors
+                    // immediately after exact reap confirmation, before any fallible parent-link
+                    // cleanup or later deadline check can retain the entry for retry.
+                    let recovery = {
+                        let mut state = lock_state(&self.state);
+                        let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                            return false;
+                        };
+                        entry.recovery.take()
+                    };
+                    drop(recovery);
+                }
                 WorkerGenerationReap::Retained { ownership, .. } => {
                     let mut state = lock_state(&self.state);
                     if let Ok(entry) = exact_entry_mut(&mut state, key) {
@@ -881,6 +936,44 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
     }
 }
 
+fn current_boottime_nanos() -> Result<u64, BackendError> {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    let now = clock_gettime(ClockId::Boottime);
+    let seconds = u64::try_from(now.tv_sec).map_err(|_| BackendError::Unavailable)?;
+    let nanoseconds = u64::try_from(now.tv_nsec).map_err(|_| BackendError::Unavailable)?;
+    if nanoseconds >= NANOS_PER_SECOND {
+        return Err(BackendError::Unavailable);
+    }
+    seconds
+        .checked_mul(NANOS_PER_SECOND)
+        .and_then(|value| value.checked_add(nanoseconds))
+        .ok_or(BackendError::Unavailable)
+}
+
+const fn boottime_lineage_is_well_formed(lineage: BackendLineage) -> bool {
+    lineage.setup_expires_at_boottime_ns != 0
+        && lineage.hard_expires_at_boottime_ns >= lineage.setup_expires_at_boottime_ns
+}
+
+const fn boottime_setup_and_hard_are_live(lineage: BackendLineage, now_ns: u64) -> bool {
+    now_ns < lineage.setup_expires_at_boottime_ns && now_ns < lineage.hard_expires_at_boottime_ns
+}
+
+fn ensure_setup_and_hard_are_live(lineage: BackendLineage) -> Result<(), BackendError> {
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| BackendError::Unavailable)?
+        .as_secs();
+    let now_boottime_ns = current_boottime_nanos()?;
+    if now_unix >= lineage.setup_expires_at_unix
+        || now_unix >= lineage.hard_expires_at_unix
+        || !boottime_setup_and_hard_are_live(lineage, now_boottime_ns)
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(())
+}
+
 fn validate_prepare_batch_binding(
     binding: BackendBinding,
     value: &PrepareLeaseBatch,
@@ -908,6 +1001,7 @@ fn validate_prepare_batch_binding(
         || value.setup_expires_at_unix != lineage.setup_expires_at_unix
         || value.hard_expires_at_unix != lineage.hard_expires_at_unix
         || value.hard_expires_at_unix < value.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
     {
         return Err(BackendError::Invalid);
     }
@@ -915,19 +1009,24 @@ fn validate_prepare_batch_binding(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| BackendError::Unavailable)?
         .as_secs();
-    let ttl_seconds = value
-        .hard_expires_at_unix
-        .checked_sub(now)
-        .filter(|ttl| *ttl != 0 && *ttl <= DEFAULT_MAX_TTL.as_secs())
+    let boottime_now_ns = current_boottime_nanos()?;
+    let ttl_ns = lineage
+        .hard_expires_at_boottime_ns
+        .checked_sub(boottime_now_ns)
+        .filter(|ttl| *ttl != 0)
         .ok_or(BackendError::Invalid)?;
-    if value.setup_expires_at_unix <= now {
+    let context_ttl = Duration::from_nanos(ttl_ns);
+    if value.setup_expires_at_unix <= now
+        || lineage.setup_expires_at_boottime_ns <= boottime_now_ns
+        || context_ttl > DEFAULT_MAX_TTL
+    {
         return Err(BackendError::Invalid);
     }
     Ok((
         OpenLineageKey::from(lineage),
         context_role,
         value.leases.clone(),
-        Duration::from_secs(ttl_seconds),
+        context_ttl,
     ))
 }
 
@@ -974,6 +1073,7 @@ fn validate_activate_batch_binding(
             .all(|byte| *byte == 0)
         || lineage.setup_expires_at_unix == 0
         || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
         || context_id != lineage.context_id
         || value.context_handle.len() != HELPER_HANDLE_BYTES
         || value.context_handle.iter().all(|byte| *byte == 0)
@@ -1023,13 +1123,7 @@ fn validate_activate_batch_binding(
         }
         ContextRole::Unspecified => return Err(BackendError::Invalid),
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| BackendError::Unavailable)?
-        .as_secs();
-    if now >= lineage.setup_expires_at_unix || now >= lineage.hard_expires_at_unix {
-        return Err(BackendError::Invalid);
-    }
+    ensure_setup_and_hard_are_live(lineage)?;
     Ok((OpenLineageKey::from(lineage), value.leases.clone()))
 }
 
@@ -1079,6 +1173,7 @@ fn validate_probe_batch_binding(
             .all(|byte| *byte == 0)
         || lineage.setup_expires_at_unix == 0
         || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
         || context_id != lineage.context_id
         || value.commit.context_handle.len() != HELPER_HANDLE_BYTES
         || value.commit.context_handle.iter().all(|byte| *byte == 0)
@@ -1106,7 +1201,10 @@ fn validate_probe_batch_binding(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| BackendError::Unavailable)?
         .as_secs();
-    if value.activated_at_unix > now || now >= lineage.hard_expires_at_unix {
+    if value.activated_at_unix > now
+        || now >= lineage.hard_expires_at_unix
+        || current_boottime_nanos()? >= lineage.hard_expires_at_boottime_ns
+    {
         return Err(BackendError::Invalid);
     }
     Ok((
@@ -1188,6 +1286,7 @@ fn validate_destroy_binding(
             .all(|byte| *byte == 0)
         || lineage.setup_expires_at_unix == 0
         || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
         || value.context_id != lineage.context_id
         || value.backend_generation != lineage.backend_generation
     {
@@ -1378,6 +1477,8 @@ fn bind_lineage(hasher: &mut blake3::Hasher, key: OpenLineageKey) {
     hasher.update(&key.prepare_operation_digest);
     hasher.update(&key.setup_expires_at_unix.to_be_bytes());
     hasher.update(&key.hard_expires_at_unix.to_be_bytes());
+    hasher.update(&key.setup_expires_at_boottime_ns.to_be_bytes());
+    hasher.update(&key.hard_expires_at_boottime_ns.to_be_bytes());
 }
 
 fn internal_prepare_batch_plan(
@@ -1592,10 +1693,7 @@ fn verify_activation_authority(
     replay_keys.push((*exit.sender_id(), *exit.nonce()));
 
     let relay_message = relay.message();
-    let hard_expires_at_ms = key
-        .hard_expires_at_unix
-        .checked_mul(1_000)
-        .ok_or(BackendError::Invalid)?;
+    let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
     if activations.iter().skip(1).any(|activation| {
         activation.signed_relay_reservation != activations[0].signed_relay_reservation
     }) || relay_message.route_context_id.as_slice() != key.context_id
@@ -1899,10 +1997,13 @@ fn project_internal_activation_batch(
             activation.path_id,
             prepared.role,
             *endpoint,
+            activation.maximum_up_mbps,
+            activation.maximum_down_mbps,
         )?);
     }
     Ok(ActivateLeases {
         route_context_id: key.context_id.to_vec(),
+        hard_expires_at_boottime_ns: key.hard_expires_at_boottime_ns,
         leases,
     })
 }
@@ -1935,10 +2036,7 @@ fn verified_internal_activate_plan(
     let result = (|| {
         let relay_message = relay_grant.message();
         let exit_message = exit_grant.message();
-        let hard_expires_at_ms = key
-            .hard_expires_at_unix
-            .checked_mul(1_000)
-            .ok_or(BackendError::Invalid)?;
+        let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
         if relay_message.route_context_id.as_slice() != key.context_id
             || relay_message.path_id != activation.path_id
             || relay_message.path_id != prepared.path_id
@@ -2004,11 +2102,14 @@ fn verified_internal_activate_plan(
         }
         Ok(ActivateLeases {
             route_context_id: key.context_id.to_vec(),
+            hard_expires_at_boottime_ns: key.hard_expires_at_boottime_ns,
             leases: vec![internal_lease_activation(
                 resource,
                 activation.path_id,
                 prepared.role,
                 endpoint,
+                activation.maximum_up_mbps,
+                activation.maximum_down_mbps,
             )?],
         })
     })();
@@ -2023,6 +2124,8 @@ fn internal_lease_activation(
     path_id: u32,
     wireguard_role: i32,
     endpoint: VerifiedWireguardEndpoint,
+    maximum_up_mbps: u32,
+    maximum_down_mbps: u32,
 ) -> Result<InternalLeaseActivation, BackendError> {
     let role = functional_lease_role_for_wireguard(wireguard_role).ok_or(BackendError::Invalid)?;
     if resource.key()
@@ -2046,6 +2149,9 @@ fn internal_lease_activation(
             prefix_length: 128,
         }],
         persistent_keepalive_seconds: FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS,
+        maximum_up_mbps,
+        maximum_down_mbps,
+        hard_expires_at_unix: resource.hard_expires_at_unix(),
     })
 }
 
@@ -2094,6 +2200,10 @@ fn unix_milliseconds() -> Result<u64, BackendError> {
             .as_millis(),
     )
     .map_err(|_| BackendError::Unavailable)
+}
+
+fn unix_seconds_to_milliseconds(seconds: u64) -> Result<u64, BackendError> {
+    seconds.checked_mul(1_000).ok_or(BackendError::Invalid)
 }
 
 fn worker_request(
@@ -2303,6 +2413,12 @@ fn prepare_deadline(binding: BackendBinding) -> Result<HardDeadline, BackendErro
     HardDeadline::at(binding.call_deadline.into_std()).map_err(|_| BackendError::Unavailable)
 }
 
+fn worker_operation_deadline(deadline: HardDeadline) -> Result<HardDeadline, BackendError> {
+    deadline
+        .before_tail(WORKER_FAIL_CLOSED_RETIREMENT_TAIL)
+        .map_err(|_| BackendError::CleanupIncomplete)
+}
+
 fn definite_worker_error(error: &WorkerV3Error) -> BackendError {
     match error {
         WorkerV3Error::Capacity => BackendError::Capacity,
@@ -2432,6 +2548,8 @@ mod tests {
             prepare_operation_digest: [5; 32],
             setup_expires_at_unix: 6,
             hard_expires_at_unix: 7,
+            setup_expires_at_boottime_ns: 6,
+            hard_expires_at_boottime_ns: 7,
         }
     }
 
@@ -2444,6 +2562,21 @@ mod tests {
             prepare_operation_digest: key.prepare_operation_digest,
             setup_expires_at_unix: key.setup_expires_at_unix,
             hard_expires_at_unix: key.hard_expires_at_unix,
+            setup_expires_at_boottime_ns: key.setup_expires_at_boottime_ns,
+            hard_expires_at_boottime_ns: key.hard_expires_at_boottime_ns,
+        }
+    }
+
+    fn live_key(context_id: [u8; 16], now_unix: u64) -> OpenLineageKey {
+        const NANOS_PER_SECOND: u64 = 1_000_000_000;
+        let now_boottime = current_boottime_nanos().expect("fixture boottime");
+        OpenLineageKey {
+            context_id,
+            setup_expires_at_unix: now_unix + 20,
+            hard_expires_at_unix: now_unix + 120,
+            setup_expires_at_boottime_ns: now_boottime + 20 * NANOS_PER_SECOND,
+            hard_expires_at_boottime_ns: now_boottime + 120 * NANOS_PER_SECOND,
+            ..key()
         }
     }
 
@@ -2558,11 +2691,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("fixture time")
             .as_secs();
-        let key = OpenLineageKey {
-            setup_expires_at_unix: now + 20,
-            hard_expires_at_unix: now + 120,
-            ..key()
-        };
+        let key = live_key(key().context_id, now);
         let mut binding = binding(
             key,
             OperationKind::Prepare,
@@ -2631,12 +2760,7 @@ mod tests {
             .relay_client_wireguard_endpoint
             .as_ref()
             .expect("relay-client endpoint");
-        let key = OpenLineageKey {
-            context_id: *route.route_context_id(),
-            setup_expires_at_unix: now + 20,
-            hard_expires_at_unix: now + 120,
-            ..key()
-        };
+        let key = live_key(*route.route_context_id(), now);
         let mut binding = binding(
             key,
             OperationKind::Activate,
@@ -2753,12 +2877,7 @@ mod tests {
             .as_ref()
             .expect("exit endpoint");
         let verified_exit = verified_wireguard_endpoint(exit).expect("verified exit endpoint");
-        let key = OpenLineageKey {
-            context_id: *route.route_context_id(),
-            setup_expires_at_unix: now + 20,
-            hard_expires_at_unix: now + 120,
-            ..key()
-        };
+        let key = live_key(*route.route_context_id(), now);
         let mut binding = binding(
             key,
             OperationKind::Activate,
@@ -2884,12 +3003,7 @@ mod tests {
             .and_then(verified_wireguard_endpoint)
             .expect("exit peer endpoint");
         assert_eq!(relay_client.address, relay_exit.address);
-        let key = OpenLineageKey {
-            context_id: *route.route_context_id(),
-            setup_expires_at_unix: now + 20,
-            hard_expires_at_unix: now + 120,
-            ..key()
-        };
+        let key = live_key(*route.route_context_id(), now);
         let mut binding = binding(
             key,
             OperationKind::Activate,
@@ -3846,6 +3960,14 @@ mod tests {
         let (binding, value) = live_prepare_fixture();
         assert!(validate_prepare_binding(binding, &value).is_ok());
 
+        let mut expired = binding;
+        expired.lineage.setup_expires_at_boottime_ns = 1;
+        expired.lineage.hard_expires_at_boottime_ns = 1;
+        assert_eq!(
+            validate_prepare_binding(expired, &value).unwrap_err(),
+            BackendError::Invalid
+        );
+
         let mut wrong = binding;
         wrong.phase = BackendPhase::Prepared;
         assert_eq!(
@@ -3915,6 +4037,10 @@ mod tests {
         .expect("verified internal activation plan");
         assert_eq!(lock_replay_cache(&replay).len(), 2);
         assert_eq!(plan.route_context_id, key.context_id);
+        assert_eq!(
+            plan.hard_expires_at_boottime_ns,
+            key.hard_expires_at_boottime_ns
+        );
         let [lease] = plan.leases.as_slice() else {
             panic!("one internal activation")
         };
@@ -3952,6 +4078,13 @@ mod tests {
         wrong.prior_phase = None;
         assert_eq!(
             validate_activate_binding(wrong, &value).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut expired = binding;
+        expired.lineage.setup_expires_at_boottime_ns = 1;
+        expired.lineage.hard_expires_at_boottime_ns = 1;
+        assert_eq!(
+            validate_activate_binding(expired, &value).unwrap_err(),
             BackendError::Invalid
         );
         let mut wrong = binding;
@@ -4018,6 +4151,14 @@ mod tests {
     fn probe_validation_binds_engine_activation_threshold_and_exact_client_lease() {
         let (_, binding, value, _) = live_probe_fixture();
         assert!(validate_probe_binding(binding, &value).is_ok());
+
+        let mut expired = binding;
+        expired.lineage.setup_expires_at_boottime_ns = 1;
+        expired.lineage.hard_expires_at_boottime_ns = 1;
+        assert_eq!(
+            validate_probe_binding(expired, &value).unwrap_err(),
+            BackendError::Invalid
+        );
 
         let mut wrong_binding = binding;
         wrong_binding.operation_generation = 0;
@@ -4965,6 +5106,87 @@ mod tests {
             lock_state(&backend.state).as_ref().map(|entry| entry.key),
             Some(open_key)
         );
+    }
+
+    #[tokio::test]
+    async fn confirmed_reap_releases_recovery_pins_before_retryable_parent_cleanup() {
+        let open_key = key();
+        let (parent, _peer) =
+            private_credential_worker_channel().expect("credentialed fake worker channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let mut process = WorkerProcess::fake(parent, std::process::id(), Arc::clone(&alive));
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let ownership = match coordinator.reserve_spawn_register_with_until(
+            open_key.context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xd5; 32]),
+                })
+            },
+        ) {
+            WorkerLifecycleAdmission::Registered(ownership) => ownership,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("fake worker registration rejected: {error}")
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("fake worker registration unresolved: {error}")
+            }
+        };
+        let recovery = coordinator
+            .recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("recovery deadline"),
+            )
+            .expect("authenticated duplicate recovery pins");
+
+        let mut entry = open_relay_entry(open_key);
+        entry.worker = Some(ownership);
+        entry.recovery = Some(recovery);
+        entry.phase = OpenLeasePhase::Registered;
+        // A corrupt cardinality is a deterministic, retryable parent-cleanup failure after reap.
+        // The remaining WireGuard owners must survive, but the dead worker's namespace pins must
+        // not survive with them.
+        entry.birth_may_exist.clear();
+        let backend = FunctionalAlphaLeaseBackend {
+            coordinator,
+            relay_replay: Mutex::new(functional_alpha_replay_cache()),
+            state: Mutex::new(Some(entry)),
+        };
+
+        let cleanup_deadline =
+            HardDeadline::after(Duration::from_millis(650)).expect("cleanup deadline");
+        let operation_deadline =
+            worker_operation_deadline(cleanup_deadline).expect("reserved retirement tail");
+        tokio::time::sleep(
+            operation_deadline
+                .remaining()
+                .expect("live operation deadline")
+                + Duration::from_millis(10),
+        )
+        .await;
+        assert!(operation_deadline.ensure_remaining().is_err());
+        assert!(
+            !backend
+                .cleanup_exact(open_key, cleanup_deadline, false)
+                .await
+        );
+        assert!(!alive.load(Ordering::SeqCst));
+        let state = lock_state(&backend.state);
+        let retained = state.as_ref().expect("retryable parent ownership");
+        assert!(retained.worker.is_none());
+        assert!(retained.recovery.is_none());
+        assert_eq!(retained.wireguard.len(), 2);
+        assert!(retained.birth_may_exist.is_empty());
     }
 
     #[tokio::test]
