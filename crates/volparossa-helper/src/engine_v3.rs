@@ -497,17 +497,18 @@ pub(crate) enum BackendError {
 ///
 /// Every returned future must enforce `binding.call_deadline` as its own absolute hard deadline.
 /// It may return `Ok` only after the exact operation is quiescent and any live resources remain
-/// under exact backend authority. Prepare success may retain process-owned resources for the same
-/// helper runtime; that is not crash durability. Definitive `Err` variants guarantee no mutation,
+/// under exact backend authority. Production Prepare may retain process-owned resources joined to
+/// durable journal and systemd custody for the same helper runtime; inherited-custody adoption and
+/// crash recovery remain absent. Definitive `Err` variants guarantee no mutation,
 /// detached work, or owned descriptor survives.
 /// `CleanupIncomplete` instead means exact-lineage resources may remain only under backend-owned
 /// quarantine/reaper authority, so the engine must issue exact rollback/destroy. Every Acquire
 /// error closes every descriptor it created, and no error may leave *unowned* detached work.
 /// Destroy success is stronger: `ConfirmedAbsent` proves that the exact stable lineage's worker is
 /// reaped and every resource, pin, authority and descriptor acquired by that backend is absent for
-/// the live runtime. A complete production backend must additionally settle durable journal and
-/// systemd custody so that this proof survives restart; the functional-alpha backend acquires no
-/// such custody and makes no restart-recovery claim. Dropping any future must be safe. The engine's
+/// the live runtime. The functional-alpha backend additionally settles its same-runtime durable
+/// journal and systemd custody before returning this proof, but makes no restart-recovery claim.
+/// Dropping any future must be safe. The engine's
 /// timeout remains a soft ambiguity boundary and continues awaiting task settlement.
 ///
 /// The production server installs a deliberately narrow functional-alpha adapter for one Client or

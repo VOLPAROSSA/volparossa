@@ -2283,8 +2283,10 @@ where
     }
 }
 
-/// Publish through the production systemd manager interfaces. No production server, engine, or
-/// request-path caller exists yet.
+/// Publish through the production systemd manager interfaces.
+///
+/// The only production request-path caller is the private durable-Prepare supervisor, which
+/// retains every affine owner and opens worker dispatch only after this attestation succeeds.
 pub(crate) async fn publish_current_process_custody(
     custody_name: CustodyFdName,
     custody: BorrowedCustodyPair<'_>,
