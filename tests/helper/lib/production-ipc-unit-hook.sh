@@ -26,6 +26,8 @@ functional_underlay_gateway=192.31.195.1
 functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready
 functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass
 functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass
+functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
+functional_failure_record=$proof_directory/functional-client-lease.failure
 functional_release_byte=G
 helper_bootstrap_capability_mask=00000000002031e0
 start_failure_record=$proof_directory/start.failure
@@ -1581,6 +1583,89 @@ functional_probe_output_is_exact() {
     rm -f -- "$hook_functional_expected"
 }
 
+functional_probe_failure_value_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    hook_functional_failure_value=$1
+    hook_functional_failure_phase=${hook_functional_failure_value%%,*}
+    hook_functional_failure_class=${hook_functional_failure_value#*,}
+    [ "$hook_functional_failure_value" = \
+        "$hook_functional_failure_phase,$hook_functional_failure_class" ] \
+        || return 1
+    case $hook_functional_failure_phase in
+        plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|\
+        second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|\
+        second-cycle-destroy|final-shutdown)
+            ;;
+        *) return 1 ;;
+    esac
+    case $hook_functional_failure_class in
+        random|protocol|io|timeout|untrusted|correlation|unexpected-response)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+functional_probe_failure_record_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_functional_failure_source=$1
+    private_file_is_safe "$hook_functional_failure_source" || return 1
+    hook_functional_failure_size=$(stat -Lc '%s' \
+        "$hook_functional_failure_source" 2>/dev/null) || return 1
+    [ "$hook_functional_failure_size" -ge 1 ] \
+        && [ "$hook_functional_failure_size" -le 128 ] || return 1
+    hook_functional_failure_line=$(cat "$hook_functional_failure_source") \
+        || return 1
+    case $hook_functional_failure_line in
+        "$functional_failure_prefix"*)
+            hook_functional_failure_value=${hook_functional_failure_line#"$functional_failure_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    functional_probe_failure_value_is_safe "$hook_functional_failure_value" \
+        || return 1
+    hook_functional_failure_expected=$functional_failure_prefix$hook_functional_failure_value
+    [ "$hook_functional_failure_line" = "$hook_functional_failure_expected" ] \
+        || return 1
+    hook_functional_failure_expected_size=$((
+        ${#hook_functional_failure_expected} + 1
+    ))
+    [ "$hook_functional_failure_size" -eq \
+        "$hook_functional_failure_expected_size" ]
+}
+
+publish_functional_probe_failure() {
+    [ "$#" -eq 2 ] || return 1
+    hook_functional_failure_status=$1
+    hook_functional_failure_source=$2
+    [ "$hook_functional_failure_status" -eq 1 ] || return 1
+    [ ! -e "$functional_failure_record" ] \
+        && [ ! -L "$functional_failure_record" ] \
+        && [ ! -e "$functional_failure_record.next" ] \
+        && [ ! -L "$functional_failure_record.next" ] || return 1
+    functional_probe_failure_record_is_exact "$hook_functional_failure_source" \
+        || return 1
+    hook_functional_failure_line=$(cat "$hook_functional_failure_source") \
+        || return 1
+    write_private_file "$functional_failure_record" \
+        "$hook_functional_failure_line" || return 1
+    functional_probe_failure_record_is_exact "$functional_failure_record"
+}
+
+observe_functional_probe_failure() {
+    [ "$#" -eq 2 ] || return 1
+    hook_functional_failure_pid=$1
+    hook_functional_failure_source=$2
+    number_is_safe "$hook_functional_failure_pid" || return 1
+    if wait "$hook_functional_failure_pid"; then
+        hook_functional_failure_status=0
+    else
+        hook_functional_failure_status=$?
+    fi
+    publish_functional_probe_failure \
+        "$hook_functional_failure_status" "$hook_functional_failure_source"
+}
+
 run_functional_client_lease_probe() {
     [ "$#" -eq 7 ] || return 1
     hook_functional_unit=$1
@@ -1633,7 +1718,8 @@ run_functional_client_lease_probe() {
     hook_functional_stdout=$proof_directory/functional-client-lease.stdout
     hook_functional_stderr=$proof_directory/functional-client-lease.stderr
     for hook_functional_path in \
-        "$hook_functional_fifo" "$hook_functional_stdout" "$hook_functional_stderr"; do
+        "$hook_functional_fifo" "$hook_functional_stdout" "$hook_functional_stderr" \
+        "$functional_failure_record" "$functional_failure_record.next"; do
         [ ! -e "$hook_functional_path" ] && [ ! -L "$hook_functional_path" ] || return 1
     done
     mkfifo -m 0600 "$hook_functional_fifo" || return 1
@@ -1670,8 +1756,12 @@ run_functional_client_lease_probe() {
     while ! probe_output_is_exact \
         "$hook_functional_stdout" "$functional_ready_record"; do
         private_file_is_safe "$hook_functional_stderr" || return 1
-        [ ! -s "$hook_functional_stderr" ] || return 1
-        kill -0 "$hook_functional_probe_pid" 2>/dev/null || return 1
+        if [ -s "$hook_functional_stderr" ] \
+            || ! kill -0 "$hook_functional_probe_pid" 2>/dev/null; then
+            observe_functional_probe_failure \
+                "$hook_functional_probe_pid" "$hook_functional_stderr" || return 1
+            return 1
+        fi
         hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
         [ "$hook_functional_wait_attempt" -lt 300 ] || return 1
         sleep 0.05
@@ -1782,7 +1872,11 @@ run_functional_client_lease_probe() {
     else
         hook_functional_probe_status=$?
     fi
-    [ "$hook_functional_probe_status" -eq 0 ] || return 1
+    if [ "$hook_functional_probe_status" -ne 0 ]; then
+        publish_functional_probe_failure \
+            "$hook_functional_probe_status" "$hook_functional_stderr" || return 1
+        return 1
+    fi
     functional_probe_output_is_exact "$hook_functional_stdout" || return 1
     private_file_is_safe "$hook_functional_stderr" || return 1
     [ ! -s "$hook_functional_stderr" ] || return 1

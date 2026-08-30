@@ -7,6 +7,7 @@
 //! accepts one fixed release byte on standard input, and never prints handles or endpoint material.
 
 use std::{
+    cell::Cell,
     ffi::OsString,
     io::{self, Write as _},
     os::{fd::AsFd as _, unix::ffi::OsStrExt},
@@ -52,6 +53,8 @@ const FUNCTIONAL_PUBLIC_IPV4: [u8; 4] = [192, 31, 195, 254];
 const FUNCTIONAL_RELEASE_TIMEOUT_MILLIS: u16 = 10_000;
 const FUNCTIONAL_RELEASE_BYTE: u8 = b'G';
 const FUNCTIONAL_READY_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready";
+const FUNCTIONAL_FAILURE_RECORD_PREFIX: &str =
+    "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=";
 
 const ZERO_LENGTH_FRAME: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
 const EXCESSIVE_LENGTH_FRAME: [u8; 4] = [0x00, 0x02, 0x00, 0x01];
@@ -106,7 +109,7 @@ impl Mode {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProbeError {
     Random,
     Protocol,
@@ -115,6 +118,87 @@ enum ProbeError {
     UntrustedServer,
     Correlation,
     UnexpectedResponse,
+}
+
+impl ProbeError {
+    const fn diagnostic_class(self) -> &'static str {
+        match self {
+            Self::Random => "random",
+            Self::Protocol => "protocol",
+            Self::Io => "io",
+            Self::Timeout => "timeout",
+            Self::UntrustedServer => "untrusted",
+            Self::Correlation => "correlation",
+            Self::UnexpectedResponse => "unexpected-response",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunctionalPhase {
+    Plan,
+    Connect,
+    Bind,
+    Prepare,
+    Shutdown,
+    Ready,
+    Release,
+    Reconnect,
+    Destroy,
+    SecondCyclePlan,
+    SecondCycleBind,
+    SecondCyclePrepare,
+    Reuse,
+    SecondCycleDestroy,
+    FinalShutdown,
+}
+
+impl FunctionalPhase {
+    const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Connect => "connect",
+            Self::Bind => "bind",
+            Self::Prepare => "prepare",
+            Self::Shutdown => "shutdown",
+            Self::Ready => "ready",
+            Self::Release => "release",
+            Self::Reconnect => "reconnect",
+            Self::Destroy => "destroy",
+            Self::SecondCyclePlan => "second-cycle-plan",
+            Self::SecondCycleBind => "second-cycle-bind",
+            Self::SecondCyclePrepare => "second-cycle-prepare",
+            Self::Reuse => "reuse",
+            Self::SecondCycleDestroy => "second-cycle-destroy",
+            Self::FinalShutdown => "final-shutdown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FunctionalProbeFailure {
+    phase: FunctionalPhase,
+    error: ProbeError,
+}
+
+impl FunctionalProbeFailure {
+    const fn new(phase: FunctionalPhase, error: ProbeError) -> Self {
+        Self { phase, error }
+    }
+
+    fn write_record(self, output: &mut impl io::Write) -> io::Result<()> {
+        writeln!(
+            output,
+            "{FUNCTIONAL_FAILURE_RECORD_PREFIX}{},{}",
+            self.phase.diagnostic_name(),
+            self.error.diagnostic_class()
+        )
+    }
+}
+
+enum ProbeFailure {
+    Generic,
+    Functional(FunctionalProbeFailure),
 }
 
 struct BindExchange {
@@ -338,12 +422,23 @@ async fn main() -> ExitCode {
         eprintln!("{USAGE_RECORD}");
         return ExitCode::from(2);
     };
-    if run_mode(invocation).await.is_ok() {
-        println!("{}", invocation.mode.success_record());
-        ExitCode::SUCCESS
-    } else {
-        eprintln!("{FAILURE_RECORD}");
-        ExitCode::FAILURE
+    match run_mode(invocation).await {
+        Ok(()) => {
+            println!("{}", invocation.mode.success_record());
+            ExitCode::SUCCESS
+        }
+        Err(ProbeFailure::Functional(failure)) => {
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            if failure.write_record(&mut stderr).is_err() || stderr.flush().is_err() {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::FAILURE
+        }
+        Err(ProbeFailure::Generic) => {
+            eprintln!("{FAILURE_RECORD}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -392,15 +487,23 @@ fn parse_nonzero_decimal_u32(argument: &OsString) -> Option<u32> {
     (value != u32::MAX).then_some(value)
 }
 
-async fn run_mode(invocation: ProbeInvocation) -> Result<(), ProbeError> {
+async fn run_mode(invocation: ProbeInvocation) -> Result<(), ProbeFailure> {
     match invocation.mode {
-        Mode::BindRuntime => run_bind_runtime(invocation.expected_peer).await,
-        Mode::FunctionalClientLease => run_functional_client_lease(invocation.expected_peer).await,
-        Mode::RejectFrameBounds => run_reject_frame_bounds(invocation.expected_peer).await,
-        Mode::RejectWireShapes => run_reject_wire_shapes(invocation.expected_peer).await,
-        Mode::ExpectUnauthorisedPeer => {
-            run_expect_unauthorised_peer(invocation.expected_peer).await
-        }
+        Mode::BindRuntime => run_bind_runtime(invocation.expected_peer)
+            .await
+            .map_err(|_| ProbeFailure::Generic),
+        Mode::FunctionalClientLease => run_functional_client_lease(invocation.expected_peer)
+            .await
+            .map_err(ProbeFailure::Functional),
+        Mode::RejectFrameBounds => run_reject_frame_bounds(invocation.expected_peer)
+            .await
+            .map_err(|_| ProbeFailure::Generic),
+        Mode::RejectWireShapes => run_reject_wire_shapes(invocation.expected_peer)
+            .await
+            .map_err(|_| ProbeFailure::Generic),
+        Mode::ExpectUnauthorisedPeer => run_expect_unauthorised_peer(invocation.expected_peer)
+            .await
+            .map_err(|_| ProbeFailure::Generic),
     }
 }
 
@@ -423,47 +526,103 @@ async fn run_bind_runtime(expected_peer: ExpectedPeer) -> Result<(), ProbeError>
     .map_err(|_| ProbeError::Timeout)?
 }
 
-async fn run_functional_client_lease(expected_peer: ExpectedPeer) -> Result<(), ProbeError> {
-    timeout(FUNCTIONAL_PROBE_TIMEOUT, async move {
-        let mut prepare_stream = connect_trusted_helper(expected_peer).await?;
-        let first_plan = FunctionalCyclePlan::random(&[], &[])?;
+async fn run_functional_client_lease(
+    expected_peer: ExpectedPeer,
+) -> Result<(), FunctionalProbeFailure> {
+    let phase = Cell::new(FunctionalPhase::Connect);
+    timeout(FUNCTIONAL_PROBE_TIMEOUT, async {
+        let mut prepare_stream = connect_trusted_helper(expected_peer)
+            .await
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::Plan);
+        let first_plan = FunctionalCyclePlan::random(&[], &[])
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
         let first_context_id = first_plan.ids.context;
         let first_request_ids = first_plan.ids.request_ids();
-        let first = prepare_functional_cycle(&mut prepare_stream, &first_plan).await?;
+
+        let first = prepare_functional_cycle(
+            &mut prepare_stream,
+            &first_plan,
+            &phase,
+            FunctionalPhase::Bind,
+            FunctionalPhase::Prepare,
+        )
+        .await?;
+        phase.set(FunctionalPhase::Shutdown);
         prepare_stream
             .shutdown()
             .await
-            .map_err(|_| ProbeError::Io)?;
+            .map_err(|_| FunctionalProbeFailure::new(phase.get(), ProbeError::Io))?;
         drop(prepare_stream);
 
-        publish_functional_ready()?;
-        wait_for_functional_release()?;
-        let mut stream = connect_trusted_helper(expected_peer).await?;
-        destroy_functional_cycle(&mut stream, &first_plan, &first.prepared).await?;
+        phase.set(FunctionalPhase::Ready);
+        publish_functional_ready()
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::Release);
+        wait_for_functional_release()
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::Reconnect);
+        let mut stream = connect_trusted_helper(expected_peer)
+            .await
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::Destroy);
+        destroy_functional_cycle(&mut stream, &first_plan, &first.prepared)
+            .await
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
 
-        let second_plan = FunctionalCyclePlan::random(&[first_context_id], &first_request_ids)?;
-        let second = prepare_functional_cycle(&mut stream, &second_plan).await?;
+        phase.set(FunctionalPhase::SecondCyclePlan);
+        let second_plan = FunctionalCyclePlan::random(&[first_context_id], &first_request_ids)
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        let second = prepare_functional_cycle(
+            &mut stream,
+            &second_plan,
+            &phase,
+            FunctionalPhase::SecondCycleBind,
+            FunctionalPhase::SecondCyclePrepare,
+        )
+        .await?;
+        phase.set(FunctionalPhase::Reuse);
         if first.helper_runtime_id != second.helper_runtime_id {
-            return Err(ProbeError::Correlation);
+            return Err(FunctionalProbeFailure::new(
+                phase.get(),
+                ProbeError::Correlation,
+            ));
         }
-        validate_functional_reuse(&first.prepared, &second.prepared)?;
-        destroy_functional_cycle(&mut stream, &second_plan, &second.prepared).await?;
-        stream.shutdown().await.map_err(|_| ProbeError::Io)
+        validate_functional_reuse(&first.prepared, &second.prepared)
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::SecondCycleDestroy);
+        destroy_functional_cycle(&mut stream, &second_plan, &second.prepared)
+            .await
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::FinalShutdown);
+        stream
+            .shutdown()
+            .await
+            .map_err(|_| FunctionalProbeFailure::new(phase.get(), ProbeError::Io))
     })
     .await
-    .map_err(|_| ProbeError::Timeout)?
+    .map_err(|_| FunctionalProbeFailure::new(phase.get(), ProbeError::Timeout))?
 }
 
 async fn prepare_functional_cycle(
     stream: &mut UnixStream,
     plan: &FunctionalCyclePlan,
-) -> Result<FunctionalCycleResult, ProbeError> {
-    let runtime_outcome =
-        exchange_functional(stream, &plan.bind, HELPER_RUNTIME_DIAGNOSTIC).await?;
-    let helper_runtime_id = validate_runtime_outcome(runtime_outcome)?;
-    let prepared_outcome =
-        exchange_functional(stream, &plan.prepare, LEASES_PREPARED_DIAGNOSTIC).await?;
-    let prepared = validate_prepared_outcome(prepared_outcome, plan.ids.context)?;
+    phase: &Cell<FunctionalPhase>,
+    bind_phase: FunctionalPhase,
+    prepare_phase: FunctionalPhase,
+) -> Result<FunctionalCycleResult, FunctionalProbeFailure> {
+    phase.set(bind_phase);
+    let runtime_outcome = exchange_functional(stream, &plan.bind, HELPER_RUNTIME_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let helper_runtime_id = validate_runtime_outcome(runtime_outcome)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    phase.set(prepare_phase);
+    let prepared_outcome = exchange_functional(stream, &plan.prepare, LEASES_PREPARED_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let prepared = validate_prepared_outcome(prepared_outcome, plan.ids.context)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
     Ok(FunctionalCycleResult {
         helper_runtime_id,
         prepared,
@@ -526,12 +685,15 @@ fn validate_functional_response(
     if response.protocol_version != HELPER_PROTOCOL_VERSION
         || response.request_id.as_slice() != exchange.request_id
         || response.operation_digest.as_slice() != exchange.operation_digest
-        || response.diagnostic_code != expected_diagnostic
-        || HelperResult::try_from(response.result) != Ok(HelperResult::Ok)
     {
         return Err(ProbeError::Correlation);
     }
-    response.outcome.ok_or(ProbeError::Correlation)
+    if response.diagnostic_code != expected_diagnostic
+        || HelperResult::try_from(response.result) != Ok(HelperResult::Ok)
+    {
+        return Err(ProbeError::UnexpectedResponse);
+    }
+    response.outcome.ok_or(ProbeError::UnexpectedResponse)
 }
 
 fn validate_runtime_outcome(outcome: helper_response::Outcome) -> Result<[u8; 32], ProbeError> {
@@ -1001,6 +1163,65 @@ mod tests {
     }
 
     #[test]
+    fn functional_failure_records_are_one_bounded_allowlisted_line() {
+        let phases = [
+            FunctionalPhase::Plan,
+            FunctionalPhase::Connect,
+            FunctionalPhase::Bind,
+            FunctionalPhase::Prepare,
+            FunctionalPhase::Shutdown,
+            FunctionalPhase::Ready,
+            FunctionalPhase::Release,
+            FunctionalPhase::Reconnect,
+            FunctionalPhase::Destroy,
+            FunctionalPhase::SecondCyclePlan,
+            FunctionalPhase::SecondCycleBind,
+            FunctionalPhase::SecondCyclePrepare,
+            FunctionalPhase::Reuse,
+            FunctionalPhase::SecondCycleDestroy,
+            FunctionalPhase::FinalShutdown,
+        ];
+        let errors = [
+            ProbeError::Random,
+            ProbeError::Protocol,
+            ProbeError::Io,
+            ProbeError::Timeout,
+            ProbeError::UntrustedServer,
+            ProbeError::Correlation,
+            ProbeError::UnexpectedResponse,
+        ];
+        for phase in phases {
+            for error in errors {
+                let mut record = Vec::new();
+                FunctionalProbeFailure::new(phase, error)
+                    .write_record(&mut record)
+                    .expect("in-memory diagnostic record");
+                let expected = format!(
+                    "{FUNCTIONAL_FAILURE_RECORD_PREFIX}{},{}\n",
+                    phase.diagnostic_name(),
+                    error.diagnostic_class()
+                );
+                assert_eq!(record, expected.as_bytes());
+                assert!(record.len() <= 128);
+                assert_eq!(record.iter().filter(|byte| **byte == b'\n').count(), 1);
+                assert!(record[..record.len() - 1].iter().all(u8::is_ascii));
+                for forbidden in [
+                    "runtime_id",
+                    "MainPID",
+                    "InvocationID",
+                    SOCKET_PATH,
+                    "context_handle",
+                    "lease_handle",
+                    "public_key",
+                    "192.31.195.254",
+                ] {
+                    assert!(!expected.contains(forbidden));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn peer_identity_requires_exact_root_main_pid_and_primary_gid() {
         let expected = ExpectedPeer {
             pid: 1_234,
@@ -1136,13 +1357,22 @@ mod tests {
         substitutions.push(wrong_digest);
         let mut wrong_diagnostic = valid.clone();
         wrong_diagnostic.diagnostic_code = LEASES_PREPARED_DIAGNOSTIC.to_owned();
-        substitutions.push(wrong_diagnostic);
+        assert_eq!(
+            validate_functional_response(wrong_diagnostic, &plan.bind, HELPER_RUNTIME_DIAGNOSTIC,),
+            Err(ProbeError::UnexpectedResponse)
+        );
         let mut wrong_result = valid.clone();
         wrong_result.result = HelperResult::Unavailable as i32;
-        substitutions.push(wrong_result);
+        assert_eq!(
+            validate_functional_response(wrong_result, &plan.bind, HELPER_RUNTIME_DIAGNOSTIC),
+            Err(ProbeError::UnexpectedResponse)
+        );
         let mut absent_outcome = valid;
         absent_outcome.outcome = None;
-        substitutions.push(absent_outcome);
+        assert_eq!(
+            validate_functional_response(absent_outcome, &plan.bind, HELPER_RUNTIME_DIAGNOSTIC),
+            Err(ProbeError::UnexpectedResponse)
+        );
         for response in substitutions {
             assert!(
                 validate_functional_response(response, &plan.bind, HELPER_RUNTIME_DIAGNOSTIC,)

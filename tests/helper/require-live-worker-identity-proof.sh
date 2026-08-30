@@ -425,6 +425,29 @@ production_start_failure_stage_is_safe() {
     esac
 }
 
+production_functional_probe_failure_value_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    production_functional_failure_value=$1
+    production_functional_failure_phase=${production_functional_failure_value%%,*}
+    production_functional_failure_class=${production_functional_failure_value#*,}
+    [ "$production_functional_failure_value" = \
+        "$production_functional_failure_phase,$production_functional_failure_class" ] \
+        || return 1
+    case $production_functional_failure_phase in
+        plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|\
+        second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|\
+        second-cycle-destroy|final-shutdown)
+            ;;
+        *) return 1 ;;
+    esac
+    case $production_functional_failure_class in
+        random|protocol|io|timeout|untrusted|correlation|unexpected-response)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 report_production_launch_diagnostic() {
     [ "${proof_failure_reason:-}" = production-launch-status ] || return 1
     production_start_failure_file=$temporary_stage/production-output/start.failure
@@ -445,8 +468,47 @@ report_production_launch_diagnostic() {
     printf '%s%s\n' "$production_start_failure_prefix" \
         "$production_start_failure_stage" \
         | cmp -s - "$production_start_failure_file" || return 1
+    production_functional_failure_file=$temporary_stage/production-output/functional-client-lease.failure
+    [ ! -e "$production_functional_failure_file.next" ] \
+        && [ ! -L "$production_functional_failure_file.next" ] || return 1
+    production_functional_failure_value=
+    if [ -e "$production_functional_failure_file" ] \
+        || [ -L "$production_functional_failure_file" ]; then
+        case $production_start_failure_stage in
+            functional-probe-wait|functional-probe-finish) ;;
+            *) return 1 ;;
+        esac
+        vp_capture_file_is_safe "$production_functional_failure_file" || return 1
+        production_functional_failure_size=$(stat -Lc '%s' \
+            "$production_functional_failure_file" 2>/dev/null) || return 1
+        [ "$production_functional_failure_size" -ge 1 ] \
+            && [ "$production_functional_failure_size" -le 128 ] || return 1
+        production_functional_failure_record=$(cat \
+            "$production_functional_failure_file") || return 1
+        production_functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
+        case $production_functional_failure_record in
+            "$production_functional_failure_prefix"*)
+                production_functional_failure_value=${production_functional_failure_record#"$production_functional_failure_prefix"}
+                ;;
+            *) return 1 ;;
+        esac
+        production_functional_probe_failure_value_is_safe \
+            "$production_functional_failure_value" || return 1
+        production_functional_failure_expected=$production_functional_failure_prefix$production_functional_failure_value
+        [ "$production_functional_failure_record" = \
+            "$production_functional_failure_expected" ] || return 1
+        production_functional_failure_expected_size=$((
+            ${#production_functional_failure_expected} + 1
+        ))
+        [ "$production_functional_failure_size" -eq \
+            "$production_functional_failure_expected_size" ] || return 1
+    fi
     printf 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=%s\n' \
         "$production_start_failure_stage" >&2
+    if [ -n "$production_functional_failure_value" ]; then
+        printf 'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=%s\n' \
+            "$production_functional_failure_value" >&2
+    fi
 }
 
 driver_phase_is_safe() {

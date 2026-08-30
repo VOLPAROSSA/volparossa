@@ -724,12 +724,38 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^report_non_retained_worker_launch_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_confinement_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_production_launch_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 9
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 10
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
+
+for non_retained_functional_phase in \
+    plan connect bind prepare shutdown ready release reconnect destroy \
+    second-cycle-plan second-cycle-bind second-cycle-prepare reuse \
+    second-cycle-destroy final-shutdown; do
+    for non_retained_functional_class in \
+        random protocol io timeout untrusted correlation unexpected-response; do
+        non_retained_functional_probe_failure_value_is_safe \
+            "$non_retained_functional_phase,$non_retained_functional_class" || {
+            printf 'non-retained parser rejected fixed functional value: %s,%s\n' \
+                "$non_retained_functional_phase" \
+                "$non_retained_functional_class" >&2
+            exit 1
+        }
+    done
+done
+for non_retained_functional_mutant in \
+    '' private,io prepare,private prepare,io,extra prepare/io; do
+    if non_retained_functional_probe_failure_value_is_safe \
+        "$non_retained_functional_mutant"; then
+        printf 'non-retained parser accepted functional mutant: %s\n' \
+            "$non_retained_functional_mutant" >&2
+        exit 1
+    fi
+done
 
 branch_failure_diagnostic=$temporary_directory/branch-proof.stderr.log
 branch_failure_privacy_sentinel='private-runtime-payload-must-not-escape'
@@ -775,6 +801,65 @@ if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/de
     printf '%s\n' 'production launch diagnostic exposed a non-allowlisted payload' >&2
     exit 1
 fi
+
+printf '%s\n%s\n%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-wait' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=prepare,unexpected-response' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+printf '%s\n%s\n' \
+    'non-retained helper-boundary PR smoke production launch diagnostic: functional-probe-wait' \
+    'non-retained helper-boundary PR smoke functional client lease diagnostic: prepare,unexpected-response' \
+    >"$temporary_directory/expected-branch-functional-diagnostic"
+cmp -s "$temporary_directory/expected-branch-functional-diagnostic" "$last_stderr"
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'functional probe diagnostic exposed a private payload' >&2
+    exit 1
+fi
+
+while read -r functional_mutant_name functional_mutant_stage \
+    functional_mutant_value; do
+    printf '%s\n%s\n%s\n' \
+        "VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=$functional_mutant_stage" \
+        "VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=$functional_mutant_value" \
+        'live worker-identity proof failed: predicate rejected: production-launch-status' \
+        >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_production_launch_diagnostic \
+        "$branch_failure_diagnostic"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'functional diagnostic mutant escaped: %s\n' \
+            "$functional_mutant_name" >&2
+        exit 1
+    fi
+done <<'EOF'
+private-phase functional-probe-wait private,io
+private-class functional-probe-wait prepare,private
+extra-field functional-probe-wait prepare,io,extra
+wrong-stage functional-probe-identity prepare,io
+EOF
+
+printf '%s\n%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-wait' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=prepare,io' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=connect,io' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-wait' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
 # Missing, duplicate, malformed, mixed and private-key-bearing production
 # launch records fail closed without printing any captured payload.

@@ -425,6 +425,29 @@ non_retained_production_launch_stage_is_safe() {
     esac
 }
 
+non_retained_functional_probe_failure_value_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_functional_failure_value=$1
+    non_retained_functional_failure_phase=${non_retained_functional_failure_value%%,*}
+    non_retained_functional_failure_class=${non_retained_functional_failure_value#*,}
+    [ "$non_retained_functional_failure_value" = \
+        "$non_retained_functional_failure_phase,$non_retained_functional_failure_class" ] \
+        || return 1
+    case $non_retained_functional_failure_phase in
+        plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|\
+        second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|\
+        second-cycle-destroy|final-shutdown)
+            ;;
+        *) return 1 ;;
+    esac
+    case $non_retained_functional_failure_class in
+        random|protocol|io|timeout|untrusted|correlation|unexpected-response)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 report_non_retained_production_launch_diagnostic() {
     [ "$#" -eq 1 ] || return 1
     non_retained_diagnostic=$1
@@ -450,7 +473,33 @@ report_non_retained_production_launch_diagnostic() {
     non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-probe-finish|functional-cleanup|publication)$'
     [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_production_mixed_pattern='^(VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=|VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=)'
+    non_retained_functional_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=
+    if non_retained_functional_diagnostic_count=$(grep -Ec \
+        "^$non_retained_functional_diagnostic_prefix" \
+        "$non_retained_diagnostic"); then
+        :
+    else
+        non_retained_functional_grep_status=$?
+        [ "$non_retained_functional_grep_status" -eq 1 ] || return 1
+    fi
+    case $non_retained_functional_diagnostic_count in
+        0)
+            non_retained_functional_failure_value=
+            ;;
+        1)
+            non_retained_functional_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=(plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|second-cycle-destroy|final-shutdown),(random|protocol|io|timeout|untrusted|correlation|unexpected-response)$'
+            [ "$(grep -Ec "$non_retained_functional_diagnostic_pattern" \
+                "$non_retained_diagnostic")" -eq 1 ] || return 1
+            non_retained_functional_diagnostic=$(grep -E \
+                "$non_retained_functional_diagnostic_pattern" \
+                "$non_retained_diagnostic") || return 1
+            non_retained_functional_failure_value=${non_retained_functional_diagnostic#"$non_retained_functional_diagnostic_prefix"}
+            non_retained_functional_probe_failure_value_is_safe \
+                "$non_retained_functional_failure_value" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    non_retained_production_mixed_pattern='^(VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=|VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=|VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=)'
     [ "$(grep -Ec "$non_retained_production_mixed_pattern" \
         "$non_retained_diagnostic")" -eq 0 ] || return 1
     non_retained_production_diagnostic=$(grep -E \
@@ -459,8 +508,18 @@ report_non_retained_production_launch_diagnostic() {
     non_retained_production_stage=${non_retained_production_diagnostic#"$non_retained_production_diagnostic_prefix"}
     non_retained_production_launch_stage_is_safe "$non_retained_production_stage" \
         || return 1
+    if [ -n "$non_retained_functional_failure_value" ]; then
+        case $non_retained_production_stage in
+            functional-probe-wait|functional-probe-finish) ;;
+            *) return 1 ;;
+        esac
+    fi
     printf 'non-retained helper-boundary PR smoke production launch diagnostic: %s\n' \
         "$non_retained_production_stage" >&2
+    if [ -n "$non_retained_functional_failure_value" ]; then
+        printf 'non-retained helper-boundary PR smoke functional client lease diagnostic: %s\n' \
+            "$non_retained_functional_failure_value" >&2
+    fi
 }
 
 case ${#expected_commit} in

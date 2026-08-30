@@ -274,6 +274,7 @@ proof_failure_functions=$temporary_directory/proof-failure-functions.sh
     sed -n '/^report_worker_launch_diagnostic() {$/,/^}$/p' "$gate"
     sed -n '/^report_worker_confinement_diagnostic() {$/,/^}$/p' "$gate"
     sed -n '/^production_start_failure_stage_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^production_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$gate"
     sed -n '/^report_production_launch_diagnostic() {$/,/^}$/p' "$gate"
     sed -n '/^report_proof_failure() {$/,/^}$/p' "$gate"
 } >"$proof_failure_functions"
@@ -294,6 +295,8 @@ if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")
     || [ "$(grep -c '^report_worker_confinement_diagnostic() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^production_start_failure_stage_is_safe() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^production_functional_probe_failure_value_is_safe() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_production_launch_diagnostic() {$' \
         "$proof_failure_functions")" -ne 1 ] \
@@ -494,6 +497,52 @@ if production_start_failure_stage_is_safe 'functional-private-value'; then
     exit 1
 fi
 
+expected_functional_failure_phases=$temporary_directory/expected-functional-failure-phases
+printf '%s\n' \
+    plan \
+    connect \
+    bind \
+    prepare \
+    shutdown \
+    ready \
+    release \
+    reconnect \
+    destroy \
+    second-cycle-plan \
+    second-cycle-bind \
+    second-cycle-prepare \
+    reuse \
+    second-cycle-destroy \
+    final-shutdown >"$expected_functional_failure_phases"
+expected_functional_failure_classes=$temporary_directory/expected-functional-failure-classes
+printf '%s\n' \
+    random \
+    protocol \
+    io \
+    timeout \
+    untrusted \
+    correlation \
+    unexpected-response >"$expected_functional_failure_classes"
+while IFS= read -r functional_failure_phase; do
+    while IFS= read -r functional_failure_class; do
+        production_functional_probe_failure_value_is_safe \
+            "$functional_failure_phase,$functional_failure_class" || {
+            printf 'gate rejected functional failure value: %s,%s\n' \
+                "$functional_failure_phase" "$functional_failure_class" >&2
+            exit 1
+        }
+    done <"$expected_functional_failure_classes"
+done <"$expected_functional_failure_phases"
+for invalid_functional_failure_value in \
+    '' private,io prepare,private prepare,io,extra prepare/io; do
+    if production_functional_probe_failure_value_is_safe \
+        "$invalid_functional_failure_value"; then
+        printf 'gate accepted functional failure mutant: %s\n' \
+            "$invalid_functional_failure_value" >&2
+        exit 1
+    fi
+done
+
 exercise_production_launch_diagnostic() (
     [ "$#" -eq 2 ] || exit 98
     production_diagnostic_name=$1
@@ -515,6 +564,105 @@ production_launch_privacy_sentinel='private-production-launch-value'
 expect_status 1 exercise_production_launch_diagnostic invalid \
     "$production_launch_privacy_sentinel"
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+exercise_production_functional_probe_diagnostic() (
+    [ "$#" -eq 3 ] || exit 98
+    production_diagnostic_name=$1
+    production_diagnostic_stage=$2
+    production_functional_payload=$3
+    temporary_stage=$temporary_directory/production-functional-$production_diagnostic_name
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    printf 'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=%s\n' \
+        "$production_diagnostic_stage" \
+        >"$temporary_stage/production-output/start.failure"
+    printf 'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=%s\n' \
+        "$production_functional_payload" \
+        >"$temporary_stage/production-output/functional-client-lease.failure"
+    chmod 0600 \
+        "$temporary_stage/production-output/start.failure" \
+        "$temporary_stage/production-output/functional-client-lease.failure"
+    proof_failure_reason=production-launch-status
+    report_production_launch_diagnostic
+)
+expect_status 0 exercise_production_functional_probe_diagnostic \
+    exact functional-probe-wait prepare,unexpected-response
+test ! -s "$last_stdout"
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-wait' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=prepare,unexpected-response' \
+    >"$temporary_directory/expected-functional-production-diagnostic"
+cmp -s "$temporary_directory/expected-functional-production-diagnostic" "$last_stderr"
+while read -r production_functional_mutant_name production_functional_mutant; do
+    expect_status 1 exercise_production_functional_probe_diagnostic \
+        "$production_functional_mutant_name" functional-probe-wait \
+        "$production_functional_mutant"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done <<'EOF'
+private-phase private-phase,io
+private-class prepare,private-class
+extra-field prepare,io,extra
+wrong-separator prepare/io
+EOF
+expect_status 1 exercise_production_functional_probe_diagnostic \
+    wrong-stage functional-probe-identity prepare,io
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+reject_production_functional_probe_capture() (
+    [ "$#" -eq 2 ] || exit 98
+    production_functional_shape_name=$1
+    production_functional_shape=$2
+    temporary_stage=$temporary_directory/production-functional-shape-$production_functional_shape_name
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=functional-probe-wait' \
+        >"$temporary_stage/production-output/start.failure"
+    chmod 0600 "$temporary_stage/production-output/start.failure"
+    production_functional_file=$temporary_stage/production-output/functional-client-lease.failure
+    case $production_functional_shape in
+        duplicate)
+            printf '%s\n%s\n' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=connect,io' \
+                >"$production_functional_file"
+            ;;
+        truncated)
+            printf '%s' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+                >"$production_functional_file"
+            ;;
+        oversized)
+            awk 'BEGIN { for (i = 0; i < 129; i++) printf "x"; printf "\n" }' \
+                >"$production_functional_file"
+            ;;
+        symlink)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+                >"$production_functional_file.target"
+            chmod 0600 "$production_functional_file.target"
+            ln -s "$production_functional_file.target" "$production_functional_file"
+            ;;
+        next)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+                >"$production_functional_file"
+            : >"$production_functional_file.next"
+            chmod 0600 "$production_functional_file.next"
+            ;;
+        *) exit 97 ;;
+    esac
+    if [ "$production_functional_shape" != symlink ]; then
+        chmod 0600 "$production_functional_file"
+    fi
+    proof_failure_reason=production-launch-status
+    if report_production_launch_diagnostic; then
+        exit 96
+    fi
+)
+for production_functional_shape in duplicate truncated oversized symlink next; do
+    expect_status 0 reject_production_functional_probe_capture \
+        "$production_functional_shape" "$production_functional_shape"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
 
 exercise_production_launch_diagnostic_missing() (
     temporary_stage=$temporary_directory/production-launch-missing
@@ -4953,6 +5101,136 @@ if [ "$forced_fd_status" -ne 1 ] \
         'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=functional-probe-ready' \
         | cmp -s - "$forced_fd_record"; then
     printf '%s\n' 'forced hook FD failure did not return status 1 with one fixed stage' >&2
+    exit 1
+fi
+
+# The hook may retain a failed functional child only after observing its exact
+# exit status with wait and validating one bounded, fully enumerated record.
+hook_functional_failure_functions=$temporary_directory/hook-functional-failure-functions.sh
+{
+    sed -n '/^functional_probe_failure_value_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^functional_probe_failure_record_is_exact() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^publish_functional_probe_failure() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^observe_functional_probe_failure() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_functional_failure_functions"
+test "$(grep -c '^[_a-z].*() {$' "$hook_functional_failure_functions")" -eq 4
+sh -n "$hook_functional_failure_functions"
+# shellcheck disable=SC1090
+. "$hook_functional_failure_functions"
+while IFS= read -r functional_failure_phase; do
+    while IFS= read -r functional_failure_class; do
+        functional_probe_failure_value_is_safe \
+            "$functional_failure_phase,$functional_failure_class" || {
+            printf 'hook rejected functional failure value: %s,%s\n' \
+                "$functional_failure_phase" "$functional_failure_class" >&2
+            exit 1
+        }
+    done <"$expected_functional_failure_classes"
+done <"$expected_functional_failure_phases"
+for invalid_functional_failure_value in \
+    '' private,io prepare,private prepare,io,extra prepare/io; do
+    if functional_probe_failure_value_is_safe "$invalid_functional_failure_value"; then
+        printf 'hook accepted functional failure mutant: %s\n' \
+            "$invalid_functional_failure_value" >&2
+        exit 1
+    fi
+done
+exercise_hook_functional_failure() (
+    [ "$#" -eq 3 ] || exit 98
+    hook_failure_name=$1
+    hook_failure_value=$2
+    hook_failure_status=$3
+    hook_failure_directory=$temporary_directory/hook-functional-failure-$hook_failure_name
+    mkdir -m 0700 "$hook_failure_directory"
+    hook_failure_source=$hook_failure_directory/probe.stderr
+    functional_failure_record=$hook_failure_directory/probe.failure
+    functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
+    printf '%s%s\n' "$functional_failure_prefix" "$hook_failure_value" \
+        >"$hook_failure_source"
+    chmod 0600 "$hook_failure_source"
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    private_file_is_safe() {
+        [ "$#" -eq 1 ] || return 1
+        [ -f "$1" ] && [ ! -L "$1" ] \
+            && [ "$(stat -Lc '%f:%u:%g:%a:%h' "$1" 2>/dev/null || true)" = \
+                "8180:$(id -u):$(id -g):600:1" ]
+    }
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    write_private_file() {
+        [ "$#" -eq 2 ] || return 1
+        printf '%s\n' "$2" >"$1.next" || return 1
+        chmod 0600 "$1.next" || return 1
+        private_file_is_safe "$1.next" || return 1
+        mv -- "$1.next" "$1" || return 1
+        private_file_is_safe "$1"
+    }
+    # shellcheck disable=SC1090
+    . "$hook_functional_failure_functions"
+    publish_functional_probe_failure "$hook_failure_status" "$hook_failure_source"
+    functional_probe_failure_record_is_exact "$functional_failure_record"
+)
+expect_status 0 exercise_hook_functional_failure \
+    exact second-cycle-prepare,correlation 1
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+while read -r hook_failure_name hook_failure_value hook_failure_status; do
+    expect_status 1 exercise_hook_functional_failure \
+        "$hook_failure_name" "$hook_failure_value" "$hook_failure_status"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done <<'EOF'
+bad-phase private,io 1
+bad-class prepare,private 1
+extra-field prepare,io,extra 1
+wrong-status prepare,io 2
+success-status prepare,io 0
+EOF
+
+exercise_hook_functional_failure_wait() (
+    hook_failure_directory=$temporary_directory/hook-functional-failure-wait
+    mkdir -m 0700 "$hook_failure_directory"
+    hook_failure_source=$hook_failure_directory/probe.stderr
+    functional_failure_record=$hook_failure_directory/probe.failure
+    functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=connect,io' \
+        >"$hook_failure_source"
+    chmod 0600 "$hook_failure_source"
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    private_file_is_safe() {
+        [ "$#" -eq 1 ] || return 1
+        [ -f "$1" ] && [ ! -L "$1" ] \
+            && [ "$(stat -Lc '%f:%u:%g:%a:%h' "$1" 2>/dev/null || true)" = \
+                "8180:$(id -u):$(id -g):600:1" ]
+    }
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    write_private_file() {
+        printf '%s\n' "$2" >"$1.next" || return 1
+        chmod 0600 "$1.next" || return 1
+        mv -- "$1.next" "$1"
+    }
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    number_is_safe() {
+        case $1 in ''|0|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+    }
+    # shellcheck disable=SC1090
+    . "$hook_functional_failure_functions"
+    (exit 1) &
+    hook_failure_pid=$!
+    observe_functional_probe_failure "$hook_failure_pid" "$hook_failure_source"
+    functional_probe_failure_record_is_exact "$functional_failure_record"
+)
+expect_status 0 exercise_hook_functional_failure_wait
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+# These are literal hook-source contracts; expansion would defeat the checks.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc 'wait "$hook_functional_failure_pid"' "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc 'wait "$hook_functional_failure_pid"; then' "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc 'observe_functional_probe_failure' "$ipc_hook")" -ne 2 ]; then
+    printf '%s\n' 'functional probe failures are not observed through exact child waits' >&2
     exit 1
 fi
 if [ "$(grep -Fc -- 'capture_unit_property CollectMode' "$gate")" -ne 2 ] \
