@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-29
+Last updated: 2026-08-30
 
 ## Fixed alpha v1 scorecard
 
@@ -104,10 +104,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   observed the final sandbox and sent Accepted, the child disables and reads back `PR_SET_DUMPABLE`
   before Ready or any operational request; the fixed service and transient live-proof driver also
   set `LimitCORE=0`. The production server now uses it only for a one-Client/one-lease
-  functional-alpha Prepare/Activate/Destroy backend. Activate requires and verifies the exact
-  nested relay/exit signed grant, binds it to helper-owned context/path/client key/expiry, and
-  installs only the signed relay-client peer plus a derived `/128` route. Probe, Commit, transport
-  and usable datapath operations deliberately return `Unavailable`. The package declares a locked,
+  functional-alpha Prepare/Activate/Probe-Commit/Destroy backend. Activate requires and verifies the
+  exact nested relay/exit signed grant, binds it to helper-owned context/path/client key/expiry,
+  installs only the signed relay-client peer plus a derived `/128` route, and retains its kernel
+  counters as the activation baseline. Commit succeeds only after an exact correlated worker probe
+  proves a handshake no older than activation and strict growth of both RX and TX; an exact retry
+  returns the cached committed receipt. Transport, ingress and usable datapath operations
+  deliberately return `Unavailable`. The package declares a locked,
   group-isolated `volparossa-worker`, pins its numeric
   identity at startup, and first binds unique local passwd/group names and numeric IDs to exact
   name- and number-based NSS results. Only the canonical `files` or `files systemd` order is
@@ -173,8 +176,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   `PrivateNetwork`, registers an exact tag-35 Client intent and holds its first signed activation at
   a fixed root-owned FIFO READY barrier. The hook externally checks the direct child's executable,
   dedicated identity, separate network namespace, exact relay-client peer and derived `/128` route
-  without publishing keys, ports, handles or runtime IDs. Exact Destroy plus an idempotent absent
-  retry is followed by a second distinct Prepare/Activate/Destroy cycle under the same runtime to
+  without publishing keys, ports, handles or runtime IDs. The expanded branch fixture creates one
+  temporary relay-side WireGuard peer in that same private namespace, carries one bounded ICMPv6
+  echo over the client-to-relay leg, requires a recent handshake and strict RX/TX growth, then
+  removes the fixture and proves exact absence before release. The probe reconnects, requires exact
+  Commit plus a byte-identical cached retry, performs exact Destroy plus an idempotent absent retry,
+  and follows it with a second distinct Prepare/Activate/Destroy cycle under the same runtime to
   prove capacity reuse. Final checks
   require zero helper children, no WireGuard in the retained first-worker namespace, no helper FD
   retaining it or any foreign worker network namespace, an empty descriptor store and the fixed
@@ -196,9 +203,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   `non-retained-pr-smoke`. On PASS it validates the proof internally, discards every proof file and
   requires an empty output directory; the workflow uploads neither branch PASS artifacts nor branch
   failure diagnostics. This is manual branch selection rather than an automatic pull-request trigger. No
-  retained exact-main job has yet succeeded for the expanded live driver. It validates no installed
-  package or shipped-unit restart behavior, and a non-retained branch PASS closes no checkbox or
-  scorecard row.
+  retained exact-main job has yet succeeded for the expanded live driver. It validates no trusted
+  selection/policy authority, second relay-to-exit leg, transport descriptor, ingress, usable VPN
+  datapath, crash recovery, installed package or shipped-unit restart behavior, and a non-retained
+  branch PASS closes no A01--A15 checkbox or scorecard row. The score remains **11/100 (11%)**.
   The private capture and production-lock metadata predicates now use the numeric regular-file
   type plus exact owner, mode and single-link fields, so intentionally empty successful stderr,
   validator and lock files are not misclassified by GNU `stat` as a different type. Content
@@ -421,8 +429,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   Activated/Committed state, and exact retries re-evaluate a capped 1024-entry runtime-lifetime
   `Absent` ledger. There is no tombstone ACK; tag 28 retries exact Pending/Owned cleanup, while tag 29
   is an independent process-wide operation outside per-route reconciliation. The production server
-  can dispatch the one-Client functional-alpha Prepare backend, but no production manager calls this
-  path. A boot-scoped, secret-free
+  can dispatch the one-Client functional-alpha lifecycle backend, but no production manager calls
+  this path. A boot-scoped, secret-free
   canonical/CAS ownership store and actor transitions have temp-directory tests; the production
   wrapper has explicit composition and ordering tests. Production opens and locks the actor after
   fixed runtime identity/directory validation but before cleanup-token publication, stale-socket
@@ -642,14 +650,16 @@ single clean-build A01--A15 run; the score is not a release claim.
   before its own deadline, while runtime/task cancellation fails closed and cannot upgrade.
   Terminal unresolved settlement atomically drains captured owners and immediately escalates any
   later owner instead of leaving it stranded.
-  The authenticated child now executes exact single-lease WireGuard Prepare, Activate and Destroy
-  against its worker-local `NamespaceKernel`: interface and `/128` are derived from the bound
+  The authenticated child now executes exact single-lease WireGuard Prepare, Activate,
+  Probe/Commit and Destroy against its worker-local `NamespaceKernel`: interface and `/128` are derived from the bound
   context/path/role, the ephemeral X25519 private key stays in worker-owned secret containers that
   zeroize on drop, and only correlated kernel proof supplies the returned public key and port.
   Prepare failure becomes a normal kernel error only after exact delete and absence proof;
   otherwise resource/key state is retained as `CleanupIncomplete` for Destroy. Activate consumes a
-  helper-projected verified relay-client peer, installs it and the derived `/128` route, and returns
-  only after exact readback. Destroy without an
+  helper-projected verified relay-client peer, installs it and the derived `/128` route, retains the
+  readback counters as its activation baseline, and returns only after exact readback. Probe/Commit
+  re-proves the exact peer and route, requires a handshake no older than activation plus strict RX
+  and TX growth, and only then enters Committed. Destroy without an
   adopted lease returns `NotFound`, not kernel-absence evidence. Successful internal Prepare,
   Activate, Probe and MPTCP endpoint responses must preserve exact request order and identity;
   each credentialed request now carries the parent's fixed absolute Linux `CLOCK_MONOTONIC`
@@ -679,7 +689,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   child `NEWNET`. The outer deadline reserves separate response-reconciliation and cleanup tails.
   Child Prepare supplies only the
   correlated kernel public key/port proof; the response adds the selected direct-underlay IP.
-  Destroy dispatches the exact child operation and confirms worker termination, reap and registry
+  The engine maps `CommitLeaseBatch` to the child's exact Probe/Commit, independently revalidates
+  the returned counter proof, and caches the exact successful committed receipt for identical
+  retries. Destroy dispatches the exact child operation and confirms worker termination, reap and registry
   purge before success. A server-owned driver schedules cancellation-safe exact expiry cleanup once
   per second without waiting for another agent request; execution is serialized behind earlier
   operations. It immediately retries cleanup-pending orphan preparations once it owns that gate,
@@ -691,15 +703,17 @@ single clean-build A01--A15 run; the score is not a release claim.
   helper-owned context/path/client-key/expiry scope, and installs/read-backs only the signed
   relay-client endpoint plus its derived `/128` route. Pure pre-mutation binding failures roll back
   replay admission; no replay entry is rolled back once worker mutation may have begun. It still has
-  no Probe, Commit, transport or usable datapath operation and no durable journal/systemd custody,
-  restart-persistent replay, trusted selected-operator authority or crash/restart recovery. The
-  committed disposable KVM producer now exercises the no-argument server, signed activation, exact
-  cached retry, exact/idempotent Destroy and a second capacity-reuse cycle entirely in private
+  no transport descriptor, ingress or usable datapath operation and no durable journal/systemd
+  custody, restart-persistent replay, trusted selected-operator authority or crash/restart recovery.
+  The expanded non-retained branch KVM producer now exercises the no-argument server, signed
+  activation, a temporary relay-side WireGuard peer, bounded ICMPv6, recent-handshake and strict
+  bidirectional counter proof, exact fixture removal, exact Commit plus byte-identical cached retry,
+  exact/idempotent Destroy and a second Activate/Destroy capacity-reuse cycle entirely in private
   namespaces. No retained exact-main PASS
   exists yet, so this implemented gate is not earned acceptance evidence. Durable
   pidfd/network-namespace recovery and the separate Add/Remove MPTCP endpoint seam remain required;
-  AV1-09, AV1-10 and AV1-11, the 11/100 score, and every datapath or acceptance checkbox remain
-  unchanged.
+  AV1-09, AV1-10 and AV1-11, the **11/100 (11%)** score, and every datapath or A01--A15 acceptance
+  checkbox remain unchanged.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
   and doctor contract now require exactly the reviewed seven-capability bootstrap set
@@ -847,7 +861,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   fake-only 1-200-record evidence boundary and prospective planner remain separate;
   no checkbox is closed. Production still publishes no usable relay/exit capability, route
   finalization still fails closed with `ProbeEvidenceUnavailable`, and no production evidence
-  producer, production transaction caller/orchestration or disposable live-network proof exists.
+  producer, production transaction caller/orchestration or disposable live-network proof for that
+  discovery/evidence pipeline exists.
 - [ ] Bootstrap from peerstore, mDNS, multiple independent built-ins, peerlinks, and signed bootstrap files works.
 - [ ] No bootstrap node or DHT record becomes a unique authority or central node catalogue.
 - [ ] `volparossa://peer/...` peerlinks round-trip and validate.
@@ -1018,18 +1033,22 @@ single clean-build A01--A15 run; the score is not a release claim.
 - [ ] The v3 lease API exposes only opaque handles and public endpoint material and has no private-key
   input/output. The production server's functional-alpha backend can obtain one helper-owned Client
   WireGuard lease with kernel-proven key/port and selected direct-underlay IP, verify the exact
-  signed relay/exit grant, and install only its relay-client peer and derived `/128` route. The
-  committed disposable KVM producer exercises that no-argument production server, exact cached
-  activation retry, exact/idempotent Destroy and a second capacity-reuse cycle in private
-  namespaces. The public
+  signed relay/exit grant, install only its relay-client peer and derived `/128` route, retain an
+  activation baseline, and Commit only after a recent handshake and strict RX/TX growth. The
+  expanded non-retained branch KVM producer exercises that no-argument production server, exact
+  cached activation retry, one temporary relay-side WireGuard peer, bounded ICMPv6, strict
+  bidirectional growth, exact fixture cleanup, exact Commit plus byte-identical cached retry,
+  exact/idempotent Destroy and a second Activate/Destroy capacity-reuse cycle in private namespaces. The public
   `HelperEngine::new` remains `Unavailable`, no production route-manager caller reaches the backend,
   and no retained exact-main PASS exists yet.
 - [ ] Typed/pure/fake helper boundaries prove exact public handles, cardinality, TTL, idempotency,
   state transitions, and handshake/RX/TX proof policy. Agent route tests exercise
   prepare/activate/commit/destroy and destroy-first retirement through fake backends. The helper's
-  functional-alpha backend has no production route-manager caller. Its disposable gate proves one
-  configured peer, derived route and normal process-owned cleanup, not a peer handshake, routed
-  packet, end-to-end worker/kernel tunnel or datapath.
+  functional-alpha backend has no production route-manager caller. Its expanded branch gate proves
+  one live client-to-relay WireGuard leg, ICMPv6, recent handshake, strict RX/TX growth, Commit retry
+  and normal process-owned cleanup. It does not prove trusted selection/policy authority, a second
+  relay-to-exit leg, transport descriptor, ingress, a usable end-to-end VPN/datapath, crash recovery,
+  A01--A15 acceptance, or any increase from the **11/100 (11%)** alpha score.
 - [ ] Service ledgers reduce internal available capacity immediately, but production publishes no
   relay/exit advertisement, so advertised free-capacity updates are not wired.
 - [ ] Ledger/service tests prove that explicit expiry purging restores capacity, and the agent

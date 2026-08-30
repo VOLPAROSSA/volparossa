@@ -364,6 +364,13 @@ capacity ledger tunnel-established. Real helper-owned endpoint preparation, read
 activation, handshake/counter proof, route supervision, and cleanup remain required before a
 production datapath can be claimed.
 
+The helper's separate one-Client branch fixture is wired to prove only its client-to-relay
+WireGuard leg by bounded ICMPv6. It removes the relay fixture exactly before `CommitLeaseBatch`, so
+Commit proves only the retained recent one-leg handshake and strict-counter result, not a currently
+live endpoint. The fixture supplies neither the relay-to-exit leg nor a `RelayProbeResult`, and its
+self-contained identities are not trusted selection or policy authority. It therefore does not
+change the production two-leg `ProbeEvidenceUnavailable` boundary.
+
 Unprivileged endpoint leases contain only helper-returned public endpoints and opaque non-secret
 handles. `VerifiedRelayProbe` projects immutable typed leg metrics, transport/family, and the
 exact already-verified signed result bytes. `VerifiedRelayGrant` projects only the already
@@ -396,7 +403,7 @@ rejected before dispatch.
 |---|---|
 | `PrepareLeaseBatch` | prepare the exact role/cardinality set for paths 1–8 and return only opaque non-secret handles plus helper-owned public evidence |
 | `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production one-Client backend requires and verifies that grant before deriving privileged state |
-| `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease |
+| `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease; the production functional-alpha backend implements this for its exact one Client lease |
 | `DestroyContext` | idempotently remove one context and all contained state |
 | `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
 | `RemoveMptcpEndpoint` | remove one exact owned MPTCP endpoint; currently returns `Unavailable` in production |
@@ -512,7 +519,7 @@ validation failure or expiry closes the descriptor and quarantines the generatio
 factories create and revalidate connected MPTCP, listening MPTCP and unconnected UDP sockets,
 including genuine `MPTCP_INFO` negotiation evidence for a connected stream. The production
 functional-alpha path uses the coordinator only for one Client lease's Initialise, Prepare,
-signed-grant-bound Activate and Destroy operations; the socket factories remain disconnected, so
+signed-grant-bound Activate, correlated Probe/Commit and Destroy operations; the socket factories remain disconnected, so
 their socketpair/fake-kernel
 tests do not prove a production namespace socket or datapath.
 
@@ -524,23 +531,30 @@ tunnel. A server-owned expiry driver schedules cancellation-safe exact cleanup o
 without waiting for another agent request, serializes it behind earlier operations, retries
 quarantined lineages, and is joined before backend shutdown. The exact one-lease
 `ActivateLeaseBatch` installs and reads back one verified relay-client peer plus its helper-derived
-`/128` route. `CommitLeaseBatch` and `AcquireTransportSocket` remain `Unavailable`, and no datapath
-is connected. The exact proof contract and remaining live-kernel
+`/128` route and retains that readback as the activation counter baseline. `CommitLeaseBatch` sends
+one correlated internal Probe/Commit, requires a handshake no older than activation and strict RX/TX
+growth, independently revalidates the proof, transitions the exact context to Committed and caches
+the successful receipt for an identical retry. `AcquireTransportSocket` remains `Unavailable`, and
+no datapath is connected. The exact proof contract and remaining live-kernel
 work are recorded in [Privileged helper protocol v3](HELPER_V3.md).
 
-The committed disposable production-IPC producer exercises only that implemented subset. As the
-staged agent, it performs two exact same-runtime Bind/Prepare/Activate/Destroy cycles with distinct
-contexts, handles, public keys and ephemeral signed grants. Each exact Activate request is sent
-twice to prove response-cache idempotence despite replay protection; the first cycle pauses at a
-fixed READY barrier so the root hook can observe the exact child identity, separate network
-namespace, verified peer and derived `/128` route. Repeated Destroy must report the context absent,
-and the second cycle proves that the single-context capacity is reusable. Its fixed dummy underlay
-exists only inside the transient production unit's `PrivateNetwork`; successful cleanup leaves that
-namespace with exactly loopback and no default route before retirement. The producer establishes no
-handshake or datapath. A non-main branch smoke validates and
-on PASS discards all proof files; its workflow uploads neither branch PASS artifacts nor branch
-failure diagnostics. It is not retained protocol or acceptance evidence. Only a retained,
-host-revalidated exact-main PASS can change that evidence status.
+The expanded non-retained branch production-IPC producer exercises that implemented subset. As the
+staged agent, its first exact same-runtime cycle runs Bind/Prepare/Activate, including an identical
+cached Activate retry, then pauses at a fixed READY barrier so the root hook can observe the exact
+child identity, separate network namespace, verified peer and derived `/128` route. In the transient
+production unit's `PrivateNetwork`, the hook creates one temporary relay-side WireGuard peer on
+fixed test-only UDP port 10000, carries one bounded ICMPv6 echo over the client-to-relay leg, requires
+a recent handshake and strict RX/TX growth, then removes the relay fixture and proves exact absence
+before release. The probe reconnects, sends the exact Commit request twice, requires one correlated
+receipt plus a byte-identical cached retry, and then performs exact/idempotent Destroy. A second
+distinct cycle deliberately remains Bind/Prepare/Activate/Destroy and proves that single-context
+capacity is reusable. Successful cleanup leaves the private namespace with exactly loopback and no
+default route before retirement. This proves no trusted selection/policy authority, relay-to-exit
+leg, transport descriptor, ingress, usable VPN/datapath or crash recovery. A non-main branch smoke
+validates and on PASS discards all proof files; its workflow uploads neither branch PASS artifacts
+nor branch failure diagnostics. It is not retained protocol or A01--A15 acceptance evidence. Only
+after this slice is merged can a retained, host-revalidated exact-main PASS change that evidence
+status. Until then the fixed alpha score remains **11/100 (11%)**.
 
 Tags 35 and 28 provide only same-process ambiguity containment. The functional-alpha request path
 consumes tag 35's closed plan, which is directly convertible to the journal's canonical
