@@ -370,11 +370,15 @@ cycle starts a fresh worker and namespace and carries bounded ICMPv6 over a sepa
 WireGuard leg. Each fixture is removed exactly before its `CommitLeaseBatch`, so Commit proves the
 retained recent role-specific handshake and strict-counter result, not a currently live peer.
 Retained exact-main run 33301595311 additionally proves one simultaneous ordered `RelayClient` +
-`RelayExit` endpoint-pair lifecycle, but predates cross-leg forwarding. Current non-retained branch
-smoke [run 33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
+`RelayExit` endpoint-pair lifecycle, but predates cross-leg forwarding. Non-retained branch smoke
+[run 33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
 `8d9cc533edfc1e9add273c03a9ce3fa164c3353d` proves bounded ICMPv6 through both live WireGuard legs,
 both nftables forwarding counters, all four peer counter views, Commit retry, teardown and the
-unchanged-host-state fence. It remains a self-contained single-path helper fixture: there is no
+unchanged-host-state fence. Exact-main
+[run 33309109220](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220) at
+`1f3cee798787ed4673a3ba28d88931947800ca22` reproduced that proof and retained artifact
+[9731470248](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220/artifacts/9731470248).
+It remains a self-contained single-path helper fixture: there is no
 production Client/Relay/Exit route manager, `RelayProbeResult`, trusted selection/policy authority,
 transport or ingress. These scoped helper facts therefore do not change the production two-leg
 `ProbeEvidenceUnavailable` boundary.
@@ -618,8 +622,16 @@ before forwarding was implemented. Non-retained branch smoke [run
 33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
 `8d9cc533edfc1e9add273c03a9ce3fa164c3353d` proves the current exact cross-leg Relay fence, bounded
 traffic, correlated WireGuard and nftables counter growth, Commit retry, teardown and unchanged host
-state. It publishes no artifact and is not live product-route or A01--A15 evidence. The fixed alpha
-score remains **11/100 (11%)**.
+state, but that non-main run publishes no artifact. Exact-main run 33309109220 at
+`1f3cee798787ed4673a3ba28d88931947800ca22` reproduced the proof and retained the 39,915-byte artifact
+`helper-boundary-evidence-1f3cee798787ed4673a3ba28d88931947800ca22` (artifact 9731470248, expiry
+`2026-11-28T11:30:49Z`). Its streamed report is overall `PASS` from the exact clean source SHA on
+Debian 13 amd64 (`x86_64`) with systemd 257; all 16 checks pass and the before/after host-state
+SHA-256 is identically
+`2209ca5e63388fe23b8bf54c072cd2be5aa289e7e68293841150bce93ff59698`. Its explicit scope remains
+`helper_boundary_only=true`, `datapath=false`, `restart_recovery=false`,
+`acceptance_a01_a15=false`, `cleanup_owned=false`, and `installed_package=false`; it is not live
+product-route or A01--A15 evidence. The fixed alpha score remains **11/100 (11%)**.
 
 Tags 35 and 28 provide only same-process ambiguity containment. The functional-alpha request path
 consumes tag 35's closed plan, which is directly convertible to the journal's canonical
