@@ -499,6 +499,24 @@ while IFS= read -r proof_failure_reason_under_test; do
     }
 done <"$expected_proof_failure_reasons"
 
+# A retired worker's numeric PID and nsfs inode may be reused after the final
+# live pin closes. Cross-generation numeric inequalities are therefore not
+# identity proofs; every active generation is bound through current custody.
+# shellcheck disable=SC2016
+for forbidden_stale_identity_comparison in \
+    '[ "$hook_functional_exit_worker_pid" != "$hook_functional_worker_pid" ]' \
+    '[ "$hook_functional_pair_worker_pid" != "$hook_functional_worker_pid" ]' \
+    '[ "$hook_functional_pair_worker_pid" != "$hook_functional_exit_worker_pid" ]' \
+    '[ "$hook_functional_exit_worker_namespace" !=' \
+    '[ "$hook_functional_pair_worker_namespace" !='
+do
+    if grep -F "$forbidden_stale_identity_comparison" "$ipc_hook" >/dev/null; then
+        printf 'production hook treats a reusable numeric identity as authority: %s\n' \
+            "$forbidden_stale_identity_comparison" >&2
+        exit 1
+    fi
+done
+
 expected_production_start_stages=$temporary_directory/expected-production-start-stages
 printf '%s\n' \
     preflight-runtime \

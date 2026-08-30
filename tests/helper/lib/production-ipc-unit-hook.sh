@@ -3269,7 +3269,6 @@ run_functional_client_lease_probe() {
     advance_start_failure_stage functional-exit-worker-observation || return 1
     hook_functional_exit_worker_pid=$(direct_helper_child "$hook_functional_main_pid") \
         || return 1
-    [ "$hook_functional_exit_worker_pid" != "$hook_functional_worker_pid" ] || return 1
     capture_parent_worker_custody \
         "$hook_functional_main_pid" "$hook_functional_exit_worker_pid" || return 1
     hook_functional_exit_pidfd_count=$hook_custody_pidfd_count
@@ -3281,11 +3280,12 @@ run_functional_client_lease_probe() {
     hook_functional_exit_process_identity=$hook_custody_process_identity
     hook_functional_exit_namespace_parent_fd=$hook_custody_namespace_fd
     hook_functional_exit_worker_namespace=$hook_custody_namespace_identity
+    # Retired PID and nsfs numbers are reusable after their last pins close.
+    # Only the current live pidfd, proc-dir and netns custody is identity
+    # authority; comparing against a stale numeric observation would be flaky.
     [ "$hook_functional_exit_parent_namespace" = "$hook_functional_parent_namespace" ] \
         && [ "$hook_functional_exit_parent_namespace" != \
-            "$hook_functional_exit_worker_namespace" ] \
-        && [ "$hook_functional_exit_worker_namespace" != \
-            "$hook_functional_worker_namespace" ] || return 1
+            "$hook_functional_exit_worker_namespace" ] || return 1
     hook_functional_exit_parent_process_path=/proc/$hook_functional_main_pid/fd/$hook_functional_exit_process_parent_fd
     hook_functional_exit_parent_namespace_path=/proc/$hook_functional_main_pid/fd/$hook_functional_exit_namespace_parent_fd
     [ "$(capture_parent_process_fd_identity \
@@ -3478,9 +3478,6 @@ run_functional_client_lease_probe() {
     advance_start_failure_stage functional-relay-pair-worker-observation || return 1
     hook_functional_pair_worker_pid=$(direct_helper_child \
         "$hook_functional_main_pid") || return 1
-    [ "$hook_functional_pair_worker_pid" != "$hook_functional_worker_pid" ] \
-        && [ "$hook_functional_pair_worker_pid" != \
-            "$hook_functional_exit_worker_pid" ] || return 1
     capture_parent_worker_custody \
         "$hook_functional_main_pid" "$hook_functional_pair_worker_pid" || return 1
     hook_functional_pair_pidfd_count=$hook_custody_pidfd_count
@@ -3492,14 +3489,12 @@ run_functional_client_lease_probe() {
     hook_functional_pair_process_identity=$hook_custody_process_identity
     hook_functional_pair_namespace_parent_fd=$hook_custody_namespace_fd
     hook_functional_pair_worker_namespace=$hook_custody_namespace_identity
+    # As above, retired numeric identities may be reused. Bind this generation
+    # to its live parent-held descriptors instead of stale observations.
     [ "$hook_functional_pair_parent_namespace" = \
         "$hook_functional_parent_namespace" ] \
         && [ "$hook_functional_pair_parent_namespace" != \
-            "$hook_functional_pair_worker_namespace" ] \
-        && [ "$hook_functional_pair_worker_namespace" != \
-            "$hook_functional_worker_namespace" ] \
-        && [ "$hook_functional_pair_worker_namespace" != \
-            "$hook_functional_exit_worker_namespace" ] || return 1
+            "$hook_functional_pair_worker_namespace" ] || return 1
     hook_functional_pair_parent_process_path=/proc/$hook_functional_main_pid/fd/$hook_functional_pair_process_parent_fd
     hook_functional_pair_parent_namespace_path=/proc/$hook_functional_main_pid/fd/$hook_functional_pair_namespace_parent_fd
     [ "$(capture_parent_process_fd_identity \
