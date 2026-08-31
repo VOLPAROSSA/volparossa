@@ -233,22 +233,31 @@ not cryptographic verification, replay acceptance, signature/origin authority, o
 Discovery has independent dormant client-hop and relay-to-exit transport seams. Each derives its
 target and family from the exact request, admits one active same-hop dispatch, takes a
 connection-generation witness immediately before send, and binds only a typed matching response
-event under the fixed/request/caller deadline minimum. The upstream seam additionally requires the
-forwarding control identity to be local and never targets it instead of the exit. Each bind stamps
-arrival time internally and rechecks the exact service instance, request ID, peer, event-local
-`ConnectionId`, current unique connection generation and native prefix. Context-bound entrypoints
+arrival sealed by the originating service's private swarm pump under the fixed/request/caller
+deadline minimum. The upstream seam additionally requires the
+forwarding control identity to be local and never targets it instead of the exit. The private
+swarm pump stamps monotonic and wall arrival time while sealing the opaque arrival; binding then
+rechecks that both the dispatch and arrival belong to the exact service instance, and that the
+private request ID, peer, event-local `ConnectionId`, current unique connection generation and
+native prefix match. Context-bound entrypoints
 can carry a non-cloned attempt/snapshot or downstream-channel owner through only that exact bind or
-cancellation. Both affine results expose none of their ID/hash/time/prefix fields. Dropping a token,
-a non-response event, unavailable pre-correlation wall time, or a cross-service, wrong-ID or
-wrong-peer event keeps that hop's slot occupied fail closed; exact correlation consumes it before
+cancellation. Dispatches, transactions, arrivals and bound results expose no ID-equality oracle,
+constructor, ID/hash/time/prefix field or decomposition. Dropping a token, an unavailable arrival
+clock, or a cross-service, wrong-ID or wrong-peer arrival keeps that hop's slot occupied fail
+closed; exact correlation consumes it before
 later time or provenance checks. A still-current inbound client-hop request is withheld unless it
 targets the local relay/control and its authenticated remote differs from both local peer and actor;
 requester-anonymous A0 has no client identity to bind. Upstream instead requires the authenticated
 relay to equal `forwarded_control` and the actor to equal the local exit. These predicates and the
 raw response channels remain behind a private pump. The ordinary public event pump closes inbound
-requests on both hops; the direct-responder pump owns direct Relay requests internally and closes
-upstream requests because that responder is not implemented. No public API accepts a preselection
-response channel or sends either response type.
+requests on both hops, drops stale/unowned responses, and replaces responses for the exact active
+dispatch with service-sealed opaque arrivals;
+the direct-responder pump does the same while owning direct Relay requests internally and closing
+upstream requests because that responder is not implemented. No public pump yields a raw
+preselection request or response message, and no public API accepts a raw response event or
+response channel or sends either response type. Real independent client-hop and upstream
+request-response behaviours deliberately reproduce the same behaviour-local outbound ID and prove
+that their responses, even when sealed by a sibling service, cannot bind the originating dispatch.
 
 Discovery also exposes one production-compiled direct-Relay response poll transaction. It takes
 each typed inbound request directly from the same service's swarm, so its behaviour-local request

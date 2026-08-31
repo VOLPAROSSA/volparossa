@@ -33,12 +33,12 @@ use volparossa_core::{
 };
 use volparossa_discovery::{
     AdvertisementResponse, BehaviourEvent, DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation,
-    DatapathRelayRequest, DatapathRelayResponse, DiscoveryProtocolRoles, DiscoveryService,
-    EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation,
-    ExitForwardRequest, ExitForwardResponse, ForwardStatus, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
-    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, PeerLink,
-    UpstreamExitForwardRequest, UpstreamExitForwardResponse, advertisement_envelope_matches_peer,
-    capability, signed_envelope_matches_peer,
+    DatapathRelayRequest, DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles,
+    DiscoveryService, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT,
+    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
+    MAX_CONCURRENT_DATAPATH_RELAY_STREAMS, MAX_CONCURRENT_FORWARDING_STREAMS,
+    MAX_FORWARDING_FRAME_BYTES, PeerLink, UpstreamExitForwardRequest, UpstreamExitForwardResponse,
+    advertisement_envelope_matches_peer, capability, signed_envelope_matches_peer,
 };
 use volparossa_exit::{ExitService, ExitServiceConfig};
 use volparossa_identity::Identity;
@@ -1247,7 +1247,24 @@ impl DiscoveryRuntime {
                     }
                 }
                 event = self.service.next_event() => {
-                    self.handle_event(event, &state).await;
+                    match event {
+                        DiscoveryEvent::Other(event) => self.handle_event(event, &state).await,
+                        DiscoveryEvent::ClientPreselectionResponse(_)
+                        | DiscoveryEvent::UpstreamPreselectionResponse(_) => {
+                            state.write().await.log(
+                                LogLevel::Error,
+                                "PRESELECTION_RESPONSE_WITHOUT_OWNER",
+                                unix_millis(),
+                            );
+                        }
+                        _ => {
+                            state.write().await.log(
+                                LogLevel::Error,
+                                "UNSUPPORTED_SANITIZED_DISCOVERY_EVENT",
+                                unix_millis(),
+                            );
+                        }
+                    }
                 }
                 command = self.role_commands.recv() => {
                     let Some(command) = command else {

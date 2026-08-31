@@ -56,8 +56,9 @@ use preselection_responder::PreselectionResponderState;
 pub use preselection_responder::{DirectPreselectionResponderError, LocalPreselectionPolicy};
 pub use preselection_transaction::{
     BoundClientPreselectionTransport, BoundUpstreamPreselectionTransport,
-    ClientPreselectionDispatch, ClientPreselectionTransaction, PreselectionDispatchError,
-    UpstreamPreselectionDispatch, UpstreamPreselectionTransaction,
+    ClientPreselectionDispatch, ClientPreselectionResponseArrival, ClientPreselectionTransaction,
+    PreselectionDispatchError, UpstreamPreselectionDispatch, UpstreamPreselectionResponseArrival,
+    UpstreamPreselectionTransaction,
 };
 use preselection_transaction::{
     PreselectionTransactionState, client_request_has_local_target_from_distinct_sender,
@@ -399,6 +400,23 @@ pub enum BehaviourEvent {
     ),
     /// Direct client-to-datapath-relay event.
     DatapathRelay(request_response::Event<DatapathRelayRequest, DatapathRelayResponse>),
+}
+
+/// Sanitized public discovery event.
+///
+/// Preselection request messages remain entirely service-owned. Responses for the exact active
+/// dispatch are replaced at the private swarm boundary by opaque, instance-bound arrival values;
+/// stale or unowned responses are dropped. Raw request/response events are never returned by a
+/// public event pump. All unrelated swarm events, including typed outbound failures, remain
+/// available unchanged through [`Self::Other`].
+#[non_exhaustive]
+pub enum DiscoveryEvent {
+    /// Service-sealed response to an outbound client-to-relay observation request.
+    ClientPreselectionResponse(ClientPreselectionResponseArrival),
+    /// Service-sealed response to an outbound relay-to-exit observation request.
+    UpstreamPreselectionResponse(UpstreamPreselectionResponseArrival),
+    /// Any event other than a preselection request or response message.
+    Other(libp2p::swarm::SwarmEvent<BehaviourEvent>),
 }
 
 impl From<identify::Event> for BehaviourEvent {
@@ -1218,25 +1236,64 @@ impl DiscoveryService {
 
     /// Advances the real libp2p swarm and performs safe automatic protocol plumbing.
     ///
-    /// Inbound preselection request events are service-owned. This public pump drops both the
-    /// direct/client-hop and upstream request variants so their behaviour-local response channels
-    /// cannot cross the `DiscoveryService` boundary. Call
+    /// Inbound preselection request events are service-owned and dropped. Responses for the exact
+    /// active outbound dispatch are sealed into opaque arrivals whose private instance identity
+    /// and arrival clocks are captured here; stale or unowned responses are dropped. Thus neither
+    /// raw request nor raw response messages cross the `DiscoveryService` boundary. Call
     /// [`Self::next_event_with_direct_preselection_responder`] to enable the currently implemented
     /// direct-Relay responder. No upstream responder exists yet, so upstream requests fail closed.
-    pub async fn next_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
+    pub async fn next_event(&mut self) -> DiscoveryEvent {
         loop {
             let event = self.next_internal_event().await;
-            if inbound_preselection_request(&event) {
-                continue;
+            if let Some(event) = self.sanitize_public_event(event) {
+                return event;
             }
-            return event;
+        }
+    }
+
+    fn sanitize_public_event(
+        &self,
+        event: libp2p::swarm::SwarmEvent<BehaviourEvent>,
+    ) -> Option<DiscoveryEvent> {
+        match event {
+            libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
+                request_response::Event::Message {
+                    peer,
+                    connection_id,
+                    message:
+                        request_response::Message::Response {
+                            request_id,
+                            response,
+                        },
+                },
+            )) => self
+                .seal_client_preselection_response(peer, connection_id, request_id, response)
+                .ok()
+                .map(DiscoveryEvent::ClientPreselectionResponse),
+            libp2p::swarm::SwarmEvent::Behaviour(
+                BehaviourEvent::PreselectionObservationUpstream(request_response::Event::Message {
+                    peer,
+                    connection_id,
+                    message:
+                        request_response::Message::Response {
+                            request_id,
+                            response,
+                        },
+                }),
+            ) => self
+                .seal_upstream_preselection_response(peer, connection_id, request_id, response)
+                .ok()
+                .map(DiscoveryEvent::UpstreamPreselectionResponse),
+            event if inbound_preselection_request(&event) => None,
+            event => Some(DiscoveryEvent::Other(event)),
         }
     }
 
     /// Private event pump for service-owned protocol handlers and transport-only unit proofs.
     ///
-    /// Unlike [`Self::next_event`], this may yield inbound preselection response channels. It must
-    /// therefore never become a public API or be called by application owners.
+    /// Unlike [`Self::next_event`], this may yield inbound preselection request channels and raw
+    /// outbound preselection responses. It must therefore never become a public API or be called
+    /// by application owners.
     #[allow(clippy::too_many_lines, reason = "single composed swarm event pump")]
     async fn next_internal_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
         loop {

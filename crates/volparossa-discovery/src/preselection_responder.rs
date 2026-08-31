@@ -175,7 +175,7 @@ impl DiscoveryService {
         policy: LocalPreselectionPolicy,
         signer_public_key: [u8; 32],
         signer: &mut F,
-    ) -> libp2p::swarm::SwarmEvent<crate::BehaviourEvent>
+    ) -> crate::DiscoveryEvent
     where
         F: FnMut(&[u8]) -> Option<[u8; 64]>,
     {
@@ -208,7 +208,11 @@ impl DiscoveryService {
                     // exposing its behaviour-local channel would allow a different service owner
                     // to answer it, so this request is deliberately closed without a response.
                 }
-                event => return event,
+                event => {
+                    if let Some(event) = self.sanitize_public_event(event) {
+                        return event;
+                    }
+                }
             }
         }
     }
@@ -534,7 +538,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::DiscoveryProtocolRoles;
+    use crate::{BehaviourEvent, DiscoveryEvent, DiscoveryProtocolRoles};
 
     const NOW_MS: u64 = 1_000_000;
     const CONNECTION: usize = 41;
@@ -542,6 +546,14 @@ mod tests {
     const POLICY_HASH: [u8; 32] = [71; 32];
     const POLICY_EXPIRY_MS: u64 = NOW_MS + 60_000;
     const ADVERTISEMENT_EXPIRY_MS: u64 = NOW_MS + 30_000;
+
+    async fn next_other(service: &mut DiscoveryService) -> SwarmEvent<BehaviourEvent> {
+        loop {
+            if let DiscoveryEvent::Other(event) = service.next_event().await {
+                return event;
+            }
+        }
+    }
 
     struct Fixture {
         service: DiscoveryService,
@@ -723,7 +735,7 @@ mod tests {
             .expect("memory listener");
         let address = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let SwarmEvent::NewListenAddr { address, .. } = relay.next_event().await {
+                if let SwarmEvent::NewListenAddr { address, .. } = next_other(relay).await {
                     break address;
                 }
             }
@@ -741,7 +753,7 @@ mod tests {
             let mut relay_lineage = None;
             while !client_connected || relay_lineage.is_none() {
                 tokio::select! {
-                    event = client.next_event() => {
+                    event = next_other(client) => {
                         if matches!(
                             event,
                             SwarmEvent::ConnectionEstablished { peer_id, .. }
@@ -750,7 +762,7 @@ mod tests {
                             client_connected = true;
                         }
                     }
-                    event = relay.next_event() => {
+                    event = next_other(relay) => {
                         if let SwarmEvent::ConnectionEstablished {
                             peer_id,
                             connection_id,
@@ -948,9 +960,9 @@ mod tests {
         let signed_response = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 tokio::select! {
-                    event = client.next_event() => {
+                    event = client.next_internal_event() => {
                         match event {
-                            SwarmEvent::Behaviour(crate::BehaviourEvent::PreselectionObservation(
+                            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                                 request_response::Event::Message {
                                     peer,
                                     message: request_response::Message::Response {
@@ -962,7 +974,7 @@ mod tests {
                             )) if peer == relay_peer && request_id == outbound => {
                                 break response;
                             }
-                            SwarmEvent::Behaviour(crate::BehaviourEvent::PreselectionObservation(
+                            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                                 request_response::Event::OutboundFailure {
                                     request_id,
                                     error,
@@ -1009,9 +1021,9 @@ mod tests {
         let raw_event = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 tokio::select! {
-                    event = client.next_event() => {
+                    event = client.next_internal_event() => {
                         if let SwarmEvent::Behaviour(
-                            crate::BehaviourEvent::PreselectionObservation(
+                            BehaviourEvent::PreselectionObservation(
                                 request_response::Event::OutboundFailure {
                                     request_id,
                                     error,
@@ -1029,7 +1041,7 @@ mod tests {
                     }
                     event = relay.next_internal_event() => {
                         if let SwarmEvent::Behaviour(
-                            crate::BehaviourEvent::PreselectionObservation(
+                            BehaviourEvent::PreselectionObservation(
                                 event @ request_response::Event::Message {
                                     message: request_response::Message::Request { .. },
                                     ..
@@ -1067,9 +1079,9 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let SwarmEvent::Behaviour(crate::BehaviourEvent::PreselectionObservation(
+                if let SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                     request_response::Event::OutboundFailure { request_id, .. },
-                )) = client.next_event().await
+                )) = client.next_internal_event().await
                 {
                     if request_id == transplanted_outbound {
                         break;

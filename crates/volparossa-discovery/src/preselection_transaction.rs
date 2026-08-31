@@ -5,11 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use libp2p::{
-    PeerId,
-    request_response::{self, OutboundRequestId},
-    swarm::ConnectionId,
-};
+use libp2p::{PeerId, request_response::OutboundRequestId, swarm::ConnectionId};
 use thiserror::Error;
 use tokio::time::Instant;
 use volparossa_core::IpFamily;
@@ -54,7 +50,7 @@ pub enum PreselectionDispatchError {
     /// No unique current authenticated connection proves the requested native family.
     #[error("preselection transport provenance is unavailable")]
     Provenance,
-    /// A response event does not belong to this exact dispatch.
+    /// A response arrival does not belong to this exact dispatch.
     #[error("preselection response correlation failed")]
     Correlation,
     /// Dispatch or response arrival falls outside the monotonic time window.
@@ -77,17 +73,6 @@ pub struct ClientPreselectionDispatch {
     witness: ConnectionWitness,
 }
 
-impl ClientPreselectionDispatch {
-    /// Test only the request ID after matching the originating client-hop behaviour event.
-    ///
-    /// libp2p request IDs are not a cross-behaviour namespace. Callers must first match
-    /// [`crate::BehaviourEvent::PreselectionObservation`].
-    #[must_use]
-    pub fn matches_request_id(&self, event_request: OutboundRequestId) -> bool {
-        self.request_id == event_request
-    }
-}
-
 /// Affine client-hop dispatch carrying its exact caller-owned attempt context.
 ///
 /// The context can be the owner that retains the original candidate snapshot and canonical
@@ -99,15 +84,23 @@ pub struct ClientPreselectionTransaction<Context> {
     context: Context,
 }
 
-impl<Context> ClientPreselectionTransaction<Context> {
-    /// Test only the request ID after matching the client-hop behaviour event.
-    #[must_use]
-    pub fn matches_request_id(&self, event_request: OutboundRequestId) -> bool {
-        self.dispatch.matches_request_id(event_request)
-    }
+/// Service-sealed arrival of one outbound client-hop response.
+///
+/// All fields are private and this type has no constructor or inspection API. Only the
+/// `DiscoveryService` instance whose private swarm observed the response can mint it, and only
+/// that same instance can bind it to an affine dispatch.
+#[must_use = "a client response arrival must be bound through its originating DiscoveryService"]
+pub struct ClientPreselectionResponseArrival {
+    peer: PeerId,
+    connection_id: ConnectionId,
+    request_id: OutboundRequestId,
+    response: ClientPreselectionObservationResponse,
+    instance: Arc<()>,
+    arrived_at_mono: Instant,
+    arrived_at_unix_ms: u64,
 }
 
-/// Affine transport observation bound to the exact response event and current connection lineage.
+/// Affine transport observation bound to the exact sealed response and current connection lineage.
 #[must_use = "a bound client preselection transport must remain with its A1c transaction"]
 #[cfg_attr(
     not(test),
@@ -138,17 +131,6 @@ pub struct UpstreamPreselectionDispatch {
     witness: ConnectionWitness,
 }
 
-impl UpstreamPreselectionDispatch {
-    /// Test only the request ID after matching the upstream behaviour event.
-    ///
-    /// libp2p request IDs are not a cross-behaviour namespace. Callers must first match
-    /// [`crate::BehaviourEvent::PreselectionObservationUpstream`].
-    #[must_use]
-    pub fn matches_request_id(&self, event_request: OutboundRequestId) -> bool {
-        self.request_id == event_request
-    }
-}
-
 /// Affine relay-to-exit dispatch carrying its exact caller-owned forwarding context.
 ///
 /// A future service-owned upstream responder can retain its private originating request owner in
@@ -160,12 +142,20 @@ pub struct UpstreamPreselectionTransaction<Context> {
     context: Context,
 }
 
-impl<Context> UpstreamPreselectionTransaction<Context> {
-    /// Test only the request ID after matching the upstream behaviour event.
-    #[must_use]
-    pub fn matches_request_id(&self, event_request: OutboundRequestId) -> bool {
-        self.dispatch.matches_request_id(event_request)
-    }
+/// Service-sealed arrival of one outbound relay-to-exit response.
+///
+/// The opaque value records its private behaviour instance and arrival clocks at the instant the
+/// service-owned event pump observes the response. A sibling service or independent behaviour
+/// cannot manufacture a bindable value even when its local request ID is numerically identical.
+#[must_use = "an upstream response arrival must be bound through its originating DiscoveryService"]
+pub struct UpstreamPreselectionResponseArrival {
+    peer: PeerId,
+    connection_id: ConnectionId,
+    request_id: OutboundRequestId,
+    response: UpstreamPreselectionObservationResponse,
+    instance: Arc<()>,
+    arrived_at_mono: Instant,
+    arrived_at_unix_ms: u64,
 }
 
 /// Affine transport observation bound to one exact exit response and connection lineage.
@@ -215,10 +205,7 @@ impl DiscoveryService {
     pub fn bind_preselection_observation_response_with_context<Context>(
         &mut self,
         transaction: ClientPreselectionTransaction<Context>,
-        event: request_response::Event<
-            ClientPreselectionObservationRequest,
-            ClientPreselectionObservationResponse,
-        >,
+        arrival: ClientPreselectionResponseArrival,
     ) -> Result<
         (
             Context,
@@ -228,7 +215,8 @@ impl DiscoveryService {
         PreselectionDispatchError,
     > {
         let ClientPreselectionTransaction { dispatch, context } = transaction;
-        let (transport, response) = self.bind_preselection_observation_response(dispatch, event)?;
+        let (transport, response) =
+            self.bind_preselection_observation_response(dispatch, arrival)?;
         Ok((context, transport, response))
     }
 
@@ -327,23 +315,19 @@ impl DiscoveryService {
         })
     }
 
-    /// Bind one matching response event to the still-current exact connection lineage.
+    /// Bind one matching service-sealed response arrival to the exact connection lineage.
     ///
     /// # Errors
     ///
-    /// Returns a detail-free error for a non-response event, service/peer/request mismatch,
-    /// unavailable wall time, an invalid monotonic arrival time, or a stale, ambiguous, closed,
-    /// changed, or otherwise unavailable connection proof. Dropping the token or submitting a
-    /// non-response event, unavailable pre-correlation wall time, or a cross-service, wrong-ID, or
-    /// wrong-peer event deliberately leaves its originating slot occupied. After exact correlation
-    /// the slot is consumed even when time or connection-provenance binding then fails closed.
+    /// Returns a detail-free error for a service-instance, peer, or request mismatch, an invalid
+    /// monotonic arrival time, or a stale, ambiguous, closed, changed, or otherwise unavailable
+    /// connection proof. Dropping either affine value or submitting a cross-service arrival
+    /// deliberately leaves the originating slot occupied. After exact correlation the slot is
+    /// consumed even when time or connection-provenance binding then fails closed.
     pub fn bind_preselection_observation_response(
         &mut self,
         dispatch: ClientPreselectionDispatch,
-        event: request_response::Event<
-            ClientPreselectionObservationRequest,
-            ClientPreselectionObservationResponse,
-        >,
+        arrival: ClientPreselectionResponseArrival,
     ) -> Result<
         (
             BoundClientPreselectionTransport,
@@ -351,20 +335,21 @@ impl DiscoveryService {
         ),
         PreselectionDispatchError,
     > {
-        let request_response::Event::Message {
+        let ClientPreselectionResponseArrival {
             peer,
             connection_id,
-            message:
-                request_response::Message::Response {
-                    request_id,
-                    response,
-                },
-        } = event
-        else {
+            request_id,
+            response,
+            instance,
+            arrived_at_mono,
+            arrived_at_unix_ms,
+        } = arrival;
+        if !Arc::ptr_eq(&self.preselection_transaction.instance, &dispatch.instance)
+            || !Arc::ptr_eq(&self.preselection_transaction.instance, &instance)
+            || !Arc::ptr_eq(&dispatch.instance, &instance)
+        {
             return Err(PreselectionDispatchError::Correlation);
-        };
-        let arrived_at_mono = Instant::now();
-        let arrived_at_unix_ms = system_unix_millis()?;
+        }
         let transport = self.bind_preselection_observation_response_at(
             dispatch,
             peer,
@@ -374,6 +359,27 @@ impl DiscoveryService {
             arrived_at_unix_ms,
         )?;
         Ok((transport, response))
+    }
+
+    pub(super) fn seal_client_preselection_response(
+        &self,
+        peer: PeerId,
+        connection_id: ConnectionId,
+        request_id: OutboundRequestId,
+        response: ClientPreselectionObservationResponse,
+    ) -> Result<ClientPreselectionResponseArrival, PreselectionDispatchError> {
+        if self.preselection_transaction.client_active != Some(request_id) {
+            return Err(PreselectionDispatchError::Correlation);
+        }
+        Ok(ClientPreselectionResponseArrival {
+            peer,
+            connection_id,
+            request_id,
+            response,
+            instance: Arc::clone(&self.preselection_transaction.instance),
+            arrived_at_mono: Instant::now(),
+            arrived_at_unix_ms: system_unix_millis()?,
+        })
     }
 
     fn bind_preselection_observation_response_at(
@@ -423,8 +429,9 @@ impl DiscoveryService {
         })
     }
 
-    /// Consume and clear the exact active dispatch after a local timeout, shutdown or matching
-    /// typed outbound-failure event. Callers must first match the client-hop event domain and ID.
+    /// Consume and clear the exact active dispatch after a local timeout or shutdown. Typed
+    /// outbound-failure events remain observable for diagnostics, but deliberately expose no
+    /// dispatch-token equality oracle; the fixed local deadline remains the terminal authority.
     ///
     /// # Errors
     ///
@@ -552,21 +559,18 @@ impl DiscoveryService {
         Ok(UpstreamPreselectionTransaction { dispatch, context })
     }
 
-    /// Bind one matching upstream response event to the still-current exact exit connection.
+    /// Bind one matching sealed upstream response to the still-current exact exit connection.
     ///
     /// # Errors
     ///
-    /// Returns a detail-free error for a non-response event, service/peer/request mismatch,
-    /// unavailable wall time, an invalid monotonic arrival time, or a stale, ambiguous, closed,
-    /// changed, or otherwise unavailable exit-connection proof. Exact correlation consumes the
-    /// upstream slot before later time or provenance checks.
+    /// Returns a detail-free error for a service-instance, peer, or request mismatch, an invalid
+    /// monotonic arrival time, or a stale, ambiguous, closed, changed, or otherwise unavailable
+    /// exit-connection proof. Exact correlation consumes the upstream slot before later time or
+    /// provenance checks.
     pub fn bind_preselection_observation_upstream_response(
         &mut self,
         dispatch: UpstreamPreselectionDispatch,
-        event: request_response::Event<
-            UpstreamPreselectionObservationRequest,
-            UpstreamPreselectionObservationResponse,
-        >,
+        arrival: UpstreamPreselectionResponseArrival,
     ) -> Result<
         (
             BoundUpstreamPreselectionTransport,
@@ -574,20 +578,21 @@ impl DiscoveryService {
         ),
         PreselectionDispatchError,
     > {
-        let request_response::Event::Message {
+        let UpstreamPreselectionResponseArrival {
             peer,
             connection_id,
-            message:
-                request_response::Message::Response {
-                    request_id,
-                    response,
-                },
-        } = event
-        else {
+            request_id,
+            response,
+            instance,
+            arrived_at_mono,
+            arrived_at_unix_ms,
+        } = arrival;
+        if !Arc::ptr_eq(&self.preselection_transaction.instance, &dispatch.instance)
+            || !Arc::ptr_eq(&self.preselection_transaction.instance, &instance)
+            || !Arc::ptr_eq(&dispatch.instance, &instance)
+        {
             return Err(PreselectionDispatchError::Correlation);
-        };
-        let arrived_at_mono = Instant::now();
-        let arrived_at_unix_ms = system_unix_millis()?;
+        }
         let transport = self.bind_preselection_observation_upstream_response_at(
             dispatch,
             peer,
@@ -599,6 +604,27 @@ impl DiscoveryService {
         Ok((transport, response))
     }
 
+    pub(super) fn seal_upstream_preselection_response(
+        &self,
+        peer: PeerId,
+        connection_id: ConnectionId,
+        request_id: OutboundRequestId,
+        response: UpstreamPreselectionObservationResponse,
+    ) -> Result<UpstreamPreselectionResponseArrival, PreselectionDispatchError> {
+        if self.preselection_transaction.upstream_active != Some(request_id) {
+            return Err(PreselectionDispatchError::Correlation);
+        }
+        Ok(UpstreamPreselectionResponseArrival {
+            peer,
+            connection_id,
+            request_id,
+            response,
+            instance: Arc::clone(&self.preselection_transaction.instance),
+            arrived_at_mono: Instant::now(),
+            arrived_at_unix_ms: system_unix_millis()?,
+        })
+    }
+
     /// Bind a matching upstream response and return its unchanged exact forwarding context.
     ///
     /// # Errors
@@ -608,10 +634,7 @@ impl DiscoveryService {
     pub fn bind_preselection_observation_upstream_response_with_context<Context>(
         &mut self,
         transaction: UpstreamPreselectionTransaction<Context>,
-        event: request_response::Event<
-            UpstreamPreselectionObservationRequest,
-            UpstreamPreselectionObservationResponse,
-        >,
+        arrival: UpstreamPreselectionResponseArrival,
     ) -> Result<
         (
             Context,
@@ -622,7 +645,7 @@ impl DiscoveryService {
     > {
         let UpstreamPreselectionTransaction { dispatch, context } = transaction;
         let (transport, response) =
-            self.bind_preselection_observation_upstream_response(dispatch, event)?;
+            self.bind_preselection_observation_upstream_response(dispatch, arrival)?;
         Ok((context, transport, response))
     }
 
@@ -673,8 +696,8 @@ impl DiscoveryService {
         })
     }
 
-    /// Consume and clear the exact active upstream dispatch after a local timeout, shutdown, or
-    /// matching typed outbound-failure event.
+    /// Consume and clear the exact active upstream dispatch after a local timeout or shutdown.
+    /// Typed outbound failures remain diagnostic-only; the fixed local deadline is authoritative.
     ///
     /// # Errors
     ///
@@ -859,14 +882,16 @@ fn upstream_target_and_family(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use libp2p::{
-        Multiaddr,
-        core::{ConnectedPoint, Endpoint, transport::PortUse},
-        identity,
+        Multiaddr, Swarm, Transport as _,
+        core::{ConnectedPoint, Endpoint, transport::MemoryTransport, transport::PortUse, upgrade},
+        identity, noise, request_response,
         swarm::{
             AddressChange, ConnectionClosed, FromSwarm, NetworkBehaviour, SwarmEvent,
             behaviour::ConnectionEstablished,
         },
+        yamux,
     };
     use volparossa_protocol::{
         PROTOCOL_VERSION, PreselectionActorBinding, PreselectionObservationReceipt,
@@ -874,7 +899,13 @@ mod tests {
         node_id_from_public_key, sign_control_message_with,
     };
 
-    use crate::{BehaviourEvent, DiscoveryProtocolRoles};
+    use crate::{
+        BehaviourEvent, DiscoveryEvent, DiscoveryProtocolRoles,
+        preselection_wire::{
+            ClientPreselectionObservationCodec, UpstreamPreselectionObservationCodec,
+            client_preselection_observation_behaviour, upstream_preselection_observation_behaviour,
+        },
+    };
 
     const CONNECTION: usize = 41;
 
@@ -890,6 +921,98 @@ mod tests {
 
     fn now_ms() -> u64 {
         system_unix_millis().expect("test wall clock")
+    }
+
+    async fn next_other(service: &mut DiscoveryService) -> SwarmEvent<BehaviourEvent> {
+        loop {
+            if let DiscoveryEvent::Other(event) = service.next_event().await {
+                return event;
+            }
+        }
+    }
+
+    fn custom_client_preselection_swarm(
+        keypair: &identity::Keypair,
+    ) -> Swarm<request_response::Behaviour<ClientPreselectionObservationCodec>> {
+        let peer_id = keypair.public().to_peer_id();
+        let transport = MemoryTransport::default()
+            .upgrade(upgrade::Version::V1)
+            .authenticate(noise::Config::new(keypair).expect("custom client noise"))
+            .multiplex(yamux::Config::default())
+            .boxed();
+        Swarm::new(
+            transport,
+            client_preselection_observation_behaviour(Some(
+                request_response::ProtocolSupport::Full,
+            )),
+            peer_id,
+            libp2p::swarm::Config::with_tokio_executor(),
+        )
+    }
+
+    fn custom_upstream_preselection_swarm(
+        keypair: &identity::Keypair,
+    ) -> Swarm<request_response::Behaviour<UpstreamPreselectionObservationCodec>> {
+        let peer_id = keypair.public().to_peer_id();
+        let transport = MemoryTransport::default()
+            .upgrade(upgrade::Version::V1)
+            .authenticate(noise::Config::new(keypair).expect("custom upstream noise"))
+            .multiplex(yamux::Config::default())
+            .boxed();
+        Swarm::new(
+            transport,
+            upstream_preselection_observation_behaviour(Some(
+                request_response::ProtocolSupport::Full,
+            )),
+            peer_id,
+            libp2p::swarm::Config::with_tokio_executor(),
+        )
+    }
+
+    async fn connect_custom_behaviour<B>(custom: &mut Swarm<B>, service: &mut DiscoveryService)
+    where
+        B: NetworkBehaviour,
+    {
+        service
+            .listen_on("/memory/0".parse().expect("custom memory address"))
+            .expect("custom memory listener");
+        let address = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let SwarmEvent::NewListenAddr { address, .. } = next_other(service).await {
+                    break address;
+                }
+            }
+        })
+        .await
+        .expect("custom listener timeout");
+        let service_peer = *service.local_peer_id();
+        custom
+            .dial(
+                address
+                    .with_p2p(service_peer)
+                    .expect("peer-bound custom address"),
+            )
+            .expect("custom dial");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut custom_connected = false;
+            let mut service_connected = false;
+            while !custom_connected || !service_connected {
+                tokio::select! {
+                    event = custom.select_next_some() => {
+                        custom_connected |= matches!(
+                            event,
+                            SwarmEvent::ConnectionEstablished { peer_id, .. }
+                                if peer_id == service_peer
+                        );
+                    }
+                    event = next_other(service) => {
+                        service_connected |= matches!(event, SwarmEvent::ConnectionEstablished { .. });
+                    }
+                }
+            }
+        })
+        .await
+        .expect("custom connection timeout");
     }
 
     fn raw_public_key(key: &identity::Keypair) -> [u8; 32] {
@@ -1118,7 +1241,7 @@ mod tests {
             .expect("memory listener");
         let address = tokio::time::timeout(TEST_TIMEOUT, async {
             loop {
-                if let SwarmEvent::NewListenAddr { address, .. } = listening.next_event().await {
+                if let SwarmEvent::NewListenAddr { address, .. } = next_other(listening).await {
                     break address;
                 }
             }
@@ -1135,14 +1258,14 @@ mod tests {
             let mut listening_connected = false;
             while !dialing_connected || !listening_connected {
                 tokio::select! {
-                    event = dialing.next_event() => {
+                    event = next_other(dialing) => {
                         dialing_connected |= matches!(
                             event,
                             SwarmEvent::ConnectionEstablished { peer_id, .. }
                                 if peer_id == listening_peer
                         );
                     }
-                    event = listening.next_event() => {
+                    event = next_other(listening) => {
                         listening_connected |= matches!(
                             event,
                             SwarmEvent::ConnectionEstablished { peer_id, .. }
@@ -1154,6 +1277,61 @@ mod tests {
         })
         .await
         .expect("memory connection timeout");
+    }
+
+    async fn connect_memory_and_capture_dialer_lineage(
+        dialing: &mut DiscoveryService,
+        listening: &mut DiscoveryService,
+    ) -> (ConnectionId, ConnectedPoint) {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+        listening
+            .listen_on("/memory/0".parse().expect("memory address"))
+            .expect("memory listener");
+        let address = tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                if let SwarmEvent::NewListenAddr { address, .. } = next_other(listening).await {
+                    break address;
+                }
+            }
+        })
+        .await
+        .expect("memory listener timeout");
+        let listening_peer = *listening.local_peer_id();
+        let dialing_peer = *dialing.local_peer_id();
+        dialing
+            .dial_peerlink(&crate::PeerLink::new(listening_peer, address).expect("memory peerlink"))
+            .expect("memory dial");
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let mut dialing_lineage = None;
+            let mut listening_connected = false;
+            while dialing_lineage.is_none() || !listening_connected {
+                tokio::select! {
+                    event = next_other(dialing) => {
+                        if let SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } = event
+                        {
+                            if peer_id == listening_peer {
+                                dialing_lineage = Some((connection_id, endpoint));
+                            }
+                        }
+                    }
+                    event = next_other(listening) => {
+                        listening_connected |= matches!(
+                            event,
+                            SwarmEvent::ConnectionEstablished { peer_id, .. }
+                                if peer_id == dialing_peer
+                        );
+                    }
+                }
+            }
+            dialing_lineage.expect("dialer lineage")
+        })
+        .await
+        .expect("memory connection timeout")
     }
 
     async fn exchange_client_response(
@@ -1175,7 +1353,7 @@ mod tests {
             let mut response = Some(response);
             loop {
                 tokio::select! {
-                    event = client.next_event() => {
+                    event = client.next_internal_event() => {
                         match event {
                             SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                                 request_response::Event::Message {
@@ -1249,7 +1427,7 @@ mod tests {
             let mut response = Some(response);
             loop {
                 tokio::select! {
-                    event = relay.next_event() => {
+                    event = relay.next_internal_event() => {
                         match event {
                             SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservationUpstream(
                                 request_response::Event::Message {
@@ -1361,7 +1539,6 @@ mod tests {
             .expect("dispatch");
         assert_eq!(dispatch.expected_peer_id, peer);
         assert_eq!(dispatch.request_hash, expected_hash);
-        assert!(dispatch.matches_request_id(dispatch.request_id));
         assert!(dispatch.deadline > dispatch.sent_at);
         assert!(
             dispatch.deadline
@@ -1668,8 +1845,8 @@ mod tests {
             .preselection_observation
             .send_request(&peer, unrelated.request);
         let request_id = wrong_id.request_id;
-        assert!(wrong_id.matches_request_id(request_id));
-        assert!(!wrong_id.matches_request_id(unrelated_id));
+        assert_eq!(wrong_id.request_id, request_id);
+        assert_ne!(wrong_id.request_id, unrelated_id);
         let sent_at = wrong_id.sent_at;
         assert!(matches!(
             wrong_id_service.bind_preselection_observation_response_at(
@@ -1825,17 +2002,17 @@ mod tests {
         let dispatch = &transaction.dispatch;
         let request_id = dispatch.request_id;
         let sent_at = dispatch.sent_at;
-        let event = request_response::Event::Message {
-            peer,
-            connection_id: ConnectionId::new_unchecked(CONNECTION),
-            message: request_response::Message::Response {
+        let arrival = service
+            .seal_client_preselection_response(
+                peer,
+                ConnectionId::new_unchecked(CONNECTION),
                 request_id,
                 response,
-            },
-        };
+            )
+            .expect("service-sealed arrival");
         let (context, bound, returned_response) = service
-            .bind_preselection_observation_response_with_context(transaction, event)
-            .expect("typed event binding");
+            .bind_preselection_observation_response_with_context(transaction, arrival)
+            .expect("sealed arrival binding");
         assert_eq!(&*context.candidate_snapshot_marker, &[41, 42, 43]);
         assert_eq!(returned_response.as_encoded(), expected_response);
         assert_eq!(bound.request_hash, expected_hash);
@@ -1852,18 +2029,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_non_response_event_is_rejected_and_leaves_the_slot_fail_closed() {
-        let (mut service, _, relay, peer, _) = direct_context();
+    async fn cross_service_sealed_arrival_is_rejected_and_leaves_the_slot_fail_closed() {
+        let (mut service, relay_key, relay, peer, _) = direct_context();
         let dispatch = dispatch_direct(&mut service, relay.clone());
         let request_id = dispatch.request_id;
-        let event = request_response::Event::OutboundFailure {
+        let fixture = client_request(
+            PreselectionObservationRole::Relay,
+            relay.clone(),
+            None,
+            ObservationAddressFamily::Ipv4,
+            now_ms(),
+        );
+        let response = signed_response(&fixture, &relay_key, now_ms());
+        let mut sibling = client_service(identity::Keypair::generate_ed25519());
+        established(
+            &mut sibling,
             peer,
-            connection_id: ConnectionId::new_unchecked(CONNECTION),
-            request_id,
-            error: request_response::OutboundFailure::Timeout,
-        };
+            CONNECTION,
+            &dialer("/ip4/1.1.1.8/tcp/443"),
+            0,
+        );
+        let sibling_dispatch = dispatch_direct(&mut sibling, relay.clone());
+        assert_eq!(sibling_dispatch.request_id, request_id);
+        let arrival = sibling
+            .seal_client_preselection_response(
+                peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                request_id,
+                response,
+            )
+            .expect("sibling-sealed arrival");
         assert!(matches!(
-            service.bind_preselection_observation_response(dispatch, event),
+            service.bind_preselection_observation_response(dispatch, arrival),
             Err(PreselectionDispatchError::Correlation)
         ));
         let blocked = client_request(
@@ -1877,6 +2074,370 @@ mod tests {
             service.dispatch_preselection_observation(
                 blocked.request,
                 Instant::now() + Duration::from_secs(30)
+            ),
+            Err(PreselectionDispatchError::Busy)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_responses_are_dropped_before_sealing_on_both_hops() {
+        let (mut client, relay_key, relay_binding, peer, _) = direct_context();
+        let first = dispatch_direct(&mut client, relay_binding.clone());
+        let stale_request_id = first.request_id;
+        client
+            .cancel_preselection_observation_dispatch(first)
+            .expect("cancel first client dispatch");
+        let replacement = dispatch_direct(&mut client, relay_binding.clone());
+        assert_ne!(replacement.request_id, stale_request_id);
+        let fixture = client_request(
+            PreselectionObservationRole::Relay,
+            relay_binding,
+            None,
+            ObservationAddressFamily::Ipv4,
+            now_ms(),
+        );
+        let stale_response = signed_response(&fixture, &relay_key, now_ms());
+        let stale_event = SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
+            request_response::Event::Message {
+                peer,
+                connection_id: ConnectionId::new_unchecked(CONNECTION),
+                message: request_response::Message::Response {
+                    request_id: stale_request_id,
+                    response: stale_response,
+                },
+            },
+        ));
+        assert!(client.sanitize_public_event(stale_event).is_none());
+        client
+            .cancel_preselection_observation_dispatch(replacement)
+            .expect("replacement client dispatch remains active");
+
+        let created_at_ms = now_ms();
+        let control_key = identity::Keypair::generate_ed25519();
+        let exit_key = identity::Keypair::generate_ed25519();
+        let exit_peer = exit_key.public().to_peer_id();
+        let mut control = relay_service(control_key.clone());
+        established(
+            &mut control,
+            exit_peer,
+            CONNECTION,
+            &dialer("/ip4/9.9.9.9/tcp/443"),
+            0,
+        );
+        let forwarded = client_request(
+            PreselectionObservationRole::Exit,
+            actor(&exit_key, 70, created_at_ms),
+            Some(actor(&control_key, 71, created_at_ms)),
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+        let first = control
+            .dispatch_preselection_observation_upstream(
+                upstream_request(&forwarded),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("first upstream dispatch");
+        let stale_request_id = first.request_id;
+        control
+            .cancel_preselection_observation_upstream_dispatch(first)
+            .expect("cancel first upstream dispatch");
+        let replacement = control
+            .dispatch_preselection_observation_upstream(
+                upstream_request(&forwarded),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("replacement upstream dispatch");
+        assert_ne!(replacement.request_id, stale_request_id);
+        let stale_response = signed_upstream_response(&forwarded, &exit_key, now_ms());
+        let stale_event = SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservationUpstream(
+            request_response::Event::Message {
+                peer: exit_peer,
+                connection_id: ConnectionId::new_unchecked(CONNECTION),
+                message: request_response::Message::Response {
+                    request_id: stale_request_id,
+                    response: stale_response,
+                },
+            },
+        ));
+        assert!(control.sanitize_public_event(stale_event).is_none());
+        control
+            .cancel_preselection_observation_upstream_dispatch(replacement)
+            .expect("replacement upstream dispatch remains active");
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real independent client-behaviour collision and transplant proof"
+    )]
+    async fn independent_client_behaviour_same_id_response_cannot_be_transplanted() {
+        let (mut origin, relay_key, relay_binding, relay_peer, _) = direct_context();
+        let fixture = client_request(
+            PreselectionObservationRole::Relay,
+            relay_binding.clone(),
+            None,
+            ObservationAddressFamily::Ipv4,
+            now_ms(),
+        );
+        let custom_request =
+            ClientPreselectionObservationRequest::from_canonical(fixture.encoded.clone())
+                .expect("custom client request");
+        let response = signed_response(&fixture, &relay_key, now_ms());
+        let dispatch = origin
+            .dispatch_preselection_observation(
+                fixture.request,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("origin client dispatch");
+
+        let custom_key = identity::Keypair::generate_ed25519();
+        let custom_peer = custom_key.public().to_peer_id();
+        let mut custom = custom_client_preselection_swarm(&custom_key);
+        let mut responder = relay_service(relay_key);
+        connect_custom_behaviour(&mut custom, &mut responder).await;
+        let custom_request_id = custom
+            .behaviour_mut()
+            .send_request(&relay_peer, custom_request);
+        assert_eq!(
+            custom_request_id, dispatch.request_id,
+            "the independent behaviour deliberately collides in its local ID namespace"
+        );
+
+        let (peer, connection_id, request_id, response) =
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let mut response = Some(response);
+                loop {
+                    tokio::select! {
+                        event = custom.select_next_some() => {
+                            match event {
+                                SwarmEvent::Behaviour(request_response::Event::Message {
+                                    peer,
+                                    connection_id,
+                                    message: request_response::Message::Response {
+                                        request_id,
+                                        response,
+                                    },
+                                }) if request_id == custom_request_id => {
+                                    break (peer, connection_id, request_id, response);
+                                }
+                                SwarmEvent::Behaviour(request_response::Event::OutboundFailure {
+                                    request_id,
+                                    error,
+                                    ..
+                                }) if request_id == custom_request_id => {
+                                    panic!("custom client response failed: {error}");
+                                }
+                                _ => {}
+                            }
+                        }
+                        event = responder.next_internal_event() => {
+                            if let SwarmEvent::Behaviour(
+                                BehaviourEvent::PreselectionObservation(
+                                    request_response::Event::Message {
+                                        peer,
+                                        message: request_response::Message::Request {
+                                            channel,
+                                            ..
+                                        },
+                                        ..
+                                    },
+                                ),
+                            ) = event
+                            {
+                                assert_eq!(peer, custom_peer);
+                                responder
+                                    .swarm
+                                    .behaviour_mut()
+                                    .preselection_observation
+                                    .send_response(channel, response.take().expect("one response"))
+                                    .expect("custom client response");
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("custom client exchange timeout");
+        assert_eq!(peer, relay_peer);
+        assert_eq!(request_id, dispatch.request_id);
+
+        let mut foreign_service = client_service(identity::Keypair::generate_ed25519());
+        established(
+            &mut foreign_service,
+            relay_peer,
+            CONNECTION,
+            &dialer("/ip4/1.1.1.8/tcp/443"),
+            0,
+        );
+        let foreign_dispatch = dispatch_direct(&mut foreign_service, relay_binding.clone());
+        assert_eq!(foreign_dispatch.request_id, request_id);
+        let foreign_arrival = foreign_service
+            .seal_client_preselection_response(peer, connection_id, request_id, response)
+            .expect("foreign client arrival");
+        assert!(matches!(
+            origin.bind_preselection_observation_response(dispatch, foreign_arrival),
+            Err(PreselectionDispatchError::Correlation)
+        ));
+        let blocked = client_request(
+            PreselectionObservationRole::Relay,
+            relay_binding,
+            None,
+            ObservationAddressFamily::Ipv4,
+            now_ms(),
+        );
+        assert!(matches!(
+            origin.dispatch_preselection_observation(
+                blocked.request,
+                Instant::now() + Duration::from_secs(30),
+            ),
+            Err(PreselectionDispatchError::Busy)
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real independent upstream-behaviour collision and transplant proof"
+    )]
+    async fn independent_upstream_behaviour_same_id_response_cannot_be_transplanted() {
+        let created_at_ms = now_ms();
+        let relay_key = identity::Keypair::generate_ed25519();
+        let exit_key = identity::Keypair::generate_ed25519();
+        let exit_peer = exit_key.public().to_peer_id();
+        let exit_binding = actor(&exit_key, 63, created_at_ms);
+        let relay_binding = actor(&relay_key, 64, created_at_ms);
+        let fixture = client_request(
+            PreselectionObservationRole::Exit,
+            exit_binding,
+            Some(relay_binding),
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+        let custom_request = upstream_request(&fixture);
+        let response = signed_upstream_response(&fixture, &exit_key, now_ms());
+        let mut origin = relay_service(relay_key.clone());
+        established(
+            &mut origin,
+            exit_peer,
+            CONNECTION,
+            &dialer("/ip4/9.9.9.9/tcp/443"),
+            0,
+        );
+        let dispatch = origin
+            .dispatch_preselection_observation_upstream(
+                upstream_request(&fixture),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("origin upstream dispatch");
+
+        let custom_peer = relay_key.public().to_peer_id();
+        let mut custom = custom_upstream_preselection_swarm(&relay_key);
+        let mut responder = DiscoveryService::new_with_protocol_roles(
+            exit_key.clone(),
+            DiscoveryProtocolRoles::new(false, false, true),
+        )
+        .expect("custom upstream responder");
+        connect_custom_behaviour(&mut custom, &mut responder).await;
+        let custom_request_id = custom
+            .behaviour_mut()
+            .send_request(&exit_peer, custom_request);
+        assert_eq!(
+            custom_request_id, dispatch.request_id,
+            "the independent upstream behaviour deliberately collides in its local ID namespace"
+        );
+
+        let (peer, connection_id, request_id, response) =
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let mut response = Some(response);
+                loop {
+                    tokio::select! {
+                        event = custom.select_next_some() => {
+                            match event {
+                                SwarmEvent::Behaviour(request_response::Event::Message {
+                                    peer,
+                                    connection_id,
+                                    message: request_response::Message::Response {
+                                        request_id,
+                                        response,
+                                    },
+                                }) if request_id == custom_request_id => {
+                                    break (peer, connection_id, request_id, response);
+                                }
+                                SwarmEvent::Behaviour(request_response::Event::OutboundFailure {
+                                    request_id,
+                                    error,
+                                    ..
+                                }) if request_id == custom_request_id => {
+                                    panic!("custom upstream response failed: {error}");
+                                }
+                                _ => {}
+                            }
+                        }
+                        event = responder.next_internal_event() => {
+                            if let SwarmEvent::Behaviour(
+                                BehaviourEvent::PreselectionObservationUpstream(
+                                    request_response::Event::Message {
+                                        peer,
+                                        message: request_response::Message::Request {
+                                            channel,
+                                            ..
+                                        },
+                                        ..
+                                    },
+                                ),
+                            ) = event
+                            {
+                                assert_eq!(peer, custom_peer);
+                                responder
+                                    .swarm
+                                    .behaviour_mut()
+                                    .preselection_observation_upstream
+                                    .send_response(channel, response.take().expect("one response"))
+                                    .expect("custom upstream response");
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("custom upstream exchange timeout");
+        assert_eq!(peer, exit_peer);
+        assert_eq!(request_id, dispatch.request_id);
+
+        let foreign_key = identity::Keypair::generate_ed25519();
+        let mut foreign_service = relay_service(foreign_key.clone());
+        established(
+            &mut foreign_service,
+            exit_peer,
+            CONNECTION,
+            &dialer("/ip4/9.9.9.9/tcp/443"),
+            0,
+        );
+        let foreign_fixture = client_request(
+            PreselectionObservationRole::Exit,
+            actor(&exit_key, 68, created_at_ms),
+            Some(actor(&foreign_key, 69, created_at_ms)),
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+        let foreign_dispatch = foreign_service
+            .dispatch_preselection_observation_upstream(
+                upstream_request(&foreign_fixture),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("foreign upstream dispatch");
+        assert_eq!(foreign_dispatch.request_id, request_id);
+        let foreign_arrival = foreign_service
+            .seal_upstream_preselection_response(peer, connection_id, request_id, response)
+            .expect("foreign upstream arrival");
+        assert!(matches!(
+            origin.bind_preselection_observation_upstream_response(dispatch, foreign_arrival),
+            Err(PreselectionDispatchError::Correlation)
+        ));
+        assert!(matches!(
+            origin.dispatch_preselection_observation_upstream(
+                upstream_request(&fixture),
+                Instant::now() + Duration::from_secs(30),
             ),
             Err(PreselectionDispatchError::Busy)
         ));
@@ -2009,6 +2570,164 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real two-hop public sealing and affine binding proof"
+    )]
+    async fn public_pump_seals_and_binds_both_real_response_hops() {
+        let client_key = identity::Keypair::generate_ed25519();
+        let relay_key = identity::Keypair::generate_ed25519();
+        let exit_key = identity::Keypair::generate_ed25519();
+        let mut client = client_service(client_key);
+        let mut relay = relay_service(relay_key.clone());
+        let (client_connection, client_old_endpoint) =
+            connect_memory_and_capture_dialer_lineage(&mut client, &mut relay).await;
+        let relay_peer = *relay.local_peer_id();
+        let client_public_endpoint = dialer("/ip4/1.1.1.8/tcp/443");
+        client
+            .swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::AddressChange(AddressChange {
+                peer_id: relay_peer,
+                connection_id: client_connection,
+                old: &client_old_endpoint,
+                new: &client_public_endpoint,
+            }));
+
+        let created_at_ms = now_ms();
+        let direct = client_request(
+            PreselectionObservationRole::Relay,
+            actor(&relay_key, 65, created_at_ms),
+            None,
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+        let direct_response = signed_response(&direct, &relay_key, now_ms());
+        let direct_dispatch = client
+            .dispatch_preselection_observation(
+                direct.request,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("real direct dispatch");
+        let direct_arrival = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut response = Some(direct_response);
+            loop {
+                tokio::select! {
+                    event = client.next_event() => {
+                        match event {
+                            DiscoveryEvent::ClientPreselectionResponse(arrival) => break arrival,
+                            DiscoveryEvent::Other(SwarmEvent::Behaviour(
+                                BehaviourEvent::PreselectionObservation(
+                                    request_response::Event::OutboundFailure { error, .. },
+                                ),
+                            )) => panic!("real direct response failed: {error}"),
+                            _ => {}
+                        }
+                    }
+                    event = relay.next_internal_event() => {
+                        if let SwarmEvent::Behaviour(
+                            BehaviourEvent::PreselectionObservation(
+                                request_response::Event::Message {
+                                    message: request_response::Message::Request { channel, .. },
+                                    ..
+                                },
+                            ),
+                        ) = event
+                        {
+                            relay
+                                .swarm
+                                .behaviour_mut()
+                                .preselection_observation
+                                .send_response(channel, response.take().expect("one direct response"))
+                                .expect("direct response channel");
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("sealed direct arrival timeout");
+        let (_direct_bound, _direct_response) = client
+            .bind_preselection_observation_response(direct_dispatch, direct_arrival)
+            .expect("bind sealed direct arrival");
+
+        let mut exit = DiscoveryService::new_with_protocol_roles(
+            exit_key.clone(),
+            DiscoveryProtocolRoles::new(false, false, true),
+        )
+        .expect("exit discovery");
+        let (relay_connection, relay_old_endpoint) =
+            connect_memory_and_capture_dialer_lineage(&mut relay, &mut exit).await;
+        let exit_peer = *exit.local_peer_id();
+        let relay_public_endpoint = dialer("/ip4/9.9.9.9/tcp/443");
+        relay
+            .swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::AddressChange(AddressChange {
+                peer_id: exit_peer,
+                connection_id: relay_connection,
+                old: &relay_old_endpoint,
+                new: &relay_public_endpoint,
+            }));
+        let forwarded = client_request(
+            PreselectionObservationRole::Exit,
+            actor(&exit_key, 66, created_at_ms),
+            Some(actor(&relay_key, 67, created_at_ms)),
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+        let upstream_response = signed_upstream_response(&forwarded, &exit_key, now_ms());
+        let upstream_dispatch = relay
+            .dispatch_preselection_observation_upstream(
+                upstream_request(&forwarded),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("real upstream dispatch");
+        let upstream_arrival = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut response = Some(upstream_response);
+            loop {
+                tokio::select! {
+                    event = relay.next_event() => {
+                        match event {
+                            DiscoveryEvent::UpstreamPreselectionResponse(arrival) => break arrival,
+                            DiscoveryEvent::Other(SwarmEvent::Behaviour(
+                                BehaviourEvent::PreselectionObservationUpstream(
+                                    request_response::Event::OutboundFailure { error, .. },
+                                ),
+                            )) => panic!("real upstream response failed: {error}"),
+                            _ => {}
+                        }
+                    }
+                    event = exit.next_internal_event() => {
+                        if let SwarmEvent::Behaviour(
+                            BehaviourEvent::PreselectionObservationUpstream(
+                                request_response::Event::Message {
+                                    message: request_response::Message::Request { channel, .. },
+                                    ..
+                                },
+                            ),
+                        ) = event
+                        {
+                            exit.swarm
+                                .behaviour_mut()
+                                .preselection_observation_upstream
+                                .send_response(channel, response.take().expect("one upstream response"))
+                                .expect("upstream response channel");
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("sealed upstream arrival timeout");
+        let (_upstream_bound, _upstream_response) = relay
+            .bind_preselection_observation_upstream_response(upstream_dispatch, upstream_arrival)
+            .expect("bind sealed upstream arrival");
+    }
+
+    #[tokio::test]
     async fn public_event_pump_closes_direct_request_without_exposing_its_channel() {
         let client_key = identity::Keypair::generate_ed25519();
         let relay_key = identity::Keypair::generate_ed25519();
@@ -2035,9 +2754,9 @@ mod tests {
             loop {
                 tokio::select! {
                     event = relay.next_event() => {
-                        assert!(!crate::inbound_preselection_request(&event));
+                        assert!(matches!(event, DiscoveryEvent::Other(_)));
                     }
-                    event = client.next_event() => {
+                    event = next_other(&mut client) => {
                         match event {
                             SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                                 request_response::Event::OutboundFailure {
@@ -2105,9 +2824,9 @@ mod tests {
                         exit_public_key,
                         &mut signer,
                     ) => {
-                        assert!(!crate::inbound_preselection_request(&event));
+                        assert!(matches!(event, DiscoveryEvent::Other(_)));
                     }
-                    event = relay.next_event() => {
+                    event = next_other(&mut relay) => {
                         match event {
                             SwarmEvent::Behaviour(
                                 BehaviourEvent::PreselectionObservationUpstream(
@@ -2181,8 +2900,6 @@ mod tests {
         assert_eq!(upstream.expected_peer_id, exit_peer);
         assert_eq!(upstream.request_hash, expected_hash);
         assert_eq!(upstream.deadline, absolute_deadline);
-        assert!(upstream.matches_request_id(upstream.request_id));
-
         let busy = service.dispatch_preselection_observation_upstream(
             upstream_request(&fixture),
             Instant::now() + Duration::from_secs(1),
@@ -2302,17 +3019,17 @@ mod tests {
         let dispatch = &transaction.dispatch;
         let request_id = dispatch.request_id;
         let sent_at = dispatch.sent_at;
-        let event = request_response::Event::Message {
-            peer: exit_peer,
-            connection_id: ConnectionId::new_unchecked(CONNECTION),
-            message: request_response::Message::Response {
+        let arrival = service
+            .seal_upstream_preselection_response(
+                exit_peer,
+                ConnectionId::new_unchecked(CONNECTION),
                 request_id,
                 response,
-            },
-        };
+            )
+            .expect("service-sealed upstream arrival");
         let (context, bound, returned_response) = service
-            .bind_preselection_observation_upstream_response_with_context(transaction, event)
-            .expect("typed upstream binding");
+            .bind_preselection_observation_upstream_response_with_context(transaction, arrival)
+            .expect("sealed upstream binding");
         assert_eq!(&*context.candidate_snapshot_marker, &[51, 52, 53]);
         assert_eq!(returned_response.as_encoded(), expected_response);
         assert_eq!(bound.request_hash, expected_hash);
@@ -2550,6 +3267,13 @@ mod tests {
         assert_eq!(
             compact(item_body(
                 production,
+                "pub struct ClientPreselectionResponseArrival {"
+            )),
+            "peer:PeerId,connection_id:ConnectionId,request_id:OutboundRequestId,response:ClientPreselectionObservationResponse,instance:Arc<()>,arrived_at_mono:Instant,arrived_at_unix_ms:u64,"
+        );
+        assert_eq!(
+            compact(item_body(
+                production,
                 "pub struct UpstreamPreselectionDispatch {"
             )),
             "request_id:OutboundRequestId,request_hash:[u8;32],expected_peer_id:PeerId,instance:Arc<()>,sent_at:Instant,deadline:Instant,witness:ConnectionWitness,"
@@ -2568,6 +3292,13 @@ mod tests {
             )),
             "dispatch:UpstreamPreselectionDispatch,context:Context,"
         );
+        assert_eq!(
+            compact(item_body(
+                production,
+                "pub struct UpstreamPreselectionResponseArrival {"
+            )),
+            "peer:PeerId,connection_id:ConnectionId,request_id:OutboundRequestId,response:UpstreamPreselectionObservationResponse,instance:Arc<()>,arrived_at_mono:Instant,arrived_at_unix_ms:u64,"
+        );
     }
 
     fn assert_affine_token_surface(production: &str) {
@@ -2582,59 +3313,22 @@ mod tests {
         for token in [
             "ClientPreselectionDispatch",
             "ClientPreselectionTransaction",
+            "ClientPreselectionResponseArrival",
             "BoundClientPreselectionTransport",
             "UpstreamPreselectionDispatch",
             "UpstreamPreselectionTransaction",
+            "UpstreamPreselectionResponseArrival",
             "BoundUpstreamPreselectionTransport",
         ] {
             for trait_name in ["Clone", "Copy", "Debug", "Serialize", "Deserialize"] {
                 assert!(!production.contains(&format!("impl {trait_name} for {token}")));
             }
         }
-        let dispatch_api = production
-            .split("impl ClientPreselectionDispatch")
-            .nth(1)
-            .expect("dispatch impl")
-            .split("/// Affine client-hop dispatch carrying")
-            .next()
-            .expect("dispatch end");
-        assert_eq!(dispatch_api.matches("pub fn").count(), 1);
-        assert!(
-            compact(dispatch_api)
-                .contains("pubfnmatches_request_id(&self,event_request:OutboundRequestId)->bool")
-        );
-        assert!(!dispatch_api.contains("PeerId"));
-        let transaction_api = production
-            .split("impl<Context> ClientPreselectionTransaction<Context>")
-            .nth(1)
-            .expect("client transaction impl")
-            .split("/// Affine transport")
-            .next()
-            .expect("client transaction end");
-        assert_eq!(transaction_api.matches("pub fn").count(), 1);
-        assert!(!transaction_api.contains("context"));
-        let upstream_dispatch_api = production
-            .split("impl UpstreamPreselectionDispatch")
-            .nth(1)
-            .expect("upstream dispatch impl")
-            .split("/// Affine relay-to-exit dispatch carrying")
-            .next()
-            .expect("upstream dispatch end");
-        assert_eq!(upstream_dispatch_api.matches("pub fn").count(), 1);
-        assert!(
-            compact(upstream_dispatch_api)
-                .contains("pubfnmatches_request_id(&self,event_request:OutboundRequestId)->bool")
-        );
-        assert!(!upstream_dispatch_api.contains("PeerId"));
-        let upstream_transaction_api = production
-            .split("impl<Context> UpstreamPreselectionTransaction<Context>")
-            .nth(1)
-            .expect("upstream transaction impl")
-            .split("/// Affine transport observation bound to one exact exit response")
-            .next()
-            .expect("upstream transaction end");
-        assert_eq!(upstream_transaction_api.matches("pub fn").count(), 1);
-        assert!(!upstream_transaction_api.contains("context"));
+        assert!(!production.contains("impl ClientPreselectionDispatch"));
+        assert!(!production.contains("impl<Context> ClientPreselectionTransaction<Context>"));
+        assert!(!production.contains("impl UpstreamPreselectionDispatch"));
+        assert!(!production.contains("impl<Context> UpstreamPreselectionTransaction<Context>"));
+        assert!(!production.contains("matches_request_id"));
         assert!(!production.contains("impl BoundClientPreselectionTransport"));
         assert!(!production.contains("impl BoundUpstreamPreselectionTransport"));
         for forbidden in [
@@ -2704,13 +3398,12 @@ mod tests {
             .split("pub fn bind_preselection_observation_response(")
             .nth(1)
             .expect("public bind")
-            .split("fn bind_preselection_observation_response_at")
+            .split("pub(super) fn seal_client_preselection_response")
             .next()
             .expect("public bind end");
         let bind_signature = compact(public_bind.split('{').next().expect("bind signature"));
-        assert!(bind_signature.contains(
-            "event:request_response::Event<ClientPreselectionObservationRequest,ClientPreselectionObservationResponse,>"
-        ));
+        assert!(bind_signature.contains("arrival:ClientPreselectionResponseArrival"));
+        assert!(!bind_signature.contains("request_response::Event"));
         for forbidden in [
             "event_peer:",
             "event_connection:",
@@ -2719,8 +3412,18 @@ mod tests {
         ] {
             assert!(!bind_signature.contains(forbidden));
         }
-        assert_eq!(public_bind.matches("Instant::now()").count(), 1);
-        assert_eq!(public_bind.matches("system_unix_millis()").count(), 1);
+        assert_eq!(public_bind.matches("Arc::ptr_eq").count(), 3);
+        assert_eq!(public_bind.matches("Instant::now()").count(), 0);
+        assert_eq!(public_bind.matches("system_unix_millis()").count(), 0);
+        let seal = production
+            .split("pub(super) fn seal_client_preselection_response(")
+            .nth(1)
+            .expect("private client sealer")
+            .split("fn bind_preselection_observation_response_at")
+            .next()
+            .expect("client sealer end");
+        assert_eq!(seal.matches("Instant::now()").count(), 1);
+        assert_eq!(seal.matches("system_unix_millis()?").count(), 1);
         assert_eq!(
             production
                 .matches("fn bind_preselection_observation_response_at")
@@ -2769,13 +3472,12 @@ mod tests {
             .split("pub fn bind_preselection_observation_upstream_response(")
             .nth(1)
             .expect("upstream bind")
-            .split("fn bind_preselection_observation_upstream_response_at")
+            .split("pub(super) fn seal_upstream_preselection_response")
             .next()
             .expect("upstream public bind end");
         let upstream_bind_signature = compact(upstream_bind.split('{').next().expect("signature"));
-        assert!(upstream_bind_signature.contains(
-            "event:request_response::Event<UpstreamPreselectionObservationRequest,UpstreamPreselectionObservationResponse,>"
-        ));
+        assert!(upstream_bind_signature.contains("arrival:UpstreamPreselectionResponseArrival"));
+        assert!(!upstream_bind_signature.contains("request_response::Event"));
         for forbidden in [
             "event_peer:",
             "event_connection:",
@@ -2784,8 +3486,18 @@ mod tests {
         ] {
             assert!(!upstream_bind_signature.contains(forbidden));
         }
-        assert_eq!(upstream_bind.matches("Instant::now()").count(), 1);
-        assert_eq!(upstream_bind.matches("system_unix_millis()").count(), 1);
+        assert_eq!(upstream_bind.matches("Arc::ptr_eq").count(), 3);
+        assert_eq!(upstream_bind.matches("Instant::now()").count(), 0);
+        assert_eq!(upstream_bind.matches("system_unix_millis()").count(), 0);
+        let seal = production
+            .split("pub(super) fn seal_upstream_preselection_response(")
+            .nth(1)
+            .expect("private upstream sealer")
+            .split("/// Bind a matching upstream response")
+            .next()
+            .expect("upstream sealer end");
+        assert_eq!(seal.matches("Instant::now()").count(), 1);
+        assert_eq!(seal.matches("system_unix_millis()?").count(), 1);
     }
 
     fn assert_transaction_stops_before_application_owner(production: &str) {
@@ -2864,5 +3576,74 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn every_public_pump_seals_or_drops_preselection_messages() {
+        let root = include_str!("lib.rs");
+        let root_production = root
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("root production");
+        let next_event = root_production
+            .split("pub async fn next_event(")
+            .nth(1)
+            .expect("public event pump")
+            .split("/// Private event pump")
+            .next()
+            .expect("public event pump end");
+        assert!(compact(next_event).starts_with("&mutself)->DiscoveryEvent{"));
+        assert_eq!(
+            next_event
+                .matches("seal_client_preselection_response(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            next_event
+                .matches("seal_upstream_preselection_response(")
+                .count(),
+            1
+        );
+        assert!(next_event.contains("event if inbound_preselection_request(&event) => None"));
+        assert!(next_event.contains("event => Some(DiscoveryEvent::Other(event))"));
+
+        let responder = include_str!("preselection_responder.rs");
+        let responder_production = responder
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("responder production");
+        let responder_pump = responder_production
+            .split("pub async fn next_event_with_direct_preselection_responder")
+            .nth(1)
+            .expect("signed responder pump")
+            .split("/// Validate, connection-bind")
+            .next()
+            .expect("signed responder pump end");
+        assert!(responder_pump.contains(") -> crate::DiscoveryEvent"));
+        assert!(responder_pump.contains("self.sanitize_public_event(event)"));
+
+        let transaction = include_str!("preselection_transaction.rs");
+        let transaction_production = transaction
+            .split("#[cfg(test)]")
+            .next()
+            .expect("transaction production");
+        for public_bind in [
+            "pub fn bind_preselection_observation_response(",
+            "pub fn bind_preselection_observation_response_with_context<",
+            "pub fn bind_preselection_observation_upstream_response(",
+            "pub fn bind_preselection_observation_upstream_response_with_context<",
+        ] {
+            let signature = transaction_production
+                .split(public_bind)
+                .nth(1)
+                .expect("public sealed bind")
+                .split('{')
+                .next()
+                .expect("public sealed bind signature");
+            assert!(!signature.contains("request_response::Event"));
+            assert!(signature.contains("ResponseArrival"));
+        }
+        assert!(!transaction_production.contains("matches_request_id"));
     }
 }

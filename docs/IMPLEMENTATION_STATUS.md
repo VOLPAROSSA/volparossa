@@ -1044,22 +1044,28 @@ single clean-build A01--A15 run; the score is not a release claim.
   type/role/payload/envelope shape on read and write. Dormant client-hop and relay-to-exit service
   seams now have independent one-at-a-time slots. Each derives its target and family from the exact
   request, captures a connection witness immediately before its synchronous send, and can cancel or
-  bind a typed same-hop response event after internally stamping arrival. Upstream dispatch requires
+  bind an opaque same-hop response arrival sealed by the originating service's private event pump,
+  which stamps monotonic and wall arrival time before returning it. Upstream dispatch requires
   the forwarding control to be local and targets only the exit. Context-bound variants retain a
   non-cloned caller owner—suitable for the original candidate-snapshot attempt or downstream
-  request/channel—until that exact bind or cancellation. Binding rechecks the exact service,
-  request ID, peer, event-local connection, half-open deadline, uniqueness, generation and native
-  prefix; both affine bound results expose no field or decomposition. Drop, a non-response event,
-  unavailable pre-correlation wall time, or a service/ID/peer mismatch leaves that hop's slot
-  occupied fail closed. Exact correlation consumes it before later time or provenance checks. The
+  request/channel—until that exact bind or cancellation. Binding requires both affine values to
+  originate from the exact service and rechecks the private request ID, peer, event-local
+  connection, half-open deadline, uniqueness, generation and native prefix; dispatches,
+  transactions, arrivals and bound results expose no equality oracle, constructor, field or
+  decomposition. Drop, an unavailable arrival clock, or a service/ID/peer mismatch leaves that
+  hop's slot occupied fail closed. Exact correlation consumes it before later time or provenance
+  checks. The
   swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to
   `forwarded_control` and the actor to the local exit. These request predicates and raw response
   channels stay behind a private event pump: the ordinary public pump closes both inbound hops,
-  while the direct-responder pump internally consumes only direct Relay requests and closes
-  upstream requests unanswered. No public response-channel or preselection response-send API
-  exists. A separate production-compiled direct-Relay response poll
+  drops stale/unowned responses and seals only the exact active response into an opaque
+  instance-bound arrival, while the direct-responder pump
+  applies the same response sealing, internally consumes only direct Relay requests and closes
+  upstream requests unanswered. No public pump yields a raw preselection request or response
+  message, and no public raw-event bind, response-channel or preselection response-send API exists.
+  A separate production-compiled direct-Relay response poll
   owner obtains each typed inbound client-hop event directly from its own swarm, so the
   behaviour-local request ID,
   response channel and `ConnectionId` cannot be transplanted across service instances. It requires
@@ -1075,7 +1081,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   exhaustion, signer failure, stale authority and ambiguous lineage fail closed. A real two-swarm
   test proves that the originating response channel carries the exact signed receipt; companion
   transport regressions prove the public pumps expose no inbound channel and a sibling service
-  cannot answer the originating service's privately captured channel. It emits no
+  cannot answer the originating service's privately captured channel. A public real-swarm proof
+  binds both sealed response hops; separate independent client and upstream request-response
+  behaviours deliberately reproduce the same behaviour-local outbound ID, but their real response
+  cannot bind when sealed by another service. It emits no
   origin claim, RTT, capacity measurement, Fresh evidence, admission, reservation or route
   authority. The agent event loop does not call this responder yet, and the forwarded Exit upstream
   responder/control wrapper and signer are still absent. There is also no production root or

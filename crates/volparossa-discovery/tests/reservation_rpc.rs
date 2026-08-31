@@ -5,7 +5,7 @@ use std::time::Duration;
 use libp2p::{Multiaddr, identity, request_response, swarm::SwarmEvent};
 use tokio::time;
 use volparossa_discovery::{
-    BehaviourEvent, DatapathRelayOperation, DatapathRelayRequest, DiscoveryError,
+    BehaviourEvent, DatapathRelayOperation, DatapathRelayRequest, DiscoveryError, DiscoveryEvent,
     DiscoveryProtocolRoles, DiscoveryService, ExitForwardOperation, ExitForwardRequest,
     ExitForwardResponse, ForwardStatus, PeerLink,
 };
@@ -16,6 +16,14 @@ use volparossa_protocol::{
 
 const DEADLINE_MS: u64 = 1_700_000_012_000;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn next_other(service: &mut DiscoveryService) -> SwarmEvent<BehaviourEvent> {
+    loop {
+        if let DiscoveryEvent::Other(event) = service.next_event().await {
+            return event;
+        }
+    }
+}
 
 #[tokio::test]
 #[allow(
@@ -79,7 +87,7 @@ async fn exit_requests_cross_exactly_one_control_relay_without_direct_exit_fallb
     let response = time::timeout(TEST_TIMEOUT, async {
         loop {
             tokio::select! {
-                event = client.next_event() => {
+                event = next_other(&mut client) => {
                     match event {
                         SwarmEvent::Behaviour(BehaviourEvent::ExitForward(
                             request_response::Event::Message {
@@ -106,7 +114,7 @@ async fn exit_requests_cross_exactly_one_control_relay_without_direct_exit_fallb
                         _ => {}
                     }
                 }
-                event = relay.next_event() => {
+                event = next_other(&mut relay) => {
                     match event {
                         SwarmEvent::Behaviour(BehaviourEvent::ExitForward(
                             request_response::Event::Message {
@@ -161,7 +169,7 @@ async fn exit_requests_cross_exactly_one_control_relay_without_direct_exit_fallb
                         _ => {}
                     }
                 }
-                event = exit.next_event() => {
+                event = next_other(&mut exit) => {
                     if let SwarmEvent::Behaviour(BehaviourEvent::ExitForwardUpstream(
                         request_response::Event::Message {
                             peer,
@@ -244,7 +252,7 @@ async fn execute_probe_is_transport_valid_but_production_handler_is_unavailable(
     let response = time::timeout(TEST_TIMEOUT, async {
         loop {
             tokio::select! {
-                event = client.next_event() => {
+                event = next_other(&mut client) => {
                     match event {
                         SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
                             request_response::Event::Message {
@@ -271,7 +279,7 @@ async fn execute_probe_is_transport_valid_but_production_handler_is_unavailable(
                         _ => {}
                     }
                 }
-                event = relay.next_event() => {
+                event = next_other(&mut relay) => {
                     if matches!(
                         event,
                         SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
@@ -308,7 +316,7 @@ async fn connect(dialer: &mut DiscoveryService, listener: &mut DiscoveryService)
         .expect("memory listener");
     let address = time::timeout(TEST_TIMEOUT, async {
         loop {
-            if let SwarmEvent::NewListenAddr { address, .. } = listener.next_event().await {
+            if let SwarmEvent::NewListenAddr { address, .. } = next_other(listener).await {
                 break address;
             }
         }
@@ -327,7 +335,7 @@ async fn connect(dialer: &mut DiscoveryService, listener: &mut DiscoveryService)
         let mut listener_connected = false;
         while !dialer_connected || !listener_connected {
             tokio::select! {
-                event = dialer.next_event() => {
+                event = next_other(dialer) => {
                     if matches!(
                         event,
                         SwarmEvent::ConnectionEstablished { peer_id, .. }
@@ -336,7 +344,7 @@ async fn connect(dialer: &mut DiscoveryService, listener: &mut DiscoveryService)
                         dialer_connected = true;
                     }
                 }
-                event = listener.next_event() => {
+                event = next_other(listener) => {
                     if matches!(
                         event,
                         SwarmEvent::ConnectionEstablished { peer_id, .. }

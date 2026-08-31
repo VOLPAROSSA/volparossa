@@ -157,16 +157,20 @@ origin truth.
 A0 still has no production network owner, sampler, forwarded responder, or conversion into
 `FreshPeerEvidence`, `FreshEvidenceBatch`, or `CandidateEvidence`. Discovery composes
 request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
-dispatch one request, bind a typed matching response event to an internally timestamped current
-unique connection proof, or cancel that exact dispatch; upstream sending remains separate.
+dispatch one request, bind an opaque matching response arrival sealed and timestamped by the
+originating service's private pump to a current unique connection proof, or cancel that exact
+dispatch; upstream sending remains separate.
 
 Discovery now also contains a direct-Relay response poll seam, but the agent event loop does not
 call it yet. The poll owner obtains a typed inbound request directly from the same service's swarm;
 the raw behaviour-local request IDs, `ConnectionId` and response channel never cross its public
 caller boundary and therefore cannot be transplanted between service instances. The ordinary
 public event pump closes both client-hop and upstream inbound preselection channels without
-yielding them. The direct-responder pump consumes client-hop requests internally and also closes
-upstream requests because no upstream responder exists. It synchronously
+yielding them. It seals responses for the exact active outbound dispatch into opaque
+instance-bound arrival values before returning them and drops stale/unowned responses. The
+direct-responder pump consumes client-hop requests internally, applies the same response sealing,
+and also closes upstream requests because no upstream responder exists. No
+public pump yields a raw preselection request or response message. It synchronously
 requires the exact event `ConnectionId` to rebind a unique current authenticated peer/family
 witness. It then cryptographically re-verifies the exact currently served local Relay
 advertisement and its Peer/node/public-key identity, requires nonzero ASN, advertised
@@ -271,27 +275,31 @@ client hop derives the direct relay or forwarding control plus native family fro
 canonical request; the upstream hop requires the request's forwarding control to be local and
 derives only the exit plus family. Each requires one unique current direct connection, mints a
 generation-bound witness immediately before its synchronous libp2p send, binds only a typed
-same-hop response event, and applies the minimum of its fixed timeout, unchanged A0 expiry, and
+same-hop response arrival minted by the same service instance, and applies the minimum of its fixed timeout, unchanged A0 expiry, and
 caller deadline. Context-bound variants retain an arbitrary non-cloned caller owner—intended for
 the original candidate-snapshot attempt on the client and the original downstream channel/request
 owner at a control relay—and return it only after that exact bind or cancellation. This prevents a
 later owner from accidentally pairing a sibling response and snapshot without exposing the
 context during flight.
 
-Dropping a dispatch, a non-response event, unavailable pre-correlation wall time, or a
-cross-service, wrong-ID or wrong-peer event leaves that hop's slot occupied fail closed. After
+Dropping a dispatch or arrival, an unavailable arrival clock, or a cross-service, wrong-ID or
+wrong-peer arrival leaves that hop's slot occupied fail closed. After
 exact correlation the slot is consumed even when the subsequent time or connection-provenance
-check fails. Binding stamps local monotonic and wall time internally and rechecks the exact service
-instance, request ID, authenticated peer, event-local `ConnectionId`, deadline, uniqueness,
+check fails. The private pump stamps local monotonic and wall time at observation; binding rechecks
+that both affine values belong to the exact service instance plus the private request ID,
+authenticated peer, event-local `ConnectionId`, deadline, uniqueness,
 generation and native prefix. Both resulting proofs are completely opaque: they expose no prefix,
-address, ID, hash, time, getter, clone or decomposition surface. The swarm pump drops a
+address, ID, hash, time, getter, equality oracle, clone or decomposition surface. The swarm pump drops a
 still-current client-hop request unless it targets the local relay/control and its authenticated
 remote sender differs from both that local peer and the challenged actor. A0 deliberately contains
 no client identity, so this is not a claim that the sender is request-bound. Upstream, the pump
 instead requires `forwarded_control` to equal the authenticated relay and the actor to equal the
 local exit. Those predicates exist only inside the private raw transport pump. There is no public
-preselection response-channel or response-sending API; transport-only unit proofs use the private
-raw pump, and production upstream requests close unanswered until the missing Exit responder is
+raw-event bind, preselection response-channel or response-sending API; transport-only unit proofs
+use the private raw pump, while public real-swarm proofs bind both sealed response types.
+Independent client-hop and upstream request-response behaviours intentionally collide with the
+originating behaviour-local outbound ID, yet their real responses cannot bind when sealed by
+another service. Production upstream requests close unanswered until the missing Exit responder is
 implemented.
 
 A separate production-compiled direct-Relay poll owns each raw inbound client-hop event and its
