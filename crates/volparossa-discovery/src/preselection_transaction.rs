@@ -63,9 +63,6 @@ pub enum PreselectionDispatchError {
     /// The exact per-hop dispatch slot is already occupied.
     #[error("preselection dispatch slot is occupied")]
     Busy,
-    /// A typed response channel was already closed.
-    #[error("preselection response channel is closed")]
-    Response,
 }
 
 /// Affine owner of one exact sent client-hop request and its pre-send connection witness.
@@ -154,8 +151,9 @@ impl UpstreamPreselectionDispatch {
 
 /// Affine relay-to-exit dispatch carrying its exact caller-owned forwarding context.
 ///
-/// A relay can retain the originating client response channel and request owner in `Context`; the
-/// value is returned only after this exact upstream dispatch binds or cancels.
+/// A future service-owned upstream responder can retain its private originating request owner in
+/// `Context`; the value is returned only after this exact upstream dispatch binds or cancels. No
+/// public event pump yields the downstream response channel.
 #[must_use = "a context-bound upstream preselection transaction must be bound or cancelled through its originating DiscoveryService"]
 pub struct UpstreamPreselectionTransaction<Context> {
     dispatch: UpstreamPreselectionDispatch,
@@ -535,8 +533,9 @@ impl DiscoveryService {
 
     /// Send one upstream request while retaining an exact affine caller context.
     ///
-    /// The context can own the original inbound request/response channel and is returned only by
-    /// this exact upstream transaction's bind/cancel API.
+    /// The context can own future private responder state and is returned only by this exact
+    /// upstream transaction's bind/cancel API. No public event pump supplies an inbound response
+    /// channel to this method.
     ///
     /// # Errors
     ///
@@ -715,50 +714,6 @@ impl DiscoveryService {
         let UpstreamPreselectionTransaction { dispatch, context } = transaction;
         self.cancel_preselection_observation_upstream_dispatch(dispatch)?;
         Ok(context)
-    }
-
-    /// Send one canonical relay response over an originating client response channel.
-    ///
-    /// This transport-only seam does not sign or verify the response.
-    ///
-    /// # Errors
-    ///
-    /// Returns a detail-free error for a disabled relay role or closed response channel.
-    pub fn send_preselection_observation_response(
-        &mut self,
-        channel: request_response::ResponseChannel<ClientPreselectionObservationResponse>,
-        response: ClientPreselectionObservationResponse,
-    ) -> Result<(), PreselectionDispatchError> {
-        if !self.protocol_roles.relay() {
-            return Err(PreselectionDispatchError::Role);
-        }
-        self.swarm
-            .behaviour_mut()
-            .preselection_observation
-            .send_response(channel, response)
-            .map_err(|_| PreselectionDispatchError::Response)
-    }
-
-    /// Send one canonical Exit receipt over an originating upstream response channel.
-    ///
-    /// This transport-only seam does not sign or verify the response.
-    ///
-    /// # Errors
-    ///
-    /// Returns a detail-free error for a disabled exit role or closed response channel.
-    pub fn send_preselection_observation_upstream_response(
-        &mut self,
-        channel: request_response::ResponseChannel<UpstreamPreselectionObservationResponse>,
-        response: UpstreamPreselectionObservationResponse,
-    ) -> Result<(), PreselectionDispatchError> {
-        if !self.protocol_roles.exit() {
-            return Err(PreselectionDispatchError::Role);
-        }
-        self.swarm
-            .behaviour_mut()
-            .preselection_observation_upstream
-            .send_response(channel, response)
-            .map_err(|_| PreselectionDispatchError::Response)
     }
 }
 
@@ -1246,7 +1201,7 @@ mod tests {
                             _ => {}
                         }
                     }
-                    event = relay.next_event() => {
+                    event = relay.next_internal_event() => {
                         if let SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                             request_response::Event::Message {
                                 peer,
@@ -1261,10 +1216,10 @@ mod tests {
                             assert_eq!(peer, client_peer);
                             assert_eq!(request.as_encoded(), expected_request);
                             relay
-                                .send_preselection_observation_response(
-                                    channel,
-                                    response.take().expect("one response"),
-                                )
+                                .swarm
+                                .behaviour_mut()
+                                .preselection_observation
+                                .send_response(channel, response.take().expect("one response"))
                                 .expect("relay response");
                         }
                     }
@@ -1320,7 +1275,7 @@ mod tests {
                             _ => {}
                         }
                     }
-                    event = exit.next_event() => {
+                    event = exit.next_internal_event() => {
                         if let SwarmEvent::Behaviour(
                             BehaviourEvent::PreselectionObservationUpstream(
                                 request_response::Event::Message {
@@ -1336,11 +1291,11 @@ mod tests {
                         ) = event {
                             assert_eq!(peer, relay_peer);
                             assert_eq!(request.as_encoded(), expected_request);
-                            exit.send_preselection_observation_upstream_response(
-                                channel,
-                                response.take().expect("one response"),
-                            )
-                            .expect("exit response");
+                            exit.swarm
+                                .behaviour_mut()
+                                .preselection_observation_upstream
+                                .send_response(channel, response.take().expect("one response"))
+                                .expect("exit response");
                         }
                     }
                 }
@@ -2017,7 +1972,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_response_apis_complete_both_real_memory_transport_hops() {
+    async fn private_raw_transport_proof_completes_both_real_memory_hops() {
         let client_key = identity::Keypair::generate_ed25519();
         let relay_key = identity::Keypair::generate_ed25519();
         let exit_key = identity::Keypair::generate_ed25519();
@@ -2051,6 +2006,138 @@ mod tests {
         );
         let upstream_response = signed_upstream_response(&forwarded, &exit_key, now_ms());
         exchange_upstream_response(&mut relay, &mut exit, &forwarded, upstream_response).await;
+    }
+
+    #[tokio::test]
+    async fn public_event_pump_closes_direct_request_without_exposing_its_channel() {
+        let client_key = identity::Keypair::generate_ed25519();
+        let relay_key = identity::Keypair::generate_ed25519();
+        let mut client = client_service(client_key);
+        let mut relay = relay_service(relay_key.clone());
+        connect_memory(&mut client, &mut relay).await;
+
+        let created_at_ms = now_ms();
+        let fixture = client_request(
+            PreselectionObservationRole::Relay,
+            actor(&relay_key, 58, created_at_ms),
+            None,
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+        let relay_peer = *relay.local_peer_id();
+        let outbound = client
+            .swarm
+            .behaviour_mut()
+            .preselection_observation
+            .send_request(&relay_peer, fixture.request);
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = relay.next_event() => {
+                        assert!(!crate::inbound_preselection_request(&event));
+                    }
+                    event = client.next_event() => {
+                        match event {
+                            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
+                                request_response::Event::OutboundFailure {
+                                    request_id,
+                                    ..
+                                },
+                            )) if request_id == outbound => break,
+                            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
+                                request_response::Event::Message {
+                                    message: request_response::Message::Response {
+                                        request_id,
+                                        ..
+                                    },
+                                    ..
+                                },
+                            )) if request_id == outbound => {
+                                panic!("public pump unexpectedly permitted a direct response")
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("public direct-request omission timeout");
+    }
+
+    #[tokio::test]
+    async fn direct_responder_pump_closes_upstream_request_without_exposing_its_channel() {
+        let relay_key = identity::Keypair::generate_ed25519();
+        let exit_key = identity::Keypair::generate_ed25519();
+        let exit_public_key = raw_public_key(&exit_key);
+        let mut relay = relay_service(relay_key.clone());
+        let mut exit = DiscoveryService::new_with_protocol_roles(
+            exit_key.clone(),
+            DiscoveryProtocolRoles::new(false, false, true),
+        )
+        .expect("exit discovery");
+        connect_memory(&mut relay, &mut exit).await;
+
+        let created_at_ms = now_ms();
+        let fixture = client_request(
+            PreselectionObservationRole::Exit,
+            actor(&exit_key, 59, created_at_ms),
+            Some(actor(&relay_key, 60, created_at_ms)),
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+        let exit_peer = *exit.local_peer_id();
+        let outbound = relay
+            .swarm
+            .behaviour_mut()
+            .preselection_observation_upstream
+            .send_request(&exit_peer, upstream_request(&fixture));
+        let policy = crate::LocalPreselectionPolicy::new(1, [9; 32], created_at_ms + 60_000)
+            .expect("shaped policy");
+        let mut signer = |message: &[u8]| exit_key.sign(message).ok()?.try_into().ok();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = exit.next_event_with_direct_preselection_responder(
+                        policy,
+                        exit_public_key,
+                        &mut signer,
+                    ) => {
+                        assert!(!crate::inbound_preselection_request(&event));
+                    }
+                    event = relay.next_event() => {
+                        match event {
+                            SwarmEvent::Behaviour(
+                                BehaviourEvent::PreselectionObservationUpstream(
+                                    request_response::Event::OutboundFailure {
+                                        request_id,
+                                        ..
+                                    },
+                                ),
+                            ) if request_id == outbound => break,
+                            SwarmEvent::Behaviour(
+                                BehaviourEvent::PreselectionObservationUpstream(
+                                    request_response::Event::Message {
+                                        message: request_response::Message::Response {
+                                            request_id,
+                                            ..
+                                        },
+                                        ..
+                                    },
+                                ),
+                            ) if request_id == outbound => {
+                                panic!("direct-only pump unexpectedly permitted an upstream response")
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("public upstream-request omission timeout");
     }
 
     #[tokio::test]
@@ -2721,33 +2808,6 @@ mod tests {
         }
     }
 
-    fn assert_role_gated_response_contract(production: &str) {
-        let client = production
-            .split("pub fn send_preselection_observation_response(")
-            .nth(1)
-            .expect("client response")
-            .split("/// Send one canonical Exit receipt")
-            .next()
-            .expect("client response end");
-        let client_role = client
-            .find("if !self.protocol_roles.relay()")
-            .expect("relay role gate");
-        let client_send = client.find(".send_response(").expect("client send");
-        assert!(client_role < client_send);
-        assert!(client[..client_send].contains(".preselection_observation"));
-
-        let upstream = production
-            .split("pub fn send_preselection_observation_upstream_response(")
-            .nth(1)
-            .expect("upstream response");
-        let exit_role = upstream
-            .find("if !self.protocol_roles.exit()")
-            .expect("exit role gate");
-        let upstream_send = upstream.find(".send_response(").expect("upstream send");
-        assert!(exit_role < upstream_send);
-        assert!(upstream[..upstream_send].contains(".preselection_observation_upstream"));
-    }
-
     #[test]
     fn dispatch_and_bind_derive_every_authoritative_input_internally() {
         let production = include_str!("preselection_transaction.rs")
@@ -2756,7 +2816,10 @@ mod tests {
             .expect("production");
         assert_client_dispatch_and_bind_contract(production);
         assert_upstream_dispatch_and_bind_contract(production);
-        assert_role_gated_response_contract(production);
+        assert!(!production.contains("send_preselection_observation_response"));
+        assert!(!production.contains("send_preselection_observation_upstream_response"));
+        assert!(!production.contains("ResponseChannel"));
+        assert!(!production.contains(".send_response("));
         assert_transaction_stops_before_application_owner(production);
     }
 

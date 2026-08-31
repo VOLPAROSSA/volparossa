@@ -23,8 +23,9 @@ The current discovery crate composes:
 - canonical-byte request-response on `/volparossa/preselection-observation/4` for the
   client-to-control/direct-relay hop and `/volparossa/preselection-observation-upstream/4` for the
   control-relay-to-exit hop; both behaviours have independent dormant one-at-a-time affine
-  context/dispatch/bind/cancel seams and role-gated response-channel APIs, but neither hop has a
-  signer, application handler, or runtime caller;
+  context/dispatch/bind/cancel seams; public event pumps expose no inbound response channel, the
+  direct Relay has a dormant service-owned signer/responder, and the upstream Exit responder and
+  runtime/agent caller remain absent;
 - refusal-test constants, but no registered behaviour or fallback, for advertisement v1/v2/v3 and the
   retired direct reservation v2 identifiers; and
 - a process-local MemoryTransport used by hermetic swarm integration tests, not as a network or
@@ -153,15 +154,36 @@ field directly into the shared normalized prefix type and checks its public rang
 constructs a representative host IP. That normalized value alone proves neither provenance nor
 origin truth.
 
-A0 still has no production or network producer, signer, application handler, rate limiter, or
-conversion into `FreshPeerEvidence`, `FreshEvidenceBatch`, or `CandidateEvidence`. Discovery now
-composes request-response behaviours around the unchanged exact A0 bytes. Its only sending seam
-can dispatch one client-hop request, bind a typed matching response event to an internally
-timestamped current unique connection proof, or cancel that exact dispatch; upstream sending and
-all response-sending paths remain absent. No runtime or agent caller uses this seam, and discovery
-performs no A0 verification or replay consumption. Dormant A1a is a static consumer of the verifier/consume
-functions but has no production root, orchestrator, or transport caller. The opaque transcripts,
-transport proof, and wire wrappers are not yet local freshness, capacity, or route authority.
+A0 still has no production network owner, sampler, forwarded responder, or conversion into
+`FreshPeerEvidence`, `FreshEvidenceBatch`, or `CandidateEvidence`. Discovery composes
+request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
+dispatch one request, bind a typed matching response event to an internally timestamped current
+unique connection proof, or cancel that exact dispatch; upstream sending remains separate.
+
+Discovery now also contains a direct-Relay response poll seam, but the agent event loop does not
+call it yet. The poll owner obtains a typed inbound request directly from the same service's swarm;
+the raw behaviour-local request IDs, `ConnectionId` and response channel never cross its public
+caller boundary and therefore cannot be transplanted between service instances. The ordinary
+public event pump closes both client-hop and upstream inbound preselection channels without
+yielding them. The direct-responder pump consumes client-hop requests internally and also closes
+upstream requests because no upstream responder exists. It synchronously
+requires the exact event `ConnectionId` to rebind a unique current authenticated peer/family
+witness. It then cryptographically re-verifies the exact currently served local Relay
+advertisement and its Peer/node/public-key identity, requires nonzero ASN, advertised
+transport/family support and the
+exact supplied active policy version/hash/expiry, and signs an exact request-bound receipt through
+the same permanent Ed25519 key. The envelope and payload commit version, sender, timestamp, expiry,
+fresh fallible CSPRNG nonce, type, payload hash, request hash, challenge, actor and scope. A fixed
+120-second no-rollback request-hash tombstone is inserted before signing; 1024 global and 16 per
+authenticated peer are the hard bounds. Duplicate requests, exhausted bounds, stale or substituted
+authority, ambiguous lineage and signing failure return no response. The affine connection proof
+is retained until the exact response-channel handoff and exposes no getter.
+
+That responder records no origin claim, RTT, capacity, reachability, reservation, route or Fresh
+authority. Forwarded Exit upstream receipt production and the control-signed prefix wrapper remain
+absent, as do the production event-loop caller and A0 response-verification/A1a join owner. Dormant
+A1a remains only a static consumer of verifier/consume functions. The opaque transcripts,
+transport proof and wire wrappers are not yet local freshness, capacity, or route authority.
 
 The agent now contains a dormant A1a ownership prerequisite. Snapshot construction privately mints
 an endpoint-free, non-derived subject set from the exact freshly revalidated stored signed
@@ -267,10 +289,31 @@ still-current client-hop request unless it targets the local relay/control and i
 remote sender differs from both that local peer and the challenged actor. A0 deliberately contains
 no client identity, so this is not a claim that the sender is request-bound. Upstream, the pump
 instead requires `forwarded_control` to equal the authenticated relay and the actor to equal the
-local exit. Role-gated typed response APIs can consume only the corresponding libp2p response
-channel. There is still no runtime/agent caller, producer, signer, application handler, A0
-verifier/replay consumer, A1a exact-set join, or evidence mint. A future application owner must
-supply those remaining authenticated transaction semantics.
+local exit. Those predicates exist only inside the private raw transport pump. There is no public
+preselection response-channel or response-sending API; transport-only unit proofs use the private
+raw pump, and production upstream requests close unanswered until the missing Exit responder is
+implemented.
+
+A separate production-compiled direct-Relay poll owns each raw inbound client-hop event and its
+response channel inside the originating `DiscoveryService`. It binds the authenticated peer,
+event-local `ConnectionId` and requested native family to one unique current private connection
+lineage and retains that opaque affine proof through response handoff. It re-verifies the exact
+currently served signed Relay advertisement and local Peer/node/key identity, requires non-zero ASN,
+advertised transport/family support and the exact active policy version/hash/expiry, and signs the
+request hash, challenge, actor, scope, local observation time and bounded validity with the same
+permanent identity. The v4 envelope also binds sender, time, expiry, a fresh fallibly generated
+CSPRNG nonce, message type, payload hash and Ed25519 signature. Exact request hashes enter a
+120-second no-rollback tombstone before signing, bounded to 1024 globally and 16 per authenticated
+peer. Replay, resource exhaustion, signer failure, stale authority and ambiguous lineage fail
+closed without a response. A real two-swarm test proves that the originating channel carries the
+exact signed receipt. Separate real transport regressions prove that the ordinary public pump never
+yields an inbound channel, the direct-only pump never yields an upstream channel, and a sibling
+service cannot answer a channel captured by the originating service's private test pump.
+
+The responder emits no origin claim, RTT or capacity measurement and grants no Fresh evidence,
+reservation, route or admission authority. There is still no runtime/agent caller, upstream
+responder/forwarder or signer, A0 response-verifier/replay consumer, A1a exact-set join, or evidence
+mint. A future application owner must supply those remaining authenticated transaction semantics.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than

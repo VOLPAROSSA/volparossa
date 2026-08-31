@@ -1,7 +1,9 @@
 //! Bounded request-response wire types for the dormant A1c transaction boundary.
 //!
-//! A sibling module owns affine client-hop and relay-to-exit dispatch, connection binding, and
-//! role-gated response seams. Neither hop has a signer or production application handler.
+//! Sibling modules own affine client-hop and relay-to-exit dispatch, connection binding, and
+//! role-gated response seams. The direct-Relay hop also has a signed response poll seam. The
+//! upstream hop remains callerless and has no signer or responder; the direct responder has no
+//! agent/runtime caller.
 //!
 //! Both codecs preserve exact canonical A0 bytes. They perform only state-free canonical,
 //! version, type, payload-local, and envelope-binding validation. Cryptographic verification,
@@ -1218,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn private_transaction_module_contains_only_affine_transport_and_response_seams() {
+    fn private_transaction_module_contains_only_affine_outbound_transport_seams() {
         let transaction_source = include_str!("preselection_transaction.rs");
         let transaction_production = transaction_source
             .split("#[cfg(test)]")
@@ -1241,12 +1243,13 @@ mod tests {
             "pubfnbind_preselection_observation_upstream_response_with_context<",
             "pubfncancel_preselection_observation_upstream_dispatch(",
             "pubfncancel_preselection_observation_upstream_transaction<",
-            "pubfnsend_preselection_observation_response(",
-            "pubfnsend_preselection_observation_upstream_response(",
         ] {
             assert_compact_method_once(&transaction_compact, method);
         }
-        assert_eq!(transaction_compact.matches(".send_response(").count(), 2);
+        assert!(!transaction_compact.contains("send_preselection_observation_response"));
+        assert!(!transaction_compact.contains("send_preselection_observation_upstream_response"));
+        assert!(!transaction_compact.contains("ResponseChannel"));
+        assert!(!transaction_compact.contains(".send_response("));
         for forbidden in [
             "respond_preselection",
             "handle_preselection",

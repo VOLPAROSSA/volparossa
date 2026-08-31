@@ -108,10 +108,11 @@ Tags 17 and 18 are protocol-only primitives for a future phase-A observation pro
 `PreselectionObservationRequest` is unsigned, version 4, at most 4096 bytes, and live for at most
 five seconds. A future caller MUST CSPRNG-generate a fresh unique 32-byte challenge for every
 observation request, challenged subject (a direct relay or forwarded exit), and attempt, and MUST
-never reuse it across requests, subjects, or attempts. This module checks only the challenge's
-exact 32-byte, non-zero shape and has no producer, signer, uniqueness registry, handler, RPC, rate
-limiter, or network dispatcher. Dormant A1a is its only product-code static consumer, and that
-consumer has no production root, orchestrator, transport caller, or network path.
+never reuse it across requests, subjects, or attempts. The protocol module checks only the
+challenge's exact 32-byte, non-zero shape. Dormant A1a is its only product-code static verifier
+consumer, and that consumer has no production root, orchestrator, transport caller, or network
+path. Discovery separately owns the callerless direct-Relay responder described below; this
+message type itself provides no producer or uniqueness authority.
 
 A direct relay signs one `PreselectionObservationReceipt`. For a forwarded exit, the exit signs
 that same receipt and the exact prospective forwarding control named in the request signs a
@@ -243,11 +244,31 @@ wrong-peer event keeps that hop's slot occupied fail closed; exact correlation c
 later time or provenance checks. A still-current inbound client-hop request is withheld unless it
 targets the local relay/control and its authenticated remote differs from both local peer and actor;
 requester-anonymous A0 has no client identity to bind. Upstream instead requires the authenticated
-relay to equal `forwarded_control` and the actor to equal the local exit. Role-gated APIs can send
-only the corresponding typed client or upstream response. There is no runtime/agent caller,
-signer, application handler, A0 verification/replay consumer, A1a exact-set join, or Fresh-evidence
-conversion. A later owner must consume the unchanged response bytes, retained caller context and
-opaque proof together before any observation can become usable.
+relay to equal `forwarded_control` and the actor to equal the local exit. These predicates and the
+raw response channels remain behind a private pump. The ordinary public event pump closes inbound
+requests on both hops; the direct-responder pump owns direct Relay requests internally and closes
+upstream requests because that responder is not implemented. No public API accepts a preselection
+response channel or sends either response type.
+
+Discovery also exposes one production-compiled direct-Relay response poll transaction. It takes
+each typed inbound request directly from the same service's swarm, so its behaviour-local request
+ID, response channel and `ConnectionId` cannot be transplanted across service instances. That exact
+`ConnectionId`, authenticated peer and requested native family rebind to a unique current private
+connection witness; it cryptographically re-verifies the exact currently served local Relay
+advertisement; requires nonzero ASN, matching local identity,
+advertised transport/family support and exact active policy; tombstones the exact request hash for
+120 seconds under fixed 1024-global/16-per-peer limits; and signs the bound receipt with a fresh
+fallibly generated CSPRNG nonce. It retains the affine connection proof through the exact libp2p
+response-channel handoff. Replay, stale authority, ambiguity, capacity or signing failures emit no
+response. A real two-swarm test proves that the originating channel carries the exact signed
+receipt. Companion transport regressions prove that neither public pump exposes an inbound channel
+and that a sibling service cannot answer a privately captured originating channel. The receipt
+includes no prefix, endpoint, RTT, capacity, reachability, admission,
+reservation, route-session or evidence authority. The agent does not call this seam yet, and the
+upstream Exit responder/control wrapper and signer remain absent. A later owner must consume the
+unchanged response bytes, retained caller context and opaque proofs together before any observation
+can become usable. There is no A0 response-verification/replay consumer, A1a exact-set join or
+Fresh-evidence conversion. The fixed alpha score remains **11/100 (11%)**.
 
 Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
 relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7

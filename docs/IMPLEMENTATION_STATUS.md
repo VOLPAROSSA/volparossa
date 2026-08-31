@@ -1055,10 +1055,32 @@ single clean-build A01--A15 run; the score is not a release claim.
   swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to
-  `forwarded_control` and the actor to the local exit. Role-gated typed response APIs consume only
-  their own hop's response channel. There is still no production root or lifecycle owner,
-  producer, signer, application handler, sampler, runtime/agent caller, cryptographic
-  verification/replay, A1a exact-set join, or conversion into fresh local evidence.
+  `forwarded_control` and the actor to the local exit. These request predicates and raw response
+  channels stay behind a private event pump: the ordinary public pump closes both inbound hops,
+  while the direct-responder pump internally consumes only direct Relay requests and closes
+  upstream requests unanswered. No public response-channel or preselection response-send API
+  exists. A separate production-compiled direct-Relay response poll
+  owner obtains each typed inbound client-hop event directly from its own swarm, so the
+  behaviour-local request ID,
+  response channel and `ConnectionId` cannot be transplanted across service instances. It requires
+  that exact event-local authenticated `ConnectionId` and unique current native-family lineage,
+  and retains the opaque affine proof until response handoff.
+  It re-verifies the exact currently served local advertisement signature and local Peer/node/key,
+  requires a nonzero-ASN Relay advertisement supporting the requested transport/family and the
+  exact active policy version/hash/expiry, and signs the request hash, challenge, actor, scope,
+  local observation time and bounded validity with the same permanent identity. The canonical v4
+  envelope thereby binds sender, timestamp, expiry, fresh fallible CSPRNG nonce, message type,
+  payload hash and Ed25519 signature. Exact request hashes enter a 120-second no-rollback tombstone
+  before signing, with 1024 global and 16-per-authenticated-peer limits; replay, capacity
+  exhaustion, signer failure, stale authority and ambiguous lineage fail closed. A real two-swarm
+  test proves that the originating response channel carries the exact signed receipt; companion
+  transport regressions prove the public pumps expose no inbound channel and a sibling service
+  cannot answer the originating service's privately captured channel. It emits no
+  origin claim, RTT, capacity measurement, Fresh evidence, admission, reservation or route
+  authority. The agent event loop does not call this responder yet, and the forwarded Exit upstream
+  responder/control wrapper and signer are still absent. There is also no production root or
+  lifecycle owner, sampler, A0 response-verification/replay consumer, A1a exact-set join, or
+  conversion into fresh local evidence.
   A future A1c boundary must consume and exact-set join these real request/connection proofs before
   phase-A evidence. A first dormant private A1c precursor now passively tracks authenticated libp2p
   establish/address-change/close lineage under the existing 384-global/four-per-peer ceilings.
@@ -1073,7 +1095,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   no checkbox is closed. Production still publishes no usable relay/exit capability, route
   finalization still fails closed with `ProbeEvidenceUnavailable`, and no production evidence
   producer, production transaction caller/orchestration or disposable live-network proof for that
-  discovery/evidence pipeline exists.
+  discovery/evidence pipeline exists. This direct-only dormant responder closes no checklist or
+  scorecard row; the fixed alpha score remains **11/100 (11%)**.
 - [ ] Bootstrap from peerstore, mDNS, multiple independent built-ins, peerlinks, and signed bootstrap files works.
 - [ ] No bootstrap node or DHT record becomes a unique authority or central node catalogue.
 - [ ] `volparossa://peer/...` peerlinks round-trip and validate.

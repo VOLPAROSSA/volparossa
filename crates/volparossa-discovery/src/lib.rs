@@ -7,6 +7,7 @@ mod advertisements;
 mod connection_provenance;
 mod forwarding;
 mod peerlink;
+mod preselection_responder;
 mod preselection_transaction;
 mod preselection_wire;
 mod reservations;
@@ -51,6 +52,8 @@ use forwarding::{
     exit_forward_upstream_behaviour,
 };
 pub use peerlink::{PeerLink, PeerLinkError};
+use preselection_responder::PreselectionResponderState;
+pub use preselection_responder::{DirectPreselectionResponderError, LocalPreselectionPolicy};
 pub use preselection_transaction::{
     BoundClientPreselectionTransport, BoundUpstreamPreselectionTransport,
     ClientPreselectionDispatch, ClientPreselectionTransaction, PreselectionDispatchError,
@@ -691,6 +694,7 @@ pub struct DiscoveryService {
     advertisement_budgets: AdvertisementBudgets,
     address_admissions: AddressAdmissions,
     protocol_roles: DiscoveryProtocolRoles,
+    preselection_responder: PreselectionResponderState,
     preselection_transaction: PreselectionTransactionState,
 }
 
@@ -753,6 +757,7 @@ impl DiscoveryService {
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
             address_admissions: AddressAdmissions::default(),
+            preselection_responder: PreselectionResponderState::new(),
             preselection_transaction: PreselectionTransactionState::new(),
         })
     }
@@ -1212,8 +1217,28 @@ impl DiscoveryService {
     }
 
     /// Advances the real libp2p swarm and performs safe automatic protocol plumbing.
-    #[allow(clippy::too_many_lines, reason = "single composed swarm event pump")]
+    ///
+    /// Inbound preselection request events are service-owned. This public pump drops both the
+    /// direct/client-hop and upstream request variants so their behaviour-local response channels
+    /// cannot cross the `DiscoveryService` boundary. Call
+    /// [`Self::next_event_with_direct_preselection_responder`] to enable the currently implemented
+    /// direct-Relay responder. No upstream responder exists yet, so upstream requests fail closed.
     pub async fn next_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
+        loop {
+            let event = self.next_internal_event().await;
+            if inbound_preselection_request(&event) {
+                continue;
+            }
+            return event;
+        }
+    }
+
+    /// Private event pump for service-owned protocol handlers and transport-only unit proofs.
+    ///
+    /// Unlike [`Self::next_event`], this may yield inbound preselection response channels. It must
+    /// therefore never become a public API or be called by application owners.
+    #[allow(clippy::too_many_lines, reason = "single composed swarm event pump")]
+    async fn next_internal_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
         loop {
             let event = self.swarm.select_next_some().await;
             match event {
@@ -1401,6 +1426,24 @@ impl DiscoveryService {
         }
     }
 }
+
+fn inbound_preselection_request(event: &libp2p::swarm::SwarmEvent<BehaviourEvent>) -> bool {
+    matches!(
+        event,
+        libp2p::swarm::SwarmEvent::Behaviour(
+            BehaviourEvent::PreselectionObservation(request_response::Event::Message {
+                message: request_response::Message::Request { .. },
+                ..
+            }) | BehaviourEvent::PreselectionObservationUpstream(
+                request_response::Event::Message {
+                    message: request_response::Message::Request { .. },
+                    ..
+                }
+            )
+        )
+    )
+}
+
 fn forward_request_targets_local_relay(request: &ExitForwardRequest, local_peer: &PeerId) -> bool {
     peer_id_from_wire(request.control_relay_peer_id()).is_ok_and(|peer| peer == *local_peer)
 }
