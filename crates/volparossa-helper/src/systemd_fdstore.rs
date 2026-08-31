@@ -596,6 +596,7 @@ struct ServiceCgroupIsolationSnapshot {
     reason = "this is an exact typed D-Bus property snapshot, not mutable state"
 )]
 struct RawServiceCgroupIsolationSnapshot {
+    unit_id: String,
     invocation_id: Vec<u8>,
     main_pid: u32,
     control_pid: u32,
@@ -641,7 +642,7 @@ impl ServiceCgroupIsolationSnapshot {
         if raw.control_pid != 0 {
             return Err(invalid_inventory("ControlPID is not zero"));
         }
-        validate_control_group(&raw.control_group)?;
+        validate_service_control_group(&raw.unit_id, &raw.control_group)?;
         let control_group_id = NonZeroU64::new(raw.control_group_id)
             .ok_or_else(|| invalid_inventory("ControlGroupId is zero"))?;
         if raw.delegate || !raw.delegate_controllers.is_empty() || !raw.delegate_subgroup.is_empty()
@@ -732,6 +733,24 @@ fn validate_control_group(control_group: &str) -> Result<(), FdStoreError> {
         {
             return Err(invalid_inventory("ControlGroup is invalid"));
         }
+    }
+    Ok(())
+}
+
+fn validate_service_control_group(unit_id: &str, control_group: &str) -> Result<(), FdStoreError> {
+    validate_control_group(control_group)?;
+    let unit_bytes = unit_id.as_bytes();
+    if unit_bytes.len() <= b".service".len()
+        || unit_bytes.len() > MAX_CONTROL_GROUP_COMPONENT_BYTES
+        || !unit_bytes.ends_with(b".service")
+        || unit_bytes
+            .iter()
+            .any(|byte| *byte == b'/' || *byte < b' ' || *byte == 0x7f)
+        || control_group.as_bytes().rsplit(|byte| *byte == b'/').next() != Some(unit_bytes)
+    {
+        return Err(invalid_inventory(
+            "ControlGroup does not name the exact service unit",
+        ));
     }
     Ok(())
 }
@@ -2122,6 +2141,7 @@ impl SystemdDescriptorStoreSource {
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
+        let unit_id = unit.get_property::<String>("Id").await?;
         let invocation_id = unit.get_property::<Vec<u8>>("InvocationID").await?;
         drop(unit);
 
@@ -2133,6 +2153,7 @@ impl SystemdDescriptorStoreSource {
             .build()
             .await?;
         let raw = RawServiceCgroupIsolationSnapshot {
+            unit_id,
             invocation_id,
             main_pid: service.get_property::<u32>("MainPID").await?,
             control_pid: service.get_property::<u32>("ControlPID").await?,
@@ -3537,6 +3558,7 @@ mod tests {
         control_group_id: u64,
     ) -> RawServiceCgroupIsolationSnapshot {
         RawServiceCgroupIsolationSnapshot {
+            unit_id: "volparossa-test.service".to_owned(),
             invocation_id: vec![0x5a; SYSTEMD_INVOCATION_ID_BYTES],
             main_pid,
             control_pid: 0,
@@ -3581,6 +3603,12 @@ mod tests {
         pid: u32,
     ) -> Vec<RawServiceCgroupIsolationSnapshot> {
         let mut invalid = Vec::new();
+        let mut value = exact.clone();
+        value.unit_id = "other.service".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.unit_id = "volparossa-test.scope".to_owned();
+        invalid.push(value);
         let mut value = exact.clone();
         value.invocation_id = vec![0; SYSTEMD_INVOCATION_ID_BYTES];
         invalid.push(value);
@@ -3722,6 +3750,20 @@ mod tests {
             assert!(validate_control_group(malformed).is_err(), "{malformed:?}");
         }
         assert!(validate_control_group("/system.slice/volparossa-helper.service").is_ok());
+        assert!(
+            validate_service_control_group(
+                "volparossa-helper.service",
+                "/system.slice/volparossa-helper.service"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_service_control_group(
+                "different.service",
+                "/system.slice/volparossa-helper.service"
+            )
+            .is_err()
+        );
         let oversized = format!("/{}", "a".repeat(MAX_CONTROL_GROUP_COMPONENT_BYTES + 1));
         assert!(validate_control_group(&oversized).is_err());
     }

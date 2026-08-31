@@ -238,6 +238,7 @@ fn durable_anchor(seed: u8) -> DurablePrepareAnchor {
         executable_device: NonZeroU64::new(seed_u64 + 40).expect("non-zero device"),
         executable_inode: NonZeroU64::new(seed_u64 + 50).expect("non-zero inode"),
         service_cgroup_inode: NonZeroU64::new(seed_u64 + 60).expect("non-zero inode"),
+        service_cgroup_id: NonZeroU64::new(seed_u64 + 70).expect("non-zero cgroup id"),
     })
     .expect("valid durable anchor")
 }
@@ -549,6 +550,7 @@ fn typed_inputs_validate_complete_wire_values_and_redact_debug_output() {
         executable_device: NonZeroU64::new(1).expect("non-zero"),
         executable_inode: NonZeroU64::new(1).expect("non-zero"),
         service_cgroup_inode: NonZeroU64::new(1).expect("non-zero"),
+        service_cgroup_id: NonZeroU64::new(1).expect("non-zero"),
     });
     assert_eq!(invalid_anchor.unwrap_err(), DurableOwnershipError::Rejected);
     assert_eq!(
