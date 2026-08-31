@@ -35,8 +35,8 @@ use volparossa_linux_uapi::{cgroup_v2_id, namespace_type};
 use crate::{
     deadline::{HardDeadline, wait_for_process_pidfd_exit},
     ownership_journal::{
-        DurableCustodyDescriptorBinding, ProductionOwnershipRuntime, ProductionOwnershipStartup,
-        StartupCustodyPhase, StartupCustodyTarget,
+        DurableCustodyDescriptorBinding, DurableServiceCgroupIdentity, ProductionOwnershipRuntime,
+        ProductionOwnershipStartup, StartupCustodyPhase, StartupCustodyTarget,
     },
     systemd_fdstore::{
         BorrowedCustodyPair, CustodyDescriptorBinding, CustodyFdName, ExactRestartRemovalProof,
@@ -1518,17 +1518,22 @@ fn verify_exit_set_against_shared_cgroup(
     exits: &ObservedExactInheritedWorkerExitSet,
     pinned: &PinnedSharedServiceCgroup,
 ) -> Result<(), SharedServiceCgroupObservationError> {
-    let service_inode = NonZeroU64::new(pinned.service_identity.inode)
-        .ok_or(SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    let current_service_cgroup = DurableServiceCgroupIdentity {
+        inode: NonZeroU64::new(pinned.service_identity.inode)
+            .ok_or(SharedServiceCgroupObservationError::CgroupIdentityChanged)?,
+        kernel_id: pinned.kernel_cgroup_id,
+    };
     let mut pending_target_count = 0_usize;
+    let mut predecessor_service_cgroup = None;
     for entry in &exits.classification.classified {
         if !entry.target.has_valid_recovery_binding() {
             return Err(SharedServiceCgroupObservationError::AnchorMismatch);
         }
+        bind_exact_predecessor_service_cgroup(
+            &mut predecessor_service_cgroup,
+            entry.target.service_cgroup_identity(),
+        )?;
         if entry.target.phase() != StartupCustodyPhase::CleanupConfirmed {
-            if !entry.target.has_service_cgroup_inode(service_inode) {
-                return Err(SharedServiceCgroupObservationError::AnchorMismatch);
-            }
             if entry.disposition != StartupCustodyDisposition::ExactPresent {
                 return Err(SharedServiceCgroupObservationError::BindingChanged);
             }
@@ -1551,7 +1556,64 @@ fn verify_exit_set_against_shared_cgroup(
     if NonZeroUsize::new(pending_target_count) != Some(exits.observed_target_count) {
         return Err(SharedServiceCgroupObservationError::BindingChanged);
     }
+    classify_restart_service_cgroup_transition(
+        predecessor_service_cgroup.ok_or(SharedServiceCgroupObservationError::AnchorMismatch)?,
+        current_service_cgroup,
+    )?;
     Ok(())
+}
+
+/// One exact predecessor manager-cgroup identity shared by every classified journal target.
+///
+/// Different predecessor identities cannot be merged merely because they all differ from the
+/// successor. That would turn an arbitrary cross-cgroup journal set into apparent replacement
+/// continuity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExactPredecessorServiceCgroup(DurableServiceCgroupIdentity);
+
+fn bind_exact_predecessor_service_cgroup(
+    retained: &mut Option<ExactPredecessorServiceCgroup>,
+    candidate: DurableServiceCgroupIdentity,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    match retained {
+        None => *retained = Some(ExactPredecessorServiceCgroup(candidate)),
+        Some(exact) if exact.0 == candidate => {}
+        Some(_) => return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged),
+    }
+    Ok(())
+}
+
+/// Exact relationship between the predecessor anchor and the manager's current service cgroup.
+///
+/// A complete identity match retains the original pinned cgroup. A complete identity change is
+/// the only admissible replacement: by this point the exact predecessor process pidfd has
+/// reported exit, PID 1 still owns the same non-delegated strict service scope, and the freshly
+/// pinned same-name cgroup contains exactly the new `MainPID` and no descendants. Replacing that
+/// pathname therefore required PID 1 to remove the empty predecessor first. A partial match is
+/// identifier drift or reuse and is never continuity or replacement evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RestartServiceCgroupTransition {
+    SamePinnedManagerCgroup,
+    Pid1ManagedReplacementAfterEmptyPredecessor,
+}
+
+fn classify_restart_service_cgroup_transition(
+    predecessor: ExactPredecessorServiceCgroup,
+    current: DurableServiceCgroupIdentity,
+) -> Result<RestartServiceCgroupTransition, SharedServiceCgroupObservationError> {
+    let predecessor = predecessor.0;
+    match (
+        predecessor.inode == current.inode,
+        predecessor.kernel_id == current.kernel_id,
+    ) {
+        (true, true) => Ok(RestartServiceCgroupTransition::SamePinnedManagerCgroup),
+        (false, false) => {
+            Ok(RestartServiceCgroupTransition::Pid1ManagedReplacementAfterEmptyPredecessor)
+        }
+        (true, false) | (false, true) => {
+            Err(SharedServiceCgroupObservationError::CgroupIdentityChanged)
+        }
+    }
 }
 
 fn verify_manager_inventory_against_retained_custody(
@@ -3095,6 +3157,7 @@ mod tests {
                 .expect("nonzero executable inode"),
             service_cgroup_inode: NonZeroU64::new(u64::from(seed) + 40)
                 .expect("nonzero cgroup inode"),
+            service_cgroup_id: NonZeroU64::new(u64::from(seed) + 40).expect("nonzero cgroup ID"),
         })
         .expect("valid durable anchor")
     }
@@ -4985,6 +5048,13 @@ mod tests {
     }
 
     fn fake_pinned_shared_service_cgroup(inode: u64) -> PinnedSharedServiceCgroup {
+        fake_pinned_shared_service_cgroup_with_id(inode, inode)
+    }
+
+    fn fake_pinned_shared_service_cgroup_with_id(
+        inode: u64,
+        kernel_cgroup_id: u64,
+    ) -> PinnedSharedServiceCgroup {
         PinnedSharedServiceCgroup {
             root: descriptor(),
             root_identity: PinnedFileIdentity {
@@ -4993,7 +5063,7 @@ mod tests {
             },
             service: descriptor(),
             service_identity: PinnedFileIdentity { device: 7, inode },
-            kernel_cgroup_id: NonZeroU64::new(inode).expect("nonzero fake cgroup ID"),
+            kernel_cgroup_id: NonZeroU64::new(kernel_cgroup_id).expect("nonzero fake cgroup ID"),
             pid_namespace: descriptor(),
             pid_namespace_identity: PinnedFileIdentity {
                 device: 9,
@@ -5057,14 +5127,22 @@ mod tests {
     fn observed_exit_with_cleanup_fixture(
         pending_seed: u8,
         cleanup_seed: u8,
+        cleanup_cgroup_seed: u8,
     ) -> ObservedExactInheritedWorkerExitSet {
         let custody = captured_custody(pending_seed);
         let pending =
             exact_target_for_custody(pending_seed, StartupCustodyPhase::MayOwnPrepare, &custody);
-        let cleanup = synthetic_startup_target(
+        let cleanup_binding_seed = u32::from(cleanup_seed);
+        let cleanup_binding = synthetic_durable_binding(cleanup_binding_seed);
+        let cleanup = startup_target_with_anchor(
             cleanup_seed,
             StartupCustodyPhase::CleanupConfirmed,
-            u32::from(cleanup_seed),
+            durable_anchor(
+                cleanup_cgroup_seed,
+                rustix::fs::makedev(cleanup_binding_seed, 2),
+                u64::from(cleanup_binding_seed) * 100 + 2,
+            ),
+            cleanup_binding,
         );
         let classification = startup_classification(custody, &[pending, cleanup]);
         let mut observer = FakeProcessPidfdExitObserver::default();
@@ -5366,12 +5444,137 @@ mod tests {
     #[test]
     fn cleanup_confirmed_target_does_not_claim_current_pending_cgroup_membership() {
         let pending_seed = 55_u8;
-        let exits = observed_exit_with_cleanup_fixture(pending_seed, 56);
+        let exits = observed_exit_with_cleanup_fixture(pending_seed, 56, pending_seed);
         let pinned = fake_pinned_shared_service_cgroup(u64::from(pending_seed) + 40);
         verify_exit_set_against_shared_cgroup(&exits, &pinned)
             .expect("only pending target requires current shared-cgroup anchor");
         assert_eq!(exits.classification.classified.len(), 2);
         assert_eq!(exits.observed_target_count.get(), 1);
+    }
+
+    #[test]
+    fn cleanup_confirmed_and_pending_targets_reject_mixed_predecessor_cgroups() {
+        let pending_seed = 55_u8;
+        let exits = observed_exit_with_cleanup_fixture(pending_seed, 56, 56);
+        let pinned = fake_pinned_shared_service_cgroup(u64::from(pending_seed) + 40);
+        assert_eq!(
+            verify_exit_set_against_shared_cgroup(&exits, &pinned)
+                .expect_err("mixed CleanupConfirmed and pending predecessor cgroups must fail"),
+            SharedServiceCgroupObservationError::CgroupIdentityChanged
+        );
+        assert_eq!(exits.classification.classified.len(), 2);
+        assert_eq!(exits.observed_target_count.get(), 1);
+    }
+
+    #[test]
+    fn restart_service_cgroup_transition_accepts_same_and_pid1_replacement() {
+        let predecessor = DurableServiceCgroupIdentity {
+            inode: NonZeroU64::new(41).expect("nonzero predecessor inode"),
+            kernel_id: NonZeroU64::new(51).expect("nonzero predecessor cgroup ID"),
+        };
+        let exact_predecessor = ExactPredecessorServiceCgroup(predecessor);
+        assert_eq!(
+            classify_restart_service_cgroup_transition(exact_predecessor, predecessor)
+                .expect("same pinned manager cgroup"),
+            RestartServiceCgroupTransition::SamePinnedManagerCgroup
+        );
+        assert_eq!(
+            classify_restart_service_cgroup_transition(
+                exact_predecessor,
+                DurableServiceCgroupIdentity {
+                    inode: NonZeroU64::new(42).expect("nonzero replacement inode"),
+                    kernel_id: NonZeroU64::new(52).expect("nonzero replacement cgroup ID"),
+                },
+            )
+            .expect("complete PID-1 replacement"),
+            RestartServiceCgroupTransition::Pid1ManagedReplacementAfterEmptyPredecessor
+        );
+    }
+
+    #[test]
+    fn restart_service_cgroup_transition_rejects_partial_drift_and_reuse() {
+        let predecessor = DurableServiceCgroupIdentity {
+            inode: NonZeroU64::new(61).expect("nonzero predecessor inode"),
+            kernel_id: NonZeroU64::new(71).expect("nonzero predecessor cgroup ID"),
+        };
+        let exact_predecessor = ExactPredecessorServiceCgroup(predecessor);
+        for current in [
+            DurableServiceCgroupIdentity {
+                inode: predecessor.inode,
+                kernel_id: NonZeroU64::new(72).expect("nonzero drifted cgroup ID"),
+            },
+            DurableServiceCgroupIdentity {
+                inode: NonZeroU64::new(62).expect("nonzero reused inode"),
+                kernel_id: predecessor.kernel_id,
+            },
+        ] {
+            assert_eq!(
+                classify_restart_service_cgroup_transition(exact_predecessor, current)
+                    .expect_err("partial cgroup identity match must fail closed"),
+                SharedServiceCgroupObservationError::CgroupIdentityChanged
+            );
+        }
+    }
+
+    #[test]
+    fn restart_service_cgroup_transition_is_total_over_both_identity_axes() {
+        for predecessor_inode in 1_u64..=16 {
+            for predecessor_id in 17_u64..=32 {
+                let predecessor = DurableServiceCgroupIdentity {
+                    inode: NonZeroU64::new(predecessor_inode).expect("nonzero inode"),
+                    kernel_id: NonZeroU64::new(predecessor_id).expect("nonzero cgroup ID"),
+                };
+                let exact_predecessor = ExactPredecessorServiceCgroup(predecessor);
+                for inode_matches in [false, true] {
+                    for id_matches in [false, true] {
+                        let current = DurableServiceCgroupIdentity {
+                            inode: if inode_matches {
+                                predecessor.inode
+                            } else {
+                                NonZeroU64::new(predecessor_inode + 64)
+                                    .expect("nonzero different inode")
+                            },
+                            kernel_id: if id_matches {
+                                predecessor.kernel_id
+                            } else {
+                                NonZeroU64::new(predecessor_id + 64)
+                                    .expect("nonzero different cgroup ID")
+                            },
+                        };
+                        let classified =
+                            classify_restart_service_cgroup_transition(exact_predecessor, current);
+                        assert_eq!(
+                            classified.is_ok(),
+                            inode_matches == id_matches,
+                            "only complete equality or complete replacement is admissible"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn predecessor_service_cgroup_set_rejects_cross_cgroup_journal_join() {
+        let first = DurableServiceCgroupIdentity {
+            inode: NonZeroU64::new(81).expect("nonzero first inode"),
+            kernel_id: NonZeroU64::new(91).expect("nonzero first cgroup ID"),
+        };
+        let different = DurableServiceCgroupIdentity {
+            inode: NonZeroU64::new(82).expect("nonzero second inode"),
+            kernel_id: NonZeroU64::new(92).expect("nonzero second cgroup ID"),
+        };
+        let mut retained = None;
+        bind_exact_predecessor_service_cgroup(&mut retained, first)
+            .expect("first exact predecessor");
+        bind_exact_predecessor_service_cgroup(&mut retained, first)
+            .expect("same predecessor is stable");
+        assert_eq!(retained, Some(ExactPredecessorServiceCgroup(first)));
+        assert_eq!(
+            bind_exact_predecessor_service_cgroup(&mut retained, different)
+                .expect_err("cross-cgroup journal join must fail closed"),
+            SharedServiceCgroupObservationError::CgroupIdentityChanged
+        );
     }
 
     #[tokio::test]
@@ -5546,7 +5749,8 @@ mod tests {
         let seed = 51_u8;
         let mut exits = observed_exit_fixture(seed);
         let exact = fake_pinned_shared_service_cgroup(u64::from(seed) + 40);
-        let wrong = fake_pinned_shared_service_cgroup(u64::from(seed) + 41);
+        let wrong =
+            fake_pinned_shared_service_cgroup_with_id(u64::from(seed) + 41, u64::from(seed) + 40);
         let pid = NonZeroU32::new(std::process::id()).expect("nonzero current PID");
         let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
         let mut source = FakeSharedServiceCgroupSource {
@@ -5580,8 +5784,8 @@ mod tests {
                 deadline,
                 &mut source,
             )
-            .expect_err("wrong anchor inode"),
-            SharedServiceCgroupObservationError::AnchorMismatch
+            .expect_err("partial anchor identity drift"),
+            SharedServiceCgroupObservationError::CgroupIdentityChanged
         );
         assert!(source.observe_deadlines.is_empty());
 

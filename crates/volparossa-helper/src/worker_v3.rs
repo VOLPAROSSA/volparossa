@@ -4557,6 +4557,7 @@ fn durable_prepare_anchor_from_worker_parts(
             executable_device: parts.executable_device,
             executable_inode: parts.executable_inode,
             service_cgroup_inode: parts.service_cgroup_inode,
+            service_cgroup_id: parts.service_cgroup_id,
         },
     )
     .ok_or(WorkerV3Error::Authentication)
@@ -15669,6 +15670,7 @@ mod tests {
             executable_device: NonZeroU64::new(6).expect("executable device"),
             executable_inode: NonZeroU64::new(7).expect("executable inode"),
             service_cgroup_inode: NonZeroU64::new(8).expect("cgroup inode"),
+            service_cgroup_id: NonZeroU64::new(9).expect("cgroup id"),
         };
         let actual = durable_prepare_anchor_from_worker_parts(parts).expect("mapped anchor");
         let expected = crate::ownership_journal::durable_prepare_anchor_from_parts(
@@ -15681,6 +15683,7 @@ mod tests {
                 executable_device: NonZeroU64::new(6).expect("executable device"),
                 executable_inode: NonZeroU64::new(7).expect("executable inode"),
                 service_cgroup_inode: NonZeroU64::new(8).expect("cgroup inode"),
+                service_cgroup_id: NonZeroU64::new(9).expect("cgroup id"),
             },
         )
         .expect("expected anchor");

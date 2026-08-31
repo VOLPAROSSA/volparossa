@@ -39,7 +39,7 @@ use rustix::{
 };
 use thiserror::Error;
 use volparossa_linux_uapi::{
-    duplicate_descriptor_cloexec, install_worker_confinement_filter, namespace_type,
+    cgroup_v2_id, duplicate_descriptor_cloexec, install_worker_confinement_filter, namespace_type,
 };
 
 const SANDBOX_PROOF_DOMAIN: &[u8; 32] = b"volparossa/worker-sandbox/v5\0\0\0\0";
@@ -187,6 +187,7 @@ pub(super) struct WorkerRecoveryAnchorParts {
     pub(super) executable_device: NonZeroU64,
     pub(super) executable_inode: NonZeroU64,
     pub(super) service_cgroup_inode: NonZeroU64,
+    pub(super) service_cgroup_id: NonZeroU64,
 }
 
 /// Retained kernel objects from which one worker's durable recovery anchor is revalidated.
@@ -208,6 +209,7 @@ struct PinnedWorkerRecoveryAnchor {
     cgroup_root_identity: FileIdentity,
     service_cgroup: OwnedFd,
     service_cgroup_identity: FileIdentity,
+    service_cgroup_id: NonZeroU64,
     service_cgroup_path: Box<[u8]>,
 }
 
@@ -228,6 +230,7 @@ impl PinnedWorkerRecoveryAnchor {
             cgroup_root_identity: self.cgroup_root_identity,
             service_cgroup: duplicate_descriptor_cloexec(&self.service_cgroup)?,
             service_cgroup_identity: self.service_cgroup_identity,
+            service_cgroup_id: self.service_cgroup_id,
             service_cgroup_path: self.service_cgroup_path.clone(),
         })
     }
@@ -377,6 +380,11 @@ impl PinnedWorkerRecoveryIdentity {
         let (executable_device, executable_inode) = anchor.executable_identity.nonzero_parts()?;
         let service_cgroup_inode = NonZeroU64::new(anchor.service_cgroup_identity.inode)
             .ok_or(WorkerSandboxError::Mismatch)?;
+        let service_cgroup_id =
+            cgroup_v2_id(&anchor.service_cgroup).map_err(|_| WorkerSandboxError::Mismatch)?;
+        if service_cgroup_id != anchor.service_cgroup_id {
+            return Err(WorkerSandboxError::Mismatch);
+        }
         self.ensure_alive()?;
         Ok(WorkerRecoveryAnchorParts {
             boot_id: anchor.boot_id,
@@ -387,6 +395,7 @@ impl PinnedWorkerRecoveryIdentity {
             executable_device,
             executable_inode,
             service_cgroup_inode,
+            service_cgroup_id,
         })
     }
 
@@ -1385,6 +1394,8 @@ fn capture_recovery_anchor(
     let service_cgroup = resolve_service_cgroup(&cgroup_root, &service_cgroup_path)?;
     ensure_cgroup2(&service_cgroup)?;
     let service_cgroup_identity = descriptor_identity(&service_cgroup, FileType::Directory)?;
+    let service_cgroup_id =
+        cgroup_v2_id(&service_cgroup).map_err(|_| WorkerSandboxError::Mismatch)?;
     if service_cgroup_identity.device != cgroup_root_identity.device {
         return Err(WorkerSandboxError::Mismatch);
     }
@@ -1404,6 +1415,7 @@ fn capture_recovery_anchor(
         cgroup_root_identity,
         service_cgroup,
         service_cgroup_identity,
+        service_cgroup_id,
         service_cgroup_path,
     };
     verify_bootstrap_recovery_anchor(process_directory, &anchor)?;
@@ -1508,6 +1520,7 @@ fn verify_recovery_anchor(
     ensure_cgroup2(&anchor.service_cgroup)?;
     if descriptor_identity(&anchor.service_cgroup, FileType::Directory)?
         != anchor.service_cgroup_identity
+        || cgroup_v2_id(&anchor.service_cgroup).ok() != Some(anchor.service_cgroup_id)
     {
         return Err(WorkerSandboxError::Mismatch);
     }
@@ -1524,6 +1537,7 @@ fn verify_recovery_anchor(
     let current_service_cgroup = resolve_service_cgroup(&anchor.cgroup_root, &current_path)?;
     if descriptor_identity(&current_service_cgroup, FileType::Directory)?
         != anchor.service_cgroup_identity
+        || cgroup_v2_id(&current_service_cgroup).ok() != Some(anchor.service_cgroup_id)
     {
         return Err(WorkerSandboxError::Mismatch);
     }

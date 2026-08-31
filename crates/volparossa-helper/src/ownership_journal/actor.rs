@@ -236,6 +236,17 @@ pub(crate) struct DurablePrepareAnchorParts {
     pub(crate) executable_device: NonZeroU64,
     pub(crate) executable_inode: NonZeroU64,
     pub(crate) service_cgroup_inode: NonZeroU64,
+    pub(crate) service_cgroup_id: NonZeroU64,
+}
+
+/// Durable, two-coordinate identity of the service cgroup which originally contained a worker.
+///
+/// The inode and kernel cgroup ID must move together. This prevents an inode-only comparison from
+/// treating PID-1 replacement or identifier reuse as continuity across a service restart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DurableServiceCgroupIdentity {
+    pub(crate) inode: NonZeroU64,
+    pub(crate) kernel_id: NonZeroU64,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -254,6 +265,7 @@ impl DurablePrepareAnchor {
             executable_device: parts.executable_device,
             executable_inode: parts.executable_inode,
             service_cgroup_inode: parts.service_cgroup_inode,
+            service_cgroup_id: parts.service_cgroup_id,
         }))
     }
 }
@@ -563,8 +575,11 @@ impl StartupCustodyTarget {
     ///
     /// This is correlation evidence only. A match neither authorizes cgroup mutation nor proves
     /// that the cgroup is empty, undelegated, or immutable.
-    pub(crate) fn has_service_cgroup_inode(&self, candidate: NonZeroU64) -> bool {
-        self.recovery_anchor.0.service_cgroup_inode == candidate
+    pub(crate) fn service_cgroup_identity(&self) -> DurableServiceCgroupIdentity {
+        DurableServiceCgroupIdentity {
+            inode: self.recovery_anchor.0.service_cgroup_inode,
+            kernel_id: self.recovery_anchor.0.service_cgroup_id,
+        }
     }
 
     pub(crate) fn matches_binding(&self, candidate: &DurableCustodyDescriptorBinding) -> bool {
