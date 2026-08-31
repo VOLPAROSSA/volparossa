@@ -166,7 +166,7 @@
         "unit_result"],
       "properties": {
         "boundary": {"const": "worker_v3::DurableCustodyPublicationTerminalGuard::retain_published"},
-        "crashed_at": {"$ref": "#/$defs/time"}, "exec_main_code": {"const": "killed"},
+        "crashed_at": {"$ref": "#/$defs/time"}, "exec_main_code": {"const": 2},
         "exec_main_status": {"const": 9}, "journal_phase_after_crash": {"const": "MayOwnCustody"},
         "manager_fdstore_after_crash": {"const": 2}, "sequence": {"const": 1},
         "signal": {"const": "SIGKILL"}, "unit_result": {"const": "signal"}
@@ -180,7 +180,7 @@
       "properties": {
         "boundary": {"const": "ownership_journal::actor::DurableOwnershipStartup::confirm_single_restart_cleanup"},
         "boundary_observed_at": {"$ref": "#/$defs/time"},
-        "crashed_at": {"$ref": "#/$defs/time"}, "exec_main_code": {"const": "killed"},
+        "crashed_at": {"$ref": "#/$defs/time"}, "exec_main_code": {"const": 2},
         "exec_main_status": {"const": 9}, "journal_phase_after_crash": {"const": "MayOwnCustody"},
         "manager_fdstore_after_crash": {"const": 2}, "sequence": {"const": 2},
         "signal": {"const": "SIGKILL"}, "unit_result": {"const": "signal"}

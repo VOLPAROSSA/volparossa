@@ -251,11 +251,15 @@ published custody and then when the successor reaches the exact singleton reaper
 the third invocation observes the same two-descriptor custody at startup removal and can publish a
 new socket only after the journal is `Absent(RecoveredMayOwn)` and the manager store is empty. The
 MayOwn transient service uses the production-required `Type=simple` and three-second restart delay
-with no `ExecStartPost`. Per-invocation observers enter only its private mount and network
-namespaces from the driver cgroup; an exec-stop/release handshake requires `ControlPID=0` and a
-`cgroup.procs` set containing only the current `MainPID`. At each crash boundary, GDB then remains
-stopped until the driver has observed `frozen 1` from the service cgroup before releasing the
-single pending kill, so the three-second restart cannot outrun successor adoption. Its
+with no `ExecStartPost`. One fixed no-argument launcher remains the manager's `MainPID` for every
+invocation and publishes an InvocationID/PID-bound FIFO barrier before it execs the helper. The
+driver releases that FIFO only after exact `MainPID`, fresh `InvocationID`, `NRestarts`,
+`ControlPID=0`, canonical `ControlGroup`/nonzero `ControlGroupId`, expected fdstore count, a domain
+cgroup containing only that `MainPID`, a pending GDB breakpoint plus exec catch, and a separately
+running outside-cgroup namespace observer are all ready. At each of the first two crash boundaries,
+GDB remains stopped until the driver observes `frozen 1` on that non-empty exact cgroup. It then uses
+inferior `kill` and `quit 0`; the driver thaws the old cgroup or observes its removal before waiting
+for the FIFO-gated successor. Freezing is crash-boundary evidence, never the successor gate. Its
 claim is deliberately limited to one fixed single-path Relay target in
 `MayOwnCustody + ExactPresent`. It is not general restart recovery, `CleanupOwned`, an installed
 service proof, a usable datapath, or acceptance evidence. A non-main run validates all three

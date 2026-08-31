@@ -649,13 +649,17 @@ single clean-build A01--A15 run; the score is not a release claim.
   exact kernfs file-handle ID is obtained through a fixed audited Linux-UAPI wrapper and must equal
   systemd's `ControlGroupId`; it is not treated as an inode number. The sampler still binds exact
   pending counts, journal targets, descriptor inventories, cgroup/PID namespace identities,
-  pending-target cgroup inodes, zero live/dying descendants and canonical singleton-current-MainPID
-  membership across two initial, one post-manager and one synchronous-join projection. These remain
+  pending-target two-coordinate cgroup identities, zero live/dying descendants and canonical
+  singleton-current-MainPID membership across two initial, one post-manager and one synchronous-join
+  projection. Each target accepts either the identical inode plus kernel cgroup ID or a complete
+  PID-1-managed replacement after exact predecessor exit; a partial inode/ID match is drift or reuse
+  and fails closed. The current manager `ControlGroup` must end in the exact D-Bus service Unit ID,
+  while its nonzero `ControlGroupId` must equal the independently pinned kernel ID. These remain
   bounded non-atomic samples. The process-local spawn guard does not exclude PID 1 migration, and
   the strict mount observation does not prove absence of an inherited writable cgroup descriptor.
   Outside the exact singleton slice, that refusal observer performs no namespace destruction,
   kernel cleanup, descriptor-store removal, journal transition or socket readiness. AV1-10 remains
-  Open because retained live forced-crash/KVM recovery evidence, `MayOwnPrepare`, no-store and
+  Open because a retained exact-main live forced-crash/KVM PASS, `MayOwnPrepare`, no-store and
   multi-target recovery are still absent; the fixed alpha score remains 11/100.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
@@ -1029,10 +1033,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   retains one affine descriptor name and two-entry manager inventory across both crashes, and
   observes startup removal before a new socket and recovered tombstone. Its transient service now
   matches the production `Type=simple`/three-second restart contract without `ExecStartPost`;
-  private-namespace observers remain in the driver cgroup, and each successor is held at final exec
-  until `ControlPID=0` plus an exact current-`MainPID` cgroup observation releases it. Both forced
+  private-namespace observers remain in the driver cgroup. One fixed no-argument launcher is the
+  unchanged `MainPID` for all three invocations and holds each at an InvocationID/PID-bound FIFO
+  before helper exec. Release requires the exact new invocation/restart count, `ControlPID=0`,
+  canonical `ControlGroup` plus nonzero `ControlGroupId`, expected fdstore count, singleton domain
+  cgroup shape, pending GDB breakpoint/exec catch and a live outside-cgroup observer. Both forced
   crashes additionally use an affine kill-ready/freeze-release handshake and require the kernel
-  cgroup event `frozen 1` before GDB may issue its pending kill. Non-main mode
+  cgroup event `frozen 1` before GDB inferior `kill` plus `quit 0`. The old cgroup is thawed or already
+  removed before waiting for the FIFO-gated successor; the freezer is not a restart gate. Non-main mode
   retains nothing, and there is no retained exact-main PASS for this new slice at this commit. This is exact
   singleton production adoption/reaping evidence machinery, not general restart recovery,
   `MayOwnPrepare`, no-store/multi-target cleanup, `CleanupOwned`, an installed-service proof or a

@@ -53,6 +53,8 @@ print_plan() {
             '  restart with QEMU user-network egress denied and prove that denial;' \
             '  build fully offline as the unprivileged guest user in the restricted boot;' \
             '  run the fixed helper-boundary proof plus exact CleanupConfirmed and MayOwn Relay restart slices as guest root;' \
+            '  require three canonical reports, fixed FIFO pre-exec barriers, exact GDB SIGKILL/quit-0 boundaries,' \
+            '    non-empty shape-checked crash-only freezer use, and complete observer/unit teardown;' \
             '  shut down, rehash the base image, validate, and discard all proof files;' \
             '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
             'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
@@ -69,6 +71,8 @@ print_plan() {
         '  restart with QEMU user-network egress denied and prove that denial;' \
         '  build fully offline as the unprivileged guest user in the restricted boot;' \
         '  run the fixed helper-boundary proof plus exact CleanupConfirmed and MayOwn Relay restart slices as guest root;' \
+        '  require exactly three canonical reports, fixed FIFO pre-exec barriers, exact GDB SIGKILL/quit-0 boundaries,' \
+        '    non-empty shape-checked crash-only freezer use, and complete observer/unit teardown;' \
         '  shut down, rehash the base image, validate, and publish eleven bounded files;' \
         '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
         'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'

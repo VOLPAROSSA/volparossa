@@ -314,9 +314,11 @@ that first transition does not rerun cleanup, while the distinct manager-absence
 required before `Absent(RecoveredMayOwn)` may be written. `Absent` records persist whether they came
 from a never-dispatched intent or from completed two-step settlement, so one operation can never
 acknowledge the other's tombstone and an exact retry never reruns its executor. Mutation authority
-remains private and pre-production: the server owns only the start/shutdown wrapper, version 3 has no supported on-disk
-migration contract yet, and production decodes a v3 object only behind the canonical lock and
-refuses Ready while any custody-bearing record cannot complete both settlement proofs.
+remains private and pre-production: the server owns only the start/shutdown wrapper, helper protocol
+version 3 has no supported on-disk migration contract yet, and production decodes only canonical
+journal wire version 4 behind the lock. Wire version 4 adds the kernel cgroup ID to the recovery
+anchor; inode-only wire version 3 is rejected rather than migrated or treated as continuity. Ready
+is refused while any custody-bearing record cannot complete both settlement proofs.
 
 After a definite pre-rename I/O failure, another mutation is admitted only if a read-only health
 check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
@@ -390,8 +392,15 @@ exactly one `MayOwnCustody + ExactPresent` target. Its validated durable plan mu
 path: Client has exactly one Client lease, Exit exactly one Exit lease, and Relay exactly the
 RelayClient plus RelayExit leases with the same path ID. The durable recovery anchor must name the
 current boot and the same executable device/inode as `/proc/self/exe`; the inherited namespace FD
-must match the anchor. `MayOwnPrepare`, `ExactNoStoredCustody`, multiple records, multiple paths and
-every mixed set remain fail-closed.
+must match the anchor. The durable service-cgroup anchor contains both its inode and kernel cgroup
+ID. A restart sample accepts either complete equality of both coordinates or a complete change of
+both after the exact predecessor pidfd exited. The latter is a typed PID-1-managed replacement: the
+exact inherited manager custody remains bound to one service object, while the new `MainPID`,
+`InvocationID`, Unit-ID-matched `ControlGroup`, kernel-bound `ControlGroupId`, service contract and
+singleton cgroup shape are independently re-proved. Replacing the cgroup-namespace root required
+the empty predecessor to have been removed. An inode-only or ID-only match, or a journal set naming
+different predecessor cgroups, is drift/reuse and fails closed. `MayOwnPrepare`,
+`ExactNoStoredCustody`, multiple records, multiple paths and every mixed set remain fail-closed.
 
 The parent keeps the journal startup owner, process-wide spawn-admission owner, old process pidfd,
 network-namespace owner and manager inventory. It first reuses the exact pidfd-exit and strict
@@ -444,7 +453,9 @@ durably CAS only the unchanged singleton `MayOwnCustody -> CleanupConfirmed` whi
 `CleanupConfirmed -> Absent` chain then run under the same spawn-admission guard before the helper
 socket may be bound. A crash after the phase CAS restarts at durable `CleanupConfirmed`; a committed
 fence deletion with a lost child reply remains retryable only as exact-empty. Broader crash recovery
-and live forced-crash/KVM proof are still absent, so AV1-10 and the 11/100 alpha score do not change.
+remains absent. The committed disposable runner has the narrow three-invocation/two-crash proof
+machinery described in the testing guide, but there is no retained exact-main PASS for this
+revision, so AV1-10 and the alpha score do not change.
 
 A refusal-only observation seam can consume the complete affine classification and wait for exact
 inherited process-pidfd exit. Before its first wait, every pending `MayOwnCustody` or

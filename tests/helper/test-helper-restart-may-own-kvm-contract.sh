@@ -63,6 +63,8 @@ reject_mutation '.scope.usable_datapath = true'
 reject_mutation '.restart.initial.target_role = "Client"'
 reject_mutation '.restart.initial.manager_fdstore_count = 0'
 reject_mutation '.restart.crashes = [.restart.crashes[0]]'
+reject_mutation '.restart.crashes[0].exec_main_code = "killed"'
+reject_mutation '.restart.crashes[1].exec_main_code = "killed"'
 reject_mutation '.restart.recovered.new_socket_published_before_settlement = true'
 reject_mutation '.invocation_ids[2] = .invocation_ids[1]'
 reject_mutation '.checks[0].result = "SKIP"'
@@ -180,14 +182,17 @@ done
 grep -F "[ \"\$may_own_symbol_counts\" = '1:1:1:1:1:1' ] \\" \
     "$symbol_contract" >/dev/null
 
-# Invocation one stops at the third publication (Client, Exit, then Relay), records
-# the observation and uses GDB's bounded inferior kill at the live publication frame.
+# Invocation one installs a pending publication breakpoint and exec catch while
+# the fixed launcher is still blocked. After release it stops at the third
+# publication (Client, Exit, then Relay) and uses GDB's bounded inferior kill.
 if ! awk '
     /^    driver_phase=may-own-first-crash$/ { in_block = 1; start = NR }
     in_block && /break volparossa_helper::worker_v3::DurableCustodyPublicationTerminalGuard::retain_published/ {
         breakpoint = NR; breakpoint_count++
     }
     in_block && /ignore 1 2/ { ignore = NR; ignore_count++ }
+    in_block && /set breakpoint pending on/ { pending = NR; pending_count++ }
+    in_block && /tcatch exec/ { catch_exec = NR; catch_count++ }
     in_block && /may-own-observer first-publication/ { publication = NR; publication_count++ }
     in_block && /^[[:space:]]*\047kill\047/ { inferior_kill = NR; inferior_kill_count++ }
     in_block && /signal SIGKILL/ { invalid_signal++ }
@@ -197,12 +202,15 @@ if ! awk '
     }
     END {
         valid = start > 0 && breakpoint_count == 1 && ignore_count == 1
+        valid = valid && pending_count == 1 && catch_count == 1
         valid = valid && publication_count == 1 && inferior_kill_count == 1
         valid = valid && invalid_signal == 0
         valid = valid && armed_count == 1 && finish > 0
         valid = valid && start < breakpoint && breakpoint < ignore
-        valid = valid && ignore < publication && publication < inferior_kill
-        valid = valid && inferior_kill < armed && armed < finish
+        valid = valid && pending < breakpoint && breakpoint < ignore
+        valid = valid && ignore < armed && armed < publication
+        valid = valid && publication < inferior_kill
+        valid = valid && inferior_kill < catch_exec && catch_exec < finish
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -210,12 +218,14 @@ if ! awk '
     exit 1
 fi
 
-# Invocation two follows two executor exec transitions, observes the reaper
-# journal confirmation boundary, then uses the second bounded inferior kill.
+# Invocation two begins in the same launcher, installs one pending helper
+# breakpoint plus one exec catch, observes the reaper journal confirmation
+# boundary, then uses the second bounded inferior kill.
 if ! awk '
     /^    may_own_tracer_ready=/ { in_block = 1; start = NR }
-    in_block && /tcatch exec/ { catches++; if (catches == 1) c1 = NR; if (catches == 2) c2 = NR }
-    in_block && /'\''continue'\''/ { continues++; if (continues == 1) k1 = NR; if (continues == 2) k2 = NR; if (continues == 3) k3 = NR }
+    in_block && /set breakpoint pending on/ { pending = NR; pending_count++ }
+    in_block && /tcatch exec/ { catches++; c1 = NR }
+    in_block && /'\''continue'\''/ { continues++; if (continues == 1) k1 = NR; if (continues == 2) k2 = NR }
     in_block && /break volparossa_helper::ownership_journal::actor::DurableOwnershipStartup::confirm_single_restart_cleanup/ {
         breakpoint = NR; breakpoint_count++
     }
@@ -226,12 +236,12 @@ if ! awk '
         finish = NR; in_block = 0
     }
     END {
-        valid = start > 0 && catches == 2 && continues == 3
+        valid = start > 0 && pending_count == 1 && catches == 1 && continues == 2
         valid = valid && breakpoint_count == 1 && observer_count == 1
         valid = valid && inferior_kill_count == 1 && invalid_signal == 0 && finish > 0
-        valid = valid && start < c1 && c1 < k1 && k1 < c2 && c2 < k2
-        valid = valid && k2 < breakpoint && breakpoint < observer_line
-        valid = valid && observer_line < inferior_kill && inferior_kill < k3 && k3 < finish
+        valid = valid && start < pending && pending < breakpoint
+        valid = valid && breakpoint < observer_line && observer_line < inferior_kill
+        valid = valid && inferior_kill < c1 && c1 < k1 && k1 < k2 && k2 < finish
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -239,12 +249,14 @@ if ! awk '
     exit 1
 fi
 
-# Invocation three follows two executor exec transitions, observes exact restart
-# custody removal, and detaches so startup can settle and publish.
+# Invocation three begins in the fixed launcher, installs one pending helper
+# breakpoint plus one exec catch, observes exact restart custody removal, and
+# detaches so startup can settle and publish.
 if ! awk '
     /^    may_own_third_tracer_ready=/ { in_block = 1; start = NR }
-    in_block && /tcatch exec/ { catches++; if (catches == 1) c1 = NR; if (catches == 2) c2 = NR }
-    in_block && /'\''continue'\''/ { continues++; if (continues == 1) k1 = NR; if (continues == 2) k2 = NR; if (continues == 3) k3 = NR }
+    in_block && /set breakpoint pending on/ { pending = NR; pending_count++ }
+    in_block && /tcatch exec/ { catches++; c1 = NR }
+    in_block && /'\''continue'\''/ { continues++; if (continues == 1) k1 = NR; if (continues == 2) k2 = NR }
     in_block && /break volparossa_helper::systemd_fdstore::remove_restart_custody/ {
         breakpoint = NR; breakpoint_count++
     }
@@ -255,13 +267,13 @@ if ! awk '
         finish = NR; in_block = 0
     }
     END {
-        valid = start > 0 && catches == 2 && continues == 3
+        valid = start > 0 && pending_count == 1 && catches == 1 && continues == 2
         valid = valid && breakpoint_count == 1 && observer_count == 1
         valid = valid && detach_count == 1 && quit_count == 1 && finish > 0
-        valid = valid && start < c1 && c1 < k1 && k1 < c2 && c2 < k2
-        valid = valid && k2 < breakpoint && breakpoint < observer_line
+        valid = valid && start < pending && pending < breakpoint
+        valid = valid && breakpoint < observer_line
         valid = valid && observer_line < detach && detach < quit
-        valid = valid && quit < k3 && k3 < finish
+        valid = valid && quit < c1 && c1 < k1 && k1 < k2 && k2 < finish
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -296,6 +308,86 @@ grep -F '|| [ "$may_own_invocation_three" = "$may_own_invocation_one" ] \' \
 grep -F '|| [ "$may_own_invocation_three" = "$may_own_invocation_two" ] \' \
     "$lineage_contract" >/dev/null
 
+# All three invocations use the same fixed no-argument launcher as MainPID and
+# are released only from an invocation/PID-bound FIFO after exact manager,
+# cgroup, debugger and external-observer readiness. The cgroup freezer must be
+# zero at this gate.
+grep -F -- '--property=Environment=VOLPAROSSA_HELPER_PREEXEC_MODE=may-own \' \
+    "$gate" >/dev/null
+grep -F '/run/volparossa-helper-restart-launcher \' "$gate" >/dev/null
+[ "$(grep -Fc 'may_own_preexec_barrier_is_exact "$may_own_pid_' "$gate")" -eq 3 ]
+[ "$(grep -Fc 'start_may_own_preexec_observer ' "$gate")" -eq 3 ]
+[ "$(grep -Fc 'release_may_own_preexec_barrier "$may_own_pid_' "$gate")" -eq 3 ]
+[ "$(grep -Fc 'release_may_own_preexec_observer ' "$gate")" -eq 3 ]
+preexec_contract=$tmp/preexec-contract
+sed -n '/^may_own_preexec_barrier_is_exact() {$/,/^}$/p' \
+    "$gate" >"$preexec_contract"
+for preexec_field in \
+    'may_own_service_shape_is_exact "$may_own_barrier_main_pid" \' \
+    'VOLPAROSSA_HELPER_MAY_OWN_PRE_EXEC_BARRIER_V1=ready' \
+    'cmp -s "$may_own_barrier_expected" "$may_own_barrier_record"' \
+    'stat -Lc '\''%d:%i'\'' "/proc/$may_own_barrier_main_pid/exe"' \
+    'cgroup.freeze")" = 0 ]'
+do
+    grep -F "$preexec_field" "$preexec_contract" >/dev/null
+done
+observer_preexec_contract=$tmp/observer-preexec-contract
+sed -n '/^[[:space:]]*pre-exec-one|pre-exec-two|pre-exec-three)/,/^[[:space:]]*;;$/p' \
+    "$observer" >"$observer_preexec_contract"
+grep -F 'VOLPAROSSA_HELPER_MAY_OWN_PRE_EXEC_OBSERVER_V1=ready' \
+    "$observer_preexec_contract" >/dev/null
+grep -F 'while [ ! -f "$release_record" ]; do' \
+    "$observer_preexec_contract" >/dev/null
+
+# systemctl v257 renders ExecMainCode numerically. Both SIGKILL fences require
+# Linux CLD_KILLED == 2; symbolic "killed", deletion, or either one-sided
+# mutation must be rejected by this source contract.
+may_own_exec_code_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_exec_code_source=$1
+    [ "$(grep -Fc 'ExecMainCode --value "$unit_name")" != 2 ]' \
+        "$may_own_exec_code_source")" -eq 2 ] \
+        && [ "$(grep -Fc 'ExecMainCode --value "$unit_name")" != killed ]' \
+            "$may_own_exec_code_source")" -eq 0 ]
+}
+may_own_exec_code_contract_is_exact "$gate" || exit 1
+for mutated_fence in 1 2; do
+    exec_code_mutant=$tmp/exec-code-$mutated_fence
+    awk -v target="$mutated_fence" '
+        {
+            if (index($0, "ExecMainCode --value \"$unit_name\")\" != 2 ]")) {
+                seen++
+                if (seen == target) sub(/!= 2 \]/, "!= killed ]")
+            }
+            print
+        }
+    ' "$gate" >"$exec_code_mutant"
+    if may_own_exec_code_contract_is_exact "$exec_code_mutant"; then
+        printf 'MayOwn ExecMainCode contract accepted fence %s mutation\n' \
+            "$mutated_fence" >&2
+        exit 1
+    fi
+done
+
+# Freezing is used only at the two non-empty crash frames. Each old cgroup is
+# thawed (or already removed) while MainPID and NRestarts still describe the
+# failed invocation, before the driver begins waiting for the successor. No
+# successor-side thaw may act as its start gate.
+first_thaw=$(grep -n 'thaw_may_own_crash_boundary_before_restart 0' "$gate" \
+    | cut -d: -f1)
+second_phase=$(grep -n 'driver_phase=may-own-second-crash' "$gate" | cut -d: -f1)
+second_thaw=$(grep -n 'thaw_may_own_crash_boundary_before_restart 1' "$gate" \
+    | cut -d: -f1)
+third_phase=$(grep -n 'driver_phase=may-own-recovery' "$gate" | cut -d: -f1)
+[ "$first_thaw" -lt "$second_phase" ] && [ "$second_thaw" -lt "$third_phase" ]
+successor_segment=$tmp/successor-segment
+sed -n '/^    driver_phase=may-own-second-crash$/,/^    driver_phase=may-own-retirement$/p' \
+    "$gate" >"$successor_segment"
+if grep -F '0 >"$may_own_cgroup/cgroup.freeze"' "$successor_segment" >/dev/null; then
+    printf '%s\n' 'MayOwn successor still uses the freezer as its release gate' >&2
+    exit 1
+fi
+
 # Every boundary derives one canonical custody name from two stable manager
 # snapshots, preserves count 2 through the crashes, then proves stable empty
 # FDStore and a RecoveredMayOwn settled journal before accepting a new socket.
@@ -328,6 +420,11 @@ cleanup_contract=$tmp/cleanup-contract
 sed -n '/^cleanup() {$/,/restart_successor_debugger_pid/p' "$gate" \
     >"$cleanup_contract"
 for cleanup_pattern in \
+    'capture_process_starttime "$may_own_preexec_observer_pid"' \
+    'kill "$may_own_preexec_observer_pid"' \
+    'wait "$may_own_preexec_observer_pid"' \
+    '"$may_own_preexec_observer_record_pid" 2>/dev/null || true)' \
+    'kill "$may_own_preexec_observer_record_pid"' \
     'capture_process_starttime "$may_own_driver_observer_pid"' \
     'kill "$may_own_driver_observer_pid"' \
     'wait "$may_own_driver_observer_pid"' \

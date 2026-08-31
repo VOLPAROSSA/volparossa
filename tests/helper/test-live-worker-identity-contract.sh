@@ -4471,13 +4471,13 @@ printf '%s\n' \
     '    restart observer/launcher, and debugger artifact hashes;' \
     '  copy the already-built real helper into one validated root-only temporary stage;' \
     '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
-    '  bind account files plus the system bus socket read-only in two sequential invocations;' \
+    '  bind account files plus the system bus socket read-only in four sequential transient services;' \
     '  let PID 1 resolve only host-present root/root unit credentials before those binds;' \
     '  use exact /usr/bin/setpriv to install the staged primary and singleton agent GID;' \
     '  bind the canonical systemd notify socket read-only inside both private /run trees;' \
     '  pin its D-Bus system address to that verified socket inside the private /run;' \
     '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
-    '  require the host /run/volparossa path absent before and after both private unit runs;' \
+    '  require the host /run/volparossa path absent before and after every private unit run;' \
     '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
     '    FileDescriptorStorePreserve=yes on that transient service;' \
     '  start its fixed credential trampoline as blocking Type=exec, then require helper exec;' \
@@ -4489,6 +4489,7 @@ printf '%s\n' \
     '    the proof process and every transient-unit file write at 1 MiB;' \
     '  cap the diagnostic worker runtime at 45 seconds;' \
     '  cap the production runtime at three minutes;' \
+    '  cap the two-crash MayOwn service runtime at six minutes;' \
     '  discard production runtime stdout and stderr through exact systemd null streams;' \
     '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
     '  invoke only --internal-worker-v3-live-proof and require its exact two success records;' \
@@ -4498,7 +4499,14 @@ printf '%s\n' \
     '  stop, clean only its fdstore, and collect that exact first invocation;' \
     '  only after the unit is not-found, reuse its random name with a new exact marker and ID;' \
     '  run the argumentless production helper and fixed IPC probe inside the confined unit;' \
-    '  use one fixed no-argument launcher only to hold the restart successor before helper exec;' \
+    '  use one fixed no-argument launcher and FIFO barriers to hold the ExactPresent successor' \
+    '    plus all three MayOwn invocations before same-MainPID helper exec;' \
+    '  release each MayOwn launcher only after exact PID, new InvocationID, NRestarts,' \
+    '    ControlPID, ControlGroup/ControlGroupId, fdstore, cgroup shape, GDB exec-catch,' \
+    '    pending breakpoint, and an outside-cgroup namespace observer are ready;' \
+    '  use GDB inferior kill plus quit 0 for exactly three SIGKILL crash boundaries;' \
+    '  freeze only each non-empty, exact single-MainPID MayOwn cgroup at its two crash frames,' \
+    '    then thaw or observe removal before PID 1 may launch the FIFO-gated successor;' \
     '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
     '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
     '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
@@ -4508,14 +4516,15 @@ printf '%s\n' \
     '  require byte-identical Commit retries, exact fixture cleanup, Destroy, and worker retirement;' \
     '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
     '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
-    '  collect that exact second invocation and remove the validated temporary stage;' \
+    '  retire each exact unit, stop all observers/keepers/debuggers, thaw any crash freezer,' \
+    '    collect the units, and remove the validated temporary stage;' \
     '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
     '    and network digests;' \
-    '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
+    '  validate exactly three bounded canonical evidence-v1 reports before publishing only those JSON values.' \
     'This stages the helper identity and production IPC boundary. It creates no host account,' \
     'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or production VPN datapath.' \
     'One dummy underlay and ephemeral Client, Exit, and simultaneous Relay-pair WireGuard leases exist only in private namespaces.' \
-    'It is not package-install, restart-recovery, CleanupOwned, production datapath, or A01-A15 evidence.' \
+    'It is not package-install, general restart recovery, CleanupOwned, production datapath, or A01-A15 evidence.' \
     'PREVIEW ONLY: no file, account, service, or network state was changed.' \
     >"$expected_preview"
 if ! cmp -s "$expected_preview" "$default_preview"; then
@@ -5506,10 +5515,10 @@ if [ "$(grep -Fc \
     "$gate")" -ne 1 ] \
     || [ "$(grep -Fc \
         '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production \' \
-        "$gate")" -ne 2 ] \
+        "$gate")" -ne 1 ] \
     || [ "$(grep -Fc \
         '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-restart-launcher \' \
-        "$gate")" -ne 1 ]; then
+        "$gate")" -ne 2 ]; then
     printf '%s\n' 'transient helper credential trampolines are not exact' >&2
     exit 1
 fi

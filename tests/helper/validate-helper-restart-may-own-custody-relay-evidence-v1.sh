@@ -125,7 +125,7 @@ jq -e '
           and .sequence == 1
           and .boundary == "worker_v3::DurableCustodyPublicationTerminalGuard::retain_published"
           and .signal == "SIGKILL" and .unit_result == "signal"
-          and .exec_main_code == "killed" and .exec_main_status == 9
+          and .exec_main_code == 2 and .exec_main_status == 9
           and .manager_fdstore_after_crash == 2
           and .journal_phase_after_crash == "MayOwnCustody")
         and (.[1] | exact_keys(["boundary","boundary_observed_at","crashed_at",
@@ -135,7 +135,7 @@ jq -e '
           and .boundary ==
             "ownership_journal::actor::DurableOwnershipStartup::confirm_single_restart_cleanup"
           and .signal == "SIGKILL" and .unit_result == "signal"
-          and .exec_main_code == "killed" and .exec_main_status == 9
+          and .exec_main_code == 2 and .exec_main_status == 9
           and .manager_fdstore_after_crash == 2
           and .journal_phase_after_crash == "MayOwnCustody"))
       and (.recovered | exact_keys(["argumentless","cleanup_confirmed_before_removal",

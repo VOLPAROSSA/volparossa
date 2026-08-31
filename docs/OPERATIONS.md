@@ -235,8 +235,13 @@ operator inspection.
 
 One `MayOwnCustody + ExactPresent` target may proceed only when its durable plan is exactly one
 Client lease, one Exit lease, or the same-path RelayClient/RelayExit pair; its boot ID and helper
-executable inode must still match. After proving the old process pidfd exited and the shared service
-cgroup is quiescent, the parent runs only
+executable inode must still match. Its durable service-cgroup inode and kernel cgroup ID must either
+both equal the newly pinned manager cgroup or both change as one PID-1-managed replacement after the
+old pidfd exited. Every target must name that same predecessor identity. The current manager scope,
+`MainPID`, `InvocationID`, Unit-ID-matched `ControlGroup`, kernel-bound `ControlGroupId` and singleton
+domain-cgroup shape are re-proved; a partial identity match fails closed as drift/reuse. After
+proving the old process pidfd exited and the shared service cgroup is
+quiescent, the parent runs only
 `/proc/self/exe --internal-restart-reaper-v1`. A credential-authenticated bounded
 `SOCK_SEQPACKET` transcript transfers exactly one matching network-namespace FD. The child joins it
 once, installs the fixed worker sandbox, drops to the worker account with only `CAP_NET_ADMIN`, and

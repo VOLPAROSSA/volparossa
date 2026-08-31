@@ -70,12 +70,20 @@ if ! awk '
     /--property=RestartUSec --value/ { restart = NR; restart_count++ }
     /--property=ControlPID --value/ { control = NR; control_count++ }
     /--property=MainPID --value/ { main = NR; main_count++ }
+    /unit_current_invocation_id/ { invocation = NR; invocation_count++ }
+    /--property=NRestarts --value/ { restarts = NR; restarts_count++ }
+    /--property=NFileDescriptorStore --value/ { fdstore = NR; fdstore_count++ }
+    /--property=ControlGroup \\/ { cgroup = NR; cgroup_count++ }
+    /--property=ControlGroupId/ { cgroup_id = NR; cgroup_id_count++ }
     /--property=ExecStartPost --value/ { post = NR; post_count++ }
     /cgroup\.procs/ { procs = NR; procs_count++ }
     /\$0 != expected_pid/ { exact_pid = NR; exact_pid_count++ }
     END {
         valid = type_count == 1 && restart_count == 1 && control_count == 1
-        valid = valid && main_count == 1 && post_count == 1 && procs_count == 1
+        valid = valid && main_count == 1 && invocation_count == 1
+        valid = valid && restarts_count == 1 && fdstore_count == 1
+        valid = valid && cgroup_count == 1 && cgroup_id_count == 1
+        valid = valid && post_count == 1 && procs_count == 1
         valid = valid && exact_pid_count == 1
         valid = valid && type < restart && restart < control && control < main
         valid = valid && main < post && post < procs && procs < exact_pid
@@ -91,11 +99,25 @@ grep -F '[ "$(systemctl show --property=RestartUSec --value "$unit_name")" = 3s 
     "$shape_contract" >/dev/null
 grep -F '[ "$(systemctl show --property=ControlPID --value "$unit_name")" = 0 ]' \
     "$shape_contract" >/dev/null
+for exact_shape_field in \
+    'unit_current_invocation_id' \
+    'NRestarts --value' \
+    'NFileDescriptorStore --value' \
+    'FileDescriptorStoreMax --value' \
+    'FileDescriptorStorePreserve --value' \
+    'may_own_shape_control_group=$(systemctl show --property=ControlGroup' \
+    'ControlGroupId' \
+    'cgroup.type' \
+    'nr_descendants' \
+    'nr_dying_descendants'
+do
+    grep -F "$exact_shape_field" "$shape_contract" >/dev/null
+done
 [ "$(grep -Fc 'may_own_service_shape_is_exact "$may_own_pid_' "$gate")" -eq 3 ]
 
-# Frozen successors are first followed through both exec transitions. GDB then
-# holds the helper at its final exec until the outside-cgroup observer has
-# entered the final private namespaces and the driver has accepted the shape.
+# FIFO-gated successors are manager/cgroup-bound while the fixed launcher is
+# still MainPID. GDB and the outside-cgroup pre-exec observer arm before release;
+# the helper then remains stopped until the functional observer accepts shape.
 for sequence in second third; do
     sequence_contract=$tmp/$sequence-sequence
     case $sequence in
@@ -116,6 +138,9 @@ for sequence in second third; do
         /while ! vp_capture_file_is_safe "\$may_own_.*_helper_exec_ready"/ {
             helper_wait = NR; helper_wait_count++
         }
+        /may_own_preexec_barrier_is_exact/ { barrier = NR; barrier_count++ }
+        /start_may_own_preexec_observer/ { preobserver = NR; preobserver_count++ }
+        /release_may_own_preexec_barrier/ { fifo_release = NR; fifo_release_count++ }
         $0 ~ "start_may_own_driver_observer " expected_pid " " {
             observer = NR; observer_count++
         }
@@ -127,9 +152,13 @@ for sequence in second third; do
         }
         /^    wait "\$may_own_debugger_pid"/ { debugger_wait = NR; debugger_wait_count++ }
         END {
-            valid = helper_wait_count == 1 && observer_count == 1
+            valid = barrier_count == 1 && preobserver_count == 1
+            valid = valid && fifo_release_count == 1
+            valid = valid && helper_wait_count == 1 && observer_count == 1
             valid = valid && shape_count == 1 && release_count == 1
             valid = valid && debugger_wait_count == 1
+            valid = valid && barrier < preobserver && preobserver < fifo_release
+            valid = valid && fifo_release < helper_wait
             valid = valid && helper_wait < observer && observer < shape
             valid = valid && shape < release && release < debugger_wait
             if (!valid) exit 1
@@ -143,7 +172,8 @@ done
 # Each forced crash has a two-sided GDB/driver handshake. The stopped inferior
 # publishes kill-ready, GDB waits, and the driver verifies the production shape
 # plus a fully frozen cgroup before releasing the one pending GDB kill. This
-# prevents the three-second production restart from racing the successor fence.
+# proves the exact crash frame. The driver thaws/removes that old crash cgroup
+# before waiting for the independently FIFO-gated successor.
 freeze_contract=$tmp/freeze-function
 sed -n '/^freeze_may_own_cgroup_before_forced_crash() {$/,/^}$/p' \
     "$gate" >"$freeze_contract"
@@ -226,6 +256,19 @@ for sequence in first second; do
         exit 1
     fi
 done
+
+thaw_contract=$tmp/thaw-function
+sed -n '/^thaw_may_own_crash_boundary_before_restart() {$/,/^}$/p' \
+    "$gate" >"$thaw_contract"
+grep -F '[ "$(systemctl show --property=MainPID --value "$unit_name")" = 0 ]' \
+    "$thaw_contract" >/dev/null
+grep -F '0 >"$may_own_cgroup/cgroup.freeze"' "$thaw_contract" >/dev/null
+grep -F 'may_own_cgroup_frozen=no' "$thaw_contract" >/dev/null
+if sed -n '/^    driver_phase=may-own-second-crash$/,/^    driver_phase=may-own-retirement$/p' \
+    "$gate" | grep -F '0 >"$may_own_cgroup/cgroup.freeze"' >/dev/null; then
+    printf '%s\n' 'MayOwn successor release still depends on cgroup.freeze' >&2
+    exit 1
+fi
 
 # The polling observer enters the service mount and network namespaces. Its
 # cgroup stays outside the service, is credential- and NNP-bound, and the hook
