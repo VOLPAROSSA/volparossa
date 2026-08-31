@@ -51,9 +51,14 @@ use forwarding::{
     exit_forward_upstream_behaviour,
 };
 pub use peerlink::{PeerLink, PeerLinkError};
-use preselection_transaction::PreselectionTransactionState;
 pub use preselection_transaction::{
-    BoundClientPreselectionTransport, ClientPreselectionDispatch, PreselectionDispatchError,
+    BoundClientPreselectionTransport, BoundUpstreamPreselectionTransport,
+    ClientPreselectionDispatch, ClientPreselectionTransaction, PreselectionDispatchError,
+    UpstreamPreselectionDispatch, UpstreamPreselectionTransaction,
+};
+use preselection_transaction::{
+    PreselectionTransactionState, client_request_has_local_target_from_distinct_sender,
+    upstream_request_has_authenticated_target,
 };
 use preselection_wire::{
     ClientPreselectionObservationCodec, UpstreamPreselectionObservationCodec,
@@ -231,7 +236,7 @@ pub struct DiscoveryBehaviour {
     connection_provenance: ConnectionProvenanceBehaviour,
     /// Client-hop A1c behaviour for the dormant affine owner seam.
     preselection_observation: request_response::Behaviour<ClientPreselectionObservationCodec>,
-    /// Callerless control-relay-to-exit A1c wire precursor.
+    /// Affine control-relay-to-exit A1c transport behaviour.
     preselection_observation_upstream:
         request_response::Behaviour<UpstreamPreselectionObservationCodec>,
     /// Peer protocol/address metadata.
@@ -376,7 +381,7 @@ pub enum BehaviourEvent {
             ClientPreselectionObservationResponse,
         >,
     ),
-    /// Callerless control-relay-to-exit preselection wire event.
+    /// Affine control-relay-to-exit preselection transport event.
     PreselectionObservationUpstream(
         request_response::Event<
             UpstreamPreselectionObservationRequest,
@@ -1300,6 +1305,38 @@ impl DiscoveryService {
                                 ..
                             }),
                         ) if !upstream_request_has_authenticated_relay(
+                            request,
+                            peer,
+                            self.local_peer_id(),
+                        ) =>
+                        {
+                            continue;
+                        }
+                        libp2p::swarm::SwarmEvent::Behaviour(
+                            BehaviourEvent::PreselectionObservation(
+                                request_response::Event::Message {
+                                    peer,
+                                    message: request_response::Message::Request { request, .. },
+                                    ..
+                                },
+                            ),
+                        ) if !client_request_has_local_target_from_distinct_sender(
+                            request,
+                            peer,
+                            self.local_peer_id(),
+                        ) =>
+                        {
+                            continue;
+                        }
+                        libp2p::swarm::SwarmEvent::Behaviour(
+                            BehaviourEvent::PreselectionObservationUpstream(
+                                request_response::Event::Message {
+                                    peer,
+                                    message: request_response::Message::Request { request, .. },
+                                    ..
+                                },
+                            ),
+                        ) if !upstream_request_has_authenticated_target(
                             request,
                             peer,
                             self.local_peer_id(),

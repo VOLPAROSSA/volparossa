@@ -1041,17 +1041,24 @@ single clean-build A01--A15 run; the score is not a release claim.
   receipts are bounded to 4096 bytes, forwarded attestations to 8192 bytes; both behaviours use an
   exact five-second timeout, 64 streams, distinct event/request-ID domains, no legacy aliases and
   no retry. Their opaque wrappers and codecs enforce only state-free canonical/version/hop
-  type/role/payload/envelope shape on read and write. A dormant service seam derives the target and
-  family from an exact client-hop request, admits one active dispatch, captures a connection witness
-  immediately before send, and can cancel it or bind a typed response event after internally
-  stamping arrival. Binding rechecks the exact service, request ID, peer, event-local connection,
-  half-open deadline, uniqueness, generation and native prefix; the affine bound result exposes no
-  field or decomposition. Explicit cancellation consumes the exact originating token. Drop, a
-  non-response event, unavailable pre-correlation wall time, or a service/ID/peer mismatch leaves
-  the only slot occupied fail closed. Exact correlation consumes it before later time or provenance
-  checks. There is still no production root or lifecycle owner, producer, signer,
-  application handler, sampler, runtime/agent caller, upstream sender, responder/forwarder,
-  cryptographic verification/replay, A1a exact-set join, or conversion into fresh local evidence.
+  type/role/payload/envelope shape on read and write. Dormant client-hop and relay-to-exit service
+  seams now have independent one-at-a-time slots. Each derives its target and family from the exact
+  request, captures a connection witness immediately before its synchronous send, and can cancel or
+  bind a typed same-hop response event after internally stamping arrival. Upstream dispatch requires
+  the forwarding control to be local and targets only the exit. Context-bound variants retain a
+  non-cloned caller owner—suitable for the original candidate-snapshot attempt or downstream
+  request/channel—until that exact bind or cancellation. Binding rechecks the exact service,
+  request ID, peer, event-local connection, half-open deadline, uniqueness, generation and native
+  prefix; both affine bound results expose no field or decomposition. Drop, a non-response event,
+  unavailable pre-correlation wall time, or a service/ID/peer mismatch leaves that hop's slot
+  occupied fail closed. Exact correlation consumes it before later time or provenance checks. The
+  swarm pump rejects a still-current client-hop request unless it targets the local relay/control
+  and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
+  client identity to bind. Upstream alone binds the authenticated relay exactly to
+  `forwarded_control` and the actor to the local exit. Role-gated typed response APIs consume only
+  their own hop's response channel. There is still no production root or lifecycle owner,
+  producer, signer, application handler, sampler, runtime/agent caller, cryptographic
+  verification/replay, A1a exact-set join, or conversion into fresh local evidence.
   A future A1c boundary must consume and exact-set join these real request/connection proofs before
   phase-A evidence. A first dormant private A1c precursor now passively tracks authenticated libp2p
   establish/address-change/close lineage under the existing 384-global/four-per-peer ceilings.
@@ -1060,8 +1067,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   or six prefix bytes (no full IP/multiaddress), generation-invalidates every address change, and
   permanently poisons and clears on ambiguous lineage or overflow. Its affine
   witness/binding rechecks the exact Peer ID, `ConnectionId`, non-zero generation and native /24 or
-  /48. It has no generic registry/address/prefix accessor; only the purpose-specific client seam
-  may consume its affine witness. There is still no A1a join or Fresh-evidence mint. The
+  /48. It has no generic registry/address/prefix accessor; only the purpose-specific client and
+  upstream seams may consume its affine witness. There is still no A1a join or Fresh-evidence mint. The
   fake-only 1-200-record evidence boundary and prospective planner remain separate;
   no checkbox is closed. Production still publishes no usable relay/exit capability, route
   finalization still fails closed with `ProbeEvidenceUnavailable`, and no production evidence

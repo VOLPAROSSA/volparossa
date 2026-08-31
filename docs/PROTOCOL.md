@@ -229,19 +229,25 @@ no retry.
 The opaque hop wrappers admit bytes only after state-free canonical, version, hop type/role,
 payload-local, and typed envelope-binding validation; codec writes repeat those checks. This is
 not cryptographic verification, replay acceptance, signature/origin authority, or usable evidence.
-Discovery has one dormant client-hop transport seam: it derives the peer and family from the exact
-request, admits one active dispatch, takes a connection-generation witness immediately before send,
-and binds only a typed matching response event under the fixed/request/attempt deadline minimum.
-The bind stamps arrival time internally and rechecks the exact service instance, request ID, peer,
-event-local `ConnectionId`, current unique connection generation and native prefix. The affine
-result exposes none of those fields. Explicit cancellation consumes the originating token. Dropping
-it, a non-response event, unavailable pre-correlation wall time, or a cross-service, wrong-ID or
-wrong-peer event keeps the only slot occupied fail closed. Exact correlation consumes the slot
-before later time or provenance checks.
-There is no runtime/agent caller, upstream sender, responder,
-signer, handler, forwarder, A0 verification/replay consumer, A1a exact-set join, or Fresh-evidence
-conversion. A later owner must consume the unchanged response bytes and opaque proof together
-before any observation can become usable.
+Discovery has independent dormant client-hop and relay-to-exit transport seams. Each derives its
+target and family from the exact request, admits one active same-hop dispatch, takes a
+connection-generation witness immediately before send, and binds only a typed matching response
+event under the fixed/request/caller deadline minimum. The upstream seam additionally requires the
+forwarding control identity to be local and never targets it instead of the exit. Each bind stamps
+arrival time internally and rechecks the exact service instance, request ID, peer, event-local
+`ConnectionId`, current unique connection generation and native prefix. Context-bound entrypoints
+can carry a non-cloned attempt/snapshot or downstream-channel owner through only that exact bind or
+cancellation. Both affine results expose none of their ID/hash/time/prefix fields. Dropping a token,
+a non-response event, unavailable pre-correlation wall time, or a cross-service, wrong-ID or
+wrong-peer event keeps that hop's slot occupied fail closed; exact correlation consumes it before
+later time or provenance checks. A still-current inbound client-hop request is withheld unless it
+targets the local relay/control and its authenticated remote differs from both local peer and actor;
+requester-anonymous A0 has no client identity to bind. Upstream instead requires the authenticated
+relay to equal `forwarded_control` and the actor to equal the local exit. Role-gated APIs can send
+only the corresponding typed client or upstream response. There is no runtime/agent caller,
+signer, application handler, A0 verification/replay consumer, A1a exact-set join, or Fresh-evidence
+conversion. A later owner must consume the unchanged response bytes, retained caller context and
+opaque proof together before any observation can become usable.
 
 Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
 relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7

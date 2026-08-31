@@ -22,9 +22,9 @@ The current discovery crate composes:
   one prospective or selected datapath relay;
 - canonical-byte request-response on `/volparossa/preselection-observation/4` for the
   client-to-control/direct-relay hop and `/volparossa/preselection-observation-upstream/4` for the
-  control-relay-to-exit hop; the client-facing behaviour has a dormant one-at-a-time affine
-  dispatch/bind/cancel seam, while upstream remains callerless and neither hop has an application
-  handler or responder;
+  control-relay-to-exit hop; both behaviours have independent dormant one-at-a-time affine
+  context/dispatch/bind/cancel seams and role-gated response-channel APIs, but neither hop has a
+  signer, application handler, or runtime caller;
 - refusal-test constants, but no registered behaviour or fallback, for advertisement v1/v2/v3 and the
   retired direct reservation v2 identifiers; and
 - a process-local MemoryTransport used by hermetic swarm integration tests, not as a network or
@@ -227,8 +227,9 @@ generation even inside the same prefix. The private
 affine witness can be minted only for exactly one total connection to that peer in the requested
 native family, and binding consumes it while rechecking peer, connection, generation and prefix.
 There is deliberately no generic `DiscoveryService` registry, address, prefix, witness, or bound-
-observation accessor. The only consumer is the purpose-specific client transaction seam described
-below; there is still no A1a join or Fresh-evidence mint, so the rest of A1c remains required.
+observation accessor. The only consumers are the purpose-specific client and upstream transaction
+seams described below; there is still no A1a join or Fresh-evidence mint, so the rest of A1c
+remains required.
 
 A second dormant A1c wire precursor consists of two strictly separate libp2p request-response
 behaviours and event variants. The client-facing protocol is outbound for Client and inbound for
@@ -242,24 +243,34 @@ A0/A1a absolute request expiry remains authoritative.
 
 The codecs revalidate canonical encoding, v4 and hop-specific type/role shape, payload-local
 invariants, and typed payload-to-envelope fields on both read and write. They neither verify a
-signature nor mutate replay state, correlate a response with a request, derive a connection
-witness/request ID, sign or forward a response, or claim origin/reachability. The two event
-variants retain separate libp2p request-ID domains. A dormant client-only seam derives its target
-and address family from the canonical request, requires one unique current direct connection,
-mints a generation-bound witness immediately before libp2p dispatch, and admits at most one active
-request. Its affine token can be bound only through a typed client-hop response event. Cancellation
-consumes that exact token after the caller has matched a client-hop failure, local timeout or
-shutdown. Dropping it, a non-response event, unavailable pre-correlation wall time, or a
-cross-service, wrong-ID or wrong-peer event leaves the slot occupied fail closed. After exact
-correlation the slot is consumed even when the subsequent time or connection-provenance check
-fails. Binding stamps local monotonic and wall time internally and rechecks the exact service
-instance,
-request ID, authenticated peer, event-local `ConnectionId`, deadline, uniqueness, generation and
-native prefix. The resulting proof is completely opaque: it exposes no prefix, address, ID, hash,
-time, getter, clone or decomposition surface. There is still no runtime/agent caller, upstream
-dispatcher, producer, signer, application handler, responder/forwarder, A0 verifier/replay consumer,
-A1a exact-set join, or evidence mint. A future transaction owner must supply those remaining
-authenticated transaction semantics.
+signature nor mutate replay state, sign a response, or claim origin/reachability. The two event
+variants retain separate libp2p request-ID domains and independent one-at-a-time active slots. The
+client hop derives the direct relay or forwarding control plus native family from the exact
+canonical request; the upstream hop requires the request's forwarding control to be local and
+derives only the exit plus family. Each requires one unique current direct connection, mints a
+generation-bound witness immediately before its synchronous libp2p send, binds only a typed
+same-hop response event, and applies the minimum of its fixed timeout, unchanged A0 expiry, and
+caller deadline. Context-bound variants retain an arbitrary non-cloned caller owner—intended for
+the original candidate-snapshot attempt on the client and the original downstream channel/request
+owner at a control relay—and return it only after that exact bind or cancellation. This prevents a
+later owner from accidentally pairing a sibling response and snapshot without exposing the
+context during flight.
+
+Dropping a dispatch, a non-response event, unavailable pre-correlation wall time, or a
+cross-service, wrong-ID or wrong-peer event leaves that hop's slot occupied fail closed. After
+exact correlation the slot is consumed even when the subsequent time or connection-provenance
+check fails. Binding stamps local monotonic and wall time internally and rechecks the exact service
+instance, request ID, authenticated peer, event-local `ConnectionId`, deadline, uniqueness,
+generation and native prefix. Both resulting proofs are completely opaque: they expose no prefix,
+address, ID, hash, time, getter, clone or decomposition surface. The swarm pump drops a
+still-current client-hop request unless it targets the local relay/control and its authenticated
+remote sender differs from both that local peer and the challenged actor. A0 deliberately contains
+no client identity, so this is not a claim that the sender is request-bound. Upstream, the pump
+instead requires `forwarded_control` to equal the authenticated relay and the actor to equal the
+local exit. Role-gated typed response APIs can consume only the corresponding libp2p response
+channel. There is still no runtime/agent caller, producer, signer, application handler, A0
+verifier/replay consumer, A1a exact-set join, or evidence mint. A future application owner must
+supply those remaining authenticated transaction semantics.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than
