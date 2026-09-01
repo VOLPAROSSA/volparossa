@@ -15,7 +15,7 @@
 //! MPTCP, Relay transport handoff and every usable end-to-end datapath remain disconnected.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs,
     future::Future,
     io,
@@ -62,14 +62,19 @@ use volparossa_mptcp::{
 use crate::{
     deadline::HardDeadline,
     internal_protocol::{
-        AcquireTransportSocket, ActivateLeases, ActivatedLease, ActivatedLeases, AddMptcpEndpoint,
-        ContextDestroyed, ContextInitialised, DestroyContext, INTERNAL_WORKER_MAGIC,
-        INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext, InternalContextRole,
-        InternalEndpointRole, InternalMptcpMode, InternalTransportSocketKind, InternalUdpEndpoint,
-        InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult, MptcpEndpointAdded,
-        MptcpEndpointRemoved, PrepareLeases, PreparedLease, PreparedLeases, ProbeCommitLeases,
-        ProbedLease, ProbedLeases, RemoveMptcpEndpoint, TransportSocketReady, encode_request,
-        internal_worker_request, internal_worker_response, validate_response_for_request,
+        AcquireClientIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeases,
+        ActivatedClientIngress, ActivatedLease, ActivatedLeases, AddMptcpEndpoint,
+        ClientIngressDestroyed, ClientIngressInitialised, ContextDestroyed, ContextInitialised,
+        DestroyClientIngress, DestroyContext, INTERNAL_WORKER_MAGIC,
+        INTERNAL_WORKER_PROTOCOL_VERSION, IngressSocketReady, InitialiseClientIngress,
+        InitialiseContext, InternalContextRole, InternalEndpointRole, InternalIngressAddressFamily,
+        InternalIngressSocketKind, InternalMptcpMode, InternalTransportSocketKind,
+        InternalUdpEndpoint, InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult,
+        MptcpEndpointAdded, MptcpEndpointRemoved, PrepareClientIngress, PrepareLeases,
+        PreparedClientIngress, PreparedIngressSocket, PreparedLease, PreparedLeases,
+        ProbeCommitLeases, ProbedLease, ProbedLeases, RemoveMptcpEndpoint, TransportSocketReady,
+        encode_request, internal_worker_request, internal_worker_response,
+        validate_response_for_request,
     },
     kernel::{
         KernelError, NamespaceKernel, PreparedWireguardKernelProof, WireguardV3PeerConfiguration,
@@ -86,14 +91,15 @@ use crate::{
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
         CommittedSocketLease, CredentialedWorkerExecution, ExpectedUnixCredentials,
-        WorkerTransportError, create_transport_socket, enable_passcred_receiver,
-        private_credential_worker_channel, receive_credential_record,
+        WorkerTransportError, create_client_ingress_socket, create_transport_socket,
+        enable_passcred_receiver, private_credential_worker_channel, receive_credential_record,
         receive_credential_record_with_deadline,
         receive_credential_worker_destroy_response_reconciling_initialise_with_deadline,
         receive_credential_worker_request, receive_credential_worker_response_with_deadline,
         send_credential_record, send_credential_record_with_deadline,
         send_credential_worker_request_with_deadline,
-        send_credential_worker_response_with_deadline, validate_adopted_transport_socket,
+        send_credential_worker_response_with_deadline, validate_adopted_ingress_socket,
+        validate_adopted_transport_socket,
     },
 };
 use volparossa_linux_uapi::install_close_range_on_exec;
@@ -1803,6 +1809,153 @@ struct WorkerContext<Kernel> {
     mptcp: Option<WorkerMptcpPathManager>,
 }
 
+struct WorkerIngressSocket {
+    descriptor: OwnedFd,
+    local: crate::internal_protocol::InternalSocketAddress,
+}
+
+struct WorkerClientIngress {
+    client_runtime_id: ContextId,
+    hard_expires_at_unix: u64,
+    _bootstrap: WorkerNetworkBootstrap,
+    _kernel: NamespaceKernel,
+    sockets:
+        BTreeMap<(InternalIngressSocketKind, InternalIngressAddressFamily), WorkerIngressSocket>,
+    acquired: BTreeSet<(InternalIngressSocketKind, InternalIngressAddressFamily)>,
+    prepared: bool,
+    active: bool,
+}
+
+impl WorkerClientIngress {
+    fn initialise(
+        value: &InitialiseClientIngress,
+        bound_context: ContextId,
+        bootstrap: WorkerNetworkBootstrap,
+        deadline: HardDeadline,
+    ) -> Result<Self, InternalWorkerResult> {
+        let runtime =
+            context_id(&value.client_runtime_id).map_err(|_| InternalWorkerResult::Invalid)?;
+        let now = current_unix_seconds().ok_or(InternalWorkerResult::Kernel)?;
+        if runtime != bound_context
+            || value.hard_expires_at_unix <= now
+            || value.hard_expires_at_unix > now.saturating_add(15 * 60)
+            || !matches!(bootstrap, WorkerNetworkBootstrap::NonRelay)
+        {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        let mut kernel =
+            NamespaceKernel::connect(deadline).map_err(|_| InternalWorkerResult::Kernel)?;
+        kernel
+            .activate_loopback(deadline)
+            .map_err(|_| InternalWorkerResult::Kernel)?;
+        Ok(Self {
+            client_runtime_id: runtime,
+            hard_expires_at_unix: value.hard_expires_at_unix,
+            _bootstrap: bootstrap,
+            _kernel: kernel,
+            sockets: BTreeMap::new(),
+            acquired: BTreeSet::new(),
+            prepared: false,
+            active: false,
+        })
+    }
+
+    fn prepare(&mut self) -> Result<Vec<PreparedIngressSocket>, InternalWorkerResult> {
+        if self.prepared || self.active || !self.sockets.is_empty() || !self.acquired.is_empty() {
+            return Err(InternalWorkerResult::Conflict);
+        }
+        let mut sockets = BTreeMap::new();
+        let mut prepared = Vec::with_capacity(volparossa_routing::REQUIRED_INGRESS_SOCKETS);
+        for kind in [
+            InternalIngressSocketKind::TransparentTcpListener,
+            InternalIngressSocketKind::TransparentUdp,
+            InternalIngressSocketKind::DnsTcpListener,
+            InternalIngressSocketKind::DnsUdp,
+        ] {
+            for family in [
+                InternalIngressAddressFamily::Ipv4,
+                InternalIngressAddressFamily::Ipv6,
+            ] {
+                let (descriptor, local) = create_client_ingress_socket(kind, family)
+                    .map_err(|_| InternalWorkerResult::Kernel)?;
+                prepared.push(PreparedIngressSocket {
+                    descriptor_kind: kind as i32,
+                    address_family: family as i32,
+                    local: Some(local.clone()),
+                });
+                sockets.insert((kind, family), WorkerIngressSocket { descriptor, local });
+            }
+        }
+        self.sockets = sockets;
+        self.prepared = true;
+        Ok(prepared)
+    }
+
+    fn acquire(
+        &mut self,
+        request: &AcquireClientIngressSocket,
+    ) -> Result<(OwnedFd, IngressSocketReady), InternalWorkerResult> {
+        let runtime =
+            context_id(&request.client_runtime_id).map_err(|_| InternalWorkerResult::Invalid)?;
+        let kind = InternalIngressSocketKind::try_from(request.descriptor_kind)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        let family = InternalIngressAddressFamily::try_from(request.address_family)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        let identity = (kind, family);
+        if runtime != self.client_runtime_id
+            || !self.prepared
+            || self.active
+            || self.acquired.contains(&identity)
+        {
+            return Err(InternalWorkerResult::Conflict);
+        }
+        let socket = self
+            .sockets
+            .remove(&identity)
+            .ok_or(InternalWorkerResult::NotFound)?;
+        if request.expected_local.as_ref() != Some(&socket.local) {
+            self.sockets.insert(identity, socket);
+            return Err(InternalWorkerResult::Invalid);
+        }
+        self.acquired.insert(identity);
+        let ready = IngressSocketReady {
+            client_runtime_id: self.client_runtime_id.to_vec(),
+            descriptor_kind: kind as i32,
+            address_family: family as i32,
+            local: Some(socket.local),
+        };
+        Ok((socket.descriptor, ready))
+    }
+
+    fn activate(&mut self, request: &ActivateClientIngress) -> Result<(), InternalWorkerResult> {
+        let runtime =
+            context_id(&request.client_runtime_id).map_err(|_| InternalWorkerResult::Invalid)?;
+        let identities = request
+            .identities
+            .iter()
+            .map(|identity| {
+                Some((
+                    InternalIngressSocketKind::try_from(identity.descriptor_kind).ok()?,
+                    InternalIngressAddressFamily::try_from(identity.address_family).ok()?,
+                ))
+            })
+            .collect::<Option<BTreeSet<_>>>()
+            .ok_or(InternalWorkerResult::Invalid)?;
+        if runtime != self.client_runtime_id
+            || !self.prepared
+            || self.active
+            || !self.sockets.is_empty()
+            || identities.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS
+            || identities != self.acquired
+            || current_unix_seconds().is_none_or(|now| now >= self.hard_expires_at_unix)
+        {
+            return Err(InternalWorkerResult::Conflict);
+        }
+        self.active = true;
+        Ok(())
+    }
+}
+
 struct WorkerMptcpPathManager {
     backend: KernelMptcpPathManager,
     runtime: tokio::runtime::Runtime,
@@ -3407,6 +3560,143 @@ fn remove_mptcp_child_context(
     ))
 }
 
+fn initialise_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    route_context: &Option<WorkerContext<NamespaceKernel>>,
+    network_bootstrap: &mut Option<WorkerNetworkBootstrap>,
+    request: &InitialiseClientIngress,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    if ingress.is_some() || route_context.is_some() {
+        return Ok((InternalWorkerResult::Conflict, None, false));
+    }
+    let bootstrap = network_bootstrap
+        .take()
+        .ok_or(WorkerV3Error::Authentication)?;
+    match WorkerClientIngress::initialise(request, bound_context, bootstrap, deadline) {
+        Ok(owner) => {
+            *ingress = Some(owner);
+            Ok((
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::ClientIngressInitialised(
+                    ClientIngressInitialised {
+                        client_runtime_id: request.client_runtime_id.clone(),
+                    },
+                )),
+                false,
+            ))
+        }
+        Err(result) => Ok((result, None, false)),
+    }
+}
+
+fn prepare_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &PrepareClientIngress,
+    bound_context: ContextId,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    let runtime = context_id(&request.client_runtime_id)?;
+    let Some(ingress) = ingress
+        .as_mut()
+        .filter(|owner| owner.client_runtime_id == runtime && runtime == bound_context)
+    else {
+        return Ok((InternalWorkerResult::NotFound, None, false));
+    };
+    Ok(match ingress.prepare() {
+        Ok(sockets) => (
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::PreparedClientIngress(
+                PreparedClientIngress {
+                    client_runtime_id: runtime.to_vec(),
+                    sockets,
+                },
+            )),
+            false,
+        ),
+        Err(result) => (result, None, false),
+    })
+}
+
+fn acquire_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &AcquireClientIngressSocket,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildTransportOutcome, WorkerV3Error> {
+    ensure_worker_deadline(deadline)?;
+    let runtime = context_id(&request.client_runtime_id)?;
+    let Some(ingress) = ingress
+        .as_mut()
+        .filter(|owner| owner.client_runtime_id == runtime && runtime == bound_context)
+    else {
+        return Ok((InternalWorkerResult::NotFound, None, None));
+    };
+    Ok(match ingress.acquire(request) {
+        Ok((descriptor, ready)) => (
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::IngressSocketReady(ready)),
+            Some(descriptor),
+        ),
+        Err(result) => (result, None, None),
+    })
+}
+
+fn activate_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &ActivateClientIngress,
+    bound_context: ContextId,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    let runtime = context_id(&request.client_runtime_id)?;
+    let Some(ingress) = ingress
+        .as_mut()
+        .filter(|owner| owner.client_runtime_id == runtime && runtime == bound_context)
+    else {
+        return Ok((InternalWorkerResult::NotFound, None, false));
+    };
+    Ok(match ingress.activate(request) {
+        Ok(()) => (
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::ActivatedClientIngress(
+                ActivatedClientIngress {
+                    client_runtime_id: runtime.to_vec(),
+                },
+            )),
+            false,
+        ),
+        Err(result) => (result, None, false),
+    })
+}
+
+fn destroy_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &DestroyClientIngress,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    ensure_worker_deadline(deadline)?;
+    let runtime = context_id(&request.client_runtime_id)?;
+    if runtime != bound_context {
+        return Ok((InternalWorkerResult::Invalid, None, false));
+    }
+    if ingress
+        .as_ref()
+        .is_some_and(|owner| owner.client_runtime_id != runtime)
+    {
+        return Ok((InternalWorkerResult::Conflict, None, false));
+    }
+    *ingress = None;
+    Ok((
+        InternalWorkerResult::Ok,
+        Some(internal_worker_response::Outcome::ClientIngressDestroyed(
+            ClientIngressDestroyed {
+                client_runtime_id: runtime.to_vec(),
+            },
+        )),
+        true,
+    ))
+}
+
 fn child_loop(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
@@ -3416,6 +3706,7 @@ fn child_loop(
     network_bootstrap: WorkerNetworkBootstrap,
 ) -> Result<(), WorkerV3Error> {
     let mut context: Option<WorkerContext<NamespaceKernel>> = None;
+    let mut ingress: Option<WorkerClientIngress> = None;
     let mut network_bootstrap = Some(network_bootstrap);
     let mut keys = OsWorkerKeySource;
     loop {
@@ -3480,6 +3771,37 @@ fn child_loop(
             internal_worker_request::Operation::DestroyContext(destroy) => {
                 let (result, outcome, exit) =
                     destroy_child_context(&mut context, destroy, bound_context, deadline)?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::InitialiseClientIngress(operation) => {
+                let (result, outcome, exit) = initialise_client_ingress_child(
+                    &mut ingress,
+                    &context,
+                    &mut network_bootstrap,
+                    operation,
+                    bound_context,
+                    deadline,
+                )?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::PrepareClientIngress(operation) => {
+                let (result, outcome, exit) =
+                    prepare_client_ingress_child(&mut ingress, operation, bound_context)?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::AcquireClientIngressSocket(operation) => {
+                let (result, outcome, descriptor) =
+                    acquire_client_ingress_child(&mut ingress, operation, bound_context, deadline)?;
+                (result, outcome, false, descriptor)
+            }
+            internal_worker_request::Operation::ActivateClientIngress(operation) => {
+                let (result, outcome, exit) =
+                    activate_client_ingress_child(&mut ingress, operation, bound_context)?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::DestroyClientIngress(operation) => {
+                let (result, outcome, exit) =
+                    destroy_client_ingress_child(&mut ingress, operation, bound_context, deadline)?;
                 (result, outcome, exit, None)
             }
         };
@@ -3563,6 +3885,11 @@ fn request_context(request: &InternalWorkerRequest) -> Result<ContextId, WorkerV
         Operation::AddMptcpEndpoint(value) => &value.route_context_id,
         Operation::RemoveMptcpEndpoint(value) => &value.route_context_id,
         Operation::AcquireTransportSocket(value) => &value.route_context_id,
+        Operation::InitialiseClientIngress(value) => &value.client_runtime_id,
+        Operation::PrepareClientIngress(value) => &value.client_runtime_id,
+        Operation::AcquireClientIngressSocket(value) => &value.client_runtime_id,
+        Operation::ActivateClientIngress(value) => &value.client_runtime_id,
+        Operation::DestroyClientIngress(value) => &value.client_runtime_id,
         Operation::DestroyContext(value) => &value.route_context_id,
     };
     context_id(bytes)
@@ -6163,9 +6490,10 @@ impl WorkerRegistry {
         let process = record.process.as_ref().ok_or(WorkerV3Error::Dead)?;
         let pinned_network_namespace = matches!(
             request.operation.as_ref(),
-            Some(internal_worker_request::Operation::AcquireTransportSocket(
-                _
-            ))
+            Some(
+                internal_worker_request::Operation::AcquireTransportSocket(_)
+                    | internal_worker_request::Operation::AcquireClientIngressSocket(_)
+            )
         )
         .then(|| process.duplicate_network_namespace_pin(deadline))
         .transpose()?;
@@ -6558,9 +6886,10 @@ impl WorkerRegistry {
                 } else {
                     should_cache = !matches!(
                         request.operation,
-                        Some(internal_worker_request::Operation::AcquireTransportSocket(
-                            _
-                        ))
+                        Some(
+                            internal_worker_request::Operation::AcquireTransportSocket(_)
+                                | internal_worker_request::Operation::AcquireClientIngressSocket(_)
+                        )
                     );
                     cache_expiry = record.expires_at;
                     FinishOutcome::Committed
@@ -7065,8 +7394,20 @@ fn transition(
         (StablePhase::Starting, Some(Operation::Initialise(_))) => {
             Ok((StablePhase::Initialised, false))
         }
+        (StablePhase::Starting, Some(Operation::InitialiseClientIngress(_))) => {
+            Ok((StablePhase::Initialised, false))
+        }
         (StablePhase::Initialised, Some(Operation::PrepareLeases(_))) => {
             Ok((StablePhase::Prepared, false))
+        }
+        (StablePhase::Initialised, Some(Operation::PrepareClientIngress(_))) => {
+            Ok((StablePhase::Prepared, false))
+        }
+        (StablePhase::Prepared, Some(Operation::AcquireClientIngressSocket(_))) => {
+            Ok((StablePhase::Prepared, false))
+        }
+        (StablePhase::Prepared, Some(Operation::ActivateClientIngress(_))) => {
+            Ok((StablePhase::Activated, false))
         }
         (StablePhase::Prepared, Some(Operation::ActivateLeases(_))) => {
             Ok((StablePhase::Activated, false))
@@ -7083,6 +7424,7 @@ fn transition(
             ),
         ) => Ok((StablePhase::Committed, false)),
         (_, Some(Operation::DestroyContext(_))) => Ok((phase, true)),
+        (_, Some(Operation::DestroyClientIngress(_))) => Ok((phase, true)),
         _ => Err(WorkerV3Error::Conflict),
     }
 }
@@ -7948,6 +8290,24 @@ impl WorkerSupervisor {
                     )?);
                 }
                 Some(internal_worker_request::Operation::AcquireTransportSocket(_)) => {
+                    if pinned_network_namespace.is_none() || execution.descriptor.is_some() {
+                        return Err(WorkerV3Error::Invalid);
+                    }
+                }
+                Some(internal_worker_request::Operation::AcquireClientIngressSocket(acquire))
+                    if execution.response.result == InternalWorkerResult::Ok as i32 =>
+                {
+                    let expected_namespace = pinned_network_namespace
+                        .as_ref()
+                        .ok_or(WorkerV3Error::Authentication)?;
+                    let descriptor = execution.descriptor.take().ok_or(WorkerV3Error::Invalid)?;
+                    execution.descriptor = Some(validate_adopted_ingress_socket(
+                        expected_namespace,
+                        acquire,
+                        descriptor,
+                    )?);
+                }
+                Some(internal_worker_request::Operation::AcquireClientIngressSocket(_)) => {
                     if pinned_network_namespace.is_none() || execution.descriptor.is_some() {
                         return Err(WorkerV3Error::Invalid);
                     }

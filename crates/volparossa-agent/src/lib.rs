@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod advertisement;
+mod client_ingress;
 mod control;
 mod discovery;
 mod endpoint_leases;
@@ -43,6 +44,7 @@ use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
 
+use client_ingress::ClientIngressRuntime;
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
 use helper::HelperClient;
@@ -151,6 +153,15 @@ impl Agent {
     {
         let endpoint = bind_control_socket(&self.paths.control_socket)?;
         let (listener, socket_guard) = endpoint.into_parts();
+        let client_ingress = if self.config.roles.client {
+            Some(
+                ClientIngressRuntime::start(self.helper.clone())
+                    .await
+                    .map_err(|_| AgentError::ClientIngress)?,
+            )
+        } else {
+            None
+        };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let control_context = ControlContext {
             state: Arc::clone(&self.state),
@@ -206,6 +217,13 @@ impl Agent {
         stop_task(&mut maintenance_task).await;
         stop_task(&mut metrics_task).await;
         drop(socket_guard);
+
+        if let Some(client_ingress) = client_ingress {
+            if client_ingress.shutdown().await.is_err() {
+                let _ = self.helper.cleanup_owned().await;
+                return Err(AgentError::ShutdownCleanup);
+            }
+        }
 
         if self.state.read().await.has_network_state() {
             self.helper
@@ -411,6 +429,9 @@ pub enum AgentError {
     /// Local control endpoint failed.
     #[error("agent control endpoint failed")]
     Control(#[from] control::ControlServerError),
+    /// The process-owned client ingress could not be prepared or activated.
+    #[error("client ingress runtime is unavailable")]
+    ClientIngress,
     /// Loopback-only aggregate metrics endpoint failed.
     #[error("agent metrics endpoint failed")]
     Metrics(#[source] volparossa_metrics::MetricsError),
@@ -437,6 +458,7 @@ impl AgentError {
             Self::Discovery(_) => "DISCOVERY_FAILED",
             Self::State(_) => "STATE_INVALID",
             Self::Control(_) => "CONTROL_FAILED",
+            Self::ClientIngress => "CLIENT_INGRESS_FAILED",
             Self::Metrics(_) => "METRICS_FAILED",
             Self::Task => "RUNTIME_TASK_FAILED",
             Self::ShutdownCleanup => "SHUTDOWN_CLEANUP_FAILED",

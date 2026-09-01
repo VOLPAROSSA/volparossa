@@ -32,7 +32,7 @@ pub(crate) struct InternalWorkerRequest {
     pub(crate) request_id: Vec<u8>,
     #[prost(
         oneof = "internal_worker_request::Operation",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24"
     )]
     pub(crate) operation: Option<internal_worker_request::Operation>,
 }
@@ -62,8 +62,10 @@ pub(crate) mod internal_worker_request {
     use prost::Oneof;
 
     use super::{
-        AcquireTransportSocket, ActivateLeases, AddMptcpEndpoint, DestroyContext,
-        InitialiseContext, PrepareLeases, ProbeCommitLeases, RemoveMptcpEndpoint,
+        AcquireClientIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeases,
+        AddMptcpEndpoint, DestroyClientIngress, DestroyContext, InitialiseClientIngress,
+        InitialiseContext, PrepareClientIngress, PrepareLeases, ProbeCommitLeases,
+        RemoveMptcpEndpoint,
     };
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -84,6 +86,16 @@ pub(crate) mod internal_worker_request {
         AcquireTransportSocket(AcquireTransportSocket),
         #[prost(message, tag = "19")]
         DestroyContext(DestroyContext),
+        #[prost(message, tag = "20")]
+        InitialiseClientIngress(InitialiseClientIngress),
+        #[prost(message, tag = "21")]
+        PrepareClientIngress(PrepareClientIngress),
+        #[prost(message, tag = "22")]
+        AcquireClientIngressSocket(AcquireClientIngressSocket),
+        #[prost(message, tag = "23")]
+        ActivateClientIngress(ActivateClientIngress),
+        #[prost(message, tag = "24")]
+        DestroyClientIngress(DestroyClientIngress),
     }
 }
 
@@ -122,6 +134,24 @@ pub(crate) enum InternalTransportSocketKind {
     MptcpConnected = 1,
     MptcpListener = 2,
     QuicUdpUnconnected = 3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum InternalIngressSocketKind {
+    Unspecified = 0,
+    TransparentTcpListener = 1,
+    TransparentUdp = 2,
+    DnsTcpListener = 3,
+    DnsUdp = 4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum InternalIngressAddressFamily {
+    Unspecified = 0,
+    Ipv4 = 1,
+    Ipv6 = 2,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -283,6 +313,54 @@ pub(crate) struct DestroyContext {
     pub(crate) route_context_id: Vec<u8>,
 }
 
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct InitialiseClientIngress {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub(crate) hard_expires_at_unix: u64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct PrepareClientIngress {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct AcquireClientIngressSocket {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+    #[prost(enumeration = "InternalIngressSocketKind", tag = "2")]
+    pub(crate) descriptor_kind: i32,
+    #[prost(enumeration = "InternalIngressAddressFamily", tag = "3")]
+    pub(crate) address_family: i32,
+    #[prost(message, optional, tag = "4")]
+    pub(crate) expected_local: Option<InternalSocketAddress>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct IngressSocketIdentity {
+    #[prost(enumeration = "InternalIngressSocketKind", tag = "1")]
+    pub(crate) descriptor_kind: i32,
+    #[prost(enumeration = "InternalIngressAddressFamily", tag = "2")]
+    pub(crate) address_family: i32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ActivateClientIngress {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+    #[prost(message, repeated, tag = "2")]
+    pub(crate) identities: Vec<IngressSocketIdentity>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct DestroyClientIngress {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
 pub(crate) enum InternalWorkerResult {
@@ -309,7 +387,7 @@ pub(crate) struct InternalWorkerResponse {
     pub(crate) request_digest: Vec<u8>,
     #[prost(
         oneof = "internal_worker_response::Outcome",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24"
     )]
     pub(crate) outcome: Option<internal_worker_response::Outcome>,
 }
@@ -318,8 +396,10 @@ pub(crate) mod internal_worker_response {
     use prost::Oneof;
 
     use super::{
-        ActivatedLeases, ContextDestroyed, ContextInitialised, MptcpEndpointAdded,
-        MptcpEndpointRemoved, PreparedLeases, ProbedLeases, TransportSocketReady,
+        ActivatedClientIngress, ActivatedLeases, ClientIngressDestroyed, ClientIngressInitialised,
+        ContextDestroyed, ContextInitialised, IngressSocketReady, MptcpEndpointAdded,
+        MptcpEndpointRemoved, PreparedClientIngress, PreparedLeases, ProbedLeases,
+        TransportSocketReady,
     };
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -340,6 +420,16 @@ pub(crate) mod internal_worker_response {
         TransportSocketReady(TransportSocketReady),
         #[prost(message, tag = "19")]
         Destroyed(ContextDestroyed),
+        #[prost(message, tag = "20")]
+        ClientIngressInitialised(ClientIngressInitialised),
+        #[prost(message, tag = "21")]
+        PreparedClientIngress(PreparedClientIngress),
+        #[prost(message, tag = "22")]
+        IngressSocketReady(IngressSocketReady),
+        #[prost(message, tag = "23")]
+        ActivatedClientIngress(ActivatedClientIngress),
+        #[prost(message, tag = "24")]
+        ClientIngressDestroyed(ClientIngressDestroyed),
     }
 }
 
@@ -347,6 +437,54 @@ pub(crate) mod internal_worker_response {
 pub(crate) struct ContextInitialised {
     #[prost(bytes = "vec", tag = "1")]
     pub(crate) route_context_id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ClientIngressInitialised {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct PreparedIngressSocket {
+    #[prost(enumeration = "InternalIngressSocketKind", tag = "1")]
+    pub(crate) descriptor_kind: i32,
+    #[prost(enumeration = "InternalIngressAddressFamily", tag = "2")]
+    pub(crate) address_family: i32,
+    #[prost(message, optional, tag = "3")]
+    pub(crate) local: Option<InternalSocketAddress>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct PreparedClientIngress {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+    #[prost(message, repeated, tag = "2")]
+    pub(crate) sockets: Vec<PreparedIngressSocket>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct IngressSocketReady {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+    #[prost(enumeration = "InternalIngressSocketKind", tag = "2")]
+    pub(crate) descriptor_kind: i32,
+    #[prost(enumeration = "InternalIngressAddressFamily", tag = "3")]
+    pub(crate) address_family: i32,
+    #[prost(message, optional, tag = "4")]
+    pub(crate) local: Option<InternalSocketAddress>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ActivatedClientIngress {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ClientIngressDestroyed {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
 }
 
 /// A key and kernel-assigned port proven by the worker's correlated GET after binding.
@@ -493,6 +631,25 @@ fn response_matches_operation(
                 && request.expected_local == response.local
                 && request.expected_remote == response.remote
         }
+        (
+            Operation::InitialiseClientIngress(request),
+            Outcome::ClientIngressInitialised(response),
+        ) => request.client_runtime_id == response.client_runtime_id,
+        (Operation::PrepareClientIngress(request), Outcome::PreparedClientIngress(response)) => {
+            request.client_runtime_id == response.client_runtime_id
+        }
+        (Operation::AcquireClientIngressSocket(request), Outcome::IngressSocketReady(response)) => {
+            request.client_runtime_id == response.client_runtime_id
+                && request.descriptor_kind == response.descriptor_kind
+                && request.address_family == response.address_family
+                && request.expected_local == response.local
+        }
+        (Operation::ActivateClientIngress(request), Outcome::ActivatedClientIngress(response)) => {
+            request.client_runtime_id == response.client_runtime_id
+        }
+        (Operation::DestroyClientIngress(request), Outcome::ClientIngressDestroyed(response)) => {
+            request.client_runtime_id == response.client_runtime_id
+        }
         _ => false,
     }
 }
@@ -593,7 +750,15 @@ pub(crate) fn transport_descriptor_binding(
     request: &InternalWorkerRequest,
     response: &InternalWorkerResponse,
 ) -> Result<[u8; 32], InternalProtocolError> {
-    transport_descriptor_event_binding(
+    if !matches!(
+        request.operation,
+        Some(internal_worker_request::Operation::AcquireTransportSocket(
+            _
+        ))
+    ) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    descriptor_event_binding(
         b"VOLPAROSSA internal worker transport completion v1\0",
         request,
         response,
@@ -608,26 +773,85 @@ pub(crate) fn transport_descriptor_source_released_binding(
     if response.result != InternalWorkerResult::Ok as i32 {
         return Err(InternalProtocolError::Invalid);
     }
-    transport_descriptor_event_binding(
+    if !matches!(
+        request.operation,
+        Some(internal_worker_request::Operation::AcquireTransportSocket(
+            _
+        ))
+    ) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    descriptor_event_binding(
         b"VOLPAROSSA internal worker transport descriptor source released v1\0",
         request,
         response,
     )
 }
 
-fn transport_descriptor_event_binding(
+pub(crate) fn ingress_descriptor_binding(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
+    if !matches!(
+        request.operation,
+        Some(internal_worker_request::Operation::AcquireClientIngressSocket(_))
+    ) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    descriptor_event_binding(
+        b"VOLPAROSSA internal worker ingress completion v1\0",
+        request,
+        response,
+    )
+}
+
+pub(crate) fn ingress_descriptor_source_released_binding(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
+    if response.result != InternalWorkerResult::Ok as i32
+        || !matches!(
+            request.operation,
+            Some(internal_worker_request::Operation::AcquireClientIngressSocket(_))
+        )
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    descriptor_event_binding(
+        b"VOLPAROSSA internal worker ingress descriptor source released v1\0",
+        request,
+        response,
+    )
+}
+
+pub(crate) fn request_transfers_descriptor(request: &InternalWorkerRequest) -> bool {
+    matches!(
+        request.operation,
+        Some(
+            internal_worker_request::Operation::AcquireTransportSocket(_)
+                | internal_worker_request::Operation::AcquireClientIngressSocket(_)
+        )
+    )
+}
+
+fn descriptor_event_binding(
     domain: &[u8],
     request: &InternalWorkerRequest,
     response: &InternalWorkerResponse,
 ) -> Result<[u8; 32], InternalProtocolError> {
     validate_response_for_request(request, response)?;
-    let Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) =
-        request.operation.as_ref()
-    else {
-        return Err(InternalProtocolError::Invalid);
+    let identity = match request.operation.as_ref() {
+        Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) => vec![
+            1,
+            u8::try_from(operation.descriptor_kind).map_err(|_| InternalProtocolError::Invalid)?,
+        ],
+        Some(internal_worker_request::Operation::AcquireClientIngressSocket(operation)) => vec![
+            2,
+            u8::try_from(operation.descriptor_kind).map_err(|_| InternalProtocolError::Invalid)?,
+            u8::try_from(operation.address_family).map_err(|_| InternalProtocolError::Invalid)?,
+        ],
+        _ => return Err(InternalProtocolError::Invalid),
     };
-    let kind = InternalTransportSocketKind::try_from(operation.descriptor_kind)
-        .map_err(|_| InternalProtocolError::Invalid)?;
     let canonical = response.encode_to_vec();
     let length = u32::try_from(canonical.len()).map_err(|_| InternalProtocolError::TooLarge)?;
     let mut hasher = blake3::Hasher::new();
@@ -636,7 +860,7 @@ fn transport_descriptor_event_binding(
     hasher.update(&request.magic);
     hasher.update(&request.request_id);
     hasher.update(&response.request_digest);
-    hasher.update(&(kind as i32).to_be_bytes());
+    hasher.update(&identity);
     hasher.update(&length.to_be_bytes());
     hasher.update(&canonical);
     Ok(*hasher.finalize().as_bytes())
@@ -809,6 +1033,30 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
             )
         }
         Operation::DestroyContext(operation) => route_id(&operation.route_context_id),
+        Operation::InitialiseClientIngress(operation) => {
+            route_id(&operation.client_runtime_id)?;
+            if operation.hard_expires_at_unix == 0 {
+                return Err(InternalProtocolError::Invalid);
+            }
+            Ok(())
+        }
+        Operation::PrepareClientIngress(operation) => route_id(&operation.client_runtime_id),
+        Operation::DestroyClientIngress(operation) => route_id(&operation.client_runtime_id),
+        Operation::AcquireClientIngressSocket(operation) => {
+            route_id(&operation.client_runtime_id)?;
+            validate_ingress_identity(operation.descriptor_kind, operation.address_family)?;
+            validate_ingress_local(
+                operation.address_family,
+                operation
+                    .expected_local
+                    .as_ref()
+                    .ok_or(InternalProtocolError::Invalid)?,
+            )
+        }
+        Operation::ActivateClientIngress(operation) => {
+            route_id(&operation.client_runtime_id)?;
+            validate_ingress_identities(&operation.identities)
+        }
     }
 }
 
@@ -883,6 +1131,24 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
                     outcome.remote.as_ref(),
                 )
             }
+            Outcome::ClientIngressInitialised(outcome) => route_id(&outcome.client_runtime_id),
+            Outcome::PreparedClientIngress(outcome) => {
+                route_id(&outcome.client_runtime_id)?;
+                validate_prepared_ingress_sockets(&outcome.sockets)
+            }
+            Outcome::IngressSocketReady(outcome) => {
+                route_id(&outcome.client_runtime_id)?;
+                validate_ingress_identity(outcome.descriptor_kind, outcome.address_family)?;
+                validate_ingress_local(
+                    outcome.address_family,
+                    outcome
+                        .local
+                        .as_ref()
+                        .ok_or(InternalProtocolError::Invalid)?,
+                )
+            }
+            Outcome::ActivatedClientIngress(outcome) => route_id(&outcome.client_runtime_id),
+            Outcome::ClientIngressDestroyed(outcome) => route_id(&outcome.client_runtime_id),
         },
         (InternalWorkerResult::Ok, None)
         | (InternalWorkerResult::Unspecified, _)
@@ -903,6 +1169,82 @@ fn validate_lease_batch<T>(
         if !identities.insert(validate(value)?) {
             return Err(InternalProtocolError::Invalid);
         }
+    }
+    Ok(())
+}
+
+fn validate_ingress_identity(
+    kind: i32,
+    family: i32,
+) -> Result<(InternalIngressSocketKind, InternalIngressAddressFamily), InternalProtocolError> {
+    let kind =
+        InternalIngressSocketKind::try_from(kind).map_err(|_| InternalProtocolError::Invalid)?;
+    let family = InternalIngressAddressFamily::try_from(family)
+        .map_err(|_| InternalProtocolError::Invalid)?;
+    if kind == InternalIngressSocketKind::Unspecified
+        || family == InternalIngressAddressFamily::Unspecified
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok((kind, family))
+}
+
+fn validate_ingress_local(
+    family: i32,
+    local: &InternalSocketAddress,
+) -> Result<(), InternalProtocolError> {
+    let family = InternalIngressAddressFamily::try_from(family)
+        .map_err(|_| InternalProtocolError::Invalid)?;
+    let wildcard = match family {
+        InternalIngressAddressFamily::Ipv4 => local.address.as_slice() == [0; 4],
+        InternalIngressAddressFamily::Ipv6 => local.address.as_slice() == [0; 16],
+        InternalIngressAddressFamily::Unspecified => false,
+    };
+    if !wildcard || !(1..=u32::from(u16::MAX)).contains(&local.port) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate_ingress_identities(
+    identities: &[IngressSocketIdentity],
+) -> Result<(), InternalProtocolError> {
+    if identities.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS {
+        return Err(InternalProtocolError::Invalid);
+    }
+    let mut observed = BTreeSet::new();
+    for identity in identities {
+        if !observed.insert(validate_ingress_identity(
+            identity.descriptor_kind,
+            identity.address_family,
+        )?) {
+            return Err(InternalProtocolError::Invalid);
+        }
+    }
+    Ok(())
+}
+
+fn validate_prepared_ingress_sockets(
+    sockets: &[PreparedIngressSocket],
+) -> Result<(), InternalProtocolError> {
+    if sockets.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS {
+        return Err(InternalProtocolError::Invalid);
+    }
+    let mut observed = BTreeSet::new();
+    for socket in sockets {
+        if !observed.insert(validate_ingress_identity(
+            socket.descriptor_kind,
+            socket.address_family,
+        )?) {
+            return Err(InternalProtocolError::Invalid);
+        }
+        validate_ingress_local(
+            socket.address_family,
+            socket
+                .local
+                .as_ref()
+                .ok_or(InternalProtocolError::Invalid)?,
+        )?;
     }
     Ok(())
 }

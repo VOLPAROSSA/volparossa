@@ -18,6 +18,7 @@
 //! fail-closed.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::fd::{AsRawFd as _, OwnedFd},
     sync::{Arc, Mutex},
@@ -34,10 +35,12 @@ use volparossa_protocol::{
     relay_reservation_request_sha256, verify_control_message, verify_relay_reservation,
 };
 use volparossa_routing::{
-    AcquireTransportSocket, ActivateLeaseBatch, AddMptcpEndpoint, ClosedPreparePlan, ContextRole,
-    HELPER_HANDLE_BYTES, LeasePlan as RoutingLeasePlan, MptcpEndpointMode, PrepareIntent,
-    PrepareLeaseBatch, PublicUdpEndpoint, RemoveMptcpEndpoint, TransportSocketAddress,
-    TransportSocketKind, UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
+    AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeaseBatch,
+    AddMptcpEndpoint, ClosedPreparePlan, ContextRole, DestroyClientIngress, HELPER_HANDLE_BYTES,
+    IngressAddressFamily, IngressSocketAddress, IngressSocketKind, LeasePlan as RoutingLeasePlan,
+    MptcpEndpointMode, PrepareClientIngress, PrepareIntent, PrepareLeaseBatch, PublicUdpEndpoint,
+    RemoveMptcpEndpoint, TransportSocketAddress, TransportSocketKind,
+    UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
 };
 
 use crate::{
@@ -46,16 +49,23 @@ use crate::{
         AsyncLeaseBackend, BackendAction, BackendBinding, BackendCompletion, BackendDestroy,
         BackendError, BackendFuture, BackendLineage, BackendPhase, BackendProbe, BackendRequest,
         BackendRuntimeCompletion, BackendRuntimeRequest, ConfirmedAbsent, ContextPhase,
-        KernelCounters, OperationKind, PreparedKernelLease,
+        IngressBackendAction, IngressBackendBinding, IngressBackendCompletion,
+        IngressBackendRequest, KernelCounters, OperationKind, PreparedKernelIngressSocket,
+        PreparedKernelLease,
     },
     internal_protocol::{
-        AcquireTransportSocket as InternalAcquireTransportSocket, ActivateLeases,
-        AddMptcpEndpoint as InternalAddMptcpEndpoint, DestroyContext, INTERNAL_WORKER_MAGIC,
-        INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext, InternalContextRole,
-        InternalEndpointRole, InternalIpPrefix, InternalMptcpMode, InternalSocketAddress,
-        InternalTransportSocketKind, InternalUdpEndpoint, InternalWorkerRequest,
-        InternalWorkerResult, LeaseActivation as InternalLeaseActivation,
-        LeasePlan as InternalLeasePlan, LeaseProbe, PrepareLeases, ProbeCommitLeases,
+        AcquireClientIngressSocket as InternalAcquireClientIngressSocket,
+        AcquireTransportSocket as InternalAcquireTransportSocket,
+        ActivateClientIngress as InternalActivateClientIngress, ActivateLeases,
+        AddMptcpEndpoint as InternalAddMptcpEndpoint,
+        DestroyClientIngress as InternalDestroyClientIngress, DestroyContext,
+        INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, IngressSocketIdentity,
+        InitialiseClientIngress, InitialiseContext, InternalContextRole, InternalEndpointRole,
+        InternalIngressAddressFamily, InternalIngressSocketKind, InternalIpPrefix,
+        InternalMptcpMode, InternalSocketAddress, InternalTransportSocketKind, InternalUdpEndpoint,
+        InternalWorkerRequest, InternalWorkerResult, LeaseActivation as InternalLeaseActivation,
+        LeasePlan as InternalLeasePlan, LeaseProbe,
+        PrepareClientIngress as InternalPrepareClientIngress, PrepareLeases, ProbeCommitLeases,
         RemoveMptcpEndpoint as InternalRemoveMptcpEndpoint, internal_worker_request,
         internal_worker_response,
     },
@@ -89,6 +99,11 @@ const STAGE_PROBE_COMMIT: u8 = 5;
 const STAGE_ACQUIRE_TRANSPORT: u8 = 6;
 const STAGE_ADD_MPTCP_ENDPOINT: u8 = 7;
 const STAGE_REMOVE_MPTCP_ENDPOINT: u8 = 8;
+const STAGE_INITIALISE_INGRESS: u8 = 9;
+const STAGE_PREPARE_INGRESS: u8 = 10;
+const STAGE_ACQUIRE_INGRESS: u8 = 11;
+const STAGE_ACTIVATE_INGRESS: u8 = 12;
+const STAGE_DESTROY_INGRESS: u8 = 13;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
@@ -105,6 +120,12 @@ pub(crate) fn functional_alpha_lease_backend(
         )),
         relay_replay: Mutex::new(functional_alpha_replay_cache()),
         state: Mutex::new(None),
+        ingress_coordinator: WorkerCoordinator::new(WorkerRegistry::new(
+            1,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        )),
+        ingress_state: Mutex::new(None),
         durable_ownership: Some(durable_ownership),
     })
 }
@@ -118,11 +139,31 @@ fn functional_alpha_replay_cache() -> ReplayCache {
 
 struct FunctionalAlphaLeaseBackend {
     coordinator: WorkerCoordinator,
+    ingress_coordinator: WorkerCoordinator,
     relay_replay: Mutex<ReplayCache>,
     state: Mutex<Option<OpenLeaseEntry>>,
+    ingress_state: Mutex<Option<OpenIngressEntry>>,
     /// Always present in production. `None` exists only for narrow unit fixtures which never
     /// execute Prepare.
     durable_ownership: Option<DurableOwnershipPrepareHandle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenIngressPhase {
+    Prepared,
+    Active,
+    Quarantined,
+}
+
+struct OpenIngressEntry {
+    helper_runtime_id: [u8; 32],
+    client_runtime_id: [u8; 16],
+    backend_generation: u64,
+    worker: Option<WorkerGenerationOwnership>,
+    worker_generation: u64,
+    sockets: BTreeMap<(i32, i32), IngressSocketAddress>,
+    acquired: BTreeSet<(i32, i32)>,
+    phase: OpenIngressPhase,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1771,6 +1812,435 @@ impl FunctionalAlphaLeaseBackend {
             Err(BackendError::CleanupIncomplete)
         }
     }
+
+    async fn prepare_ingress_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: PrepareClientIngress,
+    ) -> Result<Vec<PreparedKernelIngressSocket>, BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::Prepare,
+        )?;
+        let deadline = ingress_deadline(binding)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| BackendError::Kernel)?
+            .as_secs();
+        let ttl = value
+            .hard_expires_at_unix
+            .checked_sub(now)
+            .map(Duration::from_secs)
+            .filter(|ttl| !ttl.is_zero() && *ttl <= DEFAULT_MAX_TTL)
+            .ok_or(BackendError::Invalid)?;
+        if self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Err(BackendError::Capacity);
+        }
+        let worker = match self
+            .ingress_coordinator
+            .reserve_spawn_register_for_context_until(
+                binding.client_runtime_id,
+                ContextRole::Client,
+                1,
+                ttl,
+                deadline,
+            ) {
+            WorkerLifecycleAdmission::Registered(worker) => worker,
+            WorkerLifecycleAdmission::Rejected(error) => return Err(definite_worker_error(&error)),
+            WorkerLifecycleAdmission::Retained { ownership, .. } => {
+                self.retain_failed_ingress(binding, ownership);
+                return Err(BackendError::CleanupIncomplete);
+            }
+        };
+        let worker_generation = worker.coordinates.worker_generation.get();
+        let initialise = worker_request(
+            ingress_worker_request_id(binding, STAGE_INITIALISE_INGRESS),
+            internal_worker_request::Operation::InitialiseClientIngress(InitialiseClientIngress {
+                client_runtime_id: binding.client_runtime_id.to_vec(),
+                hard_expires_at_unix: value.hard_expires_at_unix,
+            }),
+        );
+        let operation_deadline = worker_operation_deadline(deadline)?;
+        let initialised = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                initialise,
+                operation_deadline,
+            )
+            .await
+            .is_ok_and(|execution| {
+                execution.descriptor.is_none()
+                    && execution.response.result == InternalWorkerResult::Ok as i32
+                    && matches!(
+                        execution.response.outcome.as_ref(),
+                        Some(internal_worker_response::Outcome::ClientIngressInitialised(result))
+                            if result.client_runtime_id.as_slice() == binding.client_runtime_id
+                    )
+            });
+        if !initialised {
+            self.retain_failed_ingress(binding, worker);
+            let _ = self
+                .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+                .await;
+            return Err(BackendError::CleanupIncomplete);
+        }
+        let prepare = worker_request(
+            ingress_worker_request_id(binding, STAGE_PREPARE_INGRESS),
+            internal_worker_request::Operation::PrepareClientIngress(
+                InternalPrepareClientIngress {
+                    client_runtime_id: binding.client_runtime_id.to_vec(),
+                },
+            ),
+        );
+        let execution = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                prepare,
+                operation_deadline,
+            )
+            .await;
+        let Some(sockets) = execution.ok().and_then(|execution| {
+            if execution.descriptor.is_some()
+                || execution.response.result != InternalWorkerResult::Ok as i32
+            {
+                return None;
+            }
+            match execution.response.outcome {
+                Some(internal_worker_response::Outcome::PreparedClientIngress(result))
+                    if result.client_runtime_id.as_slice() == binding.client_runtime_id =>
+                {
+                    canonical_worker_ingress_sockets(result.sockets)
+                }
+                _ => None,
+            }
+        }) else {
+            self.retain_failed_ingress(binding, worker);
+            let _ = self
+                .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+                .await;
+            return Err(BackendError::CleanupIncomplete);
+        };
+        let addresses = sockets
+            .iter()
+            .map(|socket| {
+                (
+                    (socket.descriptor_kind, socket.address_family),
+                    socket.local.clone(),
+                )
+            })
+            .collect();
+        let mut state = self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.is_some() {
+            drop(state);
+            self.retain_failed_ingress(binding, worker);
+            return Err(BackendError::CleanupIncomplete);
+        }
+        *state = Some(OpenIngressEntry {
+            helper_runtime_id: binding.helper_runtime_id,
+            client_runtime_id: binding.client_runtime_id,
+            backend_generation: binding.generation,
+            worker: Some(worker),
+            worker_generation,
+            sockets: addresses,
+            acquired: BTreeSet::new(),
+            phase: OpenIngressPhase::Prepared,
+        });
+        Ok(sockets)
+    }
+
+    async fn acquire_ingress_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: AcquireIngressSocket,
+    ) -> Result<OwnedFd, BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::Acquire,
+        )?;
+        let deadline = ingress_deadline(binding)?;
+        let (worker_generation, local) = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = exact_ingress_entry_mut(&mut state, binding)?;
+            let identity = (value.descriptor_kind, value.address_family);
+            if entry.phase != OpenIngressPhase::Prepared || entry.acquired.contains(&identity) {
+                return Err(BackendError::Invalid);
+            }
+            let local = entry
+                .sockets
+                .get(&identity)
+                .cloned()
+                .ok_or(BackendError::Invalid)?;
+            entry.acquired.insert(identity);
+            (entry.worker_generation, local)
+        };
+        let internal = InternalAcquireClientIngressSocket {
+            client_runtime_id: binding.client_runtime_id.to_vec(),
+            descriptor_kind: internal_ingress_kind(value.descriptor_kind)? as i32,
+            address_family: internal_ingress_family(value.address_family)? as i32,
+            expected_local: Some(InternalSocketAddress {
+                address: local.address.clone(),
+                port: local.port,
+            }),
+        };
+        let request = worker_request(
+            ingress_worker_request_id(binding, STAGE_ACQUIRE_INGRESS),
+            internal_worker_request::Operation::AcquireClientIngressSocket(internal.clone()),
+        );
+        let execution = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let mut execution = execution.map_err(|_| BackendError::CleanupIncomplete)?;
+        let exact = execution.response.result == InternalWorkerResult::Ok as i32
+            && matches!(
+                execution.response.outcome.as_ref(),
+                Some(internal_worker_response::Outcome::IngressSocketReady(ready))
+                    if ready.client_runtime_id.as_slice() == binding.client_runtime_id
+                        && ready.descriptor_kind == internal.descriptor_kind
+                        && ready.address_family == internal.address_family
+                        && ready.local == internal.expected_local
+            );
+        if !exact {
+            drop(execution.descriptor.take());
+            return Err(BackendError::CleanupIncomplete);
+        }
+        execution
+            .descriptor
+            .take()
+            .ok_or(BackendError::CleanupIncomplete)
+    }
+
+    async fn activate_ingress_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: ActivateClientIngress,
+    ) -> Result<(), BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::Activate,
+        )?;
+        let deadline = ingress_deadline(binding)?;
+        let (worker_generation, identities) = {
+            let state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = exact_ingress_entry(state.as_ref(), binding)?;
+            if entry.phase != OpenIngressPhase::Prepared
+                || entry.acquired.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS
+            {
+                return Err(BackendError::Invalid);
+            }
+            let identities = entry
+                .acquired
+                .iter()
+                .map(|(kind, family)| {
+                    Ok(IngressSocketIdentity {
+                        descriptor_kind: internal_ingress_kind(*kind)? as i32,
+                        address_family: internal_ingress_family(*family)? as i32,
+                    })
+                })
+                .collect::<Result<Vec<_>, BackendError>>()?;
+            (entry.worker_generation, identities)
+        };
+        let request = worker_request(
+            ingress_worker_request_id(binding, STAGE_ACTIVATE_INGRESS),
+            internal_worker_request::Operation::ActivateClientIngress(
+                InternalActivateClientIngress {
+                    client_runtime_id: binding.client_runtime_id.to_vec(),
+                    identities,
+                },
+            ),
+        );
+        let execution = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let exact = execution.is_ok_and(|execution| {
+            execution.descriptor.is_none()
+                && execution.response.result == InternalWorkerResult::Ok as i32
+                && matches!(
+                    execution.response.outcome.as_ref(),
+                    Some(internal_worker_response::Outcome::ActivatedClientIngress(result))
+                        if result.client_runtime_id.as_slice() == binding.client_runtime_id
+                )
+        });
+        if !exact {
+            return Err(BackendError::CleanupIncomplete);
+        }
+        let mut state = self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        exact_ingress_entry_mut(&mut state, binding)?.phase = OpenIngressPhase::Active;
+        Ok(())
+    }
+
+    async fn destroy_ingress_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: DestroyClientIngress,
+    ) -> Result<ConfirmedAbsent, BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::Destroy,
+        )?;
+        let deadline = ingress_deadline(binding).map_err(|_| BackendError::CleanupIncomplete)?;
+        if self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_none()
+        {
+            return Ok(ConfirmedAbsent);
+        }
+        if self
+            .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+            .await
+        {
+            Ok(ConfirmedAbsent)
+        } else {
+            Err(BackendError::CleanupIncomplete)
+        }
+    }
+
+    fn retain_failed_ingress(
+        &self,
+        binding: IngressBackendBinding,
+        worker: WorkerGenerationOwnership,
+    ) {
+        let worker_generation = worker.coordinates.worker_generation.get();
+        let mut state = self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.is_none() {
+            *state = Some(OpenIngressEntry {
+                helper_runtime_id: binding.helper_runtime_id,
+                client_runtime_id: binding.client_runtime_id,
+                backend_generation: binding.generation,
+                worker: Some(worker),
+                worker_generation,
+                sockets: BTreeMap::new(),
+                acquired: BTreeSet::new(),
+                phase: OpenIngressPhase::Quarantined,
+            });
+        }
+    }
+
+    async fn cleanup_ingress_exact(
+        &self,
+        client_runtime_id: [u8; 16],
+        backend_generation: u64,
+        deadline: HardDeadline,
+    ) -> bool {
+        let (worker_generation, should_dispatch) = {
+            let state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(entry) = state.as_ref().filter(|entry| {
+                entry.client_runtime_id == client_runtime_id
+                    && entry.backend_generation == backend_generation
+            }) else {
+                return true;
+            };
+            (entry.worker_generation, entry.worker.is_some())
+        };
+        if should_dispatch {
+            let binding = IngressBackendBinding {
+                helper_runtime_id: [1; 32],
+                client_runtime_id,
+                generation: backend_generation,
+                request_id: client_runtime_id,
+                request_digest: [0xd2; 32],
+                action: IngressBackendAction::Destroy,
+                call_deadline: tokio::time::Instant::now(),
+            };
+            let destroy = worker_request(
+                ingress_worker_request_id(binding, STAGE_DESTROY_INGRESS),
+                internal_worker_request::Operation::DestroyClientIngress(
+                    InternalDestroyClientIngress {
+                        client_runtime_id: client_runtime_id.to_vec(),
+                    },
+                ),
+            );
+            let _ = self
+                .ingress_coordinator
+                .execute_until(client_runtime_id, worker_generation, destroy, deadline)
+                .await;
+        }
+        let worker = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.as_mut().and_then(|entry| entry.worker.take())
+        };
+        if let Some(worker) = worker {
+            match self
+                .ingress_coordinator
+                .settle_and_terminate_lifecycle_until(worker, deadline)
+            {
+                WorkerGenerationReap::Confirmed(_) => {}
+                WorkerGenerationReap::Retained { ownership, .. } => {
+                    let mut state = self
+                        .ingress_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(entry) = state.as_mut() {
+                        entry.worker = Some(*ownership);
+                        entry.phase = OpenIngressPhase::Quarantined;
+                    }
+                    return false;
+                }
+            }
+        }
+        let mut state = self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.as_ref().is_some_and(|entry| {
+            entry.client_runtime_id == client_runtime_id
+                && entry.backend_generation == backend_generation
+                && entry.worker.is_none()
+        }) {
+            *state = None;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
@@ -1843,6 +2313,58 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
         })
     }
 
+    fn prepare_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<PrepareClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<Vec<PreparedKernelIngressSocket>>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.prepare_ingress_one(binding, value).await,
+            }
+        })
+    }
+
+    fn acquire_client_ingress_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressSocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.acquire_ingress_one(binding, value).await,
+            }
+        })
+    }
+
+    fn activate_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<ActivateClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<()>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.activate_ingress_one(binding, value).await,
+            }
+        })
+    }
+
+    fn destroy_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<DestroyClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<ConfirmedAbsent>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.destroy_ingress_one(binding, value).await,
+            }
+        })
+    }
+
     fn transport_socket_supported(
         self: Arc<Self>,
         request: BackendRuntimeRequest,
@@ -1874,13 +2396,35 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
             let result = match deadline {
                 Err(error) => Err(error),
                 Ok(deadline) => {
+                    let ingress = self
+                        .ingress_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .map(|entry| (entry.client_runtime_id, entry.backend_generation));
+                    if let Some((client_runtime_id, backend_generation)) = ingress {
+                        if !self
+                            .cleanup_ingress_exact(client_runtime_id, backend_generation, deadline)
+                            .await
+                        {
+                            return request.complete(Err(BackendError::CleanupIncomplete));
+                        }
+                    }
                     let key = lock_state(&self.state).as_ref().map(|entry| entry.key);
                     if let Some(key) = key {
                         if !self.cleanup_exact(key, deadline, true).await {
                             return request.complete(Err(BackendError::CleanupIncomplete));
                         }
                     }
-                    if self.coordinator.shutdown_until(deadline).await == ShutdownStatus::Confirmed
+                    if self.ingress_coordinator.shutdown_until(deadline).await
+                        == ShutdownStatus::Confirmed
+                        && self.coordinator.shutdown_until(deadline).await
+                            == ShutdownStatus::Confirmed
+                        && self
+                            .ingress_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .is_none()
                         && lock_state(&self.state).is_none()
                     {
                         Ok(())
@@ -4036,6 +4580,141 @@ fn prepare_deadline(binding: BackendBinding) -> Result<HardDeadline, BackendErro
     HardDeadline::at(binding.call_deadline.into_std()).map_err(|_| BackendError::Unavailable)
 }
 
+fn ingress_deadline(binding: IngressBackendBinding) -> Result<HardDeadline, BackendError> {
+    HardDeadline::at(binding.call_deadline.into_std()).map_err(|_| BackendError::Unavailable)
+}
+
+fn validate_ingress_backend_binding(
+    binding: IngressBackendBinding,
+    client_runtime_id: &[u8],
+    action: IngressBackendAction,
+) -> Result<(), BackendError> {
+    if binding.action != action
+        || binding.helper_runtime_id.iter().all(|byte| *byte == 0)
+        || binding.client_runtime_id.iter().all(|byte| *byte == 0)
+        || binding.generation == 0
+        || binding.request_id.iter().all(|byte| *byte == 0)
+        || binding.request_digest.iter().all(|byte| *byte == 0)
+        || client_runtime_id != binding.client_runtime_id
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(())
+}
+
+fn ingress_worker_request_id(binding: IngressBackendBinding, stage: u8) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"VOLPAROSSA functional ingress worker request v1\0");
+    hasher.update(&binding.helper_runtime_id);
+    hasher.update(&binding.client_runtime_id);
+    hasher.update(&binding.generation.to_be_bytes());
+    hasher.update(&binding.request_id);
+    hasher.update(&binding.request_digest);
+    hasher.update(&[stage]);
+    let mut request_id = [0; 16];
+    request_id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    request_id
+}
+
+fn internal_ingress_kind(value: i32) -> Result<InternalIngressSocketKind, BackendError> {
+    match IngressSocketKind::try_from(value).map_err(|_| BackendError::Invalid)? {
+        IngressSocketKind::TransparentTcpListener => {
+            Ok(InternalIngressSocketKind::TransparentTcpListener)
+        }
+        IngressSocketKind::TransparentUdp => Ok(InternalIngressSocketKind::TransparentUdp),
+        IngressSocketKind::DnsTcpListener => Ok(InternalIngressSocketKind::DnsTcpListener),
+        IngressSocketKind::DnsUdp => Ok(InternalIngressSocketKind::DnsUdp),
+        IngressSocketKind::Unspecified => Err(BackendError::Invalid),
+    }
+}
+
+fn internal_ingress_family(value: i32) -> Result<InternalIngressAddressFamily, BackendError> {
+    match IngressAddressFamily::try_from(value).map_err(|_| BackendError::Invalid)? {
+        IngressAddressFamily::Ipv4 => Ok(InternalIngressAddressFamily::Ipv4),
+        IngressAddressFamily::Ipv6 => Ok(InternalIngressAddressFamily::Ipv6),
+        IngressAddressFamily::Unspecified => Err(BackendError::Invalid),
+    }
+}
+
+fn canonical_worker_ingress_sockets(
+    sockets: Vec<crate::internal_protocol::PreparedIngressSocket>,
+) -> Option<Vec<PreparedKernelIngressSocket>> {
+    if sockets.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS {
+        return None;
+    }
+    let mut canonical = BTreeMap::new();
+    for socket in sockets {
+        let kind = InternalIngressSocketKind::try_from(socket.descriptor_kind).ok()?;
+        let family = InternalIngressAddressFamily::try_from(socket.address_family).ok()?;
+        if kind == InternalIngressSocketKind::Unspecified
+            || family == InternalIngressAddressFamily::Unspecified
+        {
+            return None;
+        }
+        let local = socket.local?;
+        let external_kind = match kind {
+            InternalIngressSocketKind::TransparentTcpListener => {
+                IngressSocketKind::TransparentTcpListener
+            }
+            InternalIngressSocketKind::TransparentUdp => IngressSocketKind::TransparentUdp,
+            InternalIngressSocketKind::DnsTcpListener => IngressSocketKind::DnsTcpListener,
+            InternalIngressSocketKind::DnsUdp => IngressSocketKind::DnsUdp,
+            InternalIngressSocketKind::Unspecified => return None,
+        };
+        let external_family = match family {
+            InternalIngressAddressFamily::Ipv4 => IngressAddressFamily::Ipv4,
+            InternalIngressAddressFamily::Ipv6 => IngressAddressFamily::Ipv6,
+            InternalIngressAddressFamily::Unspecified => return None,
+        };
+        let external = PreparedKernelIngressSocket {
+            descriptor_kind: external_kind as i32,
+            address_family: external_family as i32,
+            local: IngressSocketAddress {
+                address: local.address,
+                port: local.port,
+            },
+        };
+        if canonical
+            .insert(
+                (external.descriptor_kind, external.address_family),
+                external,
+            )
+            .is_some()
+        {
+            return None;
+        }
+    }
+    (canonical.len() == volparossa_routing::REQUIRED_INGRESS_SOCKETS)
+        .then(|| canonical.into_values().collect())
+}
+
+fn exact_ingress_entry(
+    entry: Option<&OpenIngressEntry>,
+    binding: IngressBackendBinding,
+) -> Result<&OpenIngressEntry, BackendError> {
+    entry
+        .filter(|entry| {
+            entry.helper_runtime_id == binding.helper_runtime_id
+                && entry.client_runtime_id == binding.client_runtime_id
+                && entry.backend_generation == binding.generation
+        })
+        .ok_or(BackendError::Invalid)
+}
+
+fn exact_ingress_entry_mut<'a>(
+    entry: &'a mut Option<OpenIngressEntry>,
+    binding: IngressBackendBinding,
+) -> Result<&'a mut OpenIngressEntry, BackendError> {
+    entry
+        .as_mut()
+        .filter(|entry| {
+            entry.helper_runtime_id == binding.helper_runtime_id
+                && entry.client_runtime_id == binding.client_runtime_id
+                && entry.backend_generation == binding.generation
+        })
+        .ok_or(BackendError::Invalid)
+}
+
 fn worker_operation_deadline(deadline: HardDeadline) -> Result<HardDeadline, BackendError> {
     deadline
         .before_tail(WORKER_FAIL_CLOSED_RETIREMENT_TAIL)
@@ -4171,6 +4850,14 @@ mod tests {
         },
     };
 
+    fn test_ingress_coordinator() -> WorkerCoordinator {
+        WorkerCoordinator::new(WorkerRegistry::new(
+            1,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ))
+    }
+
     fn backend_with_state(state: Option<OpenLeaseEntry>) -> FunctionalAlphaLeaseBackend {
         FunctionalAlphaLeaseBackend {
             coordinator: WorkerCoordinator::new(WorkerRegistry::new(
@@ -4178,8 +4865,10 @@ mod tests {
                 DEFAULT_MAX_CACHE_ENTRIES,
                 DEFAULT_MAX_TTL,
             )),
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(state),
+            ingress_state: Mutex::new(None),
             durable_ownership: None,
         }
     }
@@ -4236,8 +4925,10 @@ mod tests {
         (
             FunctionalAlphaLeaseBackend {
                 coordinator,
+                ingress_coordinator: test_ingress_coordinator(),
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
                 state: Mutex::new(Some(entry)),
+                ingress_state: Mutex::new(None),
                 durable_ownership: None,
             },
             peer,
@@ -4530,8 +5221,10 @@ mod tests {
         (
             Arc::new(FunctionalAlphaLeaseBackend {
                 coordinator,
+                ingress_coordinator: test_ingress_coordinator(),
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
                 state: Mutex::new(Some(entry)),
+                ingress_state: Mutex::new(None),
                 durable_ownership: None,
             }),
             peer,
@@ -8574,8 +9267,10 @@ mod tests {
         entry.phase = OpenLeasePhase::Prepared;
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
+            ingress_state: Mutex::new(None),
             durable_ownership: None,
         };
 
@@ -8799,8 +9494,10 @@ mod tests {
         entry.phase = OpenLeasePhase::Activated;
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
+            ingress_state: Mutex::new(None),
             durable_ownership: None,
         };
 
@@ -9067,8 +9764,10 @@ mod tests {
         entry.birth_may_exist.clear();
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
+            ingress_state: Mutex::new(None),
             durable_ownership: None,
         };
 
@@ -9178,8 +9877,10 @@ mod tests {
         entry.durable_prepare_terminal = Some(selector);
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
+            ingress_state: Mutex::new(None),
             durable_ownership: Some(handle),
         };
 

@@ -23,21 +23,24 @@ use nix::{
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 use volparossa_linux_uapi::{
+    IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
     duplicate_descriptor_cloexec, mptcp_info, receive_binding_without_fd, receive_fd_with_binding,
     receive_seqpacket_without_fd, send_binding_without_fd, send_fd_with_binding,
-    send_seqpacket_without_fd, socket_network_namespace,
+    send_seqpacket_without_fd, socket_network_namespace, validate_ingress_socket,
 };
 
 use crate::{
     deadline::{HardDeadline, wait_for_fd, wait_for_readable_fd},
     internal_protocol::{
-        AcquireTransportSocket, DeadlineBoundWorkerRequest, InternalEndpointRole,
+        AcquireClientIngressSocket, AcquireTransportSocket, DeadlineBoundWorkerRequest,
+        InternalEndpointRole, InternalIngressAddressFamily, InternalIngressSocketKind,
         InternalProtocolError, InternalSocketAddress, InternalTransportSocketKind,
         InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult,
         MAX_INTERNAL_WORKER_FRAME, decode_deadline_bound_request, decode_request, decode_response,
-        encode_deadline_bound_request, encode_request, encode_response, internal_worker_request,
-        transport_descriptor_binding, transport_descriptor_source_released_binding,
-        validate_response_for_request,
+        encode_deadline_bound_request, encode_request, encode_response, ingress_descriptor_binding,
+        ingress_descriptor_source_released_binding, internal_worker_request,
+        request_transfers_descriptor, transport_descriptor_binding,
+        transport_descriptor_source_released_binding, validate_response_for_request,
     },
     worker_sandbox::PinnedWorkerNetworkNamespace,
 };
@@ -660,23 +663,16 @@ pub(crate) fn send_credential_worker_response_with_deadline<S: AsFd>(
 ) -> Result<(), WorkerTransportError> {
     deadline.ensure_remaining()?;
     validate_response_for_request(request, response).map_err(protocol_error)?;
-    let acquire = matches!(
-        request.operation,
-        Some(internal_worker_request::Operation::AcquireTransportSocket(
-            _
-        ))
-    );
+    let acquire = request_transfers_descriptor(request);
     let success = response.result == InternalWorkerResult::Ok as i32;
     if descriptor.is_some() != (acquire && success) {
         return Err(WorkerTransportError::Invalid);
     }
     let binding = acquire
-        .then(|| transport_descriptor_binding(request, response).map_err(protocol_error))
+        .then(|| descriptor_binding(request, response).map_err(protocol_error))
         .transpose()?;
     let released = (acquire && success)
-        .then(|| {
-            transport_descriptor_source_released_binding(request, response).map_err(protocol_error)
-        })
+        .then(|| descriptor_source_released_binding(request, response).map_err(protocol_error))
         .transpose()?;
     let encoded = encode_response(response).map_err(protocol_error)?;
     send_credential_record_with_deadline(channel, encoded.as_slice(), deadline)?;
@@ -800,20 +796,13 @@ fn receive_credential_worker_response_with_reconciliation<S: AsFd>(
             }
         }
     };
-    let acquire = matches!(
-        request.operation,
-        Some(internal_worker_request::Operation::AcquireTransportSocket(
-            _
-        ))
-    );
+    let acquire = request_transfers_descriptor(request);
     let success = response.result == InternalWorkerResult::Ok as i32;
     let released = (acquire && success)
-        .then(|| {
-            transport_descriptor_source_released_binding(request, &response).map_err(protocol_error)
-        })
+        .then(|| descriptor_source_released_binding(request, &response).map_err(protocol_error))
         .transpose()?;
     let descriptor = if acquire {
-        let binding = transport_descriptor_binding(request, &response).map_err(protocol_error)?;
+        let binding = descriptor_binding(request, &response).map_err(protocol_error)?;
         if success {
             let descriptor =
                 receive_credential_fd_record_with_deadline(channel, &binding, expected, deadline)?;
@@ -851,6 +840,36 @@ fn receive_credential_worker_response_with_reconciliation<S: AsFd>(
             descriptor,
         })
         .map_err(Into::into)
+}
+
+fn descriptor_binding(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
+    match request.operation.as_ref() {
+        Some(internal_worker_request::Operation::AcquireTransportSocket(_)) => {
+            transport_descriptor_binding(request, response)
+        }
+        Some(internal_worker_request::Operation::AcquireClientIngressSocket(_)) => {
+            ingress_descriptor_binding(request, response)
+        }
+        _ => Err(InternalProtocolError::Invalid),
+    }
+}
+
+fn descriptor_source_released_binding(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
+    match request.operation.as_ref() {
+        Some(internal_worker_request::Operation::AcquireTransportSocket(_)) => {
+            transport_descriptor_source_released_binding(request, response)
+        }
+        Some(internal_worker_request::Operation::AcquireClientIngressSocket(_)) => {
+            ingress_descriptor_source_released_binding(request, response)
+        }
+        _ => Err(InternalProtocolError::Invalid),
+    }
 }
 
 /// Sends one canonical internal request record without ancillary data.
@@ -897,23 +916,16 @@ pub(crate) fn send_worker_response<S: AsFd>(
     descriptor: Option<OwnedFd>,
 ) -> Result<(), WorkerTransportError> {
     validate_response_for_request(request, response).map_err(protocol_error)?;
-    let acquire = matches!(
-        request.operation,
-        Some(internal_worker_request::Operation::AcquireTransportSocket(
-            _
-        ))
-    );
+    let acquire = request_transfers_descriptor(request);
     let success = response.result == InternalWorkerResult::Ok as i32;
     if descriptor.is_some() != (acquire && success) {
         return Err(WorkerTransportError::Invalid);
     }
     let binding = acquire
-        .then(|| transport_descriptor_binding(request, response).map_err(protocol_error))
+        .then(|| descriptor_binding(request, response).map_err(protocol_error))
         .transpose()?;
     let released = (acquire && success)
-        .then(|| {
-            transport_descriptor_source_released_binding(request, response).map_err(protocol_error)
-        })
+        .then(|| descriptor_source_released_binding(request, response).map_err(protocol_error))
         .transpose()?;
     let encoded = encode_response(response).map_err(protocol_error)?;
     send_seqpacket_without_fd(channel, encoded.as_slice())?;
@@ -945,20 +957,13 @@ pub(crate) fn receive_worker_response<S: AsFd>(
     let encoded = receive_seqpacket_without_fd(channel, MAX_INTERNAL_WORKER_FRAME)?;
     let response = decode_response(&encoded).map_err(protocol_error)?;
     validate_response_for_request(request, &response).map_err(protocol_error)?;
-    let acquire = matches!(
-        request.operation,
-        Some(internal_worker_request::Operation::AcquireTransportSocket(
-            _
-        ))
-    );
+    let acquire = request_transfers_descriptor(request);
     let success = response.result == InternalWorkerResult::Ok as i32;
     let released = (acquire && success)
-        .then(|| {
-            transport_descriptor_source_released_binding(request, &response).map_err(protocol_error)
-        })
+        .then(|| descriptor_source_released_binding(request, &response).map_err(protocol_error))
         .transpose()?;
     let descriptor = if acquire {
-        let binding = transport_descriptor_binding(request, &response).map_err(protocol_error)?;
+        let binding = descriptor_binding(request, &response).map_err(protocol_error)?;
         if success {
             let descriptor = receive_fd_with_binding(channel, &binding)?;
             let released = released.ok_or(WorkerTransportError::Invalid)?;
@@ -975,6 +980,136 @@ pub(crate) fn receive_worker_response<S: AsFd>(
         response,
         descriptor,
     })
+}
+
+/// Create one fixed transparent ingress socket in the caller's current network namespace.
+pub(crate) fn create_client_ingress_socket(
+    kind: InternalIngressSocketKind,
+    family: InternalIngressAddressFamily,
+) -> Result<(OwnedFd, InternalSocketAddress), WorkerTransportError> {
+    if kind == InternalIngressSocketKind::Unspecified
+        || family == InternalIngressAddressFamily::Unspecified
+    {
+        return Err(WorkerTransportError::Invalid);
+    }
+    let tcp = matches!(
+        kind,
+        InternalIngressSocketKind::TransparentTcpListener
+            | InternalIngressSocketKind::DnsTcpListener
+    );
+    let domain = match family {
+        InternalIngressAddressFamily::Ipv4 => Domain::IPV4,
+        InternalIngressAddressFamily::Ipv6 => Domain::IPV6,
+        InternalIngressAddressFamily::Unspecified => return Err(WorkerTransportError::Invalid),
+    };
+    let socket = Socket::new(
+        domain,
+        if tcp {
+            Type::STREAM.nonblocking().cloexec()
+        } else {
+            Type::DGRAM.nonblocking().cloexec()
+        },
+        Some(if tcp { Protocol::TCP } else { Protocol::UDP }),
+    )?;
+    setsockopt(&socket, sockopt::IpTransparent, &true).map_err(errno_io)?;
+    if family == InternalIngressAddressFamily::Ipv6 {
+        setsockopt(&socket, sockopt::Ipv6V6Only, &true).map_err(errno_io)?;
+    }
+    if !tcp {
+        match family {
+            InternalIngressAddressFamily::Ipv4 => {
+                setsockopt(&socket, sockopt::Ipv4OrigDstAddr, &true).map_err(errno_io)?;
+            }
+            InternalIngressAddressFamily::Ipv6 => {
+                setsockopt(&socket, sockopt::Ipv6OrigDstAddr, &true).map_err(errno_io)?;
+            }
+            InternalIngressAddressFamily::Unspecified => {
+                return Err(WorkerTransportError::Invalid);
+            }
+        }
+    }
+    socket.set_reuse_address(true)?;
+    let wildcard = match family {
+        InternalIngressAddressFamily::Ipv4 => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        InternalIngressAddressFamily::Ipv6 => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        InternalIngressAddressFamily::Unspecified => return Err(WorkerTransportError::Invalid),
+    };
+    socket.bind(&SockAddr::from(wildcard))?;
+    if tcp {
+        socket.listen(MPTCP_LISTEN_BACKLOG)?;
+    }
+    let local = socket
+        .local_addr()?
+        .as_socket()
+        .ok_or(WorkerTransportError::Invalid)?;
+    let port = local.port();
+    validate_ingress_socket(
+        &socket,
+        kernel_ingress_kind(kind),
+        kernel_ingress_family(family),
+        port,
+    )?;
+    let address = match local {
+        SocketAddr::V4(value) if value.ip().is_unspecified() => value.ip().octets().to_vec(),
+        SocketAddr::V6(value) if value.ip().is_unspecified() => value.ip().octets().to_vec(),
+        _ => return Err(WorkerTransportError::Invalid),
+    };
+    Ok((
+        socket.into(),
+        InternalSocketAddress {
+            address,
+            port: u32::from(port),
+        },
+    ))
+}
+
+/// Revalidate an ingress descriptor and prove it came from the exact pinned worker namespace.
+pub(crate) fn validate_adopted_ingress_socket(
+    expected_namespace: &PinnedWorkerNetworkNamespace,
+    request: &AcquireClientIngressSocket,
+    descriptor: OwnedFd,
+) -> Result<OwnedFd, WorkerTransportError> {
+    let kind = InternalIngressSocketKind::try_from(request.descriptor_kind)
+        .map_err(|_| WorkerTransportError::Invalid)?;
+    let family = InternalIngressAddressFamily::try_from(request.address_family)
+        .map_err(|_| WorkerTransportError::Invalid)?;
+    let expected_port = request
+        .expected_local
+        .as_ref()
+        .and_then(|local| u16::try_from(local.port).ok())
+        .filter(|port| *port != 0)
+        .ok_or(WorkerTransportError::Invalid)?;
+    let observed_namespace = socket_network_namespace(&descriptor)?;
+    if !expected_namespace.matches_descriptor(&observed_namespace)? {
+        return Err(WorkerTransportError::Invalid);
+    }
+    validate_ingress_socket(
+        &descriptor,
+        kernel_ingress_kind(kind),
+        kernel_ingress_family(family),
+        expected_port,
+    )?;
+    Ok(descriptor)
+}
+
+fn kernel_ingress_kind(value: InternalIngressSocketKind) -> KernelIngressSocketKind {
+    match value {
+        InternalIngressSocketKind::TransparentTcpListener => {
+            KernelIngressSocketKind::TransparentTcpListener
+        }
+        InternalIngressSocketKind::TransparentUdp => KernelIngressSocketKind::TransparentUdp,
+        InternalIngressSocketKind::DnsTcpListener => KernelIngressSocketKind::DnsTcpListener,
+        InternalIngressSocketKind::DnsUdp => KernelIngressSocketKind::DnsUdp,
+        InternalIngressSocketKind::Unspecified => std::process::abort(),
+    }
+}
+
+fn kernel_ingress_family(value: InternalIngressAddressFamily) -> KernelIngressSocketFamily {
+    match value {
+        InternalIngressAddressFamily::Ipv4 => KernelIngressSocketFamily::Ipv4,
+        InternalIngressAddressFamily::Ipv6 => KernelIngressSocketFamily::Ipv6,
+        InternalIngressAddressFamily::Unspecified => std::process::abort(),
+    }
 }
 
 /// Creates and fully revalidates one transport socket inside a committed route namespace.
