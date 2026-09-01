@@ -258,6 +258,7 @@ impl PolicyAuthorizedUdpIngress {
             flow,
             signed_authorization,
             source: self.source,
+            destination: self.destination,
             payload: self.payload,
         })
     }
@@ -269,6 +270,7 @@ pub(crate) struct RouteAuthorizedUdpIngress {
     flow: AuthorizedUdpFlow,
     signed_authorization: Vec<u8>,
     source: SocketAddrV4,
+    destination: SocketAddrV4,
     payload: Vec<u8>,
 }
 
@@ -281,6 +283,11 @@ impl RouteAuthorizedUdpIngress {
     /// Return the application source tuple needed for reverse datagram delivery.
     pub(crate) const fn source(&self) -> SocketAddrV4 {
         self.source
+    }
+
+    /// Return the immutable original destination that responses must impersonate locally.
+    pub(crate) const fn destination(&self) -> SocketAddrV4 {
+        self.destination
     }
 
     /// Borrow the first intercepted payload without exposing a mutable destination tuple.
@@ -428,6 +435,7 @@ mod tests {
         assert!(flow.matches_exact_ip_destination(destination));
         assert!(!signature.is_empty());
         assert_eq!(bound.source(), "10.0.0.2:52000".parse().expect("source"));
+        assert_eq!(SocketAddr::V4(bound.destination()), destination);
         assert_eq!(bound.payload(), b"alpha-datagram");
     }
 }

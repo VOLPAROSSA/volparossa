@@ -188,7 +188,9 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         control_request::Operation::Connect(_) => {
             Box::pin(connect_response(request_id, context)).await
         }
-        control_request::Operation::Disconnect(_) => disconnect_response(request_id, context).await,
+        control_request::Operation::Disconnect(_) => {
+            Box::pin(disconnect_response(request_id, context)).await
+        }
         control_request::Operation::Peers(_) => {
             let peers = context.state.read().await.peer_list();
             response(
@@ -282,6 +284,12 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             ControlResult::Ok,
             "OK",
             "CONNECT_ROUTE_ESTABLISHED",
+            LogLevel::Info,
+        ),
+        Ok(ClientRouteProgress::UdpRouteReady) => (
+            ControlResult::Ok,
+            "UDP_ROUTE_READY",
+            "CONNECT_UDP_ROUTE_READY",
             LogLevel::Info,
         ),
         Err(ClientRouteConnectError::Busy) => (
@@ -392,6 +400,12 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             "CONNECT_UDP_EXIT_SESSION_SIGNAL_UNAVAILABLE",
             LogLevel::Warn,
         ),
+        Err(ClientRouteConnectError::UdpIngressUnavailable) => (
+            ControlResult::Unavailable,
+            "UDP_INGRESS_UNAVAILABLE",
+            "CONNECT_UDP_INGRESS_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
     };
     context
         .state
@@ -407,7 +421,7 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
 }
 
 async fn disconnect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
-    context.routes.disconnect().await;
+    Box::pin(context.routes.disconnect()).await;
     if context.helper.cleanup_owned().await.is_ok() {
         let mut state = context.state.write().await;
         if state.clear_after_helper_cleanup(&context.config).is_err() {

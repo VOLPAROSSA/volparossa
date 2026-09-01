@@ -23,7 +23,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
-    net::IpAddr,
+    net::{IpAddr, SocketAddrV4},
     sync::Arc,
     time::Duration,
 };
@@ -45,12 +45,14 @@ use volparossa_core::{
     Transport as SelectionTransport, UnixTime,
 };
 use volparossa_discovery::{
-    DatapathRelayOperation, DatapathRelayRequest, DatapathRelayResponse, ExitForwardOperation,
-    ExitForwardRequest, ExitForwardResponse, ForwardStatus,
+    DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation, DatapathRelayRequest,
+    DatapathRelayResponse, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
+    ForwardStatus, UdpExitSessionSignal as DiscoveryUdpExitSessionSignal, UdpSessionStartRequest,
 };
+use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
     MAX_CONTROL_MESSAGE_SIZE, ProbeAddressFamily, ProbeLegEvidence, ReplayCache, SignedEnvelope,
-    TimePolicy, Transport, decode_canonical,
+    TimePolicy, Transport, decode_canonical, encode_canonical,
 };
 use volparossa_reservation::{
     ClientNativeRouteAuthorization, ExitReservationIntent, RelayPathIntent, ReservationCoordinator,
@@ -81,6 +83,7 @@ use volparossa_wireguard::overlay_addresses;
 use volparossa_wireguard::{HelperContextHandle, PublicWireGuardEndpoint};
 
 use crate::{
+    client_ingress::{PolicyAuthorizedUdpIngress, RouteAuthorizedUdpIngress},
     discovery::{
         AdvertisementPayloadHash, ClientPreselectionError, ClientPreselectionParameters,
         DirectRelayCapability, DiscoveryControlHandle, ForwardedExitCapability,
@@ -121,24 +124,43 @@ enum ClientRouteControlState {
 }
 
 struct EstablishedClientRoute {
-    transport: ActiveClientTransport,
-    route: ProductionRoute,
+    transport: ClientTransportState,
+    route: Option<ProductionRoute>,
     orchestrator: ProductionRouteOrchestrator,
     helper: HelperClient,
 }
 
-enum ActiveClientTransport {
+enum ClientTransportState {
     TcpMptcp(ClientMptcpTransport),
+    UdpReady(CertificateBoundProductionUdpRoute),
+    UdpActive(ActiveProductionUdpRoute),
 }
 
 impl EstablishedClientRoute {
-    async fn shutdown(self) {
-        match self.transport {
-            ActiveClientTransport::TcpMptcp(transport) => {
-                let _ = transport.shutdown(&self.helper).await;
+    const fn progress(&self) -> ClientRouteProgress {
+        match &self.transport {
+            ClientTransportState::UdpReady(_) => ClientRouteProgress::UdpRouteReady,
+            ClientTransportState::TcpMptcp(_) | ClientTransportState::UdpActive(_) => {
+                ClientRouteProgress::TransportActive
             }
         }
-        let _ = self.route.disconnect().await;
+    }
+
+    async fn shutdown(self) {
+        match self.transport {
+            ClientTransportState::TcpMptcp(transport) => {
+                let _ = transport.shutdown(&self.helper).await;
+            }
+            ClientTransportState::UdpReady(route) => {
+                let _ = route.disconnect().await;
+            }
+            ClientTransportState::UdpActive(route) => {
+                let _ = route.shutdown().await;
+            }
+        }
+        if let Some(route) = self.route {
+            let _ = route.disconnect().await;
+        }
         let _ = self.orchestrator.shutdown().await;
     }
 }
@@ -147,6 +169,28 @@ impl EstablishedClientRoute {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClientRouteProgress {
     TransportActive,
+    UdpRouteReady,
+}
+
+/// One response datagram plus the exact transparent local return tuple.
+pub(crate) struct ClientUdpResponse {
+    application: SocketAddrV4,
+    remote: SocketAddrV4,
+    payload: Vec<u8>,
+}
+
+impl ClientUdpResponse {
+    pub(crate) const fn application(&self) -> SocketAddrV4 {
+        self.application
+    }
+
+    pub(crate) const fn remote(&self) -> SocketAddrV4 {
+        self.remote
+    }
+
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
 }
 
 /// Stable local classification for a failed client-route bootstrap.
@@ -170,6 +214,7 @@ pub(crate) enum ClientRouteConnectError {
     MptcpExitListenerSignalUnavailable,
     TransportRuntimeUnavailable,
     UdpExitSessionSignalUnavailable,
+    UdpIngressUnavailable,
 }
 
 impl ClientRouteControl {
@@ -213,14 +258,131 @@ impl ClientRouteControl {
         let mut state = self.state.lock().await;
         match result {
             Ok(established) => {
+                let progress = established.progress();
                 *state = ClientRouteControlState::Established(Box::new(established));
-                Ok(ClientRouteProgress::TransportActive)
+                Ok(progress)
             }
             Err(error) => {
                 *state = ClientRouteControlState::Idle;
                 Err(error)
             }
         }
+    }
+
+    /// Bind one kernel-observed datagram to this route, activate Quinn, and queue its payload.
+    pub(crate) async fn activate_udp_ingress(
+        &self,
+        ingress: PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        let previous = {
+            let mut state = self.state.lock().await;
+            std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
+        };
+        let established = match previous {
+            ClientRouteControlState::Established(established) => established,
+            other => {
+                let mut state = self.state.lock().await;
+                *state = other;
+                return Err(ClientRouteConnectError::Busy);
+            }
+        };
+        let EstablishedClientRoute {
+            transport,
+            route,
+            orchestrator,
+            helper,
+        } = *established;
+        let ClientTransportState::UdpReady(ready) = transport else {
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                transport,
+                route,
+                orchestrator,
+                helper,
+            }));
+            return Err(ClientRouteConnectError::Busy);
+        };
+        if route.is_some() {
+            let _ = ready.disconnect().await;
+            if let Some(route) = route {
+                let _ = route.disconnect().await;
+            }
+            let _ = orchestrator.shutdown().await;
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Idle;
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let Ok(authorized) = ready.bind_ingress(ingress, policy, now_ms) else {
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                transport: ClientTransportState::UdpReady(ready),
+                route: None,
+                orchestrator,
+                helper,
+            }));
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        };
+        let (flow, signed_authorization) = authorized.activation();
+        match ready
+            .activate(flow, signed_authorization, MAXIMUM_CALL_DURATION, now_ms)
+            .await
+        {
+            Ok(mut active) => {
+                active.return_path = Some(ClientUdpReturnPath {
+                    application: authorized.source(),
+                    remote: authorized.destination(),
+                });
+                if active.client.send_payload(authorized.payload()).is_err() {
+                    let _ = active.shutdown().await;
+                    let _ = orchestrator.shutdown().await;
+                    let mut state = self.state.lock().await;
+                    *state = ClientRouteControlState::Idle;
+                    return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+                }
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    transport: ClientTransportState::UdpActive(active),
+                    route: None,
+                    orchestrator,
+                    helper,
+                }));
+                Ok(ClientRouteProgress::TransportActive)
+            }
+            Err(failure) => {
+                let _ = failure.route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Idle;
+                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+            }
+        }
+    }
+
+    /// Receive one bounded Exit response with the exact local transparent-return binding.
+    pub(crate) async fn receive_udp_response(
+        &self,
+    ) -> Result<ClientUdpResponse, ClientRouteConnectError> {
+        let state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &*state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let ClientTransportState::UdpActive(active) = &established.transport else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let binding = active
+            .return_path
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let payload = timeout(MAXIMUM_CALL_DURATION, active.client.receive_payload())
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        Ok(ClientUdpResponse {
+            application: binding.application,
+            remote: binding.remote,
+            payload: payload.to_vec(),
+        })
     }
 
     /// Cancels any pre-route affine ownership; helper cleanup remains a separate fail-closed step.
@@ -230,7 +392,7 @@ impl ClientRouteControl {
             std::mem::replace(&mut *state, ClientRouteControlState::Idle)
         };
         if let ClientRouteControlState::Established(established) = previous {
-            established.shutdown().await;
+            Box::pin(established.shutdown()).await;
         }
     }
 }
@@ -264,24 +426,36 @@ async fn admit_completed_native_route(
             let prepared = route
                 .prepare_single_relay_udp(helper, crate::unix_millis())
                 .await;
-            let cleanup = match prepared {
-                Ok(prepared) => prepared.disconnect().await,
+            match prepared {
+                Ok(prepared) => match prepared
+                    .start_exit_session(discovery, crate::unix_millis())
+                    .await
+                {
+                    Ok(ready) => Ok(EstablishedClientRoute {
+                        transport: ClientTransportState::UdpReady(ready),
+                        route: None,
+                        orchestrator,
+                        helper: helper.clone(),
+                    }),
+                    Err(failure) => {
+                        let cleanup = failure.prepared.disconnect().await;
+                        let _ = orchestrator.shutdown().await;
+                        if cleanup.is_err() {
+                            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+                        } else {
+                            Err(ClientRouteConnectError::UdpExitSessionSignalUnavailable)
+                        }
+                    }
+                },
                 Err(failure) => {
                     let ProductionUdpPreparationFailure { route, .. } = failure;
-                    route
+                    let _ = route
                         .disconnect()
                         .await
-                        .map_err(|_| ProductionUdpRouteError::CleanupPending)
+                        .map_err(|_| ProductionUdpRouteError::CleanupPending);
+                    let _ = orchestrator.shutdown().await;
+                    Err(ClientRouteConnectError::TransportRuntimeUnavailable)
                 }
-            };
-            let _ = orchestrator.shutdown().await;
-            if cleanup.is_err() {
-                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
-            } else {
-                // The Client socket and exact signed TLS requirement now exist, but no production
-                // responder carries the Exit's public certificate bytes yet. Claiming Connect
-                // before that provider signal would skip both TLS pinning and Exit readiness.
-                Err(ClientRouteConnectError::UdpExitSessionSignalUnavailable)
             }
         }
         Ok(route) => {
@@ -292,7 +466,7 @@ async fn admit_completed_native_route(
             match activate_committed_transport(&route, helper, None).await {
                 Ok(transport) => Ok(EstablishedClientRoute {
                     transport,
-                    route,
+                    route: Some(route),
                     orchestrator,
                     helper: helper.clone(),
                 }),
@@ -318,7 +492,7 @@ async fn activate_committed_transport(
     route: &ProductionRoute,
     helper: &HelperClient,
     mptcp_listener: Option<ExitMptcpListenerSignal>,
-) -> Result<ActiveClientTransport, ClientRouteConnectError> {
+) -> Result<ClientTransportState, ClientRouteConnectError> {
     match route.selected_transport() {
         Some(Transport::TcpMptcp) => {
             let signal = mptcp_listener
@@ -335,7 +509,7 @@ async fn activate_committed_transport(
                 route.active_path_ids().iter().copied(),
             )
             .await
-            .map(ActiveClientTransport::TcpMptcp)
+            .map(ClientTransportState::TcpMptcp)
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
         }
         Some(Transport::UdpSinglePath | Transport::MultipathQuic | Transport::Unspecified)
@@ -2545,6 +2719,13 @@ pub(crate) struct ActiveProductionUdpRoute {
     // Field order is intentional for the same socket-before-namespace Drop barrier.
     client: SingleRelayUdpClient,
     route: ProductionRoute,
+    return_path: Option<ClientUdpReturnPath>,
+}
+
+#[derive(Clone, Copy)]
+struct ClientUdpReturnPath {
+    application: SocketAddrV4,
+    remote: SocketAddrV4,
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -2555,6 +2736,8 @@ pub(crate) enum ProductionUdpRouteError {
     HelperSocket,
     #[error("Exit certificate does not match the signed native route identity")]
     ExitCertificate,
+    #[error("exact committed Exit UDP session start failed")]
+    SessionStart,
     #[error("single-relay UDP association activation failed")]
     Association,
     #[error("single-relay UDP route cleanup remains pending")]
@@ -2567,6 +2750,11 @@ struct ProductionUdpPreparationFailure {
 }
 
 struct ProductionUdpCertificateFailure {
+    prepared: PreparedProductionUdpRoute,
+    cause: ProductionUdpRouteError,
+}
+
+struct ProductionUdpSessionFailure {
     prepared: PreparedProductionUdpRoute,
     cause: ProductionUdpRouteError,
 }
@@ -2772,6 +2960,58 @@ impl ProductionRoute {
 }
 
 impl PreparedProductionUdpRoute {
+    /// Commit the exact selected data Relay and bind the Exit's authenticated readiness signal.
+    async fn start_exit_session(
+        self,
+        discovery: &DiscoveryControlHandle,
+        now_ms: u64,
+    ) -> Result<CertificateBoundProductionUdpRoute, ProductionUdpSessionFailure> {
+        let dispatch = match udp_session_start_dispatch(&self.route.established, &self.path, now_ms)
+        {
+            Ok(dispatch) => dispatch,
+            Err(cause) => {
+                return Err(ProductionUdpSessionFailure {
+                    prepared: self,
+                    cause,
+                });
+            }
+        };
+        let Ok(response) = discovery
+            .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
+            .await
+        else {
+            return Err(ProductionUdpSessionFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::SessionStart,
+            });
+        };
+        let Ok(encoded_signal) = accepted_datapath_response(
+            &dispatch.request,
+            &response,
+            &dispatch.relay,
+            RouteSetupPhase::Committing,
+        ) else {
+            return Err(ProductionUdpSessionFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::SessionStart,
+            });
+        };
+        let local_signal = match verified_udp_exit_session_signal(&encoded_signal, &self.path) {
+            Ok(signal) => signal,
+            Err(cause) => {
+                return Err(ProductionUdpSessionFailure {
+                    prepared: self,
+                    cause,
+                });
+            }
+        };
+        self.bind_exit_session_signal(local_signal)
+            .map_err(|failure| ProductionUdpSessionFailure {
+                prepared: failure.prepared,
+                cause: failure.cause,
+            })
+    }
+
     /// Bind the public Exit certificate to the exact digest and TLS name signed into this route.
     ///
     /// The Exit port is fixed inside the protected overlay namespace. A successful QUIC handshake
@@ -2842,6 +3082,25 @@ impl PreparedProductionUdpRoute {
 }
 
 impl CertificateBoundProductionUdpRoute {
+    fn bind_ingress(
+        &self,
+        ingress: PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<RouteAuthorizedUdpIngress, ()> {
+        let protocol = self
+            .prepared
+            .route
+            .established
+            .owner
+            .as_ref()
+            .and_then(PreparedContextOwner::protocol)
+            .ok_or(())?;
+        ingress
+            .bind_to_route(&self.prepared.path, &protocol.coordinator, policy, now_ms)
+            .map_err(|_| ())
+    }
+
     /// Establish the existing single-relay QUIC-DATAGRAM Client over the protected Exit target.
     async fn activate(
         self,
@@ -2874,7 +3133,11 @@ impl CertificateBoundProductionUdpRoute {
         )
         .await
         {
-            Ok(client) => Ok(ActiveProductionUdpRoute { client, route }),
+            Ok(client) => Ok(ActiveProductionUdpRoute {
+                client,
+                route,
+                return_path: None,
+            }),
             Err(_error) => Err(ProductionUdpActivationFailure {
                 route,
                 cause: ProductionUdpRouteError::Association,
@@ -2889,7 +3152,11 @@ impl CertificateBoundProductionUdpRoute {
 
 impl ActiveProductionUdpRoute {
     async fn shutdown(self) -> Result<(), ProductionUdpRouteError> {
-        let Self { route, client } = self;
+        let Self {
+            route,
+            client,
+            return_path: _,
+        } = self;
         client.shutdown().await;
         route
             .disconnect()
@@ -2947,6 +3214,97 @@ fn client_udp_socket_request(
         CLIENT_SINGLE_RELAY_UDP_PORT,
     )
     .map_err(|_| ProductionUdpRouteError::InvalidRoute)
+}
+
+struct UdpSessionStartDispatch {
+    relay: DirectRelayCapability,
+    request: DatapathRelayRequest,
+}
+
+fn udp_session_start_dispatch(
+    route: &EstablishedRoute<ReservationSession>,
+    path: &VerifiedSingleRelayPath,
+    now_ms: u64,
+) -> Result<UdpSessionStartDispatch, ProductionUdpRouteError> {
+    let [grant] = route.relay_grants.as_slice() else {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    };
+    let [relay] = route.relay_authorities.as_slice() else {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    };
+    let [confirmation] = route.confirmations.as_slice() else {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    };
+    if ReservationSession::grant_path_id(grant) != path.path_id()
+        || relay.node_id != *path.relay_node_id()
+    {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    }
+    let start = UdpSessionStartRequest::new(
+        route.signed_exit_reservation.clone(),
+        ReservationSession::signed_relay_reservation(grant).to_vec(),
+        confirmation.signed_confirmation.clone(),
+        confirmation.signed_receipt.clone(),
+    )
+    .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let confirmation_envelope = decode_canonical::<SignedEnvelope>(
+        &confirmation.signed_confirmation,
+        MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let receipt_envelope =
+        decode_canonical::<SignedEnvelope>(&confirmation.signed_receipt, MAX_CONTROL_MESSAGE_SIZE)
+            .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let request_id: [u8; ID_BYTES] = confirmation_envelope
+        .nonce
+        .get(..ID_BYTES)
+        .and_then(|value| value.try_into().ok())
+        .filter(|value: &[u8; ID_BYTES]| value.iter().any(|byte| *byte != 0))
+        .ok_or(ProductionUdpRouteError::InvalidRoute)?;
+    let call_ms = u64::try_from(DATAPATH_RELAY_REQUEST_TIMEOUT.as_millis())
+        .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let deadline_unix_ms = now_ms
+        .checked_add(call_ms)
+        .ok_or(ProductionUdpRouteError::InvalidRoute)?
+        .min(path.expires_at_ms())
+        .min(confirmation_envelope.expires_at_ms)
+        .min(receipt_envelope.expires_at_ms);
+    if deadline_unix_ms <= now_ms {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    }
+    let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE)
+        .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let request = DatapathRelayRequest::new(
+        request_id.to_vec(),
+        relay.node_id.to_vec(),
+        relay.peer_id.to_bytes(),
+        deadline_unix_ms,
+        DatapathRelayOperation::UdpSessionStart,
+        encoded,
+        Vec::new(),
+    )
+    .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    Ok(UdpSessionStartDispatch {
+        relay: relay.clone(),
+        request,
+    })
+}
+
+fn verified_udp_exit_session_signal(
+    encoded: &[u8],
+    path: &VerifiedSingleRelayPath,
+) -> Result<UdpExitSessionSignal, ProductionUdpRouteError> {
+    let signal =
+        decode_canonical::<DiscoveryUdpExitSessionSignal>(encoded, MAX_CONTROL_MESSAGE_SIZE)
+            .map_err(|_| ProductionUdpRouteError::SessionStart)?;
+    if signal.validate().is_err()
+        || signal.reservation_id() != path.reservation_id()
+        || signal.route_context_id() != path.route_context_id()
+        || signal.path_id() != path.path_id()
+    {
+        return Err(ProductionUdpRouteError::SessionStart);
+    }
+    UdpExitSessionSignal::from_certificate_der(signal.certificate_der().to_vec())
 }
 
 impl<P, L> RouteSetupManager<P, L>
@@ -3559,6 +3917,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
 
         self.phase = RouteSetupPhase::RelayReservations;
         let mut grants = Vec::with_capacity(selected_paths.len());
+        let mut relay_authorities = Vec::with_capacity(selected_paths.len());
         for (path_index, path) in selected_paths.iter().enumerate() {
             self.ensure_live(clock, cancellation, deadline)?;
             let relay = self
@@ -3608,9 +3967,11 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                 return Err(RouteSetupError::ReservationProtocol(self.phase));
             }
             grants.push(grant);
+            relay_authorities.push(relay.clone());
         }
 
         self.phase = RouteSetupPhase::ExitConfirmations;
+        let mut confirmations = Vec::with_capacity(grants.len());
         for grant in &grants {
             self.ensure_live(clock, cancellation, deadline)?;
             let now_ms = clock.unix_millis();
@@ -3656,6 +4017,10 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                     &signed_receipt,
                     clock.unix_millis(),
                 )?;
+            confirmations.push(RelayConfirmationProof {
+                signed_confirmation,
+                signed_receipt,
+            });
         }
 
         let signed_exit_reservation = P::signed_exit_reservation(&finalized).to_vec();
@@ -3712,6 +4077,8 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         self.ensure_live(clock, cancellation, deadline)?;
         Ok(ExecutionProof {
             grants,
+            relay_authorities,
+            confirmations,
             active_path_ids,
             warm_path_ids,
             commit: committed,
@@ -3805,6 +4172,8 @@ impl<P: ClientReservationProtocol> MeasuredRouteSetup<P> {
                 owner: transaction.prepared.take(),
                 request: transaction.request,
                 relay_grants: proof.grants,
+                relay_authorities: proof.relay_authorities,
+                confirmations: proof.confirmations,
                 active_path_ids: proof.active_path_ids,
                 warm_path_ids: proof.warm_path_ids,
                 commit_proof: proof.commit,
@@ -3818,6 +4187,8 @@ impl<P: ClientReservationProtocol> MeasuredRouteSetup<P> {
 
 struct ExecutionProof<G, A> {
     grants: Vec<G>,
+    relay_authorities: Vec<DirectRelayCapability>,
+    confirmations: Vec<RelayConfirmationProof>,
     active_path_ids: Vec<u32>,
     warm_path_ids: Vec<u32>,
     commit: CommittedLeaseBatch,
@@ -3825,10 +4196,17 @@ struct ExecutionProof<G, A> {
     native_authorization: A,
 }
 
+struct RelayConfirmationProof {
+    signed_confirmation: Vec<u8>,
+    signed_receipt: Vec<u8>,
+}
+
 struct EstablishedRoute<P: ClientReservationProtocol> {
     owner: Option<PreparedContextOwner<P>>,
     request: RouteSetupRequest,
     relay_grants: Vec<P::RelayGrant>,
+    relay_authorities: Vec<DirectRelayCapability>,
+    confirmations: Vec<RelayConfirmationProof>,
     active_path_ids: Vec<u32>,
     warm_path_ids: Vec<u32>,
     commit_proof: CommittedLeaseBatch,
@@ -8443,6 +8821,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real signed lifecycle also proves the exact post-commit UDP activation frame"
+    )]
     async fn production_route_owner_completes_and_disconnects_one_real_v4_lifecycle() {
         // The exact-match verifier below is test-only. Production intentionally remains
         // ProbeEvidenceUnavailable until helper-proven, exit-participating probes are wired.
@@ -8459,6 +8841,8 @@ mod tests {
         assert_eq!(established.active_path_ids, [1]);
         assert!(established.warm_path_ids.is_empty());
         assert_eq!(established.relay_grants.len(), 1);
+        assert_eq!(established.relay_authorities.len(), 1);
+        assert_eq!(established.confirmations.len(), 1);
         assert_eq!(established.commit_proof.leases.len(), 1);
         assert_eq!(
             *fixture.scope_events.lock().expect("scope events"),
@@ -8496,6 +8880,68 @@ mod tests {
             .expect("real route yields one verified UDP path");
         let acquire = client_udp_socket_request(&established, &verified_path)
             .expect("real route yields one exact helper socket request");
+        let start = udp_session_start_dispatch(&established, &verified_path, NOW_MS)
+            .expect("real route yields one exact UDP session start");
+        assert_eq!(start.relay.node_id, *verified_path.relay_node_id());
+        assert_eq!(
+            start.request.validated_operation(),
+            Ok(DatapathRelayOperation::UdpSessionStart)
+        );
+        assert_eq!(start.request.relay_node_id(), start.relay.node_id);
+        assert_eq!(
+            start.request.relay_peer_id(),
+            start.relay.peer_id.to_bytes()
+        );
+        let start_frame = decode_canonical::<UdpSessionStartRequest>(
+            start.request.client_signed_request(),
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("canonical UDP start frame");
+        start_frame.validate().expect("correlated UDP proof set");
+        assert_eq!(
+            start_frame.signed_exit_reservation(),
+            established.signed_exit_reservation
+        );
+        assert_eq!(
+            start_frame.signed_relay_reservation(),
+            established.relay_grants[0].signed_relay_reservation()
+        );
+        assert_eq!(
+            start_frame.signed_confirmation(),
+            established.confirmations[0].signed_confirmation
+        );
+        assert_eq!(
+            start_frame.signed_confirmation_receipt(),
+            established.confirmations[0].signed_receipt
+        );
+        let exit_signal = DiscoveryUdpExitSessionSignal::new(
+            *verified_path.reservation_id(),
+            *verified_path.route_context_id(),
+            verified_path.path_id(),
+            vec![0x30, 1, 2],
+        )
+        .expect("bounded Exit signal");
+        let exit_signal = encode_canonical(&exit_signal, MAX_CONTROL_MESSAGE_SIZE)
+            .expect("canonical Exit signal");
+        assert_eq!(
+            verified_udp_exit_session_signal(&exit_signal, &verified_path)
+                .expect("exact Exit signal")
+                .certificate_der,
+            [0x30, 1, 2]
+        );
+        let wrong_path_signal = DiscoveryUdpExitSessionSignal::new(
+            *verified_path.reservation_id(),
+            *verified_path.route_context_id(),
+            verified_path.path_id() + 1,
+            vec![0x30, 1, 2],
+        )
+        .expect("bounded wrong-path Exit signal");
+        let wrong_path_signal = encode_canonical(&wrong_path_signal, MAX_CONTROL_MESSAGE_SIZE)
+            .expect("canonical wrong-path Exit signal");
+        assert!(matches!(
+            verified_udp_exit_session_signal(&wrong_path_signal, &verified_path),
+            Err(ProductionUdpRouteError::SessionStart)
+        ));
         let expected_client = overlay_addresses(
             *verified_path.route_context_id(),
             u8::try_from(verified_path.path_id()).expect("bounded path"),
