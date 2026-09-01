@@ -5,7 +5,7 @@
 //! exact, short-lived request over the event's still-current authenticated connection lineage.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -31,6 +31,7 @@ use crate::{
 const REQUEST_TOMBSTONE_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_REQUEST_TOMBSTONES: usize = 1_024;
 const MAX_REQUEST_TOMBSTONES_PER_PEER: usize = 16;
+const MAX_LOCAL_ADVERTISEMENT_LINEAGE: usize = 8;
 
 /// Exact active-policy snapshot required before a Relay or Exit may sign an observation receipt.
 ///
@@ -165,13 +166,42 @@ impl TentativeRequestTombstone {
 
 pub(super) struct PreselectionResponderState {
     requests: HashMap<[u8; 32], RequestTombstone>,
+    local_advertisement_lineage: VecDeque<Vec<u8>>,
 }
 
 impl PreselectionResponderState {
     pub(super) fn new() -> Self {
         Self {
             requests: HashMap::with_capacity(MAX_REQUEST_TOMBSTONES.min(256)),
+            local_advertisement_lineage: VecDeque::with_capacity(MAX_LOCAL_ADVERTISEMENT_LINEAGE),
         }
+    }
+
+    pub(super) fn install_local_advertisement(
+        &mut self,
+        current: &mut Option<Vec<u8>>,
+        replacement: Vec<u8>,
+    ) {
+        if current.as_ref() == Some(&replacement) {
+            return;
+        }
+        if let Some(previous) = current.replace(replacement) {
+            self.local_advertisement_lineage
+                .retain(|encoded| encoded != &previous);
+            self.local_advertisement_lineage.push_back(previous);
+            while self.local_advertisement_lineage.len() > MAX_LOCAL_ADVERTISEMENT_LINEAGE {
+                self.local_advertisement_lineage.pop_front();
+            }
+        }
+    }
+
+    pub(super) fn clear_local_advertisements(&mut self, current: &mut Option<Vec<u8>>) {
+        *current = None;
+        self.local_advertisement_lineage.clear();
+    }
+
+    pub(super) fn local_advertisement_lineage(&self) -> impl DoubleEndedIterator<Item = &[u8]> {
+        self.local_advertisement_lineage.iter().map(Vec::as_slice)
     }
 
     pub(super) fn reserve(
@@ -521,8 +551,13 @@ impl DiscoveryService {
         {
             return Err(DirectPreselectionResponderError::Request);
         }
-        let authority = self.local_relay_authority(policy, signer_public_key, scope, now_ms)?;
-        if typed.actor.as_ref() != Some(&authority.actor)
+        let actor = typed
+            .actor
+            .as_ref()
+            .ok_or(DirectPreselectionResponderError::Request)?;
+        let authority =
+            self.local_relay_authority_for_actor(policy, signer_public_key, scope, actor, now_ms)?;
+        if actor != &authority.actor
             || scope.policy_version != policy.version
             || scope.policy_hash.as_slice() != policy.hash
             || scope.policy_expires_at_ms != policy.expires_at_ms
@@ -772,6 +807,37 @@ impl DiscoveryService {
         .ok_or(DirectPreselectionResponderError::Authority)
     }
 
+    pub(super) fn local_relay_authority_for_actor(
+        &self,
+        policy: LocalPreselectionPolicy,
+        signer_public_key: [u8; 32],
+        scope: &PreselectionObservationScope,
+        expected: &PreselectionActorBinding,
+        now_ms: u64,
+    ) -> Result<LocalPreselectionAuthority, DirectPreselectionResponderError> {
+        if let Ok(authority) = self.local_relay_authority(policy, signer_public_key, scope, now_ms)
+        {
+            if &authority.actor == expected {
+                return Ok(authority);
+            }
+        }
+        self.preselection_responder
+            .local_advertisement_lineage()
+            .rev()
+            .find_map(|encoded| {
+                self.local_preselection_authority_from_encoded(
+                    encoded,
+                    policy,
+                    signer_public_key,
+                    scope,
+                    now_ms,
+                    LocalResponderRole::Relay,
+                )
+                .filter(|authority| &authority.actor == expected)
+            })
+            .ok_or(DirectPreselectionResponderError::Authority)
+    }
+
     fn local_exit_authority(
         &self,
         policy: LocalPreselectionPolicy,
@@ -805,6 +871,25 @@ impl DiscoveryService {
         required_role: LocalResponderRole,
     ) -> Option<LocalPreselectionAuthority> {
         let encoded = self.local_advertisement.as_deref()?;
+        self.local_preselection_authority_from_encoded(
+            encoded,
+            policy,
+            signer_public_key,
+            scope,
+            now_ms,
+            required_role,
+        )
+    }
+
+    fn local_preselection_authority_from_encoded(
+        &self,
+        encoded: &[u8],
+        policy: LocalPreselectionPolicy,
+        signer_public_key: [u8; 32],
+        scope: &PreselectionObservationScope,
+        now_ms: u64,
+        required_role: LocalResponderRole,
+    ) -> Option<LocalPreselectionAuthority> {
         let envelope: SignedEnvelope = decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE).ok()?;
         let mut replay = ReplayCache::new(1).ok()?;
         let verified = verify_control_message::<NodeAdvertisement>(
@@ -2353,6 +2438,20 @@ mod tests {
                 .expect("Relay payload hash"),
             advertisement_expiry,
         );
+        relay_advertisement.sequence_number = relay_advertisement.sequence_number.saturating_add(1);
+        let refreshed_relay_advertisement = sign_control_message_with(
+            &relay_advertisement,
+            relay_public_key,
+            now_ms,
+            advertisement_expiry,
+            [79; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&relay_key, message),
+        )
+        .expect("signed refreshed Relay advertisement");
+        relay
+            .set_local_advertisement(refreshed_relay_advertisement)
+            .expect("refresh served Relay advertisement after client snapshot");
 
         let mut exit_advertisement = exit_advertisement(&exit_key, exit_public_key);
         exit_advertisement.measured_at_ms = now_ms;
@@ -2812,6 +2911,63 @@ mod tests {
             ),
             Err(DirectPreselectionResponderError::Authority)
         ));
+    }
+
+    #[tokio::test]
+    async fn exact_previously_served_relay_actor_survives_bounded_advertisement_refresh() {
+        let mut fixture = fixture().await;
+        let previously_served = fixture.actor.clone();
+        let mut replacement = relay_advertisement(&fixture.relay_key, fixture.relay_public_key);
+        replacement.sequence_number = replacement.sequence_number.saturating_add(1);
+        let replacement = sign_control_message_with(
+            &replacement,
+            fixture.relay_public_key,
+            NOW_MS,
+            ADVERTISEMENT_EXPIRY_MS,
+            [92; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&fixture.relay_key, message),
+        )
+        .expect("signed replacement Relay advertisement");
+        fixture
+            .service
+            .set_local_advertisement(replacement)
+            .expect("install replacement Relay advertisement");
+
+        fixture
+            .service
+            .prepare_direct_preselection_response_at(
+                fixture.client_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &request(
+                    previously_served.clone(),
+                    92,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                fixture.policy,
+                fixture.relay_public_key,
+                |message| sign_with_key(&fixture.relay_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            )
+            .expect("exact still-valid served actor");
+
+        let mut never_served = previously_served;
+        never_served.advertisement_sequence = never_served.advertisement_sequence.saturating_sub(1);
+        let error = rejection(
+            fixture.service.prepare_direct_preselection_response_at(
+                fixture.client_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &request(never_served, 93, ObservationAddressFamily::Ipv4),
+                fixture.policy,
+                fixture.relay_public_key,
+                |message| sign_with_key(&fixture.relay_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "unserved same-identity actor",
+        );
+        assert_eq!(error, DirectPreselectionResponderError::Authority);
     }
 
     #[tokio::test]

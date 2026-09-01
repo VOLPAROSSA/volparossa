@@ -1057,13 +1057,15 @@ impl DiscoveryService {
             return Err(DiscoveryError::ProtocolRole);
         }
         AdvertisementResponse::new(envelope.clone())?;
-        self.local_advertisement = Some(envelope);
+        self.preselection_responder
+            .install_local_advertisement(&mut self.local_advertisement, envelope);
         Ok(())
     }
 
     /// Stops serving a previously configured local advertisement immediately.
     pub fn clear_local_advertisement(&mut self) {
-        self.local_advertisement = None;
+        self.preselection_responder
+            .clear_local_advertisements(&mut self.local_advertisement);
     }
 
     /// Reports whether a signed local advertisement is installed.

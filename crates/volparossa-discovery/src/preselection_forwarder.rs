@@ -160,8 +160,13 @@ impl DiscoveryService {
                 let Ok(now_ms) = system_unix_millis() else {
                     return true;
                 };
-                match self.local_relay_authority(policy, signer_public_key, &pending.scope, now_ms)
-                {
+                match self.local_relay_authority_for_actor(
+                    policy,
+                    signer_public_key,
+                    &pending.scope,
+                    &pending.relay_binding,
+                    now_ms,
+                ) {
                     Ok(authority) => authority.actor != pending.relay_binding,
                     Err(_) => true,
                 }
@@ -236,7 +241,7 @@ impl DiscoveryService {
             return Err(ForwardedPreselectionError::Request);
         }
         let authority = self
-            .local_relay_authority(policy, signer_public_key, &scope, now_ms)
+            .local_relay_authority_for_actor(policy, signer_public_key, &scope, control, now_ms)
             .map_err(|_| ForwardedPreselectionError::Authority)?;
         if control != &authority.actor
             || scope.policy_version != policy.version
@@ -466,7 +471,13 @@ impl DiscoveryService {
             return Err(ForwardedPreselectionError::Time);
         }
         let authority = self
-            .local_relay_authority(policy, signer_public_key, scope, now_ms)
+            .local_relay_authority_for_actor(
+                policy,
+                signer_public_key,
+                scope,
+                &relay_binding,
+                now_ms,
+            )
             .map_err(|_| ForwardedPreselectionError::Authority)?;
         if authority.actor != relay_binding
             || context.request.forwarded_control.as_ref() != Some(&authority.actor)
