@@ -1,7 +1,7 @@
 //! Fail-closed helper-v3 lease state machine.
 //!
 //! The production server can prepare, activate, probe-commit and destroy one process-owned
-//! functional-alpha Client or Exit singleton lease through the authenticated namespace worker. A
+//! functional-alpha Client or Exit bounded lease batch through the authenticated namespace worker. A
 //! committed response proves only the exact `WireGuard` identity, signed peer, `/128` route, recent
 //! handshake and strict bidirectional counter growth; it does not claim a usable VPN datapath or
 //! crash/restart recovery.
@@ -21,12 +21,13 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use volparossa_routing::{
-    AcquireTransportSocket, ActivateLeaseBatch, BindHelperRuntime, ClosedPreparePlan,
-    CommittedLease, CommittedLeaseBatch, ContextRole, DestroyedContext, Empty, HELPER_HANDLE_BYTES,
-    HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult, HelperRuntime,
-    LeaseActivation, LeasePlan, PrepareLeaseBatch, PreparedLease, PreparedLeaseBatch,
-    PublicUdpEndpoint, ReconcileExpiredPrepare, ReconciledExpiredPrepare, TransportSocketReady,
-    UnderlayEvidence, WireguardRole, helper_request, helper_response, operation_digest,
+    AcquireTransportSocket, ActivateLeaseBatch, AddMptcpEndpoint, BindHelperRuntime,
+    ClosedPreparePlan, CommittedLease, CommittedLeaseBatch, ContextRole, DestroyedContext, Empty,
+    HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
+    HelperRuntime, LeaseActivation, LeasePlan, MptcpEndpointMode, PrepareLeaseBatch, PreparedLease,
+    PreparedLeaseBatch, PublicUdpEndpoint, ReconcileExpiredPrepare, ReconciledExpiredPrepare,
+    RemoveMptcpEndpoint, TransportSocketReady, UnderlayEvidence, WireguardRole, helper_request,
+    helper_response, operation_digest,
 };
 use zeroize::Zeroizing;
 
@@ -220,6 +221,7 @@ pub(crate) enum OperationKind {
     Probe,
     Destroy,
     Acquire,
+    MptcpEndpoint,
     Cleanup,
     Reap,
     Reconcile,
@@ -309,6 +311,8 @@ pub(crate) enum BackendAction {
     Probe,
     Destroy,
     AcquireTransportSocket,
+    AddMptcpEndpoint,
+    RemoveMptcpEndpoint,
 }
 
 /// Non-authoritative copyable identity used only to correlate a backend completion.
@@ -359,6 +363,11 @@ pub(crate) struct BackendDestroy {
 pub(crate) struct BackendProbe {
     pub(crate) commit: volparossa_routing::CommitLeaseBatch,
     pub(crate) activated_at_unix: u64,
+}
+
+enum MptcpEndpointMutation {
+    Add(AddMptcpEndpoint),
+    Remove(RemoveMptcpEndpoint),
 }
 
 /// One non-cloneable backend input. Engine rollback authority remains in `OperationOwner`.
@@ -559,6 +568,16 @@ pub(crate) trait AsyncLeaseBackend: Send + Sync {
         request: BackendRequest<AcquireTransportSocket>,
     ) -> BackendFuture<BackendCompletion<OwnedFd>>;
 
+    fn add_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<AddMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>>;
+
+    fn remove_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<RemoveMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>>;
+
     fn transport_socket_supported(
         self: Arc<Self>,
         request: BackendRuntimeRequest,
@@ -609,6 +628,22 @@ impl AsyncLeaseBackend for UnavailableLeaseBackend {
         self: Arc<Self>,
         request: BackendRequest<AcquireTransportSocket>,
     ) -> BackendFuture<BackendCompletion<OwnedFd>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn add_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<AddMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn remove_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<RemoveMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>> {
         let (completion, _) = request.into_parts();
         Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
     }
@@ -1183,6 +1218,14 @@ impl HelperEngine {
                 self.acquire_async(request, request_id, digest, value, sender)
                     .await
             }
+            Some(helper_request::Operation::AddMptcpEndpoint(value)) => {
+                self.add_mptcp_endpoint_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::RemoveMptcpEndpoint(value)) => {
+                self.remove_mptcp_endpoint_async(request, request_id, digest, value, sender)
+                    .await
+            }
             Some(helper_request::Operation::CleanupOwned(value)) => {
                 if value.cleanup_token.len() != self.inner.cleanup_token.len()
                     || value
@@ -1205,18 +1248,6 @@ impl HelperEngine {
                         .await
                 }
             }
-            Some(
-                helper_request::Operation::AddMptcpEndpoint(_)
-                | helper_request::Operation::RemoveMptcpEndpoint(_),
-            ) => Some(execution(
-                response(
-                    request,
-                    HelperResult::Unavailable,
-                    "TRANSPORT_HANDOFF_UNAVAILABLE",
-                    None,
-                ),
-                None,
-            )),
             Some(
                 helper_request::Operation::PrepareClientIngress(_)
                 | helper_request::Operation::AcquireIngressSocket(_)
@@ -3204,6 +3235,241 @@ impl HelperEngine {
         ))
     }
 
+    async fn add_mptcp_endpoint_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &AddMptcpEndpoint,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        if MptcpEndpointMode::try_from(value.mode)
+            .ok()
+            .is_none_or(|mode| mode == MptcpEndpointMode::Unspecified)
+        {
+            return Some(execution(invalid_response(request), None));
+        }
+        self.mutate_mptcp_endpoint_async(
+            request,
+            request_id,
+            digest,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::AddMptcpEndpoint,
+            MptcpEndpointMutation::Add(value.clone()),
+            sender,
+        )
+        .await
+    }
+
+    async fn remove_mptcp_endpoint_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &RemoveMptcpEndpoint,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        self.mutate_mptcp_endpoint_async(
+            request,
+            request_id,
+            digest,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::RemoveMptcpEndpoint,
+            MptcpEndpointMutation::Remove(value.clone()),
+            sender,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the mutation keeps reservation, backend ambiguity, and stale-result cleanup adjacent"
+    )]
+    async fn mutate_mptcp_endpoint_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        route_context_id: &[u8],
+        context_handle: &[u8],
+        path_id: u32,
+        action: BackendAction,
+        mutation: MptcpEndpointMutation,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        let Some(context_id) = fixed::<16>(route_context_id) else {
+            return Some(execution(invalid_response(request), None));
+        };
+        let token = {
+            let mut state = self.inner.state.lock().await;
+            let Some(context) = state.contexts.get(&context_id) else {
+                return Some(execution(
+                    response(request, HelperResult::NotFound, "CONTEXT_ABSENT", None),
+                    None,
+                ));
+            };
+            let live = deadline_live(
+                expiry_now(self.inner.clock.as_ref()),
+                context.hard_expires_at_unix,
+                context.hard_expires_at_boottime_ns,
+            );
+            if context.phase != ContextPhase::Committed
+                || !live
+                || !matches_handle(&context.handle, context_handle)
+                || !context
+                    .leases
+                    .contains_key(&(path_id, WireguardRole::Client as i32))
+            {
+                return Some(execution(invalid_response(request), None));
+            }
+            let generation = context.generation;
+            let lineage = context_backend_lineage(context_id, context);
+            let Some(token) = begin_operation(
+                &mut state,
+                request_id,
+                digest,
+                context_id,
+                generation,
+                Some(ContextPhase::Committed),
+                OperationKind::MptcpEndpoint,
+                lineage,
+                Instant::now() + self.inner.backend_timeout,
+            ) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                    None,
+                ));
+            };
+            state.cleanup_pending.insert((context_id, generation));
+            token
+        };
+
+        let backend = Arc::clone(&self.inner.backend);
+        let binding = BackendBinding::for_owner(
+            &token,
+            BackendPhase::Committed,
+            action,
+            token.call_deadline(),
+        );
+        let call = match mutation {
+            MptcpEndpointMutation::Add(value) => {
+                let request = BackendRequest::new(binding, value);
+                self.call_backend(binding.call_deadline, move || {
+                    backend.add_mptcp_endpoint(request)
+                })
+                .await
+            }
+            MptcpEndpointMutation::Remove(value) => {
+                let request = BackendRequest::new(binding, value);
+                self.call_backend(binding.call_deadline, move || {
+                    backend.remove_mptcp_endpoint(request)
+                })
+                .await
+            }
+        };
+        let resolved = self
+            .resolve_mutating_call(call, token, binding, request, sender)
+            .await?;
+        let token = match resolved {
+            ResolvedCall::Definite {
+                owner,
+                result: Ok(()),
+            } => *owner,
+            ResolvedCall::Definite {
+                owner,
+                result: Err(BackendError::CleanupIncomplete),
+            } => {
+                let cleanup = self.rollback_context(*owner, request, sender).await;
+                if cleanup.response_sent {
+                    return None;
+                }
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "MPTCP_ENDPOINT_CLEANUP_INCOMPLETE",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+            ResolvedCall::Definite {
+                owner,
+                result: Err(error),
+            } => {
+                self.clear_operation(*owner).await;
+                return Some(execution(
+                    backend_response(request, error, "MPTCP_ENDPOINT_UNAVAILABLE"),
+                    None,
+                ));
+            }
+            ResolvedCall::Ambiguous => {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "BACKEND_RESULT_AMBIGUOUS",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+        };
+        let operation = token.token();
+        let mut state = self.inner.state.lock().await;
+        let exact = state.in_flight == Some(operation)
+            && state.contexts.get(&context_id).is_some_and(|context| {
+                context.generation == operation.generation
+                    && context.phase == ContextPhase::Committed
+                    && context_backend_lineage(context_id, context) == token.lineage()
+                    && matches_handle(&context.handle, context_handle)
+                    && context
+                        .leases
+                        .contains_key(&(path_id, WireguardRole::Client as i32))
+                    && deadline_live(
+                        expiry_now(self.inner.clock.as_ref()),
+                        context.hard_expires_at_unix,
+                        context.hard_expires_at_boottime_ns,
+                    )
+            });
+        if !exact {
+            drop(state);
+            let cleanup = self.rollback_context(token, request, sender).await;
+            if cleanup.response_sent {
+                return None;
+            }
+            return Some(execution(
+                response(
+                    request,
+                    HelperResult::CleanupIncomplete,
+                    "STALE_BACKEND_RESULT",
+                    None,
+                ),
+                None,
+            ));
+        }
+        state
+            .cleanup_pending
+            .remove(&(context_id, operation.generation));
+        state.in_flight = None;
+        drop(state);
+        let _ = token.settle();
+        Some(execution(
+            response(
+                request,
+                HelperResult::Ok,
+                "MPTCP_ENDPOINT_UPDATED",
+                Some(helper_response::Outcome::Empty(Empty {})),
+            ),
+            None,
+        ))
+    }
+
     async fn destroy_async(
         &self,
         request: &HelperRequest,
@@ -4871,6 +5137,22 @@ mod tests {
             })
         }
 
+        fn add_mptcp_endpoint(
+            self: Arc<Self>,
+            request: BackendRequest<AddMptcpEndpoint>,
+        ) -> BackendFuture<BackendCompletion<()>> {
+            let (completion, _) = request.into_parts();
+            Box::pin(async move { completion.complete(Ok(())) })
+        }
+
+        fn remove_mptcp_endpoint(
+            self: Arc<Self>,
+            request: BackendRequest<RemoveMptcpEndpoint>,
+        ) -> BackendFuture<BackendCompletion<()>> {
+            let (completion, _) = request.into_parts();
+            Box::pin(async move { completion.complete(Ok(())) })
+        }
+
         fn transport_socket_supported(
             self: Arc<Self>,
             request: BackendRuntimeRequest,
@@ -5699,6 +5981,58 @@ mod tests {
                 .is_empty(),
             "confirmed Destroy must purge every descriptorless Acquire replay binding"
         );
+    }
+
+    #[tokio::test]
+    async fn only_exact_committed_client_lease_can_mutate_mptcp_endpoint() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+
+        let add = engine
+            .execute(request(
+                40,
+                helper_request::Operation::AddMptcpEndpoint(AddMptcpEndpoint {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    mode: MptcpEndpointMode::Subflow as i32,
+                    backup: false,
+                }),
+            ))
+            .await;
+        assert_eq!(add.result, HelperResult::Ok as i32);
+        assert!(matches!(
+            add.outcome,
+            Some(helper_response::Outcome::Empty(_))
+        ));
+
+        let wrong_path = engine
+            .execute(request(
+                41,
+                helper_request::Operation::AddMptcpEndpoint(AddMptcpEndpoint {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 2,
+                    mode: MptcpEndpointMode::Subflow as i32,
+                    backup: false,
+                }),
+            ))
+            .await;
+        assert_eq!(wrong_path.result, HelperResult::InvalidRequest as i32);
+
+        let remove = engine
+            .execute(request(
+                42,
+                helper_request::Operation::RemoveMptcpEndpoint(RemoveMptcpEndpoint {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                    path_id: 1,
+                }),
+            ))
+            .await;
+        assert_eq!(remove.result, HelperResult::Ok as i32);
     }
 
     #[tokio::test]

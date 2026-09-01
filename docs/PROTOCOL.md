@@ -630,12 +630,12 @@ rejected before dispatch.
 | Operation | Typed effect |
 |---|---|
 | `PrepareLeaseBatch` | prepare the exact role/cardinality set for paths 1–8 and return only opaque non-secret handles plus helper-owned public evidence |
-| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one Client/Exit singleton or the exact ordered Relay pair, verifies all applicable signed authority and, for Relay, activates the exact helper-internal two-direction forwarding fence |
+| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one to eight ordered Client/Exit path leases or the exact ordered Relay pair, verifies all applicable signed authority and, for Relay, activates the exact helper-internal two-direction forwarding fence |
 | `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease; Relay additionally requires growth of both exact forwarding counters and commits only when every proof passes |
 | `DestroyContext` | idempotently remove one context and all contained state; Relay first restores policy-drop and proves the active fence absent |
-| `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
-| `RemoveMptcpEndpoint` | remove one exact owned MPTCP endpoint; currently returns `Unavailable` in production |
-| `AcquireTransportSocket` | tag 27: bind one committed context/path/role to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts unconnected QUIC UDP for an exact committed Client/Exit singleton, genuine connected MPTCP only for Client, and a genuine MPTCP listener only for Exit, while Relay remains unavailable |
+| `AddMptcpEndpoint` | add one kernel endpoint derived inside the worker namespace from an exact live committed Client MPTCP lease; arbitrary addresses/interfaces and Exit/Relay leases are rejected |
+| `RemoveMptcpEndpoint` | remove one exact worker-owned Client MPTCP endpoint; missing, stale, wrong-generation or non-Client ownership fails closed |
+| `AcquireTransportSocket` | tag 27: bind one exact path in a committed context to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts unconnected QUIC UDP for an exact committed Client/Exit lease, genuine connected MPTCP only for Client, and a genuine MPTCP listener only for Exit, while Relay remains unavailable |
 | `ReconcileExpiredPrepare` | tag 28: after setup expiry, re-evaluate one exact same-runtime ambiguous Prepare lineage and succeed only after its exact generation is proven absent |
 | `CleanupOwned` | remove only resources matching a random 32-byte process-start ownership token |
 | `PrepareClientIngress` | tag 31: request a pre-route client runtime with exactly four closed socket kinds crossed with IPv4/IPv6; production returns `Unavailable` before state or network work |

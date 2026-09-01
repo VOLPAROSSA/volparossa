@@ -31,10 +31,10 @@ use volparossa_protocol::{
     relay_reservation_request_sha256, verify_control_message, verify_relay_reservation,
 };
 use volparossa_routing::{
-    AcquireTransportSocket, ActivateLeaseBatch, ClosedPreparePlan, ContextRole,
-    HELPER_HANDLE_BYTES, LeasePlan as RoutingLeasePlan, PrepareIntent, PrepareLeaseBatch,
-    PublicUdpEndpoint, TransportSocketAddress, TransportSocketKind,
-    UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
+    AcquireTransportSocket, ActivateLeaseBatch, AddMptcpEndpoint, ClosedPreparePlan, ContextRole,
+    HELPER_HANDLE_BYTES, LeasePlan as RoutingLeasePlan, MptcpEndpointMode, PrepareIntent,
+    PrepareLeaseBatch, PublicUdpEndpoint, RemoveMptcpEndpoint, TransportSocketAddress,
+    TransportSocketKind, UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
 };
 
 use crate::{
@@ -46,13 +46,15 @@ use crate::{
         KernelCounters, OperationKind, PreparedKernelLease,
     },
     internal_protocol::{
-        AcquireTransportSocket as InternalAcquireTransportSocket, ActivateLeases, DestroyContext,
-        INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext,
-        InternalContextRole, InternalEndpointRole, InternalIpPrefix, InternalSocketAddress,
+        AcquireTransportSocket as InternalAcquireTransportSocket, ActivateLeases,
+        AddMptcpEndpoint as InternalAddMptcpEndpoint, DestroyContext, INTERNAL_WORKER_MAGIC,
+        INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext, InternalContextRole,
+        InternalEndpointRole, InternalIpPrefix, InternalMptcpMode, InternalSocketAddress,
         InternalTransportSocketKind, InternalUdpEndpoint, InternalWorkerRequest,
         InternalWorkerResult, LeaseActivation as InternalLeaseActivation,
         LeasePlan as InternalLeasePlan, LeaseProbe, PrepareLeases, ProbeCommitLeases,
-        internal_worker_request, internal_worker_response,
+        RemoveMptcpEndpoint as InternalRemoveMptcpEndpoint, internal_worker_request,
+        internal_worker_response,
     },
     kernel::{BirthLinkError, BirthNamespaceKernel, LiveWireguardLeaseOwner},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
@@ -82,6 +84,8 @@ const STAGE_ACTIVATE: u8 = 3;
 const STAGE_DESTROY: u8 = 4;
 const STAGE_PROBE_COMMIT: u8 = 5;
 const STAGE_ACQUIRE_TRANSPORT: u8 = 6;
+const STAGE_ADD_MPTCP_ENDPOINT: u8 = 7;
+const STAGE_REMOVE_MPTCP_ENDPOINT: u8 = 8;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
@@ -709,7 +713,15 @@ impl FunctionalAlphaLeaseBackend {
             let state = lock_state(&self.state);
             exact_entry(state.as_ref(), key)?.wireguard.len()
         };
-        if !(1..=2).contains(&resource_count) {
+        let valid_resource_count = match lock_state(&self.state)
+            .as_ref()
+            .map(|entry| entry.context_role)
+        {
+            Some(ContextRole::Client | ContextRole::Exit) => (1..=8).contains(&resource_count),
+            Some(ContextRole::Relay) => resource_count == 2,
+            Some(ContextRole::Unspecified) | None => false,
+        };
+        if !valid_resource_count {
             return Err(BackendError::Invalid);
         }
         for index in 0..resource_count {
@@ -1062,6 +1074,127 @@ impl FunctionalAlphaLeaseBackend {
             // reserved tail remains available to the engine's exact rollback/destroy call.
             BackendError::CleanupIncomplete
         })
+    }
+
+    async fn add_mptcp_endpoint_one(
+        &self,
+        binding: BackendBinding,
+        value: AddMptcpEndpoint,
+    ) -> Result<(), BackendError> {
+        let (key, generation) = validate_mptcp_endpoint_binding(
+            &self.state,
+            binding,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::AddMptcpEndpoint,
+        )?;
+        let mode =
+            match MptcpEndpointMode::try_from(value.mode).map_err(|_| BackendError::Invalid)? {
+                MptcpEndpointMode::Signal => InternalMptcpMode::Signal,
+                MptcpEndpointMode::Subflow => InternalMptcpMode::Subflow,
+                MptcpEndpointMode::SignalAndSubflow => InternalMptcpMode::SignalAndSubflow,
+                MptcpEndpointMode::Unspecified => return Err(BackendError::Invalid),
+            };
+        let deadline = prepare_deadline(binding)?;
+        let request = worker_request(
+            worker_attempt_request_id(key, STAGE_ADD_MPTCP_ENDPOINT, binding),
+            internal_worker_request::Operation::AddMptcpEndpoint(InternalAddMptcpEndpoint {
+                route_context_id: key.context_id.to_vec(),
+                path_id: value.path_id,
+                mode: mode as i32,
+                backup: value.backup,
+            }),
+        );
+        let execution = self
+            .coordinator
+            .execute_until(
+                key.context_id,
+                generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let Some(execution) = execution.ok() else {
+            return Err(BackendError::CleanupIncomplete);
+        };
+        let exact = execution.response.result == InternalWorkerResult::Ok as i32
+            && matches!(
+                execution.response.outcome,
+                Some(internal_worker_response::Outcome::MptcpEndpointAdded(ref added))
+                    if added.path_id == value.path_id
+            )
+            && execution.descriptor.is_none();
+        if !exact {
+            return Err(response_error(Ok(execution)));
+        }
+        validate_mptcp_endpoint_binding(
+            &self.state,
+            binding,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::AddMptcpEndpoint,
+        )?;
+        deadline
+            .complete(())
+            .map_err(|_| BackendError::CleanupIncomplete)
+    }
+
+    async fn remove_mptcp_endpoint_one(
+        &self,
+        binding: BackendBinding,
+        value: RemoveMptcpEndpoint,
+    ) -> Result<(), BackendError> {
+        let (key, generation) = validate_mptcp_endpoint_binding(
+            &self.state,
+            binding,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::RemoveMptcpEndpoint,
+        )?;
+        let deadline = prepare_deadline(binding)?;
+        let request = worker_request(
+            worker_attempt_request_id(key, STAGE_REMOVE_MPTCP_ENDPOINT, binding),
+            internal_worker_request::Operation::RemoveMptcpEndpoint(InternalRemoveMptcpEndpoint {
+                route_context_id: key.context_id.to_vec(),
+                path_id: value.path_id,
+            }),
+        );
+        let execution = self
+            .coordinator
+            .execute_until(
+                key.context_id,
+                generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let Some(execution) = execution.ok() else {
+            return Err(BackendError::CleanupIncomplete);
+        };
+        let exact = execution.response.result == InternalWorkerResult::Ok as i32
+            && matches!(
+                execution.response.outcome,
+                Some(internal_worker_response::Outcome::MptcpEndpointRemoved(ref removed))
+                    if removed.path_id == value.path_id
+            )
+            && execution.descriptor.is_none();
+        if !exact {
+            return Err(response_error(Ok(execution)));
+        }
+        validate_mptcp_endpoint_binding(
+            &self.state,
+            binding,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::RemoveMptcpEndpoint,
+        )?;
+        deadline
+            .complete(())
+            .map_err(|_| BackendError::CleanupIncomplete)
     }
 
     async fn cleanup_after_failure(
@@ -1641,6 +1774,28 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
         )
     }
 
+    fn add_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<AddMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(
+            async move { completion.complete(self.add_mptcp_endpoint_one(binding, value).await) },
+        )
+    }
+
+    fn remove_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<RemoveMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move {
+            completion.complete(self.remove_mptcp_endpoint_one(binding, value).await)
+        })
+    }
+
     fn transport_socket_supported(
         self: Arc<Self>,
         request: BackendRuntimeRequest,
@@ -2105,6 +2260,66 @@ fn validate_acquire_transport_binding(
     ))
 }
 
+fn validate_mptcp_endpoint_binding(
+    state: &Mutex<Option<OpenLeaseEntry>>,
+    binding: BackendBinding,
+    route_context_id: &[u8],
+    context_handle: &[u8],
+    path_id: u32,
+    action: BackendAction,
+) -> Result<(OpenLineageKey, u64), BackendError> {
+    let context_id: [u8; 16] = route_context_id
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    let key = OpenLineageKey::from(binding.lineage);
+    if !matches!(
+        action,
+        BackendAction::AddMptcpEndpoint | BackendAction::RemoveMptcpEndpoint
+    ) || binding.action != action
+        || binding.phase != BackendPhase::Committed
+        || binding.prior_phase != Some(ContextPhase::Committed)
+        || binding.operation_kind != OperationKind::MptcpEndpoint
+        || binding.operation_sequence == 0
+        || binding.operation_generation == 0
+        || binding.request_id.iter().all(|byte| *byte == 0)
+        || binding.request_digest.iter().all(|byte| *byte == 0)
+        || context_id != key.context_id
+        || !(1..=8).contains(&path_id)
+        || context_handle.len() != HELPER_HANDLE_BYTES
+        || context_handle.iter().all(|byte| *byte == 0)
+    {
+        return Err(BackendError::Invalid);
+    }
+    ensure_hard_is_live(key)?;
+    let state = lock_state(state);
+    let entry = exact_entry(state.as_ref(), key)?;
+    let generation = entry
+        .worker
+        .as_ref()
+        .ok_or(BackendError::CleanupIncomplete)?
+        .coordinates
+        .worker_generation
+        .get();
+    let role = WireguardRole::Client as i32;
+    let exact = entry.phase == OpenLeasePhase::Committed
+        && entry.context_role == ContextRole::Client
+        && entry.wireguard.iter().any(|wireguard| {
+            wireguard.resource().key() == (u8::try_from(path_id).unwrap_or(0), role)
+        })
+        && entry
+            .prepared
+            .iter()
+            .any(|lease| (lease.path_id, lease.role) == (path_id, role))
+        && entry
+            .activated
+            .iter()
+            .any(|lease| (lease.prepared.path_id, lease.prepared.role) == (path_id, role));
+    if !exact {
+        return Err(BackendError::Invalid);
+    }
+    Ok((key, generation))
+}
+
 #[cfg(test)]
 pub(super) fn validate_acquire_transport_binding_for_engine_test(
     binding: BackendBinding,
@@ -2174,19 +2389,22 @@ fn validate_committed_acquire_entry(
     internal: &InternalAcquireTransportSocket,
 ) -> Result<u64, BackendError> {
     let role = functional_lease_role_for_wireguard(value.role).ok_or(BackendError::Invalid)?;
-    let [wireguard] = entry.wireguard.as_slice() else {
+    let Some(index) = entry.wireguard.iter().position(|wireguard| {
+        wireguard.resource().key() == (u8::try_from(value.path_id).unwrap_or(0), value.role)
+    }) else {
         return Err(BackendError::Invalid);
     };
-    let [prepare] = entry.prepare.leases.as_slice() else {
-        return Err(BackendError::Invalid);
-    };
-    let [prepared] = entry.prepared.as_slice() else {
-        return Err(BackendError::Invalid);
-    };
-    let [activated] = entry.activated.as_slice() else {
-        return Err(BackendError::Invalid);
-    };
-    let [birth_may_exist] = entry.birth_may_exist.as_slice() else {
+    let Some((wireguard, prepare, prepared, activated, birth_may_exist)) = entry
+        .wireguard
+        .get(index)
+        .zip(entry.prepare.leases.get(index))
+        .zip(entry.prepared.get(index))
+        .zip(entry.activated.get(index))
+        .zip(entry.birth_may_exist.get(index))
+        .map(|((((wireguard, prepare), prepared), activated), birth)| {
+            (wireguard, prepare, prepared, activated, birth)
+        })
+    else {
         return Err(BackendError::Invalid);
     };
     let worker = entry
@@ -2449,6 +2667,7 @@ fn validate_functional_lease_batch_shape(
     match context {
         ContextRole::Client | ContextRole::Exit => {
             if leases.is_empty()
+                || leases.len() > 8
                 || leases.iter().any(|lease| {
                     functional_lease_role(context as i32, lease.role).is_none()
                         || !(1..=8).contains(&lease.path_id)
@@ -2456,11 +2675,7 @@ fn validate_functional_lease_batch_shape(
             {
                 return Err(BackendError::Invalid);
             }
-            if leases.len() == 1 {
-                Ok(())
-            } else {
-                Err(BackendError::Unavailable)
-            }
+            Ok(())
         }
         ContextRole::Relay => {
             let [client, exit] = leases else {
@@ -7033,7 +7248,7 @@ mod tests {
         ambiguous.leases.push(ambiguous.leases[0].clone());
         assert_eq!(
             validate_activate_binding(binding, &ambiguous).unwrap_err(),
-            BackendError::Unavailable
+            BackendError::Invalid
         );
         let mut wrong = value;
         wrong.leases[0]

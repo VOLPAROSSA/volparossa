@@ -55,18 +55,21 @@ use tokio::{
     sync::{Notify, oneshot},
     task::JoinHandle,
 };
+use volparossa_mptcp::{
+    EndpointFlags, KernelMptcpPathManager, MptcpEndpoint, MptcpLimits, MptcpPathManagerBackend,
+};
 
 use crate::{
     deadline::HardDeadline,
     internal_protocol::{
-        AcquireTransportSocket, ActivateLeases, ActivatedLease, ActivatedLeases, ContextDestroyed,
-        ContextInitialised, DestroyContext, INTERNAL_WORKER_MAGIC,
+        AcquireTransportSocket, ActivateLeases, ActivatedLease, ActivatedLeases, AddMptcpEndpoint,
+        ContextDestroyed, ContextInitialised, DestroyContext, INTERNAL_WORKER_MAGIC,
         INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext, InternalContextRole,
-        InternalEndpointRole, InternalTransportSocketKind, InternalUdpEndpoint,
-        InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult, PrepareLeases,
-        PreparedLease, PreparedLeases, ProbeCommitLeases, ProbedLease, ProbedLeases,
-        TransportSocketReady, encode_request, internal_worker_request, internal_worker_response,
-        validate_response_for_request,
+        InternalEndpointRole, InternalMptcpMode, InternalTransportSocketKind, InternalUdpEndpoint,
+        InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult, MptcpEndpointAdded,
+        MptcpEndpointRemoved, PrepareLeases, PreparedLease, PreparedLeases, ProbeCommitLeases,
+        ProbedLease, ProbedLeases, RemoveMptcpEndpoint, TransportSocketReady, encode_request,
+        internal_worker_request, internal_worker_response, validate_response_for_request,
     },
     kernel::{
         KernelError, NamespaceKernel, PreparedWireguardKernelProof, WireguardV3PeerConfiguration,
@@ -1797,6 +1800,63 @@ struct WorkerContext<Kernel> {
     /// moves any birth link. This is not durable authority, but it bounds same-runtime cleanup.
     staged_resources: Option<Vec<DurableWireguardResource>>,
     lease: Option<WorkerLeaseLifecycle>,
+    mptcp: Option<WorkerMptcpPathManager>,
+}
+
+struct WorkerMptcpPathManager {
+    backend: KernelMptcpPathManager,
+    runtime: tokio::runtime::Runtime,
+    route_context_id: String,
+}
+
+impl WorkerMptcpPathManager {
+    fn prepare(
+        route_context_id: ContextId,
+        accepted_addrs: u32,
+        subflows: u32,
+    ) -> Result<Self, ()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| ())?;
+        let backend = KernelMptcpPathManager::new().map_err(|_| ())?;
+        let route_context_id = format!("vp{:032x}", u128::from_be_bytes(route_context_id));
+        runtime
+            .block_on(backend.prepare_context(
+                &route_context_id,
+                MptcpLimits {
+                    accepted_addrs,
+                    subflows,
+                },
+            ))
+            .map_err(|_| ())?;
+        Ok(Self {
+            backend,
+            runtime,
+            route_context_id,
+        })
+    }
+
+    fn add(&self, endpoint: MptcpEndpoint) -> Result<(), ()> {
+        self.runtime
+            .block_on(self.backend.add_path(&self.route_context_id, endpoint))
+            .map_err(|_| ())
+    }
+
+    fn remove(&self, endpoint_id: u8) -> Result<(), ()> {
+        self.runtime
+            .block_on(
+                self.backend
+                    .remove_path(&self.route_context_id, endpoint_id),
+            )
+            .map_err(|_| ())
+    }
+
+    fn cleanup(&self) -> Result<(), ()> {
+        self.runtime
+            .block_on(self.backend.cleanup_context(&self.route_context_id))
+            .map_err(|_| ())
+    }
 }
 
 enum WorkerRelayFence {
@@ -1869,6 +1929,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             kernel,
             staged_resources: None,
             lease: None,
+            mptcp: None,
         }
     }
 
@@ -1879,6 +1940,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         bootstrap: WorkerNetworkBootstrap,
         kernel: Kernel,
         staged_resources: Vec<DurableWireguardResource>,
+        mptcp: WorkerMptcpPathManager,
     ) -> Option<Self> {
         let relay_fence = match (role, bootstrap) {
             (
@@ -1895,11 +1957,12 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         Some(Self {
             route_context_id,
             role,
-            bound_path_id: Some(path_id),
+            bound_path_id: matches!(role, RoutingContextRole::Relay).then_some(path_id),
             relay_fence: Some(relay_fence),
             kernel,
             staged_resources: Some(staged_resources),
             lease: None,
+            mptcp: Some(mptcp),
         })
     }
 
@@ -2258,7 +2321,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         WorkerProbeOutcome::Committed(probed)
     }
 
-    /// Project the one immutable committed Client/Exit lease accepted by the transport factory.
+    /// Project one exact immutable committed Client/Exit lease accepted by the transport factory.
     ///
     /// The later request supplies only a tuple to check. The route, endpoint role and overlay
     /// address remain derived from the already committed worker-owned `WireGuard` resource.
@@ -2280,12 +2343,6 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 InternalWorkerResult::NotFound
             });
         };
-        let [ownership] = ownerships.as_slice() else {
-            return Err(InternalWorkerResult::Invalid);
-        };
-        let Some(proof) = ownership.proof else {
-            return Err(InternalWorkerResult::Invalid);
-        };
         let path_id = u8::try_from(operation.path_id)
             .ok()
             .filter(|path_id| (1..=8).contains(path_id))
@@ -2296,6 +2353,13 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             .map_err(|_| InternalWorkerResult::Invalid)?;
         let expected_routing_role =
             routing_endpoint_role(operation.role).ok_or(InternalWorkerResult::Invalid)?;
+        let ownership = ownerships
+            .iter()
+            .find(|ownership| ownership.resource.key() == (path_id, expected_routing_role))
+            .ok_or(InternalWorkerResult::Invalid)?;
+        let Some(proof) = ownership.proof else {
+            return Err(InternalWorkerResult::Invalid);
+        };
         let wall_deadline_is_live = current_unix_seconds()
             .is_some_and(|now| now < ownership.resource.hard_expires_at_unix());
         let transport_shape_is_valid = matches!(
@@ -2329,6 +2393,111 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             role,
             overlay_address: proof.local_overlay_address,
         })
+    }
+
+    fn committed_client_mptcp_endpoint(
+        &self,
+        path_id: u32,
+    ) -> Result<MptcpEndpoint, InternalWorkerResult> {
+        if self.role != RoutingContextRole::Client {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        let path_id = u8::try_from(path_id)
+            .ok()
+            .filter(|path_id| (1..=8).contains(path_id))
+            .ok_or(InternalWorkerResult::Invalid)?;
+        if self.bound_path_id.is_some_and(|bound| bound != path_id) {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        let Some(WorkerLeaseLifecycle::Committed(ownerships)) = self.lease.as_ref() else {
+            return Err(if self.lease.is_some() {
+                InternalWorkerResult::Conflict
+            } else {
+                InternalWorkerResult::NotFound
+            });
+        };
+        let ownership = ownerships
+            .iter()
+            .find(|ownership| {
+                ownership.resource.key()
+                    == (path_id, volparossa_routing::WireguardRole::Client as i32)
+            })
+            .ok_or(InternalWorkerResult::Invalid)?;
+        let proof = ownership.proof.ok_or(InternalWorkerResult::Invalid)?;
+        let live = current_unix_seconds()
+            .is_some_and(|now| now < ownership.resource.hard_expires_at_unix());
+        if !live
+            || proof.ifindex == 0
+            || proof.local_overlay_address != IpAddr::V6(ownership.resource.local_address())
+        {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        Ok(MptcpEndpoint {
+            id: path_id,
+            address: proof.local_overlay_address,
+            if_index: proof.ifindex,
+            flags: EndpointFlags::empty(),
+        })
+    }
+
+    fn add_mptcp_endpoint(
+        &self,
+        operation: &AddMptcpEndpoint,
+        deadline: HardDeadline,
+    ) -> InternalWorkerResult {
+        if operation.route_context_id.as_slice() != self.route_context_id
+            || deadline.ensure_remaining().is_err()
+        {
+            return InternalWorkerResult::Invalid;
+        }
+        let mode = match InternalMptcpMode::try_from(operation.mode) {
+            Ok(InternalMptcpMode::Signal) => EndpointFlags::SIGNAL,
+            Ok(InternalMptcpMode::Subflow) => EndpointFlags::SUBFLOW,
+            Ok(InternalMptcpMode::SignalAndSubflow) => {
+                EndpointFlags::SIGNAL | EndpointFlags::SUBFLOW
+            }
+            Ok(InternalMptcpMode::Unspecified) | Err(_) => {
+                return InternalWorkerResult::Invalid;
+            }
+        };
+        let mut endpoint = match self.committed_client_mptcp_endpoint(operation.path_id) {
+            Ok(endpoint) => endpoint,
+            Err(result) => return result,
+        };
+        endpoint.flags = mode;
+        if operation.backup {
+            endpoint.flags.insert(EndpointFlags::BACKUP);
+        }
+        let Some(manager) = self.mptcp.as_ref() else {
+            return InternalWorkerResult::Invalid;
+        };
+        match manager.add(endpoint) {
+            Ok(()) if deadline.ensure_remaining().is_ok() => InternalWorkerResult::Ok,
+            Ok(()) | Err(()) => InternalWorkerResult::Kernel,
+        }
+    }
+
+    fn remove_mptcp_endpoint(
+        &self,
+        operation: &RemoveMptcpEndpoint,
+        deadline: HardDeadline,
+    ) -> InternalWorkerResult {
+        if operation.route_context_id.as_slice() != self.route_context_id
+            || deadline.ensure_remaining().is_err()
+        {
+            return InternalWorkerResult::Invalid;
+        }
+        let endpoint = match self.committed_client_mptcp_endpoint(operation.path_id) {
+            Ok(endpoint) => endpoint,
+            Err(result) => return result,
+        };
+        let Some(manager) = self.mptcp.as_ref() else {
+            return InternalWorkerResult::Invalid;
+        };
+        match manager.remove(endpoint.id) {
+            Ok(()) if deadline.ensure_remaining().is_ok() => InternalWorkerResult::Ok,
+            Ok(()) | Err(()) => InternalWorkerResult::Kernel,
+        }
     }
 
     fn prove_relay_forwarding_growth(&self, deadline: HardDeadline) -> RelayForwardingGrowth {
@@ -2419,6 +2588,12 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     }
 
     fn destroy(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
+        if let Some(manager) = self.mptcp.as_ref() {
+            if manager.cleanup().is_err() || deadline.ensure_remaining().is_err() {
+                return WorkerDestroyOutcome::CleanupIncomplete;
+            }
+            self.mptcp = None;
+        }
         let Some(lifecycle) = self.lease.as_ref() else {
             // Birth links are moved before Prepare adopts them. The exact authenticated cleanup
             // resource set therefore remains necessary even when no lifecycle exists in this
@@ -2538,12 +2713,20 @@ fn validate_worker_prepare(
     context_role: RoutingContextRole,
 ) -> Option<Vec<DurableWireguardResource>> {
     let expected = functional_worker_endpoint_roles(context_role)?;
-    if operation.route_context_id.as_slice() != route_context_id
-        || operation.leases.len() != expected.len()
-    {
+    let valid_count = match context_role {
+        RoutingContextRole::Client | RoutingContextRole::Exit => {
+            (1..=8).contains(&operation.leases.len())
+        }
+        RoutingContextRole::Relay => operation.leases.len() == expected.len(),
+        RoutingContextRole::Unspecified => false,
+    };
+    if operation.route_context_id.as_slice() != route_context_id || !valid_count {
         return None;
     }
-    if let [first, second] = operation.leases.as_slice() {
+    if context_role == RoutingContextRole::Relay {
+        let [first, second] = operation.leases.as_slice() else {
+            return None;
+        };
         if first.path_id != second.path_id
             || first.setup_expires_at_unix != second.setup_expires_at_unix
             || first.hard_expires_at_unix != second.hard_expires_at_unix
@@ -2553,8 +2736,10 @@ fn validate_worker_prepare(
     }
 
     let mut resources = Vec::with_capacity(expected.len());
-    for (lease, (expected_role, expected_internal_role)) in
-        operation.leases.iter().zip(expected.iter().copied())
+    for (lease, (expected_role, expected_internal_role)) in operation
+        .leases
+        .iter()
+        .zip(expected.iter().copied().cycle())
     {
         if lease.role != expected_internal_role as i32
             || routing_endpoint_role(lease.role) != Some(expected_role)
@@ -2596,10 +2781,16 @@ fn validate_worker_activation(
     ownerships: &[WorkerLeaseOwnership],
 ) -> Option<Vec<(WireguardV3PeerConfiguration, PreparedWireguardKernelProof)>> {
     let expected = functional_worker_endpoint_roles(context_role)?;
-    if operation.route_context_id.as_slice() != route_context_id
-        || operation.leases.len() != expected.len()
-        || ownerships.len() != expected.len()
-    {
+    let valid_count = match context_role {
+        RoutingContextRole::Client | RoutingContextRole::Exit => {
+            (1..=8).contains(&operation.leases.len()) && ownerships.len() == operation.leases.len()
+        }
+        RoutingContextRole::Relay => {
+            operation.leases.len() == expected.len() && ownerships.len() == expected.len()
+        }
+        RoutingContextRole::Unspecified => false,
+    };
+    if operation.route_context_id.as_slice() != route_context_id || !valid_count {
         return None;
     }
     match context_role {
@@ -2635,7 +2826,7 @@ fn validate_worker_activation(
         .leases
         .iter()
         .zip(ownerships)
-        .zip(expected.iter().copied())
+        .zip(expected.iter().copied().cycle())
     {
         let prepared = ownership.proof.filter(|proof| {
             proof.ifindex != 0
@@ -2698,14 +2889,22 @@ fn validate_worker_probe(
     let Some(expected) = functional_worker_endpoint_roles(context_role) else {
         return false;
     };
+    let valid_count = match context_role {
+        RoutingContextRole::Client | RoutingContextRole::Exit => {
+            (1..=8).contains(&operation.leases.len()) && ownerships.len() == operation.leases.len()
+        }
+        RoutingContextRole::Relay => {
+            operation.leases.len() == expected.len() && ownerships.len() == expected.len()
+        }
+        RoutingContextRole::Unspecified => false,
+    };
     operation.route_context_id.as_slice() == route_context_id
-        && operation.leases.len() == expected.len()
-        && ownerships.len() == expected.len()
+        && valid_count
         && operation
             .leases
             .iter()
             .zip(ownerships)
-            .zip(expected.iter().copied())
+            .zip(expected.iter().copied().cycle())
             .all(
                 |((lease, ownership), (expected_role, expected_internal_role))| {
                     let Ok(path_id) = u8::try_from(lease.path_id) else {
@@ -2952,7 +3151,11 @@ fn initialise_child_context(
         .filter(|resources| {
             resources
                 .iter()
-                .all(|resource| resource.key().0 == bound_path_id)
+                .any(|resource| resource.key().0 == bound_path_id)
+                && (!matches!(role, RoutingContextRole::Relay)
+                    || resources
+                        .iter()
+                        .all(|resource| resource.key().0 == bound_path_id))
         })
     else {
         return Ok((InternalWorkerResult::Invalid, None, false));
@@ -2962,6 +3165,13 @@ fn initialise_child_context(
         Ok(kernel)
     }) {
         Ok(kernel) => {
+            let Ok(mptcp) = WorkerMptcpPathManager::prepare(
+                route_context_id,
+                initialise.mptcp_accepted_addrs,
+                initialise.mptcp_subflows,
+            ) else {
+                return Ok((InternalWorkerResult::Kernel, None, false));
+            };
             let bootstrap = network_bootstrap
                 .take()
                 .ok_or(WorkerV3Error::Authentication)?;
@@ -2972,6 +3182,7 @@ fn initialise_child_context(
                 bootstrap,
                 kernel,
                 staged_resources,
+                mptcp,
             )
             .ok_or(WorkerV3Error::Authentication)?;
             *context = Some(worker_context);
@@ -3148,6 +3359,54 @@ fn acquire_transport_child_context(
     ))
 }
 
+fn add_mptcp_child_context(
+    context: Option<&WorkerContext<NamespaceKernel>>,
+    operation: &AddMptcpEndpoint,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    let route_context_id = context_id(&operation.route_context_id)?;
+    let Some(context) = context.filter(|context| {
+        context.route_context_id == route_context_id && route_context_id == bound_context
+    }) else {
+        return Ok((InternalWorkerResult::NotFound, None, false));
+    };
+    let result = context.add_mptcp_endpoint(operation, deadline);
+    Ok((
+        result,
+        (result == InternalWorkerResult::Ok).then_some(
+            internal_worker_response::Outcome::MptcpEndpointAdded(MptcpEndpointAdded {
+                path_id: operation.path_id,
+            }),
+        ),
+        false,
+    ))
+}
+
+fn remove_mptcp_child_context(
+    context: Option<&WorkerContext<NamespaceKernel>>,
+    operation: &RemoveMptcpEndpoint,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    let route_context_id = context_id(&operation.route_context_id)?;
+    let Some(context) = context.filter(|context| {
+        context.route_context_id == route_context_id && route_context_id == bound_context
+    }) else {
+        return Ok((InternalWorkerResult::NotFound, None, false));
+    };
+    let result = context.remove_mptcp_endpoint(operation, deadline);
+    Ok((
+        result,
+        (result == InternalWorkerResult::Ok).then_some(
+            internal_worker_response::Outcome::MptcpEndpointRemoved(MptcpEndpointRemoved {
+                path_id: operation.path_id,
+            }),
+        ),
+        false,
+    ))
+}
+
 fn child_loop(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
@@ -3204,12 +3463,25 @@ fn child_loop(
                 )?;
                 (result, outcome, false, descriptor)
             }
+            internal_worker_request::Operation::AddMptcpEndpoint(operation) => {
+                let (result, outcome, exit) =
+                    add_mptcp_child_context(context.as_ref(), operation, bound_context, deadline)?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::RemoveMptcpEndpoint(operation) => {
+                let (result, outcome, exit) = remove_mptcp_child_context(
+                    context.as_ref(),
+                    operation,
+                    bound_context,
+                    deadline,
+                )?;
+                (result, outcome, exit, None)
+            }
             internal_worker_request::Operation::DestroyContext(destroy) => {
                 let (result, outcome, exit) =
                     destroy_child_context(&mut context, destroy, bound_context, deadline)?;
                 (result, outcome, exit, None)
             }
-            _ => (InternalWorkerResult::Invalid, None, false, None),
         };
         let response = correlated_response(&request, result, outcome)?;
         if !send_child_response_preserving_initialise_cleanup(

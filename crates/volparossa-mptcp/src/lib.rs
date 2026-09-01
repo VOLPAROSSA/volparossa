@@ -721,7 +721,21 @@ fn validate_context_id(value: &str) -> Result<(), MptcpError> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env, fs,
+        io::{BufRead as _, BufReader, Read as _, Write as _},
+        net::SocketAddr,
+        process::{Command, Stdio},
+        time::Duration,
+    };
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
     use super::*;
+
+    const LIVE_MULTIPATH_ROLE: &str = "VOLPAROSSA_MPTCP_LIVE_MULTIPATH_ROLE";
+    const LIVE_MULTIPATH_TEST: &str =
+        "tests::kernel_backend_drives_two_data_carrying_subflows_in_disposable_namespaces";
 
     fn overlay_address(path_id: u8, host: u16) -> IpAddr {
         IpAddr::V6(std::net::Ipv6Addr::new(
@@ -793,6 +807,642 @@ mod tests {
         assert!(validate_context_id("../../host").is_err());
         assert!(validate_context_id("route;shutdown").is_err());
         assert!(validate_context_id(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn kernel_backend_drives_two_data_carrying_subflows_in_disposable_namespaces() {
+        match env::var(LIVE_MULTIPATH_ROLE).as_deref() {
+            Ok("server") => {
+                tokio::runtime::Runtime::new()
+                    .expect("server runtime")
+                    .block_on(live_multipath_server());
+                return;
+            }
+            Ok("client") => {
+                tokio::runtime::Runtime::new()
+                    .expect("client runtime")
+                    .block_on(live_multipath_client());
+                return;
+            }
+            Ok("orchestrator") => {
+                run_live_multipath_topology();
+                return;
+            }
+            Ok(_) => panic!("invalid live multipath role"),
+            Err(_) => {}
+        }
+
+        let executable = env::current_exe().expect("current MPTCP test executable");
+        let output = Command::new("/usr/bin/timeout")
+            .args([
+                "60",
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--mount",
+                "--net",
+                "--fork",
+            ])
+            .arg(executable)
+            .arg("--exact")
+            .arg(LIVE_MULTIPATH_TEST)
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(LIVE_MULTIPATH_ROLE, "orchestrator")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn disposable MPTCP topology");
+        let denied = output.status.code() == Some(1)
+            && output.stdout.is_empty()
+            && matches!(
+                output.stderr.as_slice(),
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/gid_map: Operation not permitted\n"
+            );
+        if denied {
+            eprintln!("skipped live MPTCP topology: user namespaces denied by policy");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "live MPTCP topology failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn command(program: &str, arguments: &[&str]) {
+        let output = Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|error| panic!("run {program} {arguments:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "{program} {arguments:?} failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn netns_command(namespace: &str, arguments: &[&str]) {
+        let mut command_arguments = vec!["netns", "exec", namespace, "ip"];
+        command_arguments.extend_from_slice(arguments);
+        command("ip", &command_arguments);
+    }
+
+    fn create_link(
+        left_namespace: &str,
+        left_name: &str,
+        left_address: &str,
+        right_namespace: &str,
+        right_name: &str,
+        right_address: &str,
+    ) {
+        let temporary_left = format!("t{left_name}");
+        let temporary_right = format!("t{right_name}");
+        command(
+            "ip",
+            &[
+                "link",
+                "add",
+                &temporary_left,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                &temporary_right,
+            ],
+        );
+        command(
+            "ip",
+            &["link", "set", &temporary_left, "netns", left_namespace],
+        );
+        command(
+            "ip",
+            &["link", "set", &temporary_right, "netns", right_namespace],
+        );
+        netns_command(
+            left_namespace,
+            &["link", "set", &temporary_left, "name", left_name],
+        );
+        netns_command(
+            right_namespace,
+            &["link", "set", &temporary_right, "name", right_name],
+        );
+        netns_command(
+            left_namespace,
+            &["address", "add", left_address, "dev", left_name, "nodad"],
+        );
+        netns_command(
+            right_namespace,
+            &["address", "add", right_address, "dev", right_name, "nodad"],
+        );
+        netns_command(left_namespace, &["link", "set", left_name, "up"]);
+        netns_command(right_namespace, &["link", "set", right_name, "up"]);
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the disposable topology is intentionally linear so setup mirrors teardown"
+    )]
+    fn run_live_multipath_topology() {
+        command("mount", &["--make-rprivate", "/"]);
+        command(
+            "mount",
+            &[
+                "-t",
+                "tmpfs",
+                "-o",
+                "mode=0755,nosuid,nodev",
+                "tmpfs",
+                "/run",
+            ],
+        );
+        fs::create_dir_all("/run/netns").expect("create private netns directory");
+        for namespace in ["vp-c", "vp-r1", "vp-r2", "vp-x"] {
+            command("ip", &["netns", "add", namespace]);
+            netns_command(namespace, &["link", "set", "lo", "up"]);
+        }
+        create_link("vp-c", "c1", "fd42:1::1/64", "vp-r1", "r1c", "fd42:1::2/64");
+        create_link("vp-r1", "r1x", "fd42:2::1/64", "vp-x", "x1", "fd42:2::2/64");
+        create_link("vp-c", "c2", "fd42:3::1/64", "vp-r2", "r2c", "fd42:3::2/64");
+        create_link("vp-r2", "r2x", "fd42:4::1/64", "vp-x", "x2", "fd42:4::2/64");
+        let client_one = "fd76:6f6c:7061:1111:2222:1:3333:1";
+        let client_two = "fd76:6f6c:7061:1111:2222:2:3333:1";
+        let exit_one = "fd76:6f6c:7061:1111:2222:1:3333:4";
+        let exit_two = "fd76:6f6c:7061:1111:2222:3:3333:4";
+        netns_command(
+            "vp-c",
+            &[
+                "address",
+                "add",
+                &format!("{client_one}/128"),
+                "dev",
+                "c1",
+                "nodad",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "address",
+                "add",
+                &format!("{client_two}/128"),
+                "dev",
+                "c2",
+                "nodad",
+            ],
+        );
+        netns_command(
+            "vp-x",
+            &[
+                "address",
+                "add",
+                &format!("{exit_one}/128"),
+                "dev",
+                "x1",
+                "nodad",
+            ],
+        );
+        netns_command(
+            "vp-x",
+            &[
+                "address",
+                "add",
+                &format!("{exit_two}/128"),
+                "dev",
+                "x2",
+                "nodad",
+            ],
+        );
+        for relay in ["vp-r1", "vp-r2"] {
+            command(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    relay,
+                    "/bin/sh",
+                    "-c",
+                    "printf 1 >/proc/sys/net/ipv6/conf/all/forwarding",
+                ],
+            );
+        }
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{exit_one}/128"),
+                "via",
+                "fd42:1::2",
+                "dev",
+                "c1",
+                "src",
+                client_one,
+                "cwnd",
+                "2",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "rule",
+                "add",
+                "from",
+                &format!("{client_one}/128"),
+                "table",
+                "101",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "route",
+                "add",
+                "table",
+                "101",
+                &format!("{exit_one}/128"),
+                "via",
+                "fd42:1::2",
+                "dev",
+                "c1",
+                "src",
+                client_one,
+                "cwnd",
+                "2",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "rule",
+                "add",
+                "from",
+                &format!("{client_two}/128"),
+                "table",
+                "102",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "route",
+                "add",
+                "table",
+                "102",
+                &format!("{exit_two}/128"),
+                "via",
+                "fd42:3::2",
+                "dev",
+                "c2",
+                "src",
+                client_two,
+            ],
+        );
+        netns_command(
+            "vp-r1",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{client_one}/128"),
+                "via",
+                "fd42:1::1",
+                "dev",
+                "r1c",
+            ],
+        );
+        netns_command(
+            "vp-r1",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{exit_one}/128"),
+                "via",
+                "fd42:2::2",
+                "dev",
+                "r1x",
+            ],
+        );
+        netns_command(
+            "vp-r2",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{client_two}/128"),
+                "via",
+                "fd42:3::1",
+                "dev",
+                "r2c",
+            ],
+        );
+        netns_command(
+            "vp-r2",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{exit_two}/128"),
+                "via",
+                "fd42:4::2",
+                "dev",
+                "r2x",
+            ],
+        );
+        netns_command(
+            "vp-x",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{client_one}/128"),
+                "via",
+                "fd42:2::1",
+                "dev",
+                "x1",
+            ],
+        );
+        netns_command(
+            "vp-x",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{client_two}/128"),
+                "via",
+                "fd42:4::1",
+                "dev",
+                "x2",
+            ],
+        );
+
+        let executable = env::current_exe().expect("current MPTCP test executable");
+        let mut server = Command::new("ip")
+            .args(["netns", "exec", "vp-x", "env"])
+            .arg(format!("{LIVE_MULTIPATH_ROLE}=server"))
+            .args(["/usr/bin/timeout", "25"])
+            .arg(&executable)
+            .args([
+                "--exact",
+                LIVE_MULTIPATH_TEST,
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn MPTCP Exit server");
+        let mut server_stdout = BufReader::new(server.stdout.take().expect("server stdout"));
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if server_stdout
+                .read_line(&mut line)
+                .expect("server readiness")
+                == 0
+            {
+                let mut error = String::new();
+                server
+                    .stderr
+                    .take()
+                    .expect("server stderr")
+                    .read_to_string(&mut error)
+                    .expect("read server stderr");
+                panic!("MPTCP Exit exited before readiness: {error}");
+            }
+            if line.contains("MPTCP_SERVER_READY") {
+                break;
+            }
+        }
+        let client = Command::new("ip")
+            .args(["netns", "exec", "vp-c", "env"])
+            .arg(format!("{LIVE_MULTIPATH_ROLE}=client"))
+            .args(["/usr/bin/timeout", "20"])
+            .arg(&executable)
+            .args([
+                "--exact",
+                LIVE_MULTIPATH_TEST,
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run MPTCP Client proof");
+        assert!(
+            client.status.success(),
+            "client failed: {}",
+            String::from_utf8_lossy(&client.stderr)
+        );
+        let server_status = server.wait().expect("wait MPTCP Exit server");
+        let mut remaining_server_output = String::new();
+        server_stdout
+            .read_to_string(&mut remaining_server_output)
+            .expect("remaining server output");
+        assert!(
+            server_status.success(),
+            "server failed: {remaining_server_output}"
+        );
+        for namespace in ["vp-c", "vp-r1", "vp-r2", "vp-x"] {
+            command("ip", &["netns", "delete", namespace]);
+        }
+    }
+
+    async fn live_multipath_server() {
+        let address: SocketAddr = "[::]:40123".parse().expect("Exit address");
+        let manager = KernelMptcpPathManager::new().expect("kernel MPTCP path manager");
+        manager
+            .prepare_context(
+                "live_exit_signal",
+                MptcpLimits {
+                    accepted_addrs: 4,
+                    subflows: 4,
+                },
+            )
+            .await
+            .expect("prepare Exit kernel path manager");
+        let listener = listen(address, 8).expect("MPTCP listener");
+        println!("MPTCP_SERVER_READY");
+        std::io::stdout().flush().expect("flush server readiness");
+        let (mut stream, _) = listener.accept().await.expect("accept genuine MPTCP");
+        eprintln!("server: accepted MPTCP");
+        let mut initial_block = vec![0_u8; 1024 * 1024];
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut initial_block)
+            .await
+            .expect("initial path data");
+        assert!(initial_block.iter().all(|byte| *byte == 0x51));
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&[1])
+            .await
+            .expect("initial acknowledgement");
+        manager
+            .add_path(
+                "live_exit_signal",
+                MptcpEndpoint {
+                    id: 3,
+                    address: "fd76:6f6c:7061:1111:2222:3:3333:4"
+                        .parse()
+                        .expect("Exit path two"),
+                    if_index: fs::read_to_string("/sys/class/net/x2/ifindex")
+                        .expect("Exit path ifindex")
+                        .trim()
+                        .parse()
+                        .expect("numeric Exit path ifindex"),
+                    flags: EndpointFlags::SIGNAL,
+                },
+            )
+            .await
+            .expect("signal Exit MPTCP address");
+        let mut second_block = vec![0_u8; 64 * 1024 * 1024];
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut second_block)
+            .await
+            .expect("second path data");
+        assert!(second_block.iter().all(|byte| *byte == 0xa2));
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&[2])
+            .await
+            .expect("second acknowledgement");
+        manager
+            .cleanup_context("live_exit_signal")
+            .await
+            .expect("Exit MPTCP endpoint cleanup");
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the live client proof keeps ordered socket, subflow, and byte evidence together"
+    )]
+    async fn live_multipath_client() {
+        let client_one: SocketAddr = "[fd76:6f6c:7061:1111:2222:1:3333:1]:40124"
+            .parse()
+            .expect("Client path one");
+        let remote: SocketAddr = "[fd76:6f6c:7061:1111:2222:1:3333:4]:40123"
+            .parse()
+            .expect("Exit address");
+        let manager = KernelMptcpPathManager::new().expect("kernel MPTCP path manager");
+        manager
+            .prepare_context(
+                "live_two_subflows",
+                MptcpLimits {
+                    accepted_addrs: 4,
+                    subflows: 4,
+                },
+            )
+            .await
+            .expect("prepare kernel path manager");
+        eprintln!("client: path manager prepared");
+        for (id, address, interface) in [(
+            2,
+            "fd76:6f6c:7061:1111:2222:2:3333:1"
+                .parse()
+                .expect("Client path two"),
+            "c2",
+        )] {
+            let if_index = fs::read_to_string(format!("/sys/class/net/{interface}/ifindex"))
+                .expect("path ifindex")
+                .trim()
+                .parse()
+                .expect("numeric ifindex");
+            manager
+                .add_path(
+                    "live_two_subflows",
+                    MptcpEndpoint {
+                        id,
+                        address,
+                        if_index,
+                        flags: EndpointFlags::SUBFLOW,
+                    },
+                )
+                .await
+                .expect("register selected MPTCP subflow path");
+            eprintln!("client: registered path {id}");
+        }
+        let c1_before = interface_counter("c1", "tx_bytes");
+        let c2_before = interface_counter("c2", "tx_bytes");
+        let mut stream = connect(remote, Some(client_one), Duration::from_secs(5))
+            .await
+            .expect("connect genuine MPTCP");
+        eprintln!("client: MPTCP connected");
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&vec![0x51; 1024 * 1024])
+            .await
+            .expect("initial path payload");
+        let mut acknowledgement = [0_u8; 1];
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut acknowledgement)
+            .await
+            .expect("initial acknowledgement");
+        assert_eq!(acknowledgement, [1]);
+        let c1_after_initial = interface_counter("c1", "tx_bytes");
+        assert!(
+            c1_after_initial.saturating_sub(c1_before) > 512 * 1024,
+            "initial subflow carried no application-scale data"
+        );
+        let evidence = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let info = stream.require_negotiated().expect("genuine MPTCP");
+                if info.total_subflows >= 2 {
+                    break info;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("second MPTCP subflow");
+        assert!(evidence.total_subflows >= 2 && !evidence.fallback);
+        eprintln!("client: {} subflows active", evidence.total_subflows);
+
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&vec![0xa2; 64 * 1024 * 1024])
+            .await
+            .expect("second path payload");
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut acknowledgement)
+            .await
+            .expect("second acknowledgement");
+        assert_eq!(acknowledgement, [2]);
+        let c2_after = interface_counter("c2", "tx_bytes");
+        assert!(
+            c2_after.saturating_sub(c2_before) > 1024 * 1024,
+            "second subflow carried no application-scale data"
+        );
+        let final_info = stream
+            .require_negotiated()
+            .expect("MPTCP remained negotiated");
+        assert!(final_info.bytes_sent >= 65 * 1024 * 1024);
+        manager
+            .cleanup_context("live_two_subflows")
+            .await
+            .expect("MPTCP endpoint cleanup");
+    }
+
+    fn interface_counter(interface: &str, counter: &str) -> u64 {
+        fs::read_to_string(format!("/sys/class/net/{interface}/statistics/{counter}"))
+            .expect("interface counter")
+            .trim()
+            .parse()
+            .expect("numeric interface counter")
     }
 
     #[derive(Default)]

@@ -14,6 +14,7 @@ mod endpoint_leases;
 #[path = "helper_v3.rs"]
 pub mod helper;
 pub mod mpquic_runtime;
+pub mod mptcp_transport;
 mod paths;
 mod policy;
 mod roles;
