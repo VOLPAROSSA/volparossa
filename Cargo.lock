@@ -4565,6 +4565,7 @@ dependencies = [
  "volparossa-discovery",
  "volparossa-exit",
  "volparossa-identity",
+ "volparossa-inspection",
  "volparossa-linux-uapi",
  "volparossa-local-control",
  "volparossa-metrics",

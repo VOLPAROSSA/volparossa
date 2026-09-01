@@ -607,24 +607,27 @@ impl ClientRouteControl {
         }
     }
 
-    /// Bind one accepted kernel-observed TCP stream, sign its exact raw-IP tuple, and proxy it
-    /// over the already selected genuine MPTCP/TLS route with fixed backpressure limits.
+    /// Bind one accepted kernel-observed TCP stream and proxy it over the selected genuine
+    /// MPTCP/TLS route. TLS/443 signs both visible SNI and the exact kernel destination address;
+    /// non-TLS ingress remains an explicitly authorized raw-IP tuple.
     pub(crate) async fn run_tcp_ingress(
         &self,
         ingress: PolicyAuthorizedTcpIngress,
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<(), ClientRouteConnectError> {
-        let (application, destination) = ingress
+        let (application, destination, hostname) = ingress
             .into_route_parts(policy, now_ms)
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-        self.activate_tcp_destination(
-            policy,
-            ClientTcpDestination::Ip(destination.ip()),
-            destination.port(),
-            now_ms,
-        )
-        .await?;
+        let destination_scope =
+            hostname.map_or(ClientTcpDestination::Ip(destination.ip()), |hostname| {
+                ClientTcpDestination::PinnedHostname {
+                    hostname,
+                    address: destination.ip(),
+                }
+            });
+        self.activate_tcp_destination(policy, destination_scope, destination.port(), now_ms)
+            .await?;
         self.proxy_tcp_application(application).await
     }
 
@@ -993,6 +996,7 @@ struct ClientOpenTcpMaterial {
 
 enum ClientTcpDestination {
     Hostname(String),
+    PinnedHostname { hostname: String, address: IpAddr },
     Ip(IpAddr),
 }
 
@@ -1076,6 +1080,17 @@ fn client_open_tcp_material(
             now_ms,
             expires_at_ms,
         ),
+        ClientTcpDestination::PinnedHostname { hostname, address } => {
+            coordinator.coordinator.sign_open_tcp_pinned(
+                *verified_route.route_context_id(),
+                *policy.policy_hash(),
+                hostname,
+                *address,
+                port,
+                now_ms,
+                expires_at_ms,
+            )
+        }
         ClientTcpDestination::Ip(address) => coordinator.coordinator.sign_open_tcp_ip(
             *verified_route.route_context_id(),
             *policy.policy_hash(),

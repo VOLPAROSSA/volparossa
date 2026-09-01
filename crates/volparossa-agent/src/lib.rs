@@ -43,6 +43,7 @@ use tokio::{
 };
 use volparossa_config::Config;
 use volparossa_identity::IdentityStore;
+use volparossa_inspection::InspectionError;
 use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
@@ -369,10 +370,31 @@ async fn run_client_tcp_ingress(
         let Some(policy) = state.read().await.active_policy(now_ms) else {
             continue;
         };
-        let ingress = match observed.authorize(&policy, now_ms) {
+        let ingress = match observed.authorize(&policy, now_ms).await {
             Ok(ingress) => ingress,
             Err(ClientIngressTcpError::Policy(_)) => {
-                state.write().await.record_policy_rejection();
+                let mut state = state.write().await;
+                state.record_policy_rejection();
+                state.log(LogLevel::Warn, "INGRESS_TCP_POLICY_DENIED", unix_millis());
+                continue;
+            }
+            Err(ClientIngressTcpError::ClientHello(InspectionError::EncryptedClientHello(_))) => {
+                let mut state = state.write().await;
+                state.record_policy_rejection();
+                state.log(LogLevel::Warn, "INGRESS_TCP_ECH_DENIED", unix_millis());
+                continue;
+            }
+            Err(
+                ClientIngressTcpError::ClientHello(_)
+                | ClientIngressTcpError::ClientHelloUnavailable,
+            ) => {
+                let mut state = state.write().await;
+                state.record_policy_rejection();
+                state.log(
+                    LogLevel::Warn,
+                    "INGRESS_TCP_CLIENT_HELLO_DENIED",
+                    unix_millis(),
+                );
                 continue;
             }
             Err(_) => {

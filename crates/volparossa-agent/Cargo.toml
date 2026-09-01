@@ -35,6 +35,7 @@ volparossa-core = { path = "../volparossa-core", version = "=0.1.0" }
 volparossa-discovery = { path = "../volparossa-discovery", version = "=0.1.0" }
 volparossa-exit = { path = "../volparossa-exit", version = "=0.1.0" }
 volparossa-identity = { path = "../volparossa-identity", version = "=0.1.0" }
+volparossa-inspection = { path = "../volparossa-inspection", version = "=0.1.0" }
 volparossa-linux-uapi = { path = "../volparossa-linux-uapi", version = "=0.1.0" }
 volparossa-local-control = { path = "../volparossa-local-control", version = "=0.1.0" }
 volparossa-metrics = { path = "../volparossa-metrics", version = "=0.1.0" }

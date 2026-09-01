@@ -9,12 +9,15 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     os::fd::OwnedFd,
+    time::Duration,
 };
 
 use rand_core::{OsRng, RngCore as _};
 use subtle::ConstantTimeEq as _;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{Instant, sleep, timeout_at};
+use volparossa_inspection::{InspectionError, InspectionProgress, TlsClientHelloInspector};
 use volparossa_linux_uapi::{
     IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
     duplicate_descriptor_cloexec, receive_udp_with_original_destination, tcp_original_destination,
@@ -43,6 +46,9 @@ const INGRESS_UDP_IDLE_TIMEOUT_MS: u32 = 30_000;
 const INGRESS_UDP_FLOW_TTL_MS: u64 = 60_000;
 const INGRESS_TCP_FLOW_TTL_MS: u64 = 60_000;
 const BROWSER_QUIC_PORT: u16 = 443;
+const TLS_CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+const TLS_CLIENT_HELLO_PEEK_BYTES: usize = 64 * 1024 + 64;
+const TLS_CLIENT_HELLO_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const IPV4_HEADER_BYTES: usize = 20;
 const UDP_HEADER_BYTES: usize = 8;
 const MAX_BROWSER_QUIC_DATAGRAMS_PER_FLOW: u32 = 65_536;
@@ -270,17 +276,35 @@ pub(crate) struct ObservedTcpIngress {
 }
 
 impl ObservedTcpIngress {
-    /// Bind the exact observed raw-IP tuple to the currently active signed manifest.
-    pub(crate) fn authorize(
+    /// Bind the kernel-observed tuple to the active manifest. TLS/443 additionally requires a
+    /// visible policy-approved SNI and retains the original address as an Exit-side DNS pin.
+    pub(crate) async fn authorize(
         self,
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<PolicyAuthorizedTcpIngress, ClientIngressTcpError> {
-        let (policy_hash, expires_at_ms) =
-            authorize_tcp_destination(self.destination, policy, now_ms)?;
+        let (hostname, policy_hash, expires_at_ms) = if self.destination.port() == BROWSER_QUIC_PORT
+        {
+            let hostname = inspect_visible_tls_server_name(&self.stream).await?;
+            policy
+                .authorize_domain(
+                    now_ms,
+                    &hostname,
+                    TransportProtocol::Tcp,
+                    self.destination.port(),
+                )
+                .map_err(ClientIngressTcpError::Policy)?;
+            let expires_at_ms = tcp_flow_expiry(policy, now_ms)?;
+            (Some(hostname), *policy.policy_hash(), expires_at_ms)
+        } else {
+            let (policy_hash, expires_at_ms) =
+                authorize_tcp_destination(self.destination, policy, now_ms)?;
+            (None, policy_hash, expires_at_ms)
+        };
         Ok(PolicyAuthorizedTcpIngress {
             stream: self.stream,
             destination: self.destination,
+            hostname,
             policy_hash,
             expires_at_ms,
         })
@@ -292,6 +316,7 @@ impl ObservedTcpIngress {
 pub(crate) struct PolicyAuthorizedTcpIngress {
     stream: TcpStream,
     destination: SocketAddr,
+    hostname: Option<String>,
     policy_hash: [u8; 32],
     expires_at_ms: u64,
 }
@@ -302,22 +327,77 @@ impl PolicyAuthorizedTcpIngress {
         self,
         policy: &VerifiedManifest,
         now_ms: u64,
-    ) -> Result<(TcpStream, SocketAddr), ClientIngressTcpError> {
+    ) -> Result<(TcpStream, SocketAddr, Option<String>), ClientIngressTcpError> {
         if now_ms >= self.expires_at_ms
             || self.policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() != 1
         {
             return Err(ClientIngressTcpError::PolicyBinding);
         }
-        policy
-            .authorize_ip(
-                now_ms,
-                self.destination.ip(),
-                TransportProtocol::Tcp,
-                self.destination.port(),
-            )
-            .map_err(ClientIngressTcpError::Policy)?;
-        Ok((self.stream, self.destination))
+        if let Some(hostname) = self.hostname.as_deref() {
+            policy
+                .authorize_domain(
+                    now_ms,
+                    hostname,
+                    TransportProtocol::Tcp,
+                    self.destination.port(),
+                )
+                .map_err(ClientIngressTcpError::Policy)?;
+        } else {
+            policy
+                .authorize_ip(
+                    now_ms,
+                    self.destination.ip(),
+                    TransportProtocol::Tcp,
+                    self.destination.port(),
+                )
+                .map_err(ClientIngressTcpError::Policy)?;
+        }
+        Ok((self.stream, self.destination, self.hostname))
     }
+}
+
+async fn inspect_visible_tls_server_name(
+    stream: &TcpStream,
+) -> Result<String, ClientIngressTcpError> {
+    let deadline = Instant::now() + TLS_CLIENT_HELLO_TIMEOUT;
+    let mut bytes = vec![0_u8; TLS_CLIENT_HELLO_PEEK_BYTES];
+    let mut previous_count = 0_usize;
+    loop {
+        let count = timeout_at(deadline, stream.peek(&mut bytes))
+            .await
+            .map_err(|_| ClientIngressTcpError::ClientHelloUnavailable)?
+            .map_err(ClientIngressTcpError::ClientHelloRead)?;
+        if count == 0 {
+            return Err(ClientIngressTcpError::ClientHelloUnavailable);
+        }
+        let mut inspector = TlsClientHelloInspector::new();
+        match inspector
+            .push(&bytes[..count])
+            .map_err(ClientIngressTcpError::ClientHello)?
+        {
+            InspectionProgress::Complete(server_name) => return Ok(server_name.into_string()),
+            InspectionProgress::NeedMore => {
+                if count == bytes.len() || Instant::now() >= deadline {
+                    return Err(ClientIngressTcpError::ClientHelloUnavailable);
+                }
+            }
+        }
+        if count <= previous_count {
+            sleep(TLS_CLIENT_HELLO_POLL_INTERVAL).await;
+        }
+        previous_count = count;
+    }
+}
+
+fn tcp_flow_expiry(policy: &VerifiedManifest, now_ms: u64) -> Result<u64, ClientIngressTcpError> {
+    let expires_at_ms = now_ms
+        .checked_add(INGRESS_TCP_FLOW_TTL_MS)
+        .ok_or(ClientIngressTcpError::Clock)?
+        .min(policy.expires_at_ms());
+    if expires_at_ms <= now_ms {
+        return Err(ClientIngressTcpError::Clock);
+    }
+    Ok(expires_at_ms)
 }
 
 fn authorize_tcp_destination(
@@ -336,13 +416,7 @@ fn authorize_tcp_destination(
             destination.port(),
         )
         .map_err(ClientIngressTcpError::Policy)?;
-    let expires_at_ms = now_ms
-        .checked_add(INGRESS_TCP_FLOW_TTL_MS)
-        .ok_or(ClientIngressTcpError::Clock)?
-        .min(policy.expires_at_ms());
-    if expires_at_ms <= now_ms {
-        return Err(ClientIngressTcpError::Clock);
-    }
+    let expires_at_ms = tcp_flow_expiry(policy, now_ms)?;
     Ok((*policy.policy_hash(), expires_at_ms))
 }
 
@@ -853,6 +927,12 @@ pub(crate) enum ClientIngressTcpError {
     Accept(#[source] io::Error),
     #[error("transparent TCP original destination recovery failed")]
     OriginalDestination(#[source] io::Error),
+    #[error("transparent TCP TLS ClientHello could not be read")]
+    ClientHelloRead(#[source] io::Error),
+    #[error("transparent TCP TLS ClientHello was unavailable before its deadline")]
+    ClientHelloUnavailable,
+    #[error("transparent TCP TLS ClientHello identity was not verifiable")]
+    ClientHello(#[source] InspectionError),
     #[error("transparent TCP destination was denied by policy")]
     Policy(#[source] PolicyError),
     #[error("transparent TCP authorization lifetime is invalid")]
@@ -899,6 +979,10 @@ pub(crate) enum ClientIngressUdpError {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::{TcpListener, TcpStream},
+    };
     use volparossa_policy::{DestinationRule, ProtocolPort, TransportProtocol};
     use volparossa_protocol::{
         ReplayCache, TimePolicy, Transport, UdpFlowAuthorization, generate_nonce,
@@ -908,9 +992,92 @@ mod tests {
     use volparossa_udp::VerifiedSingleRelayPath;
 
     use super::{
-        PolicyAuthorizedUdpIngress, authorize_tcp_destination, build_ipv4_udp_packet,
-        parse_ipv4_udp_packet,
+        ObservedTcpIngress, PolicyAuthorizedUdpIngress, authorize_tcp_destination,
+        build_ipv4_udp_packet, parse_ipv4_udp_packet,
     };
+
+    #[tokio::test]
+    async fn tls_ingress_retains_visible_sni_and_kernel_destination_pin() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        const HOSTNAME: &str = "allowed.example";
+        let destination = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 443));
+        let permission =
+            ProtocolPort::new(TransportProtocol::Tcp, destination.port()).expect("TCP permission");
+        let rule = DestinationRule::exact_domain(HOSTNAME, [permission]).expect("domain rule");
+        let policy = verified_development_manifest(NOW_MS, vec![rule]).expect("policy");
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("test listener");
+        let listener_address = listener.local_addr().expect("listener address");
+        let client_hello = tls_client_hello(HOSTNAME);
+        let expected_client_hello = client_hello.clone();
+        let sender = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(listener_address)
+                .await
+                .expect("test connection");
+            stream
+                .write_all(&client_hello)
+                .await
+                .expect("ClientHello write");
+        });
+        let (stream, _) = listener.accept().await.expect("accepted test stream");
+
+        let authorized = ObservedTcpIngress {
+            stream,
+            destination,
+        }
+        .authorize(&policy, NOW_MS)
+        .await
+        .expect("visible SNI policy authorization");
+        let (mut stream, retained_destination, hostname) = authorized
+            .into_route_parts(&policy, NOW_MS)
+            .expect("retained policy binding");
+        sender.await.expect("sender task");
+        let mut retained_client_hello = vec![0; expected_client_hello.len()];
+        stream
+            .read_exact(&mut retained_client_hello)
+            .await
+            .expect("unconsumed ClientHello");
+
+        assert_eq!(retained_destination, destination);
+        assert_eq!(hostname.as_deref(), Some(HOSTNAME));
+        assert_eq!(retained_client_hello, expected_client_hello);
+    }
+
+    fn tls_client_hello(hostname: &str) -> Vec<u8> {
+        let hostname = hostname.as_bytes();
+        let mut name_list = vec![0];
+        name_list.extend_from_slice(&u16::try_from(hostname.len()).unwrap().to_be_bytes());
+        name_list.extend_from_slice(hostname);
+        let mut server_name = Vec::new();
+        server_name.extend_from_slice(&u16::try_from(name_list.len()).unwrap().to_be_bytes());
+        server_name.extend_from_slice(&name_list);
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0_u16.to_be_bytes());
+        extensions.extend_from_slice(&u16::try_from(server_name.len()).unwrap().to_be_bytes());
+        extensions.extend_from_slice(&server_name);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x0303_u16.to_be_bytes());
+        body.extend_from_slice(&[7_u8; 32]);
+        body.push(0);
+        body.extend_from_slice(&2_u16.to_be_bytes());
+        body.extend_from_slice(&0x1301_u16.to_be_bytes());
+        body.push(1);
+        body.push(0);
+        body.extend_from_slice(&u16::try_from(extensions.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(&extensions);
+
+        let mut handshake = vec![1];
+        let length = u32::try_from(body.len()).unwrap().to_be_bytes();
+        handshake.extend_from_slice(&length[1..]);
+        handshake.extend_from_slice(&body);
+        let mut record = vec![22, 3, 1];
+        record.extend_from_slice(&u16::try_from(handshake.len()).unwrap().to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
 
     #[test]
     fn transparent_tcp_destination_is_bound_to_exact_raw_ip_policy() {
