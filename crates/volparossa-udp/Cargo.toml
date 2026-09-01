@@ -18,6 +18,8 @@ thiserror.workspace = true
 tokio.workspace = true
 volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
 volparossa-protocol = { path = "../volparossa-protocol", version = "=0.1.0" }
+volparossa-routing = { path = "../volparossa-routing", version = "=0.1.0" }
+volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
 
 [dev-dependencies]
 ed25519-dalek.workspace = true

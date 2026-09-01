@@ -4703,6 +4703,8 @@ dependencies = [
  "tokio",
  "volparossa-policy",
  "volparossa-protocol",
+ "volparossa-routing",
+ "volparossa-wireguard",
 ]
 
 [[package]]

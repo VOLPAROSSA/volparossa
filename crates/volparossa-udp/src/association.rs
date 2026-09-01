@@ -200,6 +200,10 @@ impl QuicUdpAssociation {
         self.idle_task.abort();
     }
 
+    pub(crate) async fn wait_closed(&self) {
+        let _ = self.connection.closed().await;
+    }
+
     fn ensure_active(&self) -> Result<(), UdpError> {
         match self.state() {
             UdpAssociationState::Active => Ok(()),

@@ -110,35 +110,55 @@ impl ExitUdpBridge {
     /// Returns an association, socket, size, or datagram-count error and closes
     /// the QUIC association fail closed.
     pub async fn run(self) -> Result<UdpBridgeStats, UdpError> {
-        let mut buffer = vec![0_u8; self.limits.maximum_payload_bytes];
+        let Self {
+            association,
+            destination_socket,
+            limits,
+        } = self;
+        let mut buffer = vec![0_u8; limits.maximum_payload_bytes];
         let mut statistics = UdpBridgeStats::default();
 
-        let result = loop {
-            tokio::select! {
-                tunneled = self.association.receive_payload() => {
+        let result = async {
+            loop {
+                tokio::select! {
+                tunneled = association.receive_payload() => {
                     let payload = tunneled?;
-                    if payload.len() > self.limits.maximum_payload_bytes {
-                        break Err(UdpError::ResourceLimit);
+                    if payload.len() > limits.maximum_payload_bytes {
+                        return Err(UdpError::ResourceLimit);
                     }
                     increment(
                         &mut statistics.tunnel_to_destination_datagrams,
-                        self.limits.maximum_tunnel_to_destination_datagrams,
+                        limits.maximum_tunnel_to_destination_datagrams,
                     )?;
-                    self.destination_socket.send(&payload).await?;
+                    destination_socket.send(&payload).await?;
                     add_bytes(&mut statistics.tunnel_to_destination_bytes, payload.len())?;
                 }
-                received = self.destination_socket.recv(&mut buffer) => {
+                received = destination_socket.recv(&mut buffer) => {
                     let length = received?;
                     increment(
                         &mut statistics.destination_to_tunnel_datagrams,
-                        self.limits.maximum_destination_to_tunnel_datagrams,
+                        limits.maximum_destination_to_tunnel_datagrams,
                     )?;
-                    self.association.send_payload(&buffer[..length])?;
+                    association.send_payload(&buffer[..length])?;
                     add_bytes(&mut statistics.destination_to_tunnel_bytes, length)?;
                 }
+                }
+                if statistics.tunnel_to_destination_datagrams
+                    == limits.maximum_tunnel_to_destination_datagrams
+                    && statistics.destination_to_tunnel_datagrams
+                        == limits.maximum_destination_to_tunnel_datagrams
+                {
+                    // The final QUIC DATAGRAM is only queued by `send_payload`.
+                    // Retain the connection until the Client observes it and
+                    // closes, rather than racing an immediate application close
+                    // against delivery of the bounded final response.
+                    association.wait_closed().await;
+                    return Ok(());
+                }
             }
-        };
-        self.association.close();
+        }
+        .await;
+        association.close();
         result.map(|()| statistics)
     }
 }

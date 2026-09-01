@@ -224,12 +224,25 @@ impl AuthorizedUdpFlow {
 
     #[cfg(test)]
     pub(crate) fn test_flow(idle_timeout: Duration, expires_at_ms: u64) -> Self {
+        Self::test_flow_to(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 12_345),
+            idle_timeout,
+            expires_at_ms,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_flow_to(
+        destination: SocketAddr,
+        idle_timeout: Duration,
+        expires_at_ms: u64,
+    ) -> Self {
         Self {
             route_context_id: [2; ROUTE_CONTEXT_BYTES],
             flow_id: [6; FLOW_ID_BYTES],
             client_ephemeral_id: [5; CLIENT_ID_BYTES],
-            destination: AuthorizedDestination::Ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))),
-            port: 12_345,
+            destination: AuthorizedDestination::Ip(destination.ip()),
+            port: destination.port(),
             idle_timeout,
             expires_at_ms,
         }
@@ -274,6 +287,15 @@ impl PinnedUdpFlow {
     #[must_use]
     pub const fn expires_at_ms(&self) -> u64 {
         self.expires_at_ms
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pin(flow: &AuthorizedUdpFlow, destination: SocketAddr) -> Self {
+        Self {
+            flow_id: *flow.flow_id(),
+            destination,
+            expires_at_ms: flow.expires_at_ms(),
+        }
     }
 }
 
