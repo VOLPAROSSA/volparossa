@@ -398,6 +398,10 @@ impl ConnectionRegistry {
         })
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "ownership is the affine one-response authority; borrowing would permit reuse"
+    )]
     fn consume_bound_native_probe_control(
         &self,
         bound: BoundNativeProbeControlConnection,

@@ -1223,17 +1223,37 @@ mod tests {
         );
         assert!(receipt.is_ok());
 
+        let native_exit_peer = identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+            .to_bytes();
         let native_permit = ExitForwardResponse::granted(
             vec![1; REQUEST_ID_LENGTH],
             ExitForwardOperation::NativeProbePermit,
             vec![2; NODE_ID_LENGTH],
-            identity::Keypair::generate_ed25519()
-                .public()
-                .to_peer_id()
-                .to_bytes(),
+            native_exit_peer.clone(),
             vec![envelope(ControlMessageType::NativeProbePermit, Vec::new())],
         );
         assert!(native_permit.is_ok());
+        for responses in [
+            Vec::new(),
+            vec![
+                envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+                envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+            ],
+            vec![envelope(ControlMessageType::RelayProbePermit, Vec::new())],
+        ] {
+            assert!(matches!(
+                ExitForwardResponse::granted(
+                    vec![1; REQUEST_ID_LENGTH],
+                    ExitForwardOperation::NativeProbePermit,
+                    vec![2; NODE_ID_LENGTH],
+                    native_exit_peer.clone(),
+                    responses,
+                ),
+                Err(ForwardingRpcError::InvalidFrame)
+            ));
+        }
     }
 
     fn advertisement_request() -> ExitForwardRequest {
