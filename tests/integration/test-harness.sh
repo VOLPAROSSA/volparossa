@@ -153,10 +153,13 @@ expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute -
 # anonymous user/mount/PID/network isolation before it accepts any mutation authority.
 grep -F 'unshare --user --map-root-user --mount --net --pid --fork --mount-proc' \
     "$REPOSITORY_DIRECTORY/tests/integration/run.sh" >/dev/null
+# The pattern intentionally verifies literal shell variables in the isolated worker.
+# shellcheck disable=SC2016
 grep -F '[ "$(readlink /proc/self/ns/net)" != "$HOST_NET" ] || exit 70' \
     "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
 grep -F 'direct_client_exit_adjacency:false' \
     "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
+# shellcheck disable=SC2016
 grep -F 'remaining_owned_objects:$remaining' \
     "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
 

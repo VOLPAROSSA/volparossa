@@ -13,20 +13,15 @@ while [ "$#" -gt 0 ]; do
  case $1 in
   --preview) [ "$SEEN_MODE" = no ] || { usage >&2; exit 64; }; MODE=PREVIEW; SEEN_MODE=yes;;
   --execute) [ "$SEEN_MODE" = no ] || { usage >&2; exit 64; }; MODE=EXECUTE; SEEN_MODE=yes;;
-  --suite) [ "$SEEN_SUITE" = no ] && [ "$#" -ge 2 ] || { usage >&2; exit 64; }; SUITE=$2; SEEN_SUITE=yes; shift;;
+  --suite)
+   if [ "$SEEN_SUITE" != no ] || [ "$#" -lt 2 ]; then usage >&2; exit 64; fi
+   SUITE=$2; SEEN_SUITE=yes; shift;;
   -h|--help) usage; exit 0;;
   *) printf 'unknown integration-runner option: %s\n' "$1" >&2; usage >&2; exit 64;;
  esac
  shift
 done
 case $SUITE in all|mptcp|mpquic) ;; *) printf 'unsupported acceptance suite: %s\n' "$SUITE" >&2; exit 64;; esac
-selected() {
- case "$SUITE:$1" in
-  all:*) return 0;; mptcp:A02|mptcp:A03|mptcp:A04|mptcp:A14|mptcp:A15) return 0;;
-  mpquic:A06|mpquic:A07|mpquic:A14|mpquic:A15) return 0;; *) return 1;;
- esac
-}
-
 preview() {
  printf '%s\n' 'PREVIEW: execute builds the product binaries, captures host state, enters anonymous user/mount/PID/network namespaces, creates Client, Relay 1, Relay 2, Exit, and destination namespaces, launches four real agents plus TCP/UDP endpoints, records the first product blocker, tears down, and requires the host snapshot to match.' >&2
  jq -n --arg suite "$SUITE" '
@@ -45,7 +40,10 @@ for cmd in cargo date git ip jq mount readlink rustc sha256sum setpriv unshare; 
  command -v "$cmd" >/dev/null 2>&1 || { printf 'required acceptance command unavailable: %s\n' "$cmd" >&2; exit 69; }
 done
 [ -x "$WORKER" ] || { printf 'topology worker is not executable\n' >&2; exit 69; }
-[ "$(sed -n '1{s/\..*$//;p;}' /etc/debian_version)" = 13 ] && [ "$(uname -m)" = x86_64 ] || { printf '%s\n' 'execute requires Debian 13 amd64' >&2; exit 69; }
+if [ "$(sed -n '1{s/\..*$//;p;}' /etc/debian_version)" != 13 ] || [ "$(uname -m)" != x86_64 ]; then
+ printf '%s\n' 'execute requires Debian 13 amd64' >&2
+ exit 69
+fi
 printf '%s\n' 'EXECUTE: every network mutation is confined to disposable anonymous namespaces; the outer host is observed only.' >&2
 TARGET=${CARGO_TARGET_DIR:-$REPO/target/acceptance-build}
 case $TARGET in /*) ;; *) TARGET=$REPO/$TARGET;; esac
