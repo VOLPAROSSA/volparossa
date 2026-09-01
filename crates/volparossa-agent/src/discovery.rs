@@ -6766,8 +6766,8 @@ fn local_native_probe_exit_actor_matches(
         && actor.advertisement_sequence == advertisement.sequence_number
         && actor.advertisement_expires_at_ms == verified.expires_at_ms()
         && actor.advertisement_payload_hash.as_slice() == payload_hash
-        && actor.capability_expires_at_ms == expected_capability_expiry
-        && expected_capability_expiry > now_ms
+        && actor.capability_expires_at_ms <= expected_capability_expiry
+        && actor.capability_expires_at_ms > now_ms
 }
 
 fn native_probe_capabilities_support_scope(
@@ -8487,6 +8487,39 @@ mod tests {
             )
         };
         assert!(matches(&fixture.local_advertisement, actor, &fixture.scope,));
+
+        let mut conservative_actor = actor.clone();
+        conservative_actor.capability_expires_at_ms = conservative_actor
+            .capability_expires_at_ms
+            .saturating_sub(1);
+        let mut conservative_scope = fixture.scope.clone();
+        conservative_scope.exit = Some(conservative_actor.clone());
+        assert!(matches(
+            &fixture.local_advertisement,
+            &conservative_actor,
+            &conservative_scope,
+        ));
+
+        let mut overlong_actor = actor.clone();
+        overlong_actor.capability_expires_at_ms =
+            overlong_actor.capability_expires_at_ms.saturating_add(1);
+        let mut overlong_scope = fixture.scope.clone();
+        overlong_scope.exit = Some(overlong_actor.clone());
+        assert!(!matches(
+            &fixture.local_advertisement,
+            &overlong_actor,
+            &overlong_scope,
+        ));
+
+        let mut expired_actor = actor.clone();
+        expired_actor.capability_expires_at_ms = fixture.now_ms;
+        let mut expired_scope = fixture.scope.clone();
+        expired_scope.exit = Some(expired_actor.clone());
+        assert!(!matches(
+            &fixture.local_advertisement,
+            &expired_actor,
+            &expired_scope,
+        ));
 
         let mut wrong_actor = actor.clone();
         wrong_actor.advertisement_sequence = wrong_actor.advertisement_sequence.saturating_add(1);
