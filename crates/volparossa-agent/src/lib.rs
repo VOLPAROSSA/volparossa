@@ -119,6 +119,7 @@ impl Agent {
                 role_store,
                 metrics: metrics.clone(),
                 helper: helper.clone(),
+                mpquic_socket: paths.mpquic_socket.clone(),
             },
         )?;
         state.log(LogLevel::Info, "AGENT_INITIALIZED", unix_millis());

@@ -12,19 +12,24 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::time::{Instant, sleep_until};
 use volparossa_discovery::ExitMpquicSessionSignal;
+use volparossa_exit::{ExitNativeRouteAuthorization, ExitNativeRouteCredentialAuthorization};
 use volparossa_quic::{
     AddPath, NativeClient, NativeClientError, NativeProcessRole, NativeResultCode, ReceiveDatagram,
-    ReceivedDatagram, SendDatagram, StartSession, StopSession, TransportMode, TunnelAssignment,
-    VerifiedExitMpquicEndpoint,
+    ReceivedDatagram, SendDatagram, StartExitSession, StartSession, StopSession, TransportMode,
+    TunnelAssignment, VerifiedExitMpquicEndpoint,
 };
 use volparossa_reservation::{ClientNativeRouteAuthorization, VerifiedRelayGrant};
 use volparossa_routing::{
-    AcquireTransportSocket, TransportSocketAddress, TransportSocketKind, WireguardRole,
+    AcquireTransportSocket, CommitLeaseBatch, ContextRole, TransportSocketAddress,
+    TransportSocketKind, WireguardRole,
 };
 use volparossa_udp::{AuthorizedUdpFlow, UdpError};
 use volparossa_wireguard::{HELPER_HANDLE_BYTES, overlay_addresses};
+use zeroize::Zeroizing;
 
-use crate::helper::{AcquiredTransportSocket, HelperClient, HelperClientError};
+use crate::helper::{
+    AcquiredTransportSocket, HelperClient, HelperClientError, RuntimeBoundPreparedLeaseBatch,
+};
 
 const MINIMUM_MULTIPATH_PATHS: usize = 2;
 const MINIMUM_MULTIPATH_PATHS_U32: u32 = 2;
@@ -34,6 +39,415 @@ const MAXIMUM_READY_WAIT: Duration = Duration::from_secs(10);
 /// Fixed protected-overlay listener port for every path of one MPQUIC Exit association.
 pub const MPQUIC_EXIT_LISTENER_PORT: u16 = 44_443;
 const MPQUIC_CLIENT_PORT_BASE: u16 = 40_000;
+
+/// Affine preflight of the exact native Exit process incarnation signed into finalization.
+#[must_use = "native Exit preflight authority must be consumed by one route"]
+pub(crate) struct ProductionMpquicExitPreflight {
+    client: NativeClient,
+    native_instance_id: [u8; 32],
+}
+
+impl ProductionMpquicExitPreflight {
+    /// Select one live native Exit process before its incarnation enters the signed reservation.
+    pub(crate) async fn new(client: NativeClient) -> Result<Self, ProductionMpquicError> {
+        let client = client.preflight(NativeProcessRole::Exit).await?;
+        let native_instance_id =
+            *client
+                .native_instance_id()
+                .ok_or(ProductionMpquicError::Invalid(
+                    "preflighted native Exit instance",
+                ))?;
+        Ok(Self {
+            client,
+            native_instance_id,
+        })
+    }
+
+    /// Exact native Exit incarnation which finalization must sign.
+    pub(crate) const fn native_instance_id(&self) -> &[u8; 32] {
+        &self.native_instance_id
+    }
+}
+
+/// One exact confirmed Relay proof used to derive an Exit listener and native proof digest.
+pub(crate) struct ExitMpquicPathAuthorization {
+    path_id: u32,
+    signed_relay_reservation: Vec<u8>,
+}
+
+impl ExitMpquicPathAuthorization {
+    pub(crate) fn new(path_id: u32, signed_relay_reservation: Vec<u8>) -> Option<Self> {
+        (path_id != 0 && !signed_relay_reservation.is_empty()).then_some(Self {
+            path_id,
+            signed_relay_reservation,
+        })
+    }
+}
+
+struct NativeExitAuthorizationParts {
+    reservation_id: [u8; 16],
+    route_context_id: [u8; 16],
+    finalize_id: [u8; 16],
+    expires_at_ms: u64,
+    auth_bearer: Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+    auth_commitment: [u8; 32],
+    certificate_sha256: [u8; 32],
+    spki_sha256: [u8; 32],
+    masque_context_id: u64,
+    tls_server_name: Vec<u8>,
+    tls_certificate_pem: Zeroizing<Vec<u8>>,
+    tls_private_key_pem: Zeroizing<Vec<u8>>,
+    client_native_instance_id: [u8; 32],
+    exit_native_instance_id: [u8; 32],
+}
+
+impl NativeExitAuthorizationParts {
+    fn from_credential(
+        credential: ExitNativeRouteCredentialAuthorization,
+    ) -> Result<Self, ProductionMpquicError> {
+        let (authorization, auth_bearer) = credential.into_parts();
+        Self::from_parts(&authorization, auth_bearer)
+    }
+
+    fn from_parts(
+        authorization: &ExitNativeRouteAuthorization,
+        auth_bearer: Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+    ) -> Result<Self, ProductionMpquicError> {
+        let scope = authorization.scope();
+        let request = scope.request();
+        let identity = authorization.public_identity();
+        let auth_commitment = identity
+            .auth_commitment
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProductionMpquicError::Invalid("native auth commitment"))?;
+        let certificate_sha256 = identity
+            .certificate_sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProductionMpquicError::Invalid("native certificate digest"))?;
+        let spki_sha256 = identity
+            .spki_sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProductionMpquicError::Invalid("native SPKI digest"))?;
+        let client_native_instance_id = identity
+            .client_native_instance_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProductionMpquicError::Invalid("native Client instance"))?;
+        let exit_native_instance_id = identity
+            .exit_native_instance_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ProductionMpquicError::Invalid("native Exit instance"))?;
+        if request.auth_commitment() != &auth_commitment
+            || request.client_native_instance_id() != &client_native_instance_id
+            || request.exit_native_instance_id() != &exit_native_instance_id
+            || scope.exit_native_instance_id() != &exit_native_instance_id
+            || authorization.expires_at_ms() == 0
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "native Exit authorization identity",
+            ));
+        }
+        Ok(Self {
+            reservation_id: *request.reservation_id(),
+            route_context_id: *request.route_context_id(),
+            finalize_id: *request.finalize_id(),
+            expires_at_ms: authorization.expires_at_ms(),
+            auth_bearer,
+            auth_commitment,
+            certificate_sha256,
+            spki_sha256,
+            masque_context_id: request.masque_context_id(),
+            tls_server_name: identity.tls_server_name.as_bytes().to_vec(),
+            tls_certificate_pem: Zeroizing::new(authorization.tls_certificate_pem().to_vec()),
+            tls_private_key_pem: Zeroizing::new(authorization.tls_private_key_pem().to_vec()),
+            client_native_instance_id,
+            exit_native_instance_id,
+        })
+    }
+}
+
+struct CommittedMpquicExitListener {
+    descriptor: OwnedFd,
+    path_id: u32,
+    listener_ip: [u8; 16],
+    expected_client_ip: [u8; 16],
+    reservation_hash: [u8; 32],
+}
+
+impl CommittedMpquicExitListener {
+    fn from_helper_handoff(
+        acquired: AcquiredTransportSocket,
+        route_context_id: [u8; 16],
+        path: &ExitMpquicPathAuthorization,
+    ) -> Result<Self, ProductionMpquicError> {
+        let (descriptor, metadata) = acquired.into_parts();
+        let path_number = u8::try_from(path.path_id)
+            .map_err(|_| ProductionMpquicError::Invalid("MPQUIC Exit path id"))?;
+        let addresses = overlay_addresses(route_context_id, path_number)
+            .map_err(|_| ProductionMpquicError::Invalid("MPQUIC Exit overlay"))?;
+        let local = transport_address(
+            metadata
+                .local
+                .as_ref()
+                .ok_or(ProductionMpquicError::Invalid("MPQUIC Exit local tuple"))?,
+        )?;
+        if metadata.path_id != path.path_id
+            || WireguardRole::try_from(metadata.role).ok() != Some(WireguardRole::Exit)
+            || TransportSocketKind::try_from(metadata.descriptor_kind).ok()
+                != Some(TransportSocketKind::QuicUdpUnconnected)
+            || metadata.remote.is_some()
+            || local != SocketAddr::new(IpAddr::V6(addresses.exit), MPQUIC_EXIT_LISTENER_PORT)
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "committed MPQUIC Exit descriptor",
+            ));
+        }
+        Ok(Self {
+            descriptor,
+            path_id: path.path_id,
+            listener_ip: addresses.exit.octets(),
+            expected_client_ip: addresses.client.octets(),
+            reservation_hash: Sha256::digest(&path.signed_relay_reservation).into(),
+        })
+    }
+}
+
+/// Native Exit plus helper owner retained until the signed route expires.
+#[must_use = "an active native MPQUIC Exit route must be run or shut down"]
+pub(crate) struct ActiveProductionMpquicExitRoute {
+    client: NativeClient,
+    helper: HelperClient,
+    owner: RuntimeBoundPreparedLeaseBatch,
+    route_context_id: [u8; 16],
+    expires_at_ms: u64,
+}
+
+impl ActiveProductionMpquicExitRoute {
+    pub(crate) async fn run(self, now_ms: u64) {
+        let wait = Duration::from_millis(self.expires_at_ms.saturating_sub(now_ms));
+        tokio::time::sleep(wait).await;
+        let _ = self.shutdown().await;
+    }
+
+    async fn shutdown(self) -> Result<(), ProductionMpquicError> {
+        let native = self
+            .client
+            .stop_session(StopSession {
+                route_context_id: self.route_context_id.to_vec(),
+            })
+            .await;
+        let helper = self.helper.destroy_context(&self.owner).await;
+        native?;
+        helper?;
+        Ok(())
+    }
+}
+
+/// Start one exact native Exit listener per committed Relay path and return only after the final
+/// listener makes the native hard-multipath set ready.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one fail-closed helper-to-native MPQUIC Exit transaction"
+)]
+pub(crate) async fn start_production_mpquic_exit(
+    preflight: ProductionMpquicExitPreflight,
+    helper: HelperClient,
+    mut owner: RuntimeBoundPreparedLeaseBatch,
+    commit: CommitLeaseBatch,
+    credential: ExitNativeRouteCredentialAuthorization,
+    paths: Vec<ExitMpquicPathAuthorization>,
+    now_ms: u64,
+) -> Result<(ActiveProductionMpquicExitRoute, ExitMpquicSessionSignal), ProductionMpquicError> {
+    let authorization = match NativeExitAuthorizationParts::from_credential(credential) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            let _ = helper.destroy_context(&owner).await;
+            return Err(error);
+        }
+    };
+    let route_context_id = authorization.route_context_id;
+    let context_handle = owner.prepared().context_handle.as_slice().try_into();
+    let Ok(context_handle): Result<[u8; HELPER_HANDLE_BYTES], _> = context_handle else {
+        let _ = helper.destroy_context(&owner).await;
+        return Err(ProductionMpquicError::Invalid("MPQUIC helper context"));
+    };
+    let mut path_ids = paths.iter().map(|path| path.path_id).collect::<Vec<_>>();
+    path_ids.sort_unstable();
+    let exact_paths = (MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&paths.len())
+        && path_ids.windows(2).all(|pair| pair[0] < pair[1])
+        && paths
+            .iter()
+            .map(|path| path.path_id)
+            .eq(path_ids.iter().copied())
+        && owner.prepare().leases.len() == paths.len()
+        && owner
+            .prepare()
+            .leases
+            .iter()
+            .zip(&path_ids)
+            .all(|(lease, path_id)| {
+                lease.path_id == *path_id && lease.role == WireguardRole::Exit as i32
+            });
+    if authorization.expires_at_ms <= now_ms
+        || preflight.native_instance_id != authorization.exit_native_instance_id
+        || ContextRole::try_from(owner.prepare().role).ok() != Some(ContextRole::Exit)
+        || owner.prepare().route_context_id != route_context_id
+        || !exact_paths
+        || commit.route_context_id != route_context_id
+        || commit.context_handle.as_slice() != context_handle
+        || commit.leases.len() != paths.len()
+        || !commit.leases.iter().zip(&path_ids).all(|(lease, path_id)| {
+            lease.path_id == *path_id && lease.role == WireguardRole::Exit as i32
+        })
+    {
+        let _ = helper.destroy_context(&owner).await;
+        return Err(ProductionMpquicError::Invalid(
+            "committed MPQUIC Exit route scope",
+        ));
+    }
+    if helper.commit_lease_batch(&mut owner, commit).await.is_err() {
+        let _ = helper.destroy_context(&owner).await;
+        return Err(ProductionMpquicError::Invalid(
+            "committed MPQUIC Exit helper route",
+        ));
+    }
+    let mut listeners = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let Ok(path_number) = u8::try_from(path.path_id) else {
+            let _ = helper.destroy_context(&owner).await;
+            return Err(ProductionMpquicError::Invalid("MPQUIC Exit path id"));
+        };
+        let Ok(addresses) = overlay_addresses(route_context_id, path_number) else {
+            let _ = helper.destroy_context(&owner).await;
+            return Err(ProductionMpquicError::Invalid("MPQUIC Exit overlay"));
+        };
+        let acquired = helper
+            .acquire_transport_socket(AcquireTransportSocket {
+                route_context_id: route_context_id.to_vec(),
+                context_handle: context_handle.to_vec(),
+                path_id: path.path_id,
+                role: WireguardRole::Exit as i32,
+                descriptor_kind: TransportSocketKind::QuicUdpUnconnected as i32,
+                expected_local: Some(TransportSocketAddress {
+                    address: addresses.exit.octets().to_vec(),
+                    port: u32::from(MPQUIC_EXIT_LISTENER_PORT),
+                }),
+                expected_remote: None,
+            })
+            .await;
+        let acquired = match acquired {
+            Ok(acquired) => acquired,
+            Err(error) => {
+                let _ = helper.destroy_context(&owner).await;
+                return Err(ProductionMpquicError::Helper(error));
+            }
+        };
+        let listener =
+            CommittedMpquicExitListener::from_helper_handoff(acquired, route_context_id, path);
+        let listener = match listener {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = helper.destroy_context(&owner).await;
+                return Err(error);
+            }
+        };
+        listeners.push(listener);
+    }
+    let client = preflight.client;
+    if let Err(error) = start_native_exit_listener_set(&client, &authorization, listeners).await {
+        let _ = client
+            .stop_session(StopSession {
+                route_context_id: route_context_id.to_vec(),
+            })
+            .await;
+        let _ = helper.destroy_context(&owner).await;
+        return Err(error);
+    }
+    let signal = ExitMpquicSessionSignal::new(
+        authorization.reservation_id,
+        route_context_id,
+        authorization.exit_native_instance_id,
+        path_ids,
+    );
+    let Ok(signal) = signal else {
+        let _ = client
+            .stop_session(StopSession {
+                route_context_id: route_context_id.to_vec(),
+            })
+            .await;
+        let _ = helper.destroy_context(&owner).await;
+        return Err(ProductionMpquicError::Invalid(
+            "MPQUIC Exit readiness signal",
+        ));
+    };
+    Ok((
+        ActiveProductionMpquicExitRoute {
+            client,
+            helper,
+            owner,
+            route_context_id,
+            expires_at_ms: authorization.expires_at_ms,
+        },
+        signal,
+    ))
+}
+
+async fn start_native_exit_listener_set(
+    client: &NativeClient,
+    authorization: &NativeExitAuthorizationParts,
+    listeners: Vec<CommittedMpquicExitListener>,
+) -> Result<(), ProductionMpquicError> {
+    let minimum_paths = u32::try_from(listeners.len())
+        .map_err(|_| ProductionMpquicError::Invalid("MPQUIC Exit path count"))?;
+    if !(MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&listeners.len()) {
+        return Err(ProductionMpquicError::Invalid("MPQUIC Exit path count"));
+    }
+    let last = listeners.len() - 1;
+    for (index, listener) in listeners.into_iter().enumerate() {
+        let endpoint = client
+            .start_exit_session(
+                StartExitSession {
+                    route_context_id: authorization.route_context_id.to_vec(),
+                    auth_secret: authorization.auth_bearer.to_vec(),
+                    expires_at_ms: authorization.expires_at_ms,
+                    minimum_paths,
+                    masque_context_id: authorization.masque_context_id,
+                    transport_mode: TransportMode::MultipathQuic as i32,
+                    exit_spki_sha256: authorization.spki_sha256.to_vec(),
+                    tls_server_name: authorization.tls_server_name.clone(),
+                    path_id: listener.path_id,
+                    listener_ip: listener.listener_ip.to_vec(),
+                    listener_port: u32::from(MPQUIC_EXIT_LISTENER_PORT),
+                    expected_client_ip: listener.expected_client_ip.to_vec(),
+                    expected_client_port: u32::from(mpquic_client_port(listener.path_id)?),
+                    reservation_hash: listener.reservation_hash.to_vec(),
+                    tls_certificate_pem: authorization.tls_certificate_pem.to_vec(),
+                    tls_private_key_pem: authorization.tls_private_key_pem.to_vec(),
+                    reservation_id: authorization.reservation_id.to_vec(),
+                    finalize_id: authorization.finalize_id.to_vec(),
+                    auth_commitment: authorization.auth_commitment.to_vec(),
+                    certificate_sha256: authorization.certificate_sha256.to_vec(),
+                    client_native_instance_id: authorization.client_native_instance_id.to_vec(),
+                    exit_native_instance_id: authorization.exit_native_instance_id.to_vec(),
+                },
+                listener.descriptor,
+            )
+            .await?;
+        if endpoint.listener_set_ready() != (index == last) {
+            return Err(if endpoint.listener_set_ready() {
+                ProductionMpquicError::UnexpectedReady
+            } else {
+                ProductionMpquicError::ReadyTimeout
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Affine preflight of the exact native Client process incarnation signed into reservations.
 #[must_use = "native process preflight authority must be consumed by one route"]
@@ -915,10 +1329,23 @@ pub enum ProductionMpquicError {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         net::UdpSocket,
         os::fd::OwnedFd,
+        os::unix::fs::PermissionsExt,
         sync::{Arc, Mutex},
-        time::Duration,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+    use tempfile::tempdir;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{UnixListener, UnixStream},
+    };
+    use volparossa_quic::{
+        NATIVE_API_VERSION, NativeProcessIdentity, NativeRequest, NativeResponse, Preflight,
+        encode_response, native_request, read_request, request_sha256,
     };
 
     use super::*;
@@ -1097,5 +1524,161 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ProductionMpquicError::ReadyTimeout));
         assert!(native.state.lock().unwrap().stopped);
+    }
+
+    fn native_response(request: &NativeRequest, result: NativeResultCode) -> NativeResponse {
+        NativeResponse {
+            api_version: NATIVE_API_VERSION,
+            request_nonce: request.request_nonce.clone(),
+            result: result as i32,
+            diagnostic_code: "mpquic_exit_test".to_owned(),
+            paths: Vec::new(),
+            received_datagram: None,
+            process_identity: Some(NativeProcessIdentity {
+                role: NativeProcessRole::Exit as i32,
+                native_instance_id: vec![8; 32],
+            }),
+            request_sha256: request_sha256(request).unwrap().to_vec(),
+            tunnel_assignment: None,
+        }
+    }
+
+    async fn read_fake_process_request(stream: &mut UnixStream) -> NativeRequest {
+        // The first 32 bytes are zero for ordinary requests and the domain-separated SCM_RIGHTS
+        // binding for StartExitSession. A normal read deliberately discards the test FD copy.
+        let mut descriptor_binding = [0_u8; 32];
+        stream.read_exact(&mut descriptor_binding).await.unwrap();
+        let request = read_request(stream).await.unwrap();
+        let mut trailing = [0_u8; 1];
+        assert_eq!(stream.read(&mut trailing).await.unwrap(), 0);
+        request
+    }
+
+    fn committed_exit_listener(
+        route_context_id: [u8; 16],
+        path_id: u32,
+    ) -> CommittedMpquicExitListener {
+        let addresses =
+            overlay_addresses(route_context_id, u8::try_from(path_id).unwrap()).unwrap();
+        let socket = Socket::new(Domain::IPV6, Type::DGRAM.cloexec(), Some(Protocol::UDP)).unwrap();
+        socket.set_only_v6(true).unwrap();
+        socket.set_reuse_address(false).unwrap();
+        socket.set_reuse_port(false).unwrap();
+        socket.set_freebind_v6(true).unwrap();
+        socket
+            .bind(&SockAddr::from(SocketAddr::new(
+                IpAddr::V6(addresses.exit),
+                MPQUIC_EXIT_LISTENER_PORT,
+            )))
+            .unwrap();
+        socket.set_nonblocking(true).unwrap();
+        CommittedMpquicExitListener {
+            descriptor: socket.into(),
+            path_id,
+            listener_ip: addresses.exit.octets(),
+            expected_client_ip: addresses.client.octets(),
+            reservation_hash: [u8::try_from(path_id).unwrap(); 32],
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_responder_boundary_waits_for_two_native_listener_fds() {
+        let directory = tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = directory.path().join("mpquic-exit.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut preflight_stream, _) = listener.accept().await.unwrap();
+            let preflight = read_fake_process_request(&mut preflight_stream).await;
+            assert!(matches!(
+                preflight.operation,
+                Some(native_request::Operation::Preflight(Preflight {
+                    expected_role
+                })) if expected_role == NativeProcessRole::Exit as i32
+            ));
+            preflight_stream
+                .write_all(
+                    &encode_response(&native_response(&preflight, NativeResultCode::Ok)).unwrap(),
+                )
+                .await
+                .unwrap();
+
+            for (index, expected_path) in [1_u32, 2].into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_fake_process_request(&mut stream).await;
+                let Some(native_request::Operation::StartExitSession(start)) = &request.operation
+                else {
+                    panic!("StartExitSession boundary");
+                };
+                assert_eq!(start.path_id, expected_path);
+                assert_eq!(start.minimum_paths, 2);
+                assert_eq!(start.transport_mode, TransportMode::MultipathQuic as i32);
+                assert_eq!(start.auth_secret, vec![b'A'; 43]);
+                assert_eq!(start.reservation_id, vec![1; 16]);
+                assert_eq!(start.route_context_id, vec![2; 16]);
+                assert_eq!(start.finalize_id, vec![4; 16]);
+                assert_eq!(start.client_native_instance_id, vec![7; 32]);
+                assert_eq!(start.exit_native_instance_id, vec![8; 32]);
+                let result = if index == 0 {
+                    NativeResultCode::InsufficientPaths
+                } else {
+                    NativeResultCode::Ok
+                };
+                stream
+                    .write_all(&encode_response(&native_response(&request, result)).unwrap())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client = NativeClient::new(socket_path)
+            .unwrap()
+            .preflight(NativeProcessRole::Exit)
+            .await
+            .unwrap();
+        let auth_bearer = Zeroizing::new(*b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let mut hasher = Sha256::new();
+        hasher.update(b"VOLPAROSSA-NATIVE-ROUTE-AUTH-COMMITMENT-V4\0");
+        hasher.update(auth_bearer.as_slice());
+        let expires_at_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60_000;
+        let authorization = NativeExitAuthorizationParts {
+            reservation_id: [1; 16],
+            route_context_id: [2; 16],
+            finalize_id: [4; 16],
+            expires_at_ms,
+            auth_bearer,
+            auth_commitment: hasher.finalize().into(),
+            certificate_sha256: [6; 32],
+            spki_sha256: [3; 32],
+            masque_context_id: 9,
+            tls_server_name: b"exit.example".to_vec(),
+            tls_certificate_pem: Zeroizing::new(
+                b"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n".to_vec(),
+            ),
+            tls_private_key_pem: Zeroizing::new(
+                b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n".to_vec(),
+            ),
+            client_native_instance_id: [7; 32],
+            exit_native_instance_id: [8; 32],
+        };
+        start_native_exit_listener_set(
+            &client,
+            &authorization,
+            vec![
+                committed_exit_listener([2; 16], 1),
+                committed_exit_listener([2; 16], 2),
+            ],
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
     }
 }

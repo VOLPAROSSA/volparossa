@@ -52,6 +52,7 @@ volparossa-udp = { path = "../volparossa-udp", version = "=0.1.0" }
 volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
 
 [dev-dependencies]
+socket2.workspace = true
 tempfile.workspace = true
 volparossa-discovery = { path = "../volparossa-discovery", version = "=0.1.0", features = ["internal-test-hooks"] }
 volparossa-test-support = { path = "../volparossa-test-support", version = "=0.1.0" }

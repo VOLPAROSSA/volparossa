@@ -60,9 +60,10 @@ use volparossa_discovery::{
     ClientPreselectionResponseArrival, DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation,
     DatapathRelayRequest, DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles,
     DiscoveryService, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT,
-    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ExitMptcpSessionSignal,
-    ForwardStatus, LocalPreselectionPolicy, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
-    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, MptcpSessionStartRequest,
+    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ExitMpquicSessionSignal,
+    ExitMptcpSessionSignal, ForwardStatus, LocalPreselectionPolicy,
+    MAX_CONCURRENT_DATAPATH_RELAY_STREAMS, MAX_CONCURRENT_FORWARDING_STREAMS,
+    MAX_FORWARDING_FRAME_BYTES, MpquicSessionStartRequest, MptcpSessionStartRequest,
     NativeProbeReadyForwardRequest, PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink,
     UdpExitSessionSignal, UdpSessionStartRequest, UpstreamExitForwardRequest,
     UpstreamExitForwardResponse, advertisement_envelope_matches_peer, capability,
@@ -86,18 +87,20 @@ use volparossa_protocol::{
     ExitReservationFinalizeRequest, IssuedNativeProbeRelayReady, MAX_CONTROL_PAYLOAD_SIZE,
     MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding, NativeProbeForwardingProof,
     NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermitRequest,
-    NativeProbeRelayLocalProofs, NativeProbeStart, NodeAdvertisement as WireAdvertisement,
-    ObservationAddressFamily, ObservationNetworkPrefix, PreselectionActorBinding, ProbeLegEvidence,
-    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
-    RelayReservation, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
-    VerifiedNativeProbePermit, VerifiedNativeProbeStartForRelay, decode_canonical,
-    encode_canonical, exit_confirmation_envelope_hash, generate_nonce,
-    native_probe_prepared_lease_commitment, node_id_from_public_key, sign_control_message_with,
-    sign_native_probe_relay_ready_with, sign_native_probe_relay_result_with,
-    verify_control_message, verify_native_probe_authorization_chain,
-    verify_native_probe_exit_ready, verify_native_probe_exit_result_for_relay,
-    verify_native_probe_permit, verify_native_probe_start_for_relay,
+    NativeProbeRelayLocalProofs, NativeProbeStart, NativeRouteCredentialDelivery,
+    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, ObservationNetworkPrefix,
+    PreselectionActorBinding, ProbeLegEvidence, RelayAuthorization, RelayProbePermit,
+    RelayProbePermitRequest, RelayProbeResult, RelayReservation, RelayReservationRequest,
+    ReplayCache, SignedEnvelope, TimePolicy, Transport, VerifiedNativeProbePermit,
+    VerifiedNativeProbeStartForRelay, decode_canonical, encode_canonical,
+    exit_confirmation_envelope_hash, generate_nonce, native_probe_prepared_lease_commitment,
+    node_id_from_public_key, sign_control_message_with, sign_native_probe_relay_ready_with,
+    sign_native_probe_relay_result_with, verify_control_message,
+    verify_native_probe_authorization_chain, verify_native_probe_exit_ready,
+    verify_native_probe_exit_result_for_relay, verify_native_probe_permit,
+    verify_native_probe_start_for_relay, verify_relay_reservation,
 };
+use volparossa_quic::NativeClient;
 use volparossa_relay::{AcceptedRelayReservation, RelayService, RelayServiceConfig};
 use volparossa_routing::{
     AcquireTransportSocket, ActivateLeaseBatch, CommitLeaseBatch, CommittedLeaseBatch, ContextRole,
@@ -116,6 +119,9 @@ use crate::{
         protocol_endpoint_for_native,
     },
     helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
+    mpquic_runtime::{
+        ExitMpquicPathAuthorization, ProductionMpquicExitPreflight, start_production_mpquic_exit,
+    },
     mptcp_flow_runtime::{
         ProductionMptcpExitCleanup, ProductionMptcpExitCompletion, ProductionMptcpExitRuntime,
     },
@@ -160,6 +166,7 @@ pub(crate) struct DiscoveryRuntimeResources {
     pub(crate) role_store: RoleStore,
     pub(crate) metrics: MetricsRegistry,
     pub(crate) helper: HelperClient,
+    pub(crate) mpquic_socket: PathBuf,
 }
 
 /// Route-policy-only input for one actor-owned client preselection attempt.
@@ -593,6 +600,7 @@ struct PendingRelayForward {
     native_result: Option<PendingNativeProbeResult>,
     udp_session: Option<PendingUdpSessionStart>,
     mptcp_session: Option<PendingMptcpSessionStart>,
+    mpquic_session: Option<PendingMpquicSessionStart>,
 }
 
 struct PendingNativeProbeReady {
@@ -783,6 +791,20 @@ struct PendingMptcpSessionStart {
     route: PreparedProductionRelayRoute,
 }
 
+struct PendingMpquicSessionStart {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<DatapathRelayResponse>>,
+    canonical_start: Vec<u8>,
+    route: PreparedProductionRelayRoute,
+}
+
+struct VerifiedMpquicRelayDispatch {
+    exit: ExitReservation,
+    relay: RelayReservation,
+    signed_relay_reservation: Vec<u8>,
+}
+
 struct PendingMptcpExitRelay {
     forward_id: [u8; FORWARD_ID_BYTES],
     channels: Vec<request_response::ResponseChannel<UpstreamExitForwardResponse>>,
@@ -808,6 +830,7 @@ struct PreparedProductionExitRoute {
     exit_leases: Vec<ExitEndpointLease>,
     pending_activations: HashMap<u32, LeaseActivation>,
     commit: Option<CommitLeaseBatch>,
+    mpquic_preflight: Option<ProductionMpquicExitPreflight>,
     expires_at_ms: u64,
 }
 
@@ -1517,6 +1540,7 @@ pub struct DiscoveryRuntime {
     config: Config,
     roles: RolesConfig,
     helper: HelperClient,
+    mpquic_socket: PathBuf,
     relay_service: Option<RelayService>,
     exit_service: Option<ExitService>,
     metrics: MetricsRegistry,
@@ -1596,6 +1620,7 @@ impl DiscoveryRuntime {
             role_store: _role_store,
             metrics,
             helper,
+            mpquic_socket,
         } = resources;
         let protocol_roles = DiscoveryProtocolRoles::new(roles.client, roles.relay, roles.exit);
         let mut service =
@@ -1657,6 +1682,7 @@ impl DiscoveryRuntime {
             config: config.clone(),
             roles,
             helper,
+            mpquic_socket,
             relay_service,
             exit_service,
             metrics,
@@ -3172,7 +3198,10 @@ impl DiscoveryRuntime {
             .pending_relay_forwards
             .iter()
             .filter_map(|(id, pending)| {
-                (pending.udp_session.is_some() || pending.mptcp_session.is_some()).then_some(*id)
+                (pending.udp_session.is_some()
+                    || pending.mptcp_session.is_some()
+                    || pending.mpquic_session.is_some())
+                .then_some(*id)
             })
             .collect::<Vec<_>>();
         for id in pending_ids {
@@ -3184,6 +3213,8 @@ impl DiscoveryRuntime {
                 self.finish_udp_session_unavailable(udp).await;
             } else if let Some(mptcp) = pending.mptcp_session.take() {
                 self.finish_mptcp_session_unavailable(mptcp).await;
+            } else if let Some(mpquic) = pending.mpquic_session.take() {
+                self.finish_mpquic_session_unavailable(mpquic).await;
             }
         }
     }
@@ -4552,6 +4583,16 @@ impl DiscoveryRuntime {
                         .await;
                         return;
                     }
+                    Ok(DatapathRelayOperation::MpquicSessionStart) => {
+                        self.begin_mpquic_session_start(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
                     _ => {}
                 }
                 let local_peer = *self.service.local_peer_id();
@@ -5193,6 +5234,7 @@ impl DiscoveryRuntime {
                     route,
                 }),
                 mptcp_session: None,
+                mpquic_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "UDP_SESSION_RELAY_DISPATCHED");
@@ -5461,9 +5503,260 @@ impl DiscoveryRuntime {
                     selected_path_ids,
                     route,
                 }),
+                mpquic_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "MPTCP_SESSION_RELAY_DISPATCHED");
+    }
+
+    /// Commit the carrying Relay route and forward the complete, byte-identical MPQUIC proof set
+    /// to the signed Exit. The Relay never opens or learns the opaque native bearer.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine Relay Commit and exact MPQUIC Exit dispatch transaction"
+    )]
+    async fn begin_mpquic_session_start(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Some((route_context_id, route)) = cleanup.take() {
+                    self.retire_production_relay_route(route_context_id, route)
+                        .await;
+                }
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::MpquicSessionStart,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let Some(datapath_request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id())
+        else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::MpquicSessionStart,
+                now_ms,
+            )
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("MPQUIC_SESSION_RELAY_SCOPE_REJECTED");
+        }
+        let Some(scope) =
+            verified_mpquic_session_start_scope(request.client_signed_request(), now_ms)
+        else {
+            reject!("MPQUIC_SESSION_RELAY_SCOPE_REJECTED");
+        };
+        let Some(first) = scope.paths.into_iter().next() else {
+            reject!("MPQUIC_SESSION_RELAY_PATH_SET_REJECTED");
+        };
+        let dispatch = VerifiedMpquicRelayDispatch {
+            exit: scope.exit,
+            relay: first.relay,
+            signed_relay_reservation: first.signed_relay_reservation,
+        };
+        let Some(route_context_id) =
+            fixed_bytes::<FORWARD_ID_BYTES>(&dispatch.exit.route_context_id)
+        else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&dispatch.exit.exit_peer_id) else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&dispatch.exit.exit_node_id) else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: datapath_request_id,
+        };
+        if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
+            if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id) {
+                if let Some(mpquic) = pending.mpquic_session.as_mut() {
+                    if pending.operation == ExitForwardOperation::MpquicSessionStart
+                        && mpquic.canonical_start == request.client_signed_request()
+                        && mpquic.channels.len() < MAX_COALESCED_WAITERS
+                    {
+                        mpquic.channels.push(channel);
+                        return;
+                    }
+                }
+            }
+            reject!("MPQUIC_SESSION_RELAY_RETRY_CONFLICT");
+        }
+        if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
+            if existing.usable
+                && existing.authenticated_client_peer == authenticated_client_peer
+                && existing.accepted.encoded() == dispatch.signed_relay_reservation
+                && existing.accepted.path_id() == dispatch.relay.path_id
+                && existing.expires_at_ms > now_ms
+                && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            {
+                if let Some(signal) = existing.committed_signal.clone() {
+                    if let Ok(response) = DatapathRelayResponse::granted(
+                        datapath_request_id.to_vec(),
+                        DatapathRelayOperation::MpquicSessionStart,
+                        self.local_node_id.to_vec(),
+                        local_peer.to_bytes(),
+                        signal,
+                    ) {
+                        let _ = self.service.send_datapath_relay_response(channel, response);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(route) = self
+            .prepared_production_relay_routes
+            .remove(&route_context_id)
+        else {
+            reject!("MPQUIC_SESSION_RELAY_OWNER_UNAVAILABLE");
+        };
+        cleanup = Some((route_context_id, route));
+        let route = cleanup
+            .as_ref()
+            .map(|(_, route)| route)
+            .expect("installed MPQUIC Relay cleanup owner");
+        if !route.usable
+            || route.authenticated_client_peer != authenticated_client_peer
+            || route.accepted.encoded() != dispatch.signed_relay_reservation
+            || route.accepted.route_context_id() != &route_context_id
+            || route.accepted.path_id() != dispatch.relay.path_id
+            || route.accepted.reservation_id().as_slice() != dispatch.exit.reservation_id
+            || route.accepted.exit_node_id().as_slice() != dispatch.exit.exit_node_id
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.committed_signal.is_some()
+            || exit_peer == local_peer
+        {
+            reject!("MPQUIC_SESSION_RELAY_OWNER_MISMATCH");
+        }
+        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+            reject!("MPQUIC_SESSION_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        let authorized_exit = self
+            .forwarded_exits
+            .get(&ForwardedExitKey {
+                control_relay_peer: local_peer,
+                exit_peer,
+            })
+            .filter(|capability| {
+                forwarded_exit_capability_matches(
+                    capability,
+                    &authorized_control,
+                    self.local_node_id,
+                    local_peer,
+                    self.local_public_key,
+                    exit_node_id,
+                    exit_peer,
+                    request.deadline_unix_ms(),
+                )
+            })
+            .cloned();
+        let Some(authorized_exit) = authorized_exit else {
+            reject!("MPQUIC_SESSION_RELAY_EXIT_AUTHORITY_UNAVAILABLE");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            datapath_request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::MpquicSessionStart,
+            request.client_signed_request().to_vec(),
+        ) else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            reject!("MPQUIC_SESSION_RELAY_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
+        {
+            reject!("MPQUIC_SESSION_RELAY_CAPACITY");
+        }
+        let route = cleanup
+            .as_mut()
+            .map(|(_, route)| route)
+            .expect("installed MPQUIC Relay cleanup owner");
+        let commit = route
+            .commit
+            .take()
+            .expect("validated prepared MPQUIC Relay commit");
+        if self
+            .helper
+            .commit_lease_batch(&mut route.helper_owner, commit)
+            .await
+            .is_err()
+        {
+            reject!("MPQUIC_SESSION_RELAY_HELPER_COMMIT_REJECTED");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            reject!("MPQUIC_SESSION_RELAY_TRANSPORT_UNAVAILABLE");
+        };
+        let (_, route) = cleanup.take().expect("committed MPQUIC Relay owner");
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::MpquicSessionStart,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: Some(authorized_exit),
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: Some(PendingMpquicSessionStart {
+                    datapath_request_id,
+                    route_context_id,
+                    channels: vec![channel],
+                    canonical_start: request.client_signed_request().to_vec(),
+                    route,
+                }),
+            },
+        );
+        log_relay_forward_admission(Some(state), "MPQUIC_SESSION_RELAY_DISPATCHED");
     }
 
     #[allow(
@@ -5661,6 +5954,7 @@ impl DiscoveryRuntime {
                 native_result: None,
                 udp_session: None,
                 mptcp_session: None,
+                mpquic_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_DISPATCHED");
@@ -5976,6 +6270,7 @@ impl DiscoveryRuntime {
                 native_result: None,
                 udp_session: None,
                 mptcp_session: None,
+                mpquic_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_AUTHORIZATION_DISPATCHED");
@@ -6181,6 +6476,7 @@ impl DiscoveryRuntime {
                 }),
                 udp_session: None,
                 mptcp_session: None,
+                mpquic_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_DISPATCHED");
@@ -6374,6 +6670,7 @@ impl DiscoveryRuntime {
                 native_result: None,
                 udp_session: None,
                 mptcp_session: None,
+                mpquic_session: None,
             },
         );
         log_relay_forward_admission(state, "EXIT_FORWARD_RELAY_DISPATCHED");
@@ -6417,6 +6714,8 @@ impl DiscoveryRuntime {
                 self.finish_udp_session_unavailable(udp).await;
             } else if let Some(mptcp) = pending.mptcp_session.take() {
                 self.finish_mptcp_session_unavailable(mptcp).await;
+            } else if let Some(mpquic) = pending.mpquic_session.take() {
+                self.finish_mpquic_session_unavailable(mpquic).await;
             } else {
                 self.finish_relay_definitive(pending);
             }
@@ -6556,6 +6855,61 @@ impl DiscoveryRuntime {
                 }
             }
             log_reservation_event(state, "MPTCP_SESSION_RELAY_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
+        }
+        if let Some(mut mpquic) = pending.mpquic_session.take() {
+            let encoded_signal = response
+                .signed_responses()
+                .first()
+                .filter(|_| response.validated_status() == Ok(ForwardStatus::Granted))
+                .cloned();
+            let Some(encoded_signal) = encoded_signal else {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            if !mpquic_session_signal_matches(&mpquic, &encoded_signal, now_ms) {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+                return OutboundEventOutcome::InvalidResponse;
+            }
+            let Ok(datapath_response) = DatapathRelayResponse::granted(
+                mpquic.datapath_request_id.to_vec(),
+                DatapathRelayOperation::MpquicSessionStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                encoded_signal.clone(),
+            ) else {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+                return OutboundEventOutcome::Failed;
+            };
+            mpquic.route.committed_start = Some(mpquic.canonical_start.clone());
+            mpquic.route.committed_signal = Some(encoded_signal);
+            let route_context_id = mpquic.route_context_id;
+            if self
+                .prepared_production_relay_routes
+                .contains_key(&route_context_id)
+            {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+                return OutboundEventOutcome::Failed;
+            }
+            self.prepared_production_relay_routes
+                .insert(route_context_id, mpquic.route);
+            for channel in mpquic.channels {
+                if self
+                    .service
+                    .send_datapath_relay_response(channel, datapath_response.clone())
+                    .is_err()
+                {
+                    if let Some(route) = self
+                        .prepared_production_relay_routes
+                        .remove(&route_context_id)
+                    {
+                        self.retire_production_relay_route(route_context_id, route)
+                            .await;
+                    }
+                    return OutboundEventOutcome::Failed;
+                }
+            }
+            log_reservation_event(state, "MPQUIC_SESSION_RELAY_COMPLETED").await;
             return OutboundEventOutcome::Completed;
         }
         if let Some(native) = pending.native_ready.take() {
@@ -7134,6 +7488,30 @@ impl DiscoveryRuntime {
         }
     }
 
+    async fn finish_mpquic_session_unavailable(&mut self, mpquic: PendingMpquicSessionStart) {
+        let PendingMpquicSessionStart {
+            datapath_request_id,
+            route_context_id,
+            channels,
+            canonical_start: _,
+            route,
+        } = mpquic;
+        self.retire_production_relay_route(route_context_id, route)
+            .await;
+        if let Ok(response) = DatapathRelayResponse::unavailable(
+            datapath_request_id.to_vec(),
+            DatapathRelayOperation::MpquicSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            for channel in channels {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(channel, response.clone());
+            }
+        }
+    }
+
     /// Destroy before releasing the Relay reservation. A failed Destroy keeps the exact affine
     /// owner quarantined for the actor's bounded maintenance retry and never makes it reusable.
     async fn retire_production_relay_route(
@@ -7165,7 +7543,9 @@ impl DiscoveryRuntime {
 
     fn finish_relay_definitive(&mut self, mut pending: PendingRelayForward) {
         debug_assert!(
-            pending.udp_session.is_none() && pending.mptcp_session.is_none(),
+            pending.udp_session.is_none()
+                && pending.mptcp_session.is_none()
+                && pending.mpquic_session.is_none(),
             "session cleanup must use the awaited affine path"
         );
         if let Some(native) = pending.native_ready.take() {
@@ -7249,6 +7629,8 @@ impl DiscoveryRuntime {
             self.finish_udp_session_unavailable(udp).await;
         } else if let Some(mptcp) = pending.mptcp_session.take() {
             self.finish_mptcp_session_unavailable(mptcp).await;
+        } else if let Some(mpquic) = pending.mpquic_session.take() {
+            self.finish_mpquic_session_unavailable(mpquic).await;
         } else {
             self.finish_relay_ambiguity(pending);
         }
@@ -7702,12 +8084,15 @@ impl DiscoveryRuntime {
                 .start_production_udp_exit_session(request.canonical_request(), now_ms, state)
                 .await
                 .map(|signal| vec![signal]),
+            ExitForwardOperation::MpquicSessionStart => self
+                .start_production_mpquic_exit_session(request.canonical_request(), now_ms)
+                .await
+                .map(|signal| vec![signal]),
             ExitForwardOperation::NativeProbePermit
             | ExitForwardOperation::NativeProbeAuthorize
             | ExitForwardOperation::NativeProbeReady
             | ExitForwardOperation::NativeProbeResult
             | ExitForwardOperation::MptcpSessionStart
-            | ExitForwardOperation::MpquicSessionStart
             | ExitForwardOperation::Unspecified => None,
         };
         let response = responses
@@ -7768,16 +8153,18 @@ impl DiscoveryRuntime {
         let capability =
             decoded_signed_payload::<ClientSessionCapability>(&finalize.client_session_capability)?;
 
-        // These in-process UDP and kernel-MPTCP transports own a fresh per-route incarnation. A
-        // userspace MPQUIC Exit must instead supply its real native preflight incarnation.
-        if !matches!(
-            capability.allowed_transports.as_slice(),
+        // In-process UDP and kernel-MPTCP own a fresh per-route incarnation. Userspace MPQUIC
+        // must instead sign the real native instance observed during preflight.
+        let native_mpquic = match capability.allowed_transports.as_slice() {
             [transport]
                 if *transport == Transport::UdpSinglePath as i32
-                    || *transport == Transport::TcpMptcp as i32
-        ) {
-            return None;
-        }
+                    || *transport == Transport::TcpMptcp as i32 =>
+            {
+                false
+            }
+            [transport] if *transport == Transport::MultipathQuic as i32 => true,
+            _ => return None,
+        };
         if let Some(existing) = self.prepared_production_exit_routes.get(&route_context_id) {
             return (existing.canonical_finalize_request == request.canonical_request()
                 && existing.expires_at_ms > now_ms)
@@ -7786,6 +8173,17 @@ impl DiscoveryRuntime {
         if self.prepared_production_exit_routes.len() >= MAX_CONCURRENT_FORWARDING_STREAMS {
             return None;
         }
+        let mpquic_preflight = if native_mpquic {
+            Some(
+                ProductionMpquicExitPreflight::new(
+                    NativeClient::new(self.mpquic_socket.clone()).ok()?,
+                )
+                .await
+                .ok()?,
+            )
+        } else {
+            None
+        };
         let prepare = production_exit_prepare_request(
             &finalize,
             request.deadline_unix_ms(),
@@ -7803,7 +8201,11 @@ impl DiscoveryRuntime {
             return None;
         };
         let exit_leases = exit_batch.exit_leases().to_vec();
-        let exit_native_instance_id = fresh_exit_route_runtime_instance_id()?;
+        let exit_native_instance_id = mpquic_preflight
+            .as_ref()
+            .map_or_else(fresh_exit_route_runtime_instance_id, |preflight| {
+                Some(*preflight.native_instance_id())
+            })?;
         let mut identity_provider = ProductionExitNativeRouteIdentityProvider;
         let identity = &self.identity;
         let finalized = self
@@ -7853,6 +8255,7 @@ impl DiscoveryRuntime {
                 exit_leases,
                 pending_activations: HashMap::new(),
                 commit: None,
+                mpquic_preflight,
             },
         );
         debug_assert!(previous.is_none(), "production Exit route checked vacant");
@@ -8044,6 +8447,94 @@ impl DiscoveryRuntime {
         tokio::spawn(async move {
             let _ = active.run(now_ms).await;
         });
+        Some(encoded)
+    }
+
+    /// Consume one exact Client-session-signed opaque bearer at the Exit, commit every confirmed
+    /// helper path and return readiness only after the preflighted native Exit owns all listeners.
+    async fn start_production_mpquic_exit_session(
+        &mut self,
+        encoded_start: &[u8],
+        now_ms: u64,
+    ) -> Option<Vec<u8>> {
+        let scope = verified_mpquic_session_start_scope(encoded_start, now_ms)?;
+        let start = decode_canonical::<MpquicSessionStartRequest>(
+            encoded_start,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+        )
+        .ok()?;
+        let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)?;
+        let route = self
+            .prepared_production_exit_routes
+            .get(&route_context_id)?;
+        let exact_activations = route.exit_leases.len() == start.paths().len()
+            && route.pending_activations.len() == start.paths().len()
+            && scope
+                .paths
+                .iter()
+                .zip(start.paths())
+                .all(|(verified, proof)| {
+                    route
+                        .pending_activations
+                        .get(&verified.path_id)
+                        .is_some_and(|activation| {
+                            activation.signed_relay_reservation == proof.signed_relay_reservation()
+                        })
+                });
+        if route.bundle.signed_exit_reservation() != start.signed_exit_reservation()
+            || route.bundle.accepted().reservation_id().as_slice() != scope.exit.reservation_id
+            || route.bundle.accepted().route_context_id() != &route_context_id
+            || usize::try_from(route.bundle.accepted().maximum_paths()).ok()? != scope.paths.len()
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.mpquic_preflight.is_none()
+            || !exact_activations
+        {
+            return None;
+        }
+        let native_scope = route.bundle.accepted().native_route_authorization_scope();
+        let credential = self
+            .exit_service
+            .as_mut()?
+            .take_native_route_authorization_with_credential(
+                &native_scope,
+                start.signed_credential_delivery(),
+                now_ms,
+            )
+            .ok()?;
+        let mut route = self
+            .prepared_production_exit_routes
+            .remove(&route_context_id)?;
+        let paths = scope
+            .paths
+            .into_iter()
+            .map(|path| {
+                ExitMpquicPathAuthorization::new(path.path_id, path.signed_relay_reservation)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let result = start_production_mpquic_exit(
+            route.mpquic_preflight.take()?,
+            self.helper.clone(),
+            route.helper_owner,
+            route.commit.take()?,
+            credential,
+            paths,
+            now_ms,
+        )
+        .await;
+        let Ok((active, signal)) = result else {
+            let _ = self
+                .exit_service
+                .as_mut()
+                .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+            return None;
+        };
+        let encoded = encode_canonical(
+            &signal,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        )
+        .ok()?;
+        tokio::spawn(active.run(now_ms));
         Some(encoded)
     }
 
@@ -10389,6 +10880,7 @@ impl DiscoveryRuntime {
             .filter_map(|(id, pending)| {
                 (pending.udp_session.is_none()
                     && pending.mptcp_session.is_none()
+                    && pending.mpquic_session.is_none()
                     && (!preserve_fetch_attempts
                         || pending.operation != ExitForwardOperation::FetchExitAdvertisement)
                     && keys.contains(&ForwardedExitKey {
@@ -11278,8 +11770,20 @@ fn datapath_request_scope_matches(
                         && request.deadline_unix_ms() <= path.expires_at_ms
                 })
         }
-        // Wire framing exists; production scope/signature admission is a separate runtime hook.
-        DatapathRelayOperation::MpquicSessionStart | DatapathRelayOperation::Unspecified => false,
+        DatapathRelayOperation::MpquicSessionStart => {
+            verified_mpquic_session_start_scope(request.client_signed_request(), now_ms)
+                .is_some_and(|scope| {
+                    let Some(first) = scope.paths.first() else {
+                        return false;
+                    };
+                    request.exit_signed_authorization().is_empty()
+                        && request.request_id() == &scope.credential_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= scope.expires_at_ms
+                        && request.relay_node_id() == first.relay.relay_node_id
+                        && request.relay_peer_id() == first.relay.relay_peer_id
+                })
+        }
+        DatapathRelayOperation::Unspecified => false,
     }
 }
 
@@ -12395,11 +12899,178 @@ fn forward_request_scope_matches(
                         && request.deadline_unix_ms() <= path.expires_at_ms
                 })
         }
-        // Wire framing exists; production scope/signature admission is a separate runtime hook.
-        ExitForwardOperation::MpquicSessionStart
-        | ExitForwardOperation::FetchExitAdvertisement
-        | ExitForwardOperation::Unspecified => false,
+        ExitForwardOperation::MpquicSessionStart => {
+            verified_mpquic_session_start_scope(request.canonical_request(), now_ms).is_some_and(
+                |scope| {
+                    let Some(first) = scope.paths.first() else {
+                        return false;
+                    };
+                    request.forward_id() == &scope.credential_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= scope.expires_at_ms
+                        && request.control_relay_node_id() == first.relay.relay_node_id
+                        && request.control_relay_peer_id() == first.relay.relay_peer_id
+                        && request.exit_node_id() == scope.exit.exit_node_id
+                        && request.exit_peer_id() == scope.exit.exit_peer_id
+                },
+            )
+        }
+        ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
     }
+}
+
+struct VerifiedMpquicPathScope {
+    relay: RelayReservation,
+    path_id: u32,
+    signed_relay_reservation: Vec<u8>,
+}
+
+struct VerifiedMpquicSessionStartScope {
+    exit: ExitReservation,
+    paths: Vec<VerifiedMpquicPathScope>,
+    credential_nonce: [u8; 32],
+    expires_at_ms: u64,
+}
+
+fn mpquic_session_signal_matches(
+    pending: &PendingMpquicSessionStart,
+    encoded_signal: &[u8],
+    now_ms: u64,
+) -> bool {
+    let Some(scope) = verified_mpquic_session_start_scope(&pending.canonical_start, now_ms) else {
+        return false;
+    };
+    let Some(native_identity) = scope.exit.native_route_identity.as_ref() else {
+        return false;
+    };
+    let expected_path_ids = scope
+        .paths
+        .iter()
+        .map(|path| path.path_id)
+        .collect::<Vec<_>>();
+    decode_canonical::<ExitMpquicSessionSignal>(
+        encoded_signal,
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+    )
+    .ok()
+    .is_some_and(|signal| {
+        signal.validate().is_ok()
+            && signal.reservation_id() == pending.route.accepted.reservation_id()
+            && signal.route_context_id() == pending.route.accepted.route_context_id()
+            && signal.exit_native_instance_id() == native_identity.exit_native_instance_id
+            && signal.selected_path_ids() == expected_path_ids
+            && signal
+                .selected_path_ids()
+                .contains(&pending.route.accepted.path_id())
+    })
+}
+
+/// Verify every signature in one complete MPQUIC activation frame without consuming the
+/// actor-owned replay state. The Exit service consumes the credential delivery in its persistent
+/// replay cache immediately before native handoff.
+fn verified_mpquic_session_start_scope(
+    encoded: &[u8],
+    now_ms: u64,
+) -> Option<VerifiedMpquicSessionStartScope> {
+    let request = decode_canonical::<MpquicSessionStartRequest>(
+        encoded,
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+    )
+    .ok()?;
+    request.validate().ok()?;
+    let replay_capacity = request.paths().len().checked_mul(4)?.checked_add(2)?;
+    let mut replay = ReplayCache::new(replay_capacity).ok()?;
+    let exit_verified = verify_control_message::<ExitReservation>(
+        request.signed_exit_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .ok()?;
+    let exit_sender = *exit_verified.sender_id();
+    let mut expires_at_ms = exit_verified.expires_at_ms();
+    let exit = exit_verified.into_message();
+    if exit_sender.as_slice() != exit.exit_node_id {
+        return None;
+    }
+    let credential_verified = verify_control_message::<NativeRouteCredentialDelivery>(
+        request.signed_credential_delivery(),
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .ok()?;
+    let credential_nonce = *credential_verified.nonce();
+    expires_at_ms = expires_at_ms.min(credential_verified.expires_at_ms());
+    if credential_verified.sender_id().as_slice() != exit.client_session_id
+        || credential_verified.sender_public_key().as_slice() != exit.client_session_public_key
+    {
+        return None;
+    }
+
+    let mut paths = Vec::with_capacity(request.paths().len());
+    for proof in request.paths() {
+        let (relay_verified, authorization_verified) = verify_relay_reservation(
+            proof.signed_relay_reservation(),
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .ok()?;
+        let relay_sender = *relay_verified.sender_id();
+        let relay_expiry = relay_verified.expires_at_ms();
+        let authorization_sender = *authorization_verified.sender_id();
+        let authorization_expiry = authorization_verified.expires_at_ms();
+        let relay_grant = relay_verified.into_message();
+        let confirmation_verified = verify_control_message::<ExitReservationConfirmation>(
+            proof.signed_confirmation(),
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .ok()?;
+        let confirmation_sender = *confirmation_verified.sender_id();
+        let confirmation_public_key = *confirmation_verified.sender_public_key();
+        let confirmation_expiry = confirmation_verified.expires_at_ms();
+        let confirmation = confirmation_verified.into_message();
+        let receipt_verified = verify_control_message::<ExitConfirmationReceipt>(
+            proof.signed_confirmation_receipt(),
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .ok()?;
+        let receipt_sender = *receipt_verified.sender_id();
+        let receipt_expiry = receipt_verified.expires_at_ms();
+        let receipt = receipt_verified.into_message();
+        let confirmation_hash =
+            exit_confirmation_envelope_hash(proof.signed_confirmation()).ok()?;
+        if relay_sender.as_slice() != relay_grant.relay_node_id
+            || authorization_sender != exit_sender
+            || confirmation_sender.as_slice() != exit.client_session_id
+            || confirmation_public_key.as_slice() != exit.client_session_public_key
+            || receipt_sender != exit_sender
+            || receipt.confirmation_envelope_hash.as_slice() != confirmation_hash
+            || confirmation.relay_reservation != proof.signed_relay_reservation()
+        {
+            return None;
+        }
+        expires_at_ms = expires_at_ms
+            .min(relay_expiry)
+            .min(authorization_expiry)
+            .min(confirmation_expiry)
+            .min(receipt_expiry);
+        paths.push(VerifiedMpquicPathScope {
+            path_id: relay_grant.path_id,
+            relay: relay_grant,
+            signed_relay_reservation: proof.signed_relay_reservation().to_vec(),
+        });
+    }
+    Some(VerifiedMpquicSessionStartScope {
+        exit,
+        paths,
+        credential_nonce,
+        expires_at_ms,
+    })
 }
 
 struct VerifiedUdpSessionStartScope {
@@ -13132,6 +13803,7 @@ mod tests {
                     directory.path().join("helper.sock"),
                     directory.path().join("helper.token"),
                 ),
+                mpquic_socket: directory.path().join("mpquic.sock"),
             },
         )
         .expect("discovery runtime");
@@ -16568,6 +17240,7 @@ mod tests {
                 native_result: None,
                 udp_session: None,
                 mptcp_session: None,
+                mpquic_session: None,
             },
         );
 
@@ -19087,6 +19760,7 @@ mod tests {
                 native_result: None,
                 udp_session: None,
                 mptcp_session: None,
+                mpquic_session: None,
             },
         );
         fixture.runtime.forwarded_exits.insert(
@@ -19363,6 +20037,7 @@ mod tests {
                 native_result: None,
                 udp_session: None,
                 mptcp_session: None,
+                mpquic_session: None,
             },
         );
         let advertisement = service_advertisement(
