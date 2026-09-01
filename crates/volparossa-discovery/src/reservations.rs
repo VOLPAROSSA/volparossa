@@ -55,6 +55,8 @@ pub enum DatapathRelayOperation {
     UdpSessionStart = 6,
     /// Forward one exact committed MPTCP path proof set to the selected Exit.
     MptcpSessionStart = 7,
+    /// Forward one exact committed MPQUIC path proof set to the selected Exit.
+    MpquicSessionStart = 8,
 }
 
 /// Canonical direct datapath-relay request.
@@ -180,6 +182,18 @@ impl DatapathRelayRequest {
                     return Err(DatapathRelayRpcError::InvalidFrame);
                 }
                 decode_canonical::<crate::MptcpSessionStartRequest>(
+                    &self.client_signed_request,
+                    frame_limit(),
+                )
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+            }
+            DatapathRelayOperation::MpquicSessionStart => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                decode_canonical::<crate::MpquicSessionStartRequest>(
                     &self.client_signed_request,
                     frame_limit(),
                 )
@@ -384,6 +398,9 @@ impl DatapathRelayResponse {
                     DatapathRelayOperation::MptcpSessionStart => {
                         return validate_mptcp_session_signal(&self.signed_response);
                     }
+                    DatapathRelayOperation::MpquicSessionStart => {
+                        return validate_mpquic_session_signal(&self.signed_response);
+                    }
                     DatapathRelayOperation::Unspecified => {
                         return Err(DatapathRelayRpcError::InvalidOperation(self.operation));
                     }
@@ -464,6 +481,13 @@ fn validate_udp_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcErr
 
 fn validate_mptcp_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcError> {
     decode_canonical::<crate::ExitMptcpSessionSignal>(encoded, frame_limit())
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+}
+
+fn validate_mpquic_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcError> {
+    decode_canonical::<crate::ExitMpquicSessionSignal>(encoded, frame_limit())
         .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
         .validate()
         .map_err(|_| DatapathRelayRpcError::InvalidFrame)

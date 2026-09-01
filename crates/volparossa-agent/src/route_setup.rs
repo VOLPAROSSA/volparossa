@@ -6150,6 +6150,7 @@ mod tests {
                 | ExitForwardOperation::NativeProbeResult
                 | ExitForwardOperation::UdpSessionStart
                 | ExitForwardOperation::MptcpSessionStart
+                | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -6265,6 +6266,7 @@ mod tests {
                 | DatapathRelayOperation::NativeProbeAuthorize
                 | DatapathRelayOperation::UdpSessionStart
                 | DatapathRelayOperation::MptcpSessionStart
+                | DatapathRelayOperation::MpquicSessionStart
                 | DatapathRelayOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -6489,6 +6491,7 @@ mod tests {
                 | ExitForwardOperation::NativeProbeResult
                 | ExitForwardOperation::UdpSessionStart
                 | ExitForwardOperation::MptcpSessionStart
+                | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(
@@ -6587,6 +6590,7 @@ mod tests {
                 | DatapathRelayOperation::NativeProbeAuthorize
                 | DatapathRelayOperation::UdpSessionStart
                 | DatapathRelayOperation::MptcpSessionStart
+                | DatapathRelayOperation::MpquicSessionStart
                 | DatapathRelayOperation::Unspecified => return Err(RealTransportError),
             };
             DatapathRelayResponse::granted(

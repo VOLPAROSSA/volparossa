@@ -7692,6 +7692,7 @@ impl DiscoveryRuntime {
             | ExitForwardOperation::NativeProbeReady
             | ExitForwardOperation::NativeProbeResult
             | ExitForwardOperation::MptcpSessionStart
+            | ExitForwardOperation::MpquicSessionStart
             | ExitForwardOperation::Unspecified => None,
         };
         let response = responses
@@ -11121,7 +11122,8 @@ fn datapath_request_scope_matches(
                         && request.deadline_unix_ms() <= path.expires_at_ms
                 })
         }
-        DatapathRelayOperation::Unspecified => false,
+        // Wire framing exists; production scope/signature admission is a separate runtime hook.
+        DatapathRelayOperation::MpquicSessionStart | DatapathRelayOperation::Unspecified => false,
     }
 }
 
@@ -12233,7 +12235,10 @@ fn forward_request_scope_matches(
                         && request.deadline_unix_ms() <= path.expires_at_ms
                 })
         }
-        ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
+        // Wire framing exists; production scope/signature admission is a separate runtime hook.
+        ExitForwardOperation::MpquicSessionStart
+        | ExitForwardOperation::FetchExitAdvertisement
+        | ExitForwardOperation::Unspecified => false,
     }
 }
 

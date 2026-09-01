@@ -11,22 +11,106 @@ use std::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::time::{Instant, sleep_until};
+use volparossa_discovery::ExitMpquicSessionSignal;
 use volparossa_quic::{
     AddPath, NativeClient, NativeClientError, NativeProcessRole, NativeResultCode, ReceiveDatagram,
     ReceivedDatagram, SendDatagram, StartSession, StopSession, TransportMode, TunnelAssignment,
     VerifiedExitMpquicEndpoint,
 };
 use volparossa_reservation::{ClientNativeRouteAuthorization, VerifiedRelayGrant};
-use volparossa_routing::{TransportSocketAddress, TransportSocketKind, WireguardRole};
-use volparossa_wireguard::overlay_addresses;
+use volparossa_routing::{
+    AcquireTransportSocket, TransportSocketAddress, TransportSocketKind, WireguardRole,
+};
+use volparossa_udp::{AuthorizedUdpFlow, UdpError};
+use volparossa_wireguard::{HELPER_HANDLE_BYTES, overlay_addresses};
 
-use crate::helper::AcquiredTransportSocket;
+use crate::helper::{AcquiredTransportSocket, HelperClient, HelperClientError};
 
 const MINIMUM_MULTIPATH_PATHS: usize = 2;
 const MINIMUM_MULTIPATH_PATHS_U32: u32 = 2;
 const MAXIMUM_MULTIPATH_PATHS: usize = 8;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAXIMUM_READY_WAIT: Duration = Duration::from_secs(10);
+/// Fixed protected-overlay listener port for every path of one MPQUIC Exit association.
+pub const MPQUIC_EXIT_LISTENER_PORT: u16 = 44_443;
+const MPQUIC_CLIENT_PORT_BASE: u16 = 40_000;
+
+/// Affine preflight of the exact native Client process incarnation signed into reservations.
+#[must_use = "native process preflight authority must be consumed by one route"]
+pub struct ProductionMpquicPreflight {
+    client: NativeClient,
+    native_instance_id: [u8; 32],
+}
+
+impl ProductionMpquicPreflight {
+    /// Preflight one native process before Exit finalization signs its incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the socket names a live native Client process.
+    pub async fn new(client: NativeClient) -> Result<Self, ProductionMpquicError> {
+        let client = client.preflight(NativeProcessRole::Client).await?;
+        let native_instance_id =
+            *client
+                .native_instance_id()
+                .ok_or(ProductionMpquicError::Invalid(
+                    "preflighted native Client instance",
+                ))?;
+        Ok(Self {
+            client,
+            native_instance_id,
+        })
+    }
+
+    /// Exact process incarnation that route admission must pass into Exit finalization.
+    #[must_use]
+    pub const fn native_instance_id(&self) -> &[u8; 32] {
+        &self.native_instance_id
+    }
+
+    /// Acquire every exact committed Client path FD and start one genuine MPQUIC association.
+    ///
+    /// The helper descriptors bind only path-specific Client overlay addresses. Their remote
+    /// targets are the derived Exit overlay addresses behind distinct Relay `WireGuard` paths; no
+    /// underlay Exit address or ordinary-QUIC fallback enters this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the signal, authorization, distinct Relay set, helper context and
+    /// every acquired socket describe the same complete 2--8 path association.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the affine route activation requires every exact signed and helper-owned input"
+    )]
+    pub async fn establish_committed(
+        self,
+        helper: &HelperClient,
+        context_handle: [u8; HELPER_HANDLE_BYTES],
+        authorization: ClientNativeRouteAuthorization,
+        grants: &[VerifiedRelayGrant],
+        signal: &ExitMpquicSessionSignal,
+        now_ms: u64,
+        ready_wait: Duration,
+    ) -> Result<ProductionMpquicSession, ProductionMpquicError> {
+        validate_committed_signal(&self, &authorization, grants, signal, now_ms)?;
+        let mut paths = Vec::with_capacity(grants.len());
+        for grant in grants {
+            let request = committed_client_socket_request(context_handle, grant)?;
+            let acquired = helper.acquire_transport_socket(request).await?;
+            paths.push(CommittedMpquicPath::from_authenticated_exit_signal(
+                acquired, grant, signal,
+            )?);
+        }
+        ProductionMpquicSession::establish_preflighted(
+            self,
+            authorization,
+            paths,
+            now_ms,
+            ready_wait,
+        )
+        .await
+    }
+}
 
 /// One affine helper-returned Client UDP path plus its independently verified Relay grant.
 ///
@@ -109,6 +193,61 @@ impl CommittedMpquicPath {
         })
     }
 
+    /// Bind one helper-correlated Client descriptor to an authenticated complete Exit signal.
+    ///
+    /// Unlike [`Self::from_helper_handoff`], this constructor consumes only remote wire evidence:
+    /// all socket tuples are therefore derived locally from the verified Relay grant and fixed
+    /// MPQUIC port contract rather than copied from the signal.
+    fn from_authenticated_exit_signal(
+        acquired: AcquiredTransportSocket,
+        grant: &VerifiedRelayGrant,
+        signal: &ExitMpquicSessionSignal,
+    ) -> Result<Self, ProductionMpquicError> {
+        let (descriptor, metadata) = acquired.into_parts();
+        let path_id = u8::try_from(grant.path_id())
+            .map_err(|_| ProductionMpquicError::Invalid("MPQUIC path id"))?;
+        let addresses = overlay_addresses(*grant.route_context_id(), path_id)
+            .map_err(|_| ProductionMpquicError::Invalid("MPQUIC overlay"))?;
+        let local_port = mpquic_client_port(grant.path_id())?;
+        let local = transport_address(metadata.local.as_ref().ok_or(
+            ProductionMpquicError::Invalid("committed MPQUIC local address"),
+        )?)?;
+        if metadata.path_id != grant.path_id()
+            || WireguardRole::try_from(metadata.role).ok() != Some(WireguardRole::Client)
+            || TransportSocketKind::try_from(metadata.descriptor_kind).ok()
+                != Some(TransportSocketKind::QuicUdpUnconnected)
+            || metadata.remote.is_some()
+            || local != SocketAddr::new(IpAddr::V6(addresses.client), local_port)
+            || signal.route_context_id() != grant.route_context_id()
+            || !signal.selected_path_ids().contains(&grant.path_id())
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "authenticated committed MPQUIC path",
+            ));
+        }
+        let exit_native_instance_id = signal
+            .exit_native_instance_id()
+            .try_into()
+            .map_err(|_| ProductionMpquicError::Invalid("Exit native instance"))?;
+        Ok(Self {
+            descriptor,
+            add: AddPath {
+                route_context_id: grant.route_context_id().to_vec(),
+                path_id: grant.path_id(),
+                local_ip: addresses.client.octets().to_vec(),
+                remote_ip: addresses.exit.octets().to_vec(),
+                remote_port: u32::from(MPQUIC_EXIT_LISTENER_PORT),
+                reservation_hash: Sha256::digest(grant.signed_relay_reservation()).to_vec(),
+                local_port: u32::from(local_port),
+            },
+            reservation_id: *grant.reservation_id(),
+            relay_node_id: *grant.relay_node_id(),
+            exit_native_instance_id,
+            expires_at_ms: grant.expires_at_ms(),
+            listener_set_ready: true,
+        })
+    }
+
     #[cfg(test)]
     fn for_test(
         descriptor: OwnedFd,
@@ -164,15 +303,35 @@ impl ProductionMpquicSession {
         now_ms: u64,
         ready_wait: Duration,
     ) -> Result<Self, ProductionMpquicError> {
+        let preflight = ProductionMpquicPreflight::new(client).await?;
+        Self::establish_preflighted(preflight, authorization, paths, now_ms, ready_wait).await
+    }
+
+    /// Establish using the exact preflight authority previously signed by the Exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the signed Client incarnation and complete committed path set bind
+    /// to this still-live preflight.
+    pub async fn establish_preflighted(
+        preflight: ProductionMpquicPreflight,
+        authorization: ClientNativeRouteAuthorization,
+        paths: Vec<CommittedMpquicPath>,
+        now_ms: u64,
+        ready_wait: Duration,
+    ) -> Result<Self, ProductionMpquicError> {
         if ready_wait.is_zero() || ready_wait > MAXIMUM_READY_WAIT {
             return Err(ProductionMpquicError::Invalid("MPQUIC ready wait"));
         }
-        let client = client.preflight(NativeProcessRole::Client).await?;
+        let ProductionMpquicPreflight {
+            client,
+            native_instance_id,
+        } = preflight;
         let expected_instance = authorization
             .native_route_identity()
             .client_native_instance_id
             .as_slice();
-        if client.native_instance_id().map(<[u8; 32]>::as_slice) != Some(expected_instance) {
+        if native_instance_id.as_slice() != expected_instance {
             return Err(ProductionMpquicError::Invalid(
                 "authorized native Client instance",
             ));
@@ -206,12 +365,19 @@ impl ProductionMpquicSession {
         &self.assignment
     }
 
-    /// Submit one already policy-authorized complete inner IP datagram.
+    /// Submit one browser-QUIC datagram pinned to its signed policy destination.
     ///
     /// # Errors
     ///
-    /// Returns an error when the bounded native process rejects or cannot send the datagram.
-    pub async fn send_inner_ip(&self, packet: Vec<u8>) -> Result<(), ProductionMpquicError> {
+    /// Returns an error when the flow expired, belongs to another route, the packet is not one
+    /// complete UDP datagram to its exact signed tuple, or native cannot send it.
+    pub async fn send_browser_quic(
+        &self,
+        flow: &AuthorizedUdpFlow,
+        packet: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<(), ProductionMpquicError> {
+        validate_browser_quic_packet(flow, self.route_context_id, &packet, now_ms, true)?;
         send_inner_ip(
             &self.client,
             self.route_context_id,
@@ -221,13 +387,29 @@ impl ProductionMpquicSession {
         .await
     }
 
-    /// Poll one reverse CONNECT-IP datagram without an ordinary-QUIC fallback.
+    /// Poll one reverse browser-QUIC datagram from the exact signed destination.
     ///
     /// # Errors
     ///
-    /// Returns an error when the bounded native process rejects or cannot poll the association.
-    pub async fn receive_inner_ip(&self) -> Result<Option<Vec<u8>>, ProductionMpquicError> {
-        receive_inner_ip(&self.client, self.route_context_id, self.masque_context_id).await
+    /// Returns an error when native cannot poll the association or a returned datagram is not one
+    /// complete UDP datagram from the same policy-pinned tuple.
+    pub async fn receive_browser_quic(
+        &self,
+        flow: &AuthorizedUdpFlow,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, ProductionMpquicError> {
+        flow.ensure_active_at(now_ms)?;
+        if flow.route_context_id() != &self.route_context_id {
+            return Err(ProductionMpquicError::Invalid(
+                "browser QUIC flow route context",
+            ));
+        }
+        let packet =
+            receive_inner_ip(&self.client, self.route_context_id, self.masque_context_id).await?;
+        if let Some(packet) = packet.as_deref() {
+            validate_browser_quic_packet(flow, self.route_context_id, packet, now_ms, false)?;
+        }
+        Ok(packet)
     }
 
     /// Stop and wipe the exact native session before the helper route is destroyed.
@@ -250,6 +432,80 @@ impl ProductionMpquicSession {
         drop(authorization);
         result.map_err(Into::into)
     }
+}
+
+fn validate_committed_signal(
+    preflight: &ProductionMpquicPreflight,
+    authorization: &ClientNativeRouteAuthorization,
+    grants: &[VerifiedRelayGrant],
+    signal: &ExitMpquicSessionSignal,
+    now_ms: u64,
+) -> Result<(), ProductionMpquicError> {
+    signal
+        .validate()
+        .map_err(|_| ProductionMpquicError::Invalid("MPQUIC Exit signal"))?;
+    let identity = authorization.native_route_identity();
+    if now_ms >= authorization.expires_at_ms()
+        || signal.reservation_id() != authorization.reservation_id()
+        || signal.route_context_id() != authorization.route_context_id()
+        || signal.exit_native_instance_id() != identity.exit_native_instance_id
+        || preflight.native_instance_id().as_slice() != identity.client_native_instance_id
+        || grants.len() != signal.selected_path_ids().len()
+        || !(MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&grants.len())
+    {
+        return Err(ProductionMpquicError::Invalid(
+            "MPQUIC complete Exit signal",
+        ));
+    }
+    for (grant, signalled_path_id) in grants.iter().zip(signal.selected_path_ids()) {
+        if grant.path_id() != *signalled_path_id
+            || grant.reservation_id() != authorization.reservation_id()
+            || grant.route_context_id() != authorization.route_context_id()
+            || grant.expires_at_ms() <= now_ms
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "MPQUIC exact committed Relay set",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn committed_client_socket_request(
+    context_handle: [u8; HELPER_HANDLE_BYTES],
+    grant: &VerifiedRelayGrant,
+) -> Result<AcquireTransportSocket, ProductionMpquicError> {
+    if context_handle == [0; HELPER_HANDLE_BYTES] {
+        return Err(ProductionMpquicError::Invalid("MPQUIC helper context"));
+    }
+    let path_id = u8::try_from(grant.path_id())
+        .map_err(|_| ProductionMpquicError::Invalid("MPQUIC path id"))?;
+    let addresses = overlay_addresses(*grant.route_context_id(), path_id)
+        .map_err(|_| ProductionMpquicError::Invalid("MPQUIC overlay"))?;
+    Ok(AcquireTransportSocket {
+        route_context_id: grant.route_context_id().to_vec(),
+        context_handle: context_handle.to_vec(),
+        path_id: grant.path_id(),
+        role: WireguardRole::Client as i32,
+        descriptor_kind: TransportSocketKind::QuicUdpUnconnected as i32,
+        expected_local: Some(TransportSocketAddress {
+            address: addresses.client.octets().to_vec(),
+            port: u32::from(mpquic_client_port(grant.path_id())?),
+        }),
+        expected_remote: None,
+    })
+}
+
+fn mpquic_client_port(path_id: u32) -> Result<u16, ProductionMpquicError> {
+    let path = u16::try_from(path_id)
+        .ok()
+        .filter(|path| {
+            (1..=u16::try_from(MAXIMUM_MULTIPATH_PATHS).unwrap_or(u16::MAX)).contains(path)
+        })
+        .ok_or(ProductionMpquicError::Invalid("MPQUIC path id"))?;
+    MPQUIC_CLIENT_PORT_BASE
+        .checked_add(path)
+        .ok_or(ProductionMpquicError::Invalid("MPQUIC Client port"))
 }
 
 fn start_request(
@@ -493,6 +749,146 @@ fn transport_address(value: &TransportSocketAddress) -> Result<SocketAddr, Produ
     Ok(SocketAddr::new(ip, port))
 }
 
+fn validate_browser_quic_packet(
+    flow: &AuthorizedUdpFlow,
+    route_context_id: [u8; 16],
+    packet: &[u8],
+    now_ms: u64,
+    outbound: bool,
+) -> Result<(), ProductionMpquicError> {
+    flow.ensure_active_at(now_ms)?;
+    if flow.route_context_id() != &route_context_id {
+        return Err(ProductionMpquicError::Invalid(
+            "browser QUIC flow route context",
+        ));
+    }
+    let (source, destination) = udp_packet_tuple(packet)?;
+    let policy_tuple = if outbound { destination } else { source };
+    if !flow.matches_exact_ip_destination(policy_tuple) {
+        return Err(ProductionMpquicError::Invalid(
+            "browser QUIC exact destination tuple",
+        ));
+    }
+    Ok(())
+}
+
+fn udp_packet_tuple(packet: &[u8]) -> Result<(SocketAddr, SocketAddr), ProductionMpquicError> {
+    let Some(version) = packet.first().map(|byte| byte >> 4) else {
+        return Err(ProductionMpquicError::Invalid("browser QUIC IP packet"));
+    };
+    match version {
+        4 => ipv4_udp_tuple(packet),
+        6 => ipv6_udp_tuple(packet),
+        _ => Err(ProductionMpquicError::Invalid("browser QUIC IP version")),
+    }
+}
+
+fn ipv4_udp_tuple(packet: &[u8]) -> Result<(SocketAddr, SocketAddr), ProductionMpquicError> {
+    if packet.len() < 28 {
+        return Err(ProductionMpquicError::Invalid("browser QUIC IPv4 packet"));
+    }
+    let header_length = usize::from(packet[0] & 0x0f) * 4;
+    let total_length = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+    let fragment = u16::from_be_bytes([packet[6], packet[7]]);
+    if header_length != 20
+        || total_length != packet.len()
+        || header_length
+            .checked_add(8)
+            .is_none_or(|minimum| minimum > total_length)
+        || packet[9] != 17
+        || fragment & 0x3fff != 0
+    {
+        return Err(ProductionMpquicError::Invalid(
+            "browser QUIC IPv4/UDP packet",
+        ));
+    }
+    let source_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+    let destination_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+    udp_tuple_at(
+        packet,
+        header_length,
+        total_length,
+        IpAddr::V4(source_ip),
+        IpAddr::V4(destination_ip),
+    )
+}
+
+fn ipv6_udp_tuple(packet: &[u8]) -> Result<(SocketAddr, SocketAddr), ProductionMpquicError> {
+    if packet.len() < 48 {
+        return Err(ProductionMpquicError::Invalid("browser QUIC IPv6 packet"));
+    }
+    let payload_length = usize::from(u16::from_be_bytes([packet[4], packet[5]]));
+    let total_length = 40_usize
+        .checked_add(payload_length)
+        .ok_or(ProductionMpquicError::Invalid("browser QUIC IPv6 length"))?;
+    if payload_length == 0 || total_length != packet.len() {
+        return Err(ProductionMpquicError::Invalid("browser QUIC IPv6 length"));
+    }
+    let source_ip = Ipv6Addr::from(
+        <[u8; 16]>::try_from(&packet[8..24])
+            .map_err(|_| ProductionMpquicError::Invalid("browser QUIC IPv6 source"))?,
+    );
+    let destination_ip = Ipv6Addr::from(
+        <[u8; 16]>::try_from(&packet[24..40])
+            .map_err(|_| ProductionMpquicError::Invalid("browser QUIC IPv6 destination"))?,
+    );
+    let mut next_header = packet[6];
+    let mut offset = 40_usize;
+    for _ in 0..8 {
+        if next_header == 17 {
+            return udp_tuple_at(
+                packet,
+                offset,
+                total_length,
+                IpAddr::V6(source_ip),
+                IpAddr::V6(destination_ip),
+            );
+        }
+        if !matches!(next_header, 0 | 60) || offset + 2 > total_length {
+            return Err(ProductionMpquicError::Invalid(
+                "browser QUIC IPv6 extension chain",
+            ));
+        }
+        next_header = packet[offset];
+        let extension_length = (usize::from(packet[offset + 1]) + 1) * 8;
+        offset = offset
+            .checked_add(extension_length)
+            .filter(|offset| *offset <= total_length)
+            .ok_or(ProductionMpquicError::Invalid(
+                "browser QUIC IPv6 extension length",
+            ))?;
+    }
+    Err(ProductionMpquicError::Invalid(
+        "browser QUIC IPv6 extension count",
+    ))
+}
+
+fn udp_tuple_at(
+    packet: &[u8],
+    offset: usize,
+    packet_length: usize,
+    source_ip: IpAddr,
+    destination_ip: IpAddr,
+) -> Result<(SocketAddr, SocketAddr), ProductionMpquicError> {
+    let udp_header = packet
+        .get(offset..offset.saturating_add(8))
+        .ok_or(ProductionMpquicError::Invalid("browser QUIC UDP header"))?;
+    let source_port = u16::from_be_bytes([udp_header[0], udp_header[1]]);
+    let destination_port = u16::from_be_bytes([udp_header[2], udp_header[3]]);
+    let udp_length = usize::from(u16::from_be_bytes([udp_header[4], udp_header[5]]));
+    if source_port == 0
+        || destination_port == 0
+        || udp_length < 8
+        || offset.checked_add(udp_length) != Some(packet_length)
+    {
+        return Err(ProductionMpquicError::Invalid("browser QUIC UDP tuple"));
+    }
+    Ok((
+        SocketAddr::new(source_ip, source_port),
+        SocketAddr::new(destination_ip, destination_port),
+    ))
+}
+
 /// Fail-closed MPQUIC owner setup and operation errors.
 #[derive(Debug, Error)]
 pub enum ProductionMpquicError {
@@ -508,6 +904,12 @@ pub enum ProductionMpquicError {
     /// The bounded native process API failed or rejected the operation.
     #[error("native MPQUIC control failed: {0}")]
     Native(#[from] NativeClientError),
+    /// The helper rejected or could not return one exact committed path descriptor.
+    #[error("native MPQUIC helper socket failed: {0}")]
+    Helper(#[from] HelperClientError),
+    /// The signed exact-destination UDP authorization expired or was otherwise unusable.
+    #[error("native MPQUIC browser flow authorization failed: {0}")]
+    Flow(#[from] UdpError),
 }
 
 #[cfg(test)]

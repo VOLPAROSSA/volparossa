@@ -6,6 +6,7 @@ mod advertisement_tests;
 mod advertisements;
 mod connection_provenance;
 mod forwarding;
+mod mpquic_session;
 mod mptcp_session;
 mod peerlink;
 mod preselection_forwarder;
@@ -57,6 +58,10 @@ pub use forwarding::{
 use forwarding::{
     ExitForwardCodec, UpstreamExitForwardCodec, exit_forward_behaviour,
     exit_forward_upstream_behaviour,
+};
+pub use mpquic_session::{
+    ExitMpquicSessionSignal, MpquicSessionFrameError, MpquicSessionPathProof,
+    MpquicSessionStartRequest,
 };
 pub use mptcp_session::{
     ExitMptcpSessionSignal, MptcpSessionFrameError, MptcpSessionPathProof, MptcpSessionStartRequest,
