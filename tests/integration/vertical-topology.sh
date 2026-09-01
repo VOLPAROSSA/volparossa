@@ -99,11 +99,20 @@ for peer in "$CLIENT_PEER" "$R1_PEER" "$R2_PEER" "$EXIT_PEER"; do [ -n "$peer" ]
 config() {
     node=$1; operator=$2; relay=$3; exit_role=$4; ip1=$5; ip2=$6; boot1=$7; boot2=$8
     relay_cap=0; exit_cap=0; manifest="\"$WORK/development-policy.manifest\""
+    advertised_asn=0; advertised_prefix=null
     [ "$relay" = false ] || relay_cap=32
     if [ "$exit_role" = true ]; then exit_cap=32; fi
+    if [ "$relay" = true ] || [ "$exit_role" = true ]; then
+        case $node in relay1) advertised_asn=64512;; relay2) advertised_asn=64513;; exit) advertised_asn=64514;; *) exit 64;; esac
+        advertised_prefix=$(printf '%s\n' "$ip1" | awk -F. '{print $1 "." $2 "." $3 ".0/24"}')
+    fi
     {
       printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-acceptance-%s\n  protocol_version: 4\n' "$RUN_ID"
       [ "$operator" = null ] && printf '  operator_id: null\n' || printf '  operator_id: %s\n' "$operator"
+      printf '  advertised_region: acceptance\n  advertised_country_code: ZZ\n'
+      printf '  advertised_asn: %s\n' "$advertised_asn"
+      [ "$advertised_prefix" = null ] && printf '  advertised_ipv4_prefix: null\n' || printf '  advertised_ipv4_prefix: %s\n' "$advertised_prefix"
+      printf '  advertised_ipv6_prefix: null\n'
       printf '  listen_addresses:\n    - /ip4/%s/udp/41000/quic-v1\n' "$ip1"
       [ "$ip2" = none ] || printf '    - /ip4/%s/udp/41000/quic-v1\n' "$ip2"
       printf '  bootstrap_peers:\n'
