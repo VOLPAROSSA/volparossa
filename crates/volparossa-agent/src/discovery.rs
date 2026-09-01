@@ -6686,12 +6686,27 @@ impl DiscoveryRuntime {
                     .ok()
             });
             let signed_relay_reservation = accepted.map(|accepted| accepted.encoded().to_vec());
+            let relay_rates = signed_relay_reservation
+                .as_deref()
+                .and_then(decoded_signed_payload::<RelayReservation>)
+                .and_then(|reservation| {
+                    Some((
+                        u32::try_from(reservation.maximum_up_mbps).ok()?,
+                        u32::try_from(reservation.maximum_down_mbps).ok()?,
+                    ))
+                });
             let activation = match (
                 signed_relay_reservation.as_ref(),
                 client_endpoint,
                 exit_endpoint,
+                relay_rates,
             ) {
-                (Some(signed), Some(client), Some(exit)) => Some(ActivateLeaseBatch {
+                (
+                    Some(signed),
+                    Some(client),
+                    Some(exit),
+                    Some((maximum_up_mbps, maximum_down_mbps)),
+                ) => Some(ActivateLeaseBatch {
                     route_context_id: endpoint.route_context_id().to_vec(),
                     context_handle: endpoint.context_handle().as_bytes().to_vec(),
                     leases: vec![
@@ -6704,8 +6719,8 @@ impl DiscoveryRuntime {
                                 address: client.underlay_ip.clone(),
                                 port: client.listen_port,
                             }),
-                            maximum_up_mbps: 0,
-                            maximum_down_mbps: 0,
+                            maximum_up_mbps,
+                            maximum_down_mbps,
                             signed_relay_reservation: signed.clone(),
                             signed_client_relay_request: signed_start.clone(),
                         },
@@ -6718,10 +6733,10 @@ impl DiscoveryRuntime {
                                 address: exit.underlay_ip,
                                 port: exit.listen_port,
                             }),
-                            maximum_up_mbps: 0,
-                            maximum_down_mbps: 0,
+                            maximum_up_mbps,
+                            maximum_down_mbps,
                             signed_relay_reservation: signed.clone(),
-                            signed_client_relay_request: signed_start,
+                            signed_client_relay_request: Vec::new(),
                         },
                     ],
                 }),
