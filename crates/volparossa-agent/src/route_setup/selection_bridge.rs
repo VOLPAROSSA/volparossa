@@ -560,6 +560,14 @@ struct ProspectiveRoutePlan {
     scope: RouteSelectionScope,
     prospective_relays: Vec<ProspectiveRelayBinding>,
     earliest_evidence_expiry_ms: u64,
+    native_proof_state: NativeProofState,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NativeProofState {
+    NotRequired,
+    Required,
+    Satisfied,
 }
 
 /// One prospective relay assigned its route-attempt path number before any live evidence.
@@ -1004,22 +1012,21 @@ pub(crate) struct CompletedClientNativeProbe {
 #[must_use = "native route admission must retire the sampler context and execute the continuation"]
 pub(crate) struct PreparedNativeRouteAdmission {
     continuation: PreProbeContinuation,
-    sampler_owner: RuntimeBoundPreparedLeaseBatch,
     remote_retirement: RemoteNativeSamplerRetirement,
 }
 
 enum RemoteNativeSamplerRetirement {
-    AwaitingProtocolAcknowledgement,
+    ConfirmedByTerminalResults,
 }
 
 impl PreparedNativeRouteAdmission {
-    /// Consume the admission into its route handoff, local cleanup owner, and remote-ack status.
-    pub(crate) fn into_parts(self) -> (PreProbeContinuation, RuntimeBoundPreparedLeaseBatch, bool) {
-        let confirmed = !matches!(
+    /// Consume the admission into its route handoff and remote-retirement status.
+    pub(crate) fn into_parts(self) -> (PreProbeContinuation, bool) {
+        let confirmed = matches!(
             self.remote_retirement,
-            RemoteNativeSamplerRetirement::AwaitingProtocolAcknowledgement
+            RemoteNativeSamplerRetirement::ConfirmedByTerminalResults
         );
-        (self.continuation, self.sampler_owner, confirmed)
+        (self.continuation, confirmed)
     }
 }
 
@@ -1067,7 +1074,7 @@ pub(crate) async fn begin_client_native_preselection(
     let replay_capacity = volparossa_protocol::MAX_NATIVE_PROBE_CANDIDATES
         .checked_mul(CLIENT_NATIVE_REPLAY_ENTRIES_PER_PATH)
         .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
-    let route_plan = snapshot_route_plan(
+    let route_plan = native_probe_candidate_plan(
         &prepared.snapshot,
         admission.preflight,
         prepared.evidence_batch.for_route_admission(),
@@ -1665,16 +1672,17 @@ impl CompletedClientNativeProbe {
     pub(crate) fn into_route_admission(
         mut self,
     ) -> Result<PreparedNativeRouteAdmission, ClientNativeProbeError> {
-        let plan = self
+        let mut plan = self
             .batch
             .route_plan
             .take()
             .ok_or(ClientNativeProbeError::HelperCorrelation)?;
-        let sampler_owner = self
-            .batch
-            .committed_owner
-            .take()
-            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        if !self.sampler_destroyed
+            || self.batch.committed_owner.is_some()
+            || plan.native_proof_state != NativeProofState::Required
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
         let proven_relays = self
             .batch
             .proofs
@@ -1690,12 +1698,24 @@ impl CompletedClientNativeProbe {
             .map(|relay| &relay.relay.identity)
             .map(|identity| (identity.wire_node_id.to_vec(), identity.peer_id.to_bytes()))
             .collect::<HashSet<_>>();
+        let expected_control = &plan.forwarded_exit.control.identity;
+        let expected_exit = &plan.forwarded_exit.exit.identity;
+        let actors_match = self.batch.proofs.iter().all(|proof| {
+            let control = proof.control();
+            let exit = proof.exit();
+            control.node_id == expected_control.wire_node_id
+                && control.peer_id == expected_control.peer_id.to_bytes()
+                && exit.node_id == expected_exit.wire_node_id
+                && exit.peer_id == expected_exit.peer_id.to_bytes()
+        });
         if proven_relays.len() != self.batch.proofs.len()
             || expected_relays.len() != self.batch.proofs.len()
             || proven_relays != expected_relays
+            || !actors_match
         {
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
+        plan.native_proof_state = NativeProofState::Satisfied;
         let now_ms = crate::unix_millis();
         let setup_ceiling_ms = now_ms
             .checked_add(
@@ -1748,8 +1768,7 @@ impl CompletedClientNativeProbe {
         .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
         Ok(PreparedNativeRouteAdmission {
             continuation,
-            sampler_owner,
-            remote_retirement: RemoteNativeSamplerRetirement::AwaitingProtocolAcknowledgement,
+            remote_retirement: RemoteNativeSamplerRetirement::ConfirmedByTerminalResults,
         })
     }
 }
@@ -2660,6 +2679,41 @@ fn snapshot_route_plan<R: RngCore + ?Sized>(
     )
 }
 
+/// Rank the exact A1 candidate set for native probing without granting route authority.
+///
+/// A1 control receipts intentionally leave dataplane usability false. This private copy enables
+/// the existing exit-first scorer only to choose the peers that must be probed. The returned plan
+/// carries an explicit proof-required state, and route allocation rejects it until the exact
+/// terminal native results bind every selected Relay plus the shared control Relay and Exit.
+fn native_probe_candidate_plan<R: RngCore + ?Sized>(
+    snapshot: &RouteCandidateSnapshot,
+    parameters: SnapshotPreflightParameters,
+    mut evidence_batch: FreshEvidenceBatch,
+    rng: &mut R,
+) -> Result<ProspectiveRoutePlan, SelectionBridgeError> {
+    let trusted_now_ms = crate::unix_millis();
+    evidence_batch.validate_at(trusted_now_ms)?;
+    if evidence_batch
+        .entries
+        .iter()
+        .any(|evidence| !evidence.reachable || evidence.network_address_usable)
+    {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+    for evidence in &mut evidence_batch.entries {
+        evidence.network_address_usable = true;
+    }
+    let mut plan = snapshot_route_plan_with_trusted_now(
+        snapshot,
+        parameters,
+        evidence_batch,
+        trusted_now_ms,
+        rng,
+    )?;
+    plan.native_proof_state = NativeProofState::Required;
+    Ok(plan)
+}
+
 #[cfg(test)]
 fn snapshot_route_plan_at<R: RngCore + ?Sized>(
     snapshot: &RouteCandidateSnapshot,
@@ -2740,6 +2794,7 @@ fn snapshot_route_plan_with_trusted_now<R: RngCore + ?Sized>(
         scope: selected.scope,
         prospective_relays,
         earliest_evidence_expiry_ms,
+        native_proof_state: NativeProofState::NotRequired,
     })
 }
 
@@ -2852,8 +2907,10 @@ fn validate_and_allocate_preprobe_plan(
         scope,
         prospective_relays,
         earliest_evidence_expiry_ms,
+        native_proof_state,
     } = plan;
-    if !batch_id.is_valid()
+    if native_proof_state == NativeProofState::Required
+        || !batch_id.is_valid()
         || selected_at_ms == 0
         || selected_at_ms != scope.now_ms
         || selected_at_ms > trusted_now_ms

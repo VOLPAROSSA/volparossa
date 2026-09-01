@@ -245,12 +245,7 @@ async fn admit_completed_native_route(
         let _ = helper.cleanup_owned().await;
         return Err(ClientRouteConnectError::RouteAdmissionUnavailable);
     };
-    let (continuation, sampler_owner, remote_retirement_confirmed) = admission.into_parts();
-    helper
-        .destroy_context(&sampler_owner)
-        .await
-        .map_err(|_| ClientRouteConnectError::NativeSamplerRetirementUnavailable)?;
-    drop(sampler_owner);
+    let (continuation, remote_retirement_confirmed) = admission.into_parts();
     if !remote_retirement_confirmed {
         return Err(ClientRouteConnectError::NativeRemoteRetirementUnavailable);
     }

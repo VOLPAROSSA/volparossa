@@ -651,6 +651,16 @@ impl BoundNativePathProof {
     pub(super) fn data_relay(&self) -> &PreselectionActorBinding {
         &self.candidate.data_relay
     }
+
+    /// Borrow the exact control Relay retained by the verified terminal chain.
+    pub(super) fn control(&self) -> &PreselectionActorBinding {
+        &self.candidate.control
+    }
+
+    /// Borrow the exact Exit retained by the verified terminal chain.
+    pub(super) fn exit(&self) -> &PreselectionActorBinding {
+        &self.candidate.exit
+    }
 }
 
 impl PendingNativeProbeAuthority {
