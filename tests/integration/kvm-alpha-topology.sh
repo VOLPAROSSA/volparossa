@@ -877,7 +877,7 @@ ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     python3 "$WORK/bin/destination.py" "$WORK/destination/ready" \
-    "$WORK/destination-udp-evidence.json" \
+    "$WORK/destination/udp-evidence.json" \
     >"$WORK/destination.log" 2>&1 &
 DESTINATION_PID=$!
 
@@ -1075,6 +1075,12 @@ set -e
 sleep 1
 if ! stop_a05_observers; then
     A05_STATUS=1
+fi
+if [ -f "$WORK/destination/udp-evidence.json" ] \
+    && [ ! -L "$WORK/destination/udp-evidence.json" ]; then
+    install -o root -g root -m 0600 \
+        "$WORK/destination/udp-evidence.json" \
+        "$WORK/destination-udp-evidence.json"
 fi
 capture_product_logs
 
