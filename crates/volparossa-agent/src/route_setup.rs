@@ -5041,13 +5041,15 @@ mod tests {
         let mut config = Config::default();
         config.udp.enabled = false;
         config.routing.client_address_family = ClientAddressFamily::Ipv6;
+        let expected_minimum = usize::from(config.selection.minimum_multipath_paths);
+        let expected_maximum = usize::from(config.selection.maximum_multipath_paths);
         let parameters = client_preselection_parameters(&config).expect("MPTCP route profile");
         let (transport, family, _, _, _, minimum_other, maximum_other, _) =
             parameters.fields_for_test();
         assert_eq!(transport, Transport::TcpMptcp);
         assert_eq!(family, volparossa_protocol::ObservationAddressFamily::Ipv6);
-        assert_eq!(minimum_other, 1);
-        assert_eq!(maximum_other, 7);
+        assert_eq!(minimum_other, expected_minimum);
+        assert_eq!(maximum_other, expected_maximum);
 
         config.tcp.enabled = false;
         config.quic.enabled = false;

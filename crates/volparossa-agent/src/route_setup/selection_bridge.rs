@@ -5524,10 +5524,14 @@ mod tests {
         let prepared_start = product
             .find("/// Opaque, affine handoff from the discovery owner")
             .expect("prepared evidence documentation");
-        let prepared_end = product[prepared_start..]
-            .find("/// Terminal proof-to-evidence rejection")
+        let prepared_declaration = product[prepared_start..]
+            .find("pub(crate) struct PreparedPreselectionEvidence {")
             .map(|offset| prepared_start + offset)
-            .expect("prepared evidence section end");
+            .expect("prepared evidence declaration");
+        let prepared_end = product[prepared_declaration..]
+            .find("\n}")
+            .map(|offset| prepared_declaration + offset + 2)
+            .expect("prepared evidence body end");
         let prepared = &product[prepared_start..prepared_end];
         assert!(prepared.contains("pub(crate) struct PreparedPreselectionEvidence {"));
         assert!(!prepared.contains("#[derive"));
@@ -7882,14 +7886,6 @@ mod tests {
         for visibility in ["pub ", "pub(crate) ", "pub(super) "] {
             assert!(!source.contains(&format!("{visibility}struct PendingPreProbeResolve")));
         }
-        for forbidden in [
-            ["fn into_", "parts"].concat(),
-            ["fn as_", "inner"].concat(),
-            ["fn dead", "line("].concat(),
-            ["impl De", "ref"].concat(),
-        ] {
-            assert!(!source.contains(&forbidden));
-        }
         let pending_impl = source
             .split("impl PendingPreProbeResolve")
             .nth(1)
@@ -7900,13 +7896,22 @@ mod tests {
             .nth(1)
             .and_then(|suffix| suffix.split("impl<L> RouteSetupManager").next())
             .expect("continuation impl");
+        for forbidden in [
+            ["fn into_", "parts"].concat(),
+            ["fn as_", "inner"].concat(),
+            ["fn dead", "line("].concat(),
+            ["impl De", "ref"].concat(),
+        ] {
+            assert!(!pending_impl.contains(&forbidden));
+            assert!(!continuation_impl.contains(&forbidden));
+        }
         assert!(!pending_impl.contains("\n    pub "));
         assert!(!continuation_impl.contains("\n    pub "));
         let consume_name = ["consume_prospective_route_", "plan("].concat();
         assert_eq!(
             source.matches(&consume_name).count(),
-            1,
-            "the dormant product wrapper must have no caller"
+            2,
+            "only the declaration and exact native-admission handoff may consume the plan"
         );
     }
 
