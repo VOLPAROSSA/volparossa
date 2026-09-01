@@ -159,7 +159,7 @@ pub(super) struct ArmedNativeProbe {
 #[must_use = "an in-flight native probe result must be verified or dropped"]
 pub(super) struct AwaitingNativeResult {
     issued_start: IssuedNativeProbeStart,
-    _challenge: Zeroizing<[u8; KEY_BYTES]>,
+    challenge: Zeroizing<[u8; KEY_BYTES]>,
     candidate: NativeCandidateTemplate,
     deadline: NativeAttemptDeadline,
     response_deadline_ms: u64,
@@ -928,7 +928,7 @@ impl ArmedNativeProbe {
         )?;
         Ok(AwaitingNativeResult {
             issued_start,
-            _challenge: self.challenge,
+            challenge: self.challenge,
             candidate: self.candidate,
             deadline: self.deadline,
             response_deadline_ms,
@@ -964,7 +964,7 @@ impl AwaitingNativeResult {
 
     /// Borrow the exact one-time challenge for the activated probe socket only.
     pub(super) fn challenge(&self) -> &[u8; KEY_BYTES] {
-        &self._challenge
+        &self.challenge
     }
 
     /// Consume the signed start into a direct RPC to the exact readiness-signing data Relay.

@@ -640,6 +640,11 @@ impl ExitService {
     /// The agent calls this only after the shared sampler helper context has been committed and
     /// confirmed destroyed. The retained projection supplies the prepared-lease commitment; the
     /// caller cannot substitute it while reporting the exact runtime, context and observed path.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a missing Ready owner, mismatched helper/datapath facts, stale policy or scope,
+    /// invalid observed prefix, zero post-baseline proof, or signing failure.
     #[allow(
         clippy::too_many_arguments,
         reason = "authenticated Relay, helper observation and signer remain explicit"

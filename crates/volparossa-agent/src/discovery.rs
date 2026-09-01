@@ -4720,6 +4720,10 @@ impl DiscoveryRuntime {
     }
 
     /// Commit the activated Relay pair and forward its exact Start chain for an Exit result.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Relay Start verification, commit, forward and owner transfer are one transaction"
+    )]
     async fn begin_native_probe_result(
         &mut self,
         authenticated_client_peer: Libp2pPeerId,
@@ -6071,6 +6075,10 @@ impl DiscoveryRuntime {
     /// upstream peer and its current direct advertisement capability. The selected Exit must be
     /// this process and its current local advertisement. Connection lineage is bound before the
     /// Exit service can retain capacity or sign.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Exit authorization also activates every exact sampler path and socket"
+    )]
     async fn prepare_native_probe_authorization_response(
         &mut self,
         authenticated_data_relay: Libp2pPeerId,
@@ -8373,14 +8381,14 @@ fn native_probe_exit_socket_request(
 }
 
 fn native_probe_observed_relay_prefix(underlay_ip: &[u8]) -> Option<ObservationNetworkPrefix> {
-    match underlay_ip {
-        [a, b, c, _] => Some(ObservationNetworkPrefix {
+    match underlay_ip.len() {
+        4 => Some(ObservationNetworkPrefix {
             address_family: ObservationAddressFamily::Ipv4 as i32,
-            network_prefix: vec![*a, *b, *c],
+            network_prefix: underlay_ip[..3].to_vec(),
         }),
-        [a, b, c, d, e, f, ..] if underlay_ip.len() == 16 => Some(ObservationNetworkPrefix {
+        16 => Some(ObservationNetworkPrefix {
             address_family: ObservationAddressFamily::Ipv6 as i32,
-            network_prefix: vec![*a, *b, *c, *d, *e, *f],
+            network_prefix: underlay_ip[..6].to_vec(),
         }),
         _ => None,
     }
