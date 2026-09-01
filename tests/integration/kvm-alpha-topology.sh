@@ -151,11 +151,11 @@ R1=$PREFIX-r1
 R2=$PREFIX-r2
 EXIT_NODE=$PREFIX-x
 DEST=$PREFIX-d
-# PrivateTmp is part of both production service sandboxes.  Keep the staged
-# executables and configuration outside /tmp and /var/tmp so the transient
-# units see the exact artifacts that this disposable VM prepared for them.
-WORK=$(mktemp -d "/run/volparossa-alpha-topology.$RUN_ID.XXXXXX")
-case $WORK in /run/volparossa-alpha-topology.*) ;; *) exit 69 ;; esac
+# PrivateTmp is part of both production service sandboxes and Debian mounts its
+# runtime tmpfs non-executable. Keep this disposable-VM stage on the executable
+# root filesystem so both transient units see and can execute the exact build.
+WORK=$(mktemp -d "/opt/volparossa-alpha-topology.$RUN_ID.XXXXXX")
+case $WORK in /opt/volparossa-alpha-topology.*) ;; *) exit 69 ;; esac
 chmod 0700 "$WORK"
 
 PHASE=identity-setup
