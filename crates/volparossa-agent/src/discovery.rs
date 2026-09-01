@@ -10209,6 +10209,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_relay_role_withdrawal_revokes_control_and_forwarded_exit_authority() {
+        let mut fixture = fixture(RolesConfig::default());
+        let relay = Identity::generate();
+        let exit = Identity::generate();
+        let relay_peer = relay.peer_id().to_owned();
+        let exit_peer = exit.peer_id().to_owned();
+        let now_ms = unix_millis();
+        let deadline = now_ms.saturating_add(20_000);
+        let relay_advertisement = service_advertisement(
+            &relay,
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: false,
+            },
+            &fixture.policy,
+            1,
+            [113; 32],
+            now_ms,
+            &fixture.directory,
+        );
+        assert!(
+            fixture
+                .runtime
+                .ingest_advertisement(
+                    relay_peer,
+                    relay_advertisement,
+                    AdvertisementProvenance::DirectRelay {
+                        authenticated_peer: relay_peer,
+                    },
+                    &fixture.state,
+                )
+                .await
+                .is_some()
+        );
+        let control = fixture
+            .runtime
+            .direct_relays
+            .get(&relay_peer)
+            .expect("direct Relay authority")
+            .clone();
+        fixture
+            .runtime
+            .mark_forwarded_exit_target(exit_peer, deadline);
+        let exit_advertisement = service_advertisement(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            1,
+            [114; 32],
+            now_ms,
+            &fixture.directory,
+        );
+        assert!(
+            fixture
+                .runtime
+                .ingest_advertisement(
+                    exit_peer,
+                    exit_advertisement,
+                    forwarded_provenance(&control, &exit, deadline),
+                    &fixture.state,
+                )
+                .await
+                .is_some()
+        );
+
+        let withdrawal = service_advertisement(
+            &relay,
+            RolesConfig::default(),
+            &fixture.policy,
+            2,
+            [115; 32],
+            now_ms.saturating_add(1),
+            &fixture.directory,
+        );
+        let _ = fixture
+            .runtime
+            .ingest_advertisement(
+                relay_peer,
+                withdrawal,
+                AdvertisementProvenance::DirectRelay {
+                    authenticated_peer: relay_peer,
+                },
+                &fixture.state,
+            )
+            .await;
+
+        assert!(!fixture.runtime.direct_relays.contains_key(&relay_peer));
+        assert!(
+            !fixture
+                .runtime
+                .forwarded_exits
+                .contains_key(&ForwardedExitKey {
+                    control_relay_peer: relay_peer,
+                    exit_peer,
+                })
+        );
+    }
+
+    #[tokio::test]
     async fn active_policy_change_revokes_all_old_capability_authority() {
         let mut fixture = fixture(RolesConfig::default());
         let relay = Identity::generate();
