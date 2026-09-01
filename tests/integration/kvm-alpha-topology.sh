@@ -3969,7 +3969,7 @@ timeout --signal=TERM --kill-after=5s 200s \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/http3-acceptance-fixture" client a06 \
-    43.159.1.1:0 47.163.4.2:443 "$WORK/client-fixtures/http3-cert.der" \
+    43.159.1.1:52006 47.163.4.2:443 "$WORK/client-fixtures/http3-cert.der" \
     "$RUN_ID" "$WORK/client-fixtures/a06-client.json" 2>"$WORK/a06-client.err"
 A06_STATUS=$?
 set -e
@@ -4017,7 +4017,7 @@ if [ "$A06_STATUS" -eq 0 ]; then
         | (($app.protocol == "HTTP/3") and ($app.http_version == "HTTP/3")
             and ($app.negotiated_alpn == "h3")
             and ($app.hostname == "destination.volparossa.test")
-            and ($app.application.ip == "43.159.1.1")
+            and ($app.application == {ip:"43.159.1.1",port:52006})
             and ($app.destination == {ip:"47.163.4.2",port:443})
             and ($app.request_bytes == 4194304) and ($app.response_bytes == 8388608)
             and ($app.request_sha256 == $destination.request_sha256)
@@ -4080,7 +4080,7 @@ timeout --signal=TERM --kill-after=5s 200s \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/http3-acceptance-fixture" client a07 \
-    43.159.1.1:0 47.163.4.2:443 "$WORK/client-fixtures/http3-cert.der" \
+    43.159.1.1:52007 47.163.4.2:443 "$WORK/client-fixtures/http3-cert.der" \
     "$RUN_ID" "$WORK/client-fixtures/a07-client.json" 2>"$WORK/a07-client.err" &
 HTTP3_CLIENT_PID=$!
 attempt=0
@@ -4173,6 +4173,7 @@ if [ "$A07_STATUS" -eq 0 ]; then
         | ($after.paths | map(select(.relay == "relay2")) | .[0]) as $after_r2
         | (($app.protocol == "HTTP/3") and ($app.http_version == "HTTP/3")
             and ($app.negotiated_alpn == "h3")
+            and ($app.application == {ip:"43.159.1.1",port:52007})
             and ($app.destination == {ip:"47.163.4.2",port:443})
             and ($app.request_bytes == 4194304) and ($app.response_bytes == 33554432)
             and ($app.request_sha256 == $destination.request_sha256)

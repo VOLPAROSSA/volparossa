@@ -152,6 +152,8 @@ grep -F 'a04_mptcp_relay_failover:{requested:$a04_requested,succeeded:$a04_succe
 grep -F 'http3-acceptance-fixture" server' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" client a06' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" client a07' "$GUEST" >/dev/null
+grep -F '43.159.1.1:52006 47.163.4.2:443' "$GUEST" >/dev/null
+grep -F '43.159.1.1:52007 47.163.4.2:443' "$GUEST" >/dev/null
 grep -F '"$WORK/client-fixtures/http3-cert.der"' "$GUEST" >/dev/null
 grep -F 'connected: false' "$GUEST" >/dev/null
 grep -F 'active contexts: 0' "$GUEST" >/dev/null

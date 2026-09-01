@@ -57,7 +57,7 @@ use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResour
 use helper::HelperClient;
 use policy::load_active_policy;
 use roles::{RoleStore, ensure_private_state_directory};
-use route_setup::{ClientPathMaintenance, ClientRouteControl};
+use route_setup::{ClientPathMaintenance, ClientRouteConnectError, ClientRouteControl};
 use secret::read_identity_credential;
 use state::AgentState;
 
@@ -645,19 +645,28 @@ async fn run_client_udp_ingress(
                 continue;
             }
             for ingress in ingresses {
-                if routes
+                match routes
                     .send_browser_quic_ingress(ingress, &policy, now_ms)
                     .await
-                    .is_err()
                 {
-                    browser_gate = BrowserQuicIngressGate::new();
-                    routes.disconnect().await;
-                    state.write().await.log(
-                        LogLevel::Warn,
-                        "INGRESS_MPQUIC_DATAGRAM_REJECTED",
-                        unix_millis(),
-                    );
-                    break;
+                    Ok(_) => {}
+                    Err(ClientRouteConnectError::UdpIngressUnavailable) => {
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "INGRESS_MPQUIC_DATAGRAM_DROPPED",
+                            unix_millis(),
+                        );
+                    }
+                    Err(_) => {
+                        browser_gate = BrowserQuicIngressGate::new();
+                        routes.disconnect().await;
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "INGRESS_MPQUIC_DATAGRAM_REJECTED",
+                            unix_millis(),
+                        );
+                        break;
+                    }
                 }
             }
             continue;

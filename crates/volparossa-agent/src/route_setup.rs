@@ -1426,6 +1426,14 @@ impl ClientRouteControl {
             .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
         let (tunnel_source, maximum_packet_bytes) = mpquic_tunnel_packet_scope(&active.session)?;
 
+        if active
+            .browser_flow
+            .as_ref()
+            .is_some_and(|binding| !binding.matches_ingress_tuple(&ingress))
+        {
+            active.browser_flow = None;
+        }
+
         let (packet, pending_binding) = if let Some(binding) = active.browser_flow.as_ref() {
             (
                 binding

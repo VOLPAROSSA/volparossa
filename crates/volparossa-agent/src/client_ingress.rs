@@ -1121,6 +1121,13 @@ impl BrowserQuicFlowBinding {
         self.remote
     }
 
+    /// Return whether one freshly inspected datagram belongs to this retained application flow.
+    pub(crate) fn matches_ingress_tuple(&self, ingress: &PolicyAuthorizedUdpIngress) -> bool {
+        ingress.is_browser_quic()
+            && ingress.source == self.application
+            && ingress.destination == self.remote
+    }
+
     fn ensure_live(
         &self,
         policy: &VerifiedManifest,
@@ -1403,7 +1410,7 @@ mod tests {
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::{TcpListener, TcpStream},
     };
-    use volparossa_policy::{DestinationRule, ProtocolPort, TransportProtocol};
+    use volparossa_policy::{DestinationRule, ProtocolPort, TransportProtocol, VerifiedManifest};
     use volparossa_protocol::{
         ReplayCache, TimePolicy, Transport, UdpFlowAuthorization, generate_nonce,
         sign_control_message,
@@ -1587,6 +1594,23 @@ mod tests {
         assert_eq!(bound.payload(), b"alpha-datagram");
     }
 
+    fn authorize_browser_quic_test_ingress(
+        application: SocketAddr,
+        remote: SocketAddr,
+        payload: &[u8],
+        hostname: &str,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> PolicyAuthorizedUdpIngress {
+        PolicyAuthorizedUdpIngress::authorize_hostname(
+            ObservedUdpIngress::new(application, remote, payload.to_vec()).expect("kernel tuple"),
+            hostname.to_owned(),
+            policy,
+            now_ms,
+        )
+        .expect("browser ingress")
+    }
+
     #[test]
     fn browser_quic_reuses_multipath_flow_with_tunnel_source_and_exact_reverse_packet() {
         const NOW_MS: u64 = 1_900_000_000_000;
@@ -1624,14 +1648,14 @@ mod tests {
             TimePolicy::default(),
         )
         .expect("signed browser flow");
-        let ingress = PolicyAuthorizedUdpIngress::authorize_hostname(
-            ObservedUdpIngress::new(application, remote, b"quic-one".to_vec())
-                .expect("kernel tuple"),
-            HOSTNAME.to_owned(),
+        let ingress = authorize_browser_quic_test_ingress(
+            application,
+            remote,
+            b"quic-one",
+            HOSTNAME,
             &policy,
             NOW_MS,
-        )
-        .expect("first ingress");
+        );
         let tunnel_source = Ipv4Addr::new(10, 76, 0, 2);
         let (mut binding, first_packet) = ingress
             .bind_signed_to_multipath_route(
@@ -1655,14 +1679,15 @@ mod tests {
         assert!(!binding.signed_authorization().is_empty());
         binding.record_sent(NOW_MS).expect("first handoff");
 
-        let next = PolicyAuthorizedUdpIngress::authorize_hostname(
-            ObservedUdpIngress::new(application, remote, b"quic-two".to_vec())
-                .expect("next kernel tuple"),
-            HOSTNAME.to_owned(),
+        let next = authorize_browser_quic_test_ingress(
+            application,
+            remote,
+            b"quic-two",
+            HOSTNAME,
             &policy,
             NOW_MS + 1,
-        )
-        .expect("next ingress");
+        );
+        assert!(binding.matches_ingress_tuple(&next));
         let next_packet = binding
             .bind_next(&next, &policy, 1_280, NOW_MS + 1)
             .expect("same active flow");
@@ -1673,6 +1698,16 @@ mod tests {
             b"quic-two"
         );
         binding.record_sent(NOW_MS + 1).expect("next handoff");
+
+        let next_connection = authorize_browser_quic_test_ingress(
+            SocketAddr::from((Ipv4Addr::new(43, 159, 1, 9), 52_001)),
+            remote,
+            b"next-connection",
+            HOSTNAME,
+            &policy,
+            NOW_MS + 2,
+        );
+        assert!(!binding.matches_ingress_tuple(&next_connection));
 
         let reverse_packet =
             build_ipv4_udp_packet(first_remote, first_source, b"server-quic", 1_280)
