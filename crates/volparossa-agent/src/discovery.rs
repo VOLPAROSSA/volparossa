@@ -62,9 +62,9 @@ use volparossa_discovery::{
     ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
     LocalPreselectionPolicy, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
     MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, NativeProbeReadyForwardRequest,
-    PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink, UdpSessionStartRequest,
-    UpstreamExitForwardRequest, UpstreamExitForwardResponse, advertisement_envelope_matches_peer,
-    capability, signed_envelope_matches_peer,
+    PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink, UdpExitSessionSignal,
+    UdpSessionStartRequest, UpstreamExitForwardRequest, UpstreamExitForwardResponse,
+    advertisement_envelope_matches_peer, capability, signed_envelope_matches_peer,
 };
 use volparossa_exit::{ExitService, ExitServiceConfig};
 use volparossa_identity::Identity;
@@ -578,6 +578,7 @@ struct PendingRelayForward {
     native_ready: Option<PendingNativeProbeReady>,
     native_authorization: Option<PendingNativeProbeAuthorization>,
     native_result: Option<PendingNativeProbeResult>,
+    udp_session: Option<PendingUdpSessionStart>,
 }
 
 struct PendingNativeProbeReady {
@@ -671,12 +672,20 @@ struct PendingNativeProbeResult {
 struct PreparedProductionRelayRoute {
     helper_owner: RuntimeBoundPreparedLeaseBatch,
     accepted: AcceptedRelayReservation,
-    #[allow(
-        dead_code,
-        reason = "consumed by the UdpSessionStart continuation once Exit native provenance lands"
-    )]
-    commit: CommitLeaseBatch,
+    authenticated_client_peer: Libp2pPeerId,
+    commit: Option<CommitLeaseBatch>,
+    committed_start: Option<Vec<u8>>,
+    committed_signal: Option<Vec<u8>>,
+    usable: bool,
     expires_at_ms: u64,
+}
+
+struct PendingUdpSessionStart {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<DatapathRelayResponse>>,
+    canonical_start: Vec<u8>,
+    route: PreparedProductionRelayRoute,
 }
 
 #[derive(Clone)]
@@ -1630,7 +1639,7 @@ impl DiscoveryRuntime {
                             exit_purged,
                         ).await;
                     }
-                    let reaped = self.reap_outbound_reservations(Instant::now());
+                    let reaped = Box::pin(self.reap_outbound_reservations(Instant::now())).await;
                     if reaped.ambiguous > 0 {
                         log_reservation_event(&state, "RESERVATION_RPC_TIMEOUT").await;
                     }
@@ -1663,6 +1672,7 @@ impl DiscoveryRuntime {
             }
         }
         self.destroy_expired_exit_native_attempts(u64::MAX).await;
+        Box::pin(self.fail_all_pending_udp_sessions()).await;
         self.destroy_expired_production_relay_routes(u64::MAX).await;
         self.cancel_client_preselection(ClientPreselectionError::Closed);
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
@@ -2922,7 +2932,7 @@ impl DiscoveryRuntime {
         OutboundEventOutcome::Failed
     }
 
-    fn reap_outbound_reservations(&mut self, now: Instant) -> OutboundReapCounts {
+    async fn reap_outbound_reservations(&mut self, now: Instant) -> OutboundReapCounts {
         self.purge_completed(now);
         let client_ids = self
             .pending_client_forwards
@@ -2958,7 +2968,7 @@ impl DiscoveryRuntime {
             if let Some(pending) = self.pending_relay_forwards.remove(&id) {
                 self.relay_forward_index.remove(&pending.key);
                 counts.ambiguous = counts.ambiguous.saturating_add(1);
-                self.finish_relay_ambiguity(pending);
+                Box::pin(self.finish_relay_ambiguity_awaited(pending)).await;
             }
         }
         counts
@@ -2982,6 +2992,23 @@ impl DiscoveryRuntime {
         self.retry_client_forwards.clear();
         self.retry_datapath.clear();
         self.retry_relay_forwards.clear();
+    }
+
+    async fn fail_all_pending_udp_sessions(&mut self) {
+        let pending_ids = self
+            .pending_relay_forwards
+            .iter()
+            .filter_map(|(id, pending)| pending.udp_session.is_some().then_some(*id))
+            .collect::<Vec<_>>();
+        for id in pending_ids {
+            let Some(mut pending) = self.pending_relay_forwards.remove(&id) else {
+                continue;
+            };
+            self.relay_forward_index.remove(&pending.key);
+            if let Some(udp) = pending.udp_session.take() {
+                self.finish_udp_session_unavailable(udp).await;
+            }
+        }
     }
 
     fn reject_queued_outbound_commands(&mut self) {
@@ -4244,7 +4271,7 @@ impl DiscoveryRuntime {
             request_response::Event::OutboundFailure {
                 peer, request_id, ..
             } => {
-                let outcome = self.fail_relay_forward(request_id, peer);
+                let outcome = Box::pin(self.fail_relay_forward(request_id, peer)).await;
                 log_outbound_event(state, outcome).await;
             }
             request_response::Event::InboundFailure { .. }
@@ -4252,6 +4279,10 @@ impl DiscoveryRuntime {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the typed inbound operation dispatch keeps every affine continuation explicit"
+    )]
     async fn handle_datapath_event(
         &mut self,
         event: request_response::Event<DatapathRelayRequest, DatapathRelayResponse>,
@@ -4309,6 +4340,16 @@ impl DiscoveryRuntime {
                     }
                     Ok(DatapathRelayOperation::NativeProbeStart) => {
                         self.begin_native_probe_result(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::UdpSessionStart) => {
+                        self.begin_udp_session_start(
                             authenticated_client_peer,
                             &request,
                             channel,
@@ -4549,7 +4590,10 @@ impl DiscoveryRuntime {
             reject!("PRODUCTION_RELAY_RESERVATION_FRAME_REJECTED");
         };
         if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
-            if existing.accepted.signed_client_relay_request() == request.client_signed_request()
+            if existing.usable
+                && existing.authenticated_client_peer == authenticated_client_peer
+                && existing.accepted.signed_client_relay_request()
+                    == request.client_signed_request()
                 && existing.accepted.expires_at_ms() > now_ms
             {
                 if let Ok(response) = DatapathRelayResponse::granted(
@@ -4701,13 +4745,262 @@ impl DiscoveryRuntime {
             route_context_id,
             PreparedProductionRelayRoute {
                 helper_owner,
+                authenticated_client_peer,
                 expires_at_ms: accepted.expires_at_ms(),
                 accepted,
-                commit,
+                commit: Some(commit),
+                committed_start: None,
+                committed_signal: None,
+                usable: true,
             },
         );
         let _ = self.service.send_datapath_relay_response(channel, response);
         log_relay_forward_admission(Some(state), "PRODUCTION_RELAY_RESERVATION_ACTIVATED");
+    }
+
+    /// Consume the exact prepared Relay route once, commit it, and forward the unchanged signed
+    /// session proof to the selected Exit. No listener readiness is returned before both helper
+    /// Commit and the authenticated Exit response have completed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine Relay Commit and Exit dispatch transaction"
+    )]
+    async fn begin_udp_session_start(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Some((route_context_id, route)) = cleanup.take() {
+                    self.retire_production_relay_route(route_context_id, route)
+                        .await;
+                }
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::UdpSessionStart,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let Some(datapath_request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id())
+        else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::UdpSessionStart,
+                now_ms,
+            )
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("UDP_SESSION_RELAY_SCOPE_REJECTED");
+        }
+        let Some(scope) = verified_udp_session_start_scope(request.client_signed_request(), now_ms)
+        else {
+            reject!("UDP_SESSION_RELAY_SCOPE_REJECTED");
+        };
+        let Ok(start) = decode_canonical::<UdpSessionStartRequest>(
+            request.client_signed_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(route_context_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)
+        else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&scope.exit.exit_peer_id) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&scope.exit.exit_node_id) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: datapath_request_id,
+        };
+        if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
+            if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id) {
+                if let Some(udp) = pending.udp_session.as_mut() {
+                    if pending.operation == ExitForwardOperation::UdpSessionStart
+                        && udp.canonical_start == request.client_signed_request()
+                        && udp.channels.len() < MAX_COALESCED_WAITERS
+                    {
+                        udp.channels.push(channel);
+                        return;
+                    }
+                }
+            }
+            reject!("UDP_SESSION_RELAY_RETRY_CONFLICT");
+        }
+        if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
+            if existing.usable
+                && existing.authenticated_client_peer == authenticated_client_peer
+                && existing.accepted.encoded() == start.signed_relay_reservation()
+                && existing.accepted.path_id() == scope.relay.path_id
+                && existing.expires_at_ms > now_ms
+                && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            {
+                if let Some(signal) = existing.committed_signal.clone() {
+                    if let Ok(response) = DatapathRelayResponse::granted(
+                        datapath_request_id.to_vec(),
+                        DatapathRelayOperation::UdpSessionStart,
+                        self.local_node_id.to_vec(),
+                        local_peer.to_bytes(),
+                        signal,
+                    ) {
+                        let _ = self.service.send_datapath_relay_response(channel, response);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(route) = self
+            .prepared_production_relay_routes
+            .remove(&route_context_id)
+        else {
+            reject!("UDP_SESSION_RELAY_OWNER_UNAVAILABLE");
+        };
+        cleanup = Some((route_context_id, route));
+        let route = cleanup
+            .as_ref()
+            .map(|(_, route)| route)
+            .expect("installed UDP Relay cleanup owner");
+        if !route.usable
+            || route.authenticated_client_peer != authenticated_client_peer
+            || route.accepted.encoded() != start.signed_relay_reservation()
+            || route.accepted.route_context_id() != &route_context_id
+            || route.accepted.path_id() != scope.relay.path_id
+            || route.accepted.reservation_id().as_slice() != scope.exit.reservation_id
+            || route.accepted.exit_node_id().as_slice() != scope.exit.exit_node_id
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.committed_signal.is_some()
+            || exit_peer == local_peer
+        {
+            reject!("UDP_SESSION_RELAY_OWNER_MISMATCH");
+        }
+        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+            reject!("UDP_SESSION_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        let authorized_exit = self
+            .forwarded_exits
+            .get(&ForwardedExitKey {
+                control_relay_peer: local_peer,
+                exit_peer,
+            })
+            .filter(|capability| {
+                forwarded_exit_capability_matches(
+                    capability,
+                    &authorized_control,
+                    self.local_node_id,
+                    local_peer,
+                    self.local_public_key,
+                    exit_node_id,
+                    exit_peer,
+                    request.deadline_unix_ms(),
+                )
+            })
+            .cloned();
+        let Some(authorized_exit) = authorized_exit else {
+            reject!("UDP_SESSION_RELAY_EXIT_AUTHORITY_UNAVAILABLE");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            datapath_request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::UdpSessionStart,
+            request.client_signed_request().to_vec(),
+        ) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            reject!("UDP_SESSION_RELAY_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
+        {
+            reject!("UDP_SESSION_RELAY_CAPACITY");
+        }
+        let route = cleanup
+            .as_mut()
+            .map(|(_, route)| route)
+            .expect("installed UDP Relay cleanup owner");
+        let commit = route
+            .commit
+            .take()
+            .expect("validated prepared UDP Relay commit");
+        if self
+            .helper
+            .commit_lease_batch(&mut route.helper_owner, commit)
+            .await
+            .is_err()
+        {
+            reject!("UDP_SESSION_RELAY_HELPER_COMMIT_REJECTED");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            reject!("UDP_SESSION_RELAY_TRANSPORT_UNAVAILABLE");
+        };
+        let (_, route) = cleanup.take().expect("committed UDP Relay owner");
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::UdpSessionStart,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: Some(authorized_exit),
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: Some(PendingUdpSessionStart {
+                    datapath_request_id,
+                    route_context_id,
+                    channels: vec![channel],
+                    canonical_start: request.client_signed_request().to_vec(),
+                    route,
+                }),
+            },
+        );
+        log_relay_forward_admission(Some(state), "UDP_SESSION_RELAY_DISPATCHED");
     }
 
     #[allow(
@@ -4903,6 +5196,7 @@ impl DiscoveryRuntime {
                 }),
                 native_authorization: None,
                 native_result: None,
+                udp_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_DISPATCHED");
@@ -5216,6 +5510,7 @@ impl DiscoveryRuntime {
                     helper_owner: cleanup_owner.take().expect("validated native helper owner"),
                 }),
                 native_result: None,
+                udp_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_AUTHORIZATION_DISPATCHED");
@@ -5419,6 +5714,7 @@ impl DiscoveryRuntime {
                     committed,
                     helper_owner: active.helper_owner,
                 }),
+                udp_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_DISPATCHED");
@@ -5610,6 +5906,7 @@ impl DiscoveryRuntime {
                 native_ready: None,
                 native_authorization: None,
                 native_result: None,
+                udp_session: None,
             },
         );
         log_relay_forward_admission(state, "EXIT_FORWARD_RELAY_DISPATCHED");
@@ -5649,9 +5946,79 @@ impl DiscoveryRuntime {
                 pending.expected_exit_node_id,
             );
         if !valid_before_ingest {
-            self.finish_relay_definitive(pending);
+            if let Some(udp) = pending.udp_session.take() {
+                self.finish_udp_session_unavailable(udp).await;
+            } else {
+                self.finish_relay_definitive(pending);
+            }
             log_reservation_event(state, "EXIT_FORWARD_RELAY_RESPONSE_INVALID").await;
             return OutboundEventOutcome::InvalidResponse;
+        }
+        if let Some(mut udp) = pending.udp_session.take() {
+            let signal = response
+                .signed_responses()
+                .first()
+                .filter(|_| response.validated_status() == Ok(ForwardStatus::Granted))
+                .and_then(|encoded| {
+                    decode_canonical::<UdpExitSessionSignal>(
+                        encoded,
+                        usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                    )
+                    .ok()
+                    .map(|signal| (encoded.clone(), signal))
+                });
+            let Some((encoded_signal, signal)) = signal else {
+                self.finish_udp_session_unavailable(udp).await;
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            if signal.validate().is_err()
+                || signal.reservation_id() != udp.route.accepted.reservation_id()
+                || signal.route_context_id() != udp.route.accepted.route_context_id()
+                || signal.path_id() != udp.route.accepted.path_id()
+            {
+                self.finish_udp_session_unavailable(udp).await;
+                return OutboundEventOutcome::InvalidResponse;
+            }
+            let Ok(datapath_response) = DatapathRelayResponse::granted(
+                udp.datapath_request_id.to_vec(),
+                DatapathRelayOperation::UdpSessionStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                encoded_signal.clone(),
+            ) else {
+                self.finish_udp_session_unavailable(udp).await;
+                return OutboundEventOutcome::Failed;
+            };
+            udp.route.committed_start = Some(udp.canonical_start.clone());
+            udp.route.committed_signal = Some(encoded_signal);
+            let route_context_id = udp.route_context_id;
+            if self
+                .prepared_production_relay_routes
+                .contains_key(&route_context_id)
+            {
+                self.finish_udp_session_unavailable(udp).await;
+                return OutboundEventOutcome::Failed;
+            }
+            self.prepared_production_relay_routes
+                .insert(route_context_id, udp.route);
+            for channel in udp.channels {
+                if self
+                    .service
+                    .send_datapath_relay_response(channel, datapath_response.clone())
+                    .is_err()
+                {
+                    if let Some(route) = self
+                        .prepared_production_relay_routes
+                        .remove(&route_context_id)
+                    {
+                        self.retire_production_relay_route(route_context_id, route)
+                            .await;
+                    }
+                    return OutboundEventOutcome::Failed;
+                }
+            }
+            log_reservation_event(state, "UDP_SESSION_RELAY_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
         }
         if let Some(native) = pending.native_ready.take() {
             if response.validated_status() != Ok(ForwardStatus::Granted) {
@@ -6165,7 +6532,64 @@ impl DiscoveryRuntime {
         .ok()
     }
 
+    async fn finish_udp_session_unavailable(&mut self, udp: PendingUdpSessionStart) {
+        let PendingUdpSessionStart {
+            datapath_request_id,
+            route_context_id,
+            channels,
+            canonical_start: _,
+            route,
+        } = udp;
+        self.retire_production_relay_route(route_context_id, route)
+            .await;
+        if let Ok(response) = DatapathRelayResponse::unavailable(
+            datapath_request_id.to_vec(),
+            DatapathRelayOperation::UdpSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            for channel in channels {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(channel, response.clone());
+            }
+        }
+    }
+
+    /// Destroy before releasing the Relay reservation. A failed Destroy keeps the exact affine
+    /// owner quarantined for the actor's bounded maintenance retry and never makes it reusable.
+    async fn retire_production_relay_route(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        mut route: PreparedProductionRelayRoute,
+    ) -> bool {
+        route.usable = false;
+        route.expires_at_ms = 0;
+        if self
+            .helper
+            .destroy_context(&route.helper_owner)
+            .await
+            .is_ok()
+        {
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(route.accepted.reservation_id()).ok());
+            true
+        } else {
+            let previous = self
+                .prepared_production_relay_routes
+                .insert(route_context_id, route);
+            debug_assert!(previous.is_none(), "UDP Relay cleanup owner collision");
+            false
+        }
+    }
+
     fn finish_relay_definitive(&mut self, mut pending: PendingRelayForward) {
+        debug_assert!(
+            pending.udp_session.is_none(),
+            "UDP session cleanup must use the awaited affine path"
+        );
         if let Some(native) = pending.native_ready.take() {
             if let Ok(response) = DatapathRelayResponse::unavailable(
                 native.datapath_request_id.to_vec(),
@@ -6242,6 +6666,14 @@ impl DiscoveryRuntime {
         }
     }
 
+    async fn finish_relay_ambiguity_awaited(&mut self, mut pending: PendingRelayForward) {
+        if let Some(udp) = pending.udp_session.take() {
+            self.finish_udp_session_unavailable(udp).await;
+        } else {
+            self.finish_relay_ambiguity(pending);
+        }
+    }
+
     fn destroy_helper_owner(&self, owner: RuntimeBoundPreparedLeaseBatch) {
         let helper = self.helper.clone();
         tokio::spawn(async move {
@@ -6314,7 +6746,7 @@ impl DiscoveryRuntime {
         destroyed
     }
 
-    fn fail_relay_forward(
+    async fn fail_relay_forward(
         &mut self,
         request_id: request_response::OutboundRequestId,
         peer: Libp2pPeerId,
@@ -6330,7 +6762,7 @@ impl DiscoveryRuntime {
             .remove(&request_id)
             .expect("present");
         self.relay_forward_index.remove(&pending.key);
-        self.finish_relay_ambiguity(pending);
+        Box::pin(self.finish_relay_ambiguity_awaited(pending)).await;
         OutboundEventOutcome::Failed
     }
 
@@ -8331,8 +8763,9 @@ impl DiscoveryRuntime {
             .pending_relay_forwards
             .iter()
             .filter_map(|(id, pending)| {
-                ((!preserve_fetch_attempts
-                    || pending.operation != ExitForwardOperation::FetchExitAdvertisement)
+                (pending.udp_session.is_none()
+                    && (!preserve_fetch_attempts
+                        || pending.operation != ExitForwardOperation::FetchExitAdvertisement)
                     && keys.contains(&ForwardedExitKey {
                         control_relay_peer: pending.authorized_control.peer_id,
                         exit_peer: pending.expected_exit_peer,
@@ -14191,6 +14624,7 @@ mod tests {
                 native_ready: None,
                 native_authorization: None,
                 native_result: None,
+                udp_session: None,
             },
         );
 
@@ -16708,6 +17142,7 @@ mod tests {
                 native_ready: None,
                 native_authorization: None,
                 native_result: None,
+                udp_session: None,
             },
         );
         fixture.runtime.forwarded_exits.insert(
@@ -16982,6 +17417,7 @@ mod tests {
                 native_ready: None,
                 native_authorization: None,
                 native_result: None,
+                udp_session: None,
             },
         );
         let advertisement = service_advertisement(
