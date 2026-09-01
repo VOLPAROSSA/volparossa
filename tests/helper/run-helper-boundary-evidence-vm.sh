@@ -604,6 +604,30 @@ non_retained_may_own_preexec_barrier_stage_is_safe() {
     esac
 }
 
+non_retained_may_own_driver_entry_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        arguments|\
+        unit-name|\
+        gid|\
+        main-pid|\
+        observer-pid|\
+        proc-records|\
+        process-credentials|\
+        observer-cgroup-record|\
+        observer-cgroup-length|\
+        observer-cgroup-boundary|\
+        manager-main-pid|\
+        network-namespace|\
+        control-pid|\
+        service-cgroup-procs|\
+        service-cgroup-members)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 report_non_retained_may_own_launch_failure_category() {
     [ "$#" -eq 1 ] || return 1
     non_retained_diagnostic=$1
@@ -648,11 +672,65 @@ report_non_retained_may_own_launch_failure_category() {
         non_retained_may_own_preexec_barrier_stage_is_safe \
             "$non_retained_may_own_preexec_category" || return 1
     fi
+    non_retained_may_own_driver_start_stage=
+    non_retained_may_own_driver_start_prefix=VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=
+    non_retained_may_own_driver_start_count=$(grep -Fc \
+        "$non_retained_may_own_driver_start_prefix" \
+        "$non_retained_diagnostic") || :
+    case $non_retained_may_own_category:$non_retained_may_own_driver_start_count in
+        identity-observer-exit:1)
+            non_retained_may_own_driver_start_line=$(grep -F \
+                "$non_retained_may_own_driver_start_prefix" \
+                "$non_retained_diagnostic") || return 1
+            case $non_retained_may_own_driver_start_line in
+                "$non_retained_may_own_driver_start_prefix"*)
+                    non_retained_may_own_driver_start_stage=${non_retained_may_own_driver_start_line#"$non_retained_may_own_driver_start_prefix"}
+                    ;;
+                *) return 1 ;;
+            esac
+            non_retained_production_launch_stage_is_safe \
+                "$non_retained_may_own_driver_start_stage" || return 1
+            ;;
+        identity-observer-exit:*) return 1 ;;
+        *:0) ;;
+        *) return 1 ;;
+    esac
+    non_retained_may_own_driver_entry_stage=
+    non_retained_may_own_driver_entry_prefix=VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=
+    non_retained_may_own_driver_entry_count=$(grep -Fc \
+        "$non_retained_may_own_driver_entry_prefix" \
+        "$non_retained_diagnostic") || :
+    case $non_retained_may_own_category:$non_retained_may_own_driver_start_stage:$non_retained_may_own_driver_entry_count in
+        identity-observer-exit:preflight-runtime:1)
+            non_retained_may_own_driver_entry_line=$(grep -F \
+                "$non_retained_may_own_driver_entry_prefix" \
+                "$non_retained_diagnostic") || return 1
+            case $non_retained_may_own_driver_entry_line in
+                "$non_retained_may_own_driver_entry_prefix"*)
+                    non_retained_may_own_driver_entry_stage=${non_retained_may_own_driver_entry_line#"$non_retained_may_own_driver_entry_prefix"}
+                    ;;
+                *) return 1 ;;
+            esac
+            non_retained_may_own_driver_entry_stage_is_safe \
+                "$non_retained_may_own_driver_entry_stage" || return 1
+            ;;
+        identity-observer-exit:preflight-runtime:0) ;;
+        *:*:0) ;;
+        *) return 1 ;;
+    esac
     printf 'non-retained helper-boundary PR smoke MayOwn launch category: %s\n' \
         "$non_retained_may_own_category" >&2
     if [ -n "$non_retained_may_own_preexec_category" ]; then
         printf 'non-retained helper-boundary PR smoke MayOwn preexec category: %s\n' \
             "$non_retained_may_own_preexec_category" >&2
+    fi
+    if [ -n "$non_retained_may_own_driver_start_stage" ]; then
+        printf 'non-retained helper-boundary PR smoke MayOwn observer failure stage: %s\n' \
+            "$non_retained_may_own_driver_start_stage" >&2
+    fi
+    if [ -n "$non_retained_may_own_driver_entry_stage" ]; then
+        printf 'non-retained helper-boundary PR smoke MayOwn driver-entry failure stage: %s\n' \
+            "$non_retained_may_own_driver_entry_stage" >&2
     fi
 }
 

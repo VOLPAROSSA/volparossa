@@ -975,6 +975,7 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_may_own_launch_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_may_own_preexec_barrier_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_may_own_driver_entry_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_may_own_launch_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_boundary_validator_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_boundary_validator_failure_category() {$/,/^}$/p' "$runner"
@@ -998,7 +999,7 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 32
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 33
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -1492,6 +1493,11 @@ while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
         printf '%s\n' \
             'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=shape-cgroup-stat' \
             >>"$branch_failure_diagnostic"
+    elif [ "$may_own_category" = identity-observer-exit ]; then
+        printf '%s\n%s\n' \
+            'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+            'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+            >>"$branch_failure_diagnostic"
     fi
     printf 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=%s\n' "$may_own_phase" \
         >>"$branch_failure_diagnostic"
@@ -1503,6 +1509,12 @@ while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
             "$(printf '%s\n%s' \
                 'non-retained helper-boundary PR smoke MayOwn launch category: preexec-barrier' \
                 'non-retained helper-boundary PR smoke MayOwn preexec category: shape-cgroup-stat')"
+    elif [ "$may_own_category" = identity-observer-exit ]; then
+        test "$(cat "$last_stderr")" = \
+            "$(printf '%s\n%s\n%s' \
+                'non-retained helper-boundary PR smoke MayOwn launch category: identity-observer-exit' \
+                'non-retained helper-boundary PR smoke MayOwn observer failure stage: preflight-runtime' \
+                'non-retained helper-boundary PR smoke MayOwn driver-entry failure stage: service-cgroup-members')"
     else
         test "$(cat "$last_stderr")" = \
             "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category"
@@ -1568,6 +1580,69 @@ while IFS= read -r may_own_first_crash_reason; do
     test "$(grep -Fc "'$may_own_first_crash_reason')" \
         "$branch_failure_functions")" -eq 1
 done <"$may_own_first_crash_reasons"
+
+printf '%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+for rejected_may_own_driver_stage in private-detail unknown-stage; do
+    printf '%s\n%s=%s\n' \
+        'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+        'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1' \
+        "$rejected_may_own_driver_stage" >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_may_own_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=identity-socket' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=identity-publication' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+for rejected_may_own_driver_entry_stage in private-detail unknown-stage; do
+    printf '%s\n%s\n%s=%s\n' \
+        'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+        'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+        'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1' \
+        "$rejected_may_own_driver_entry_stage" >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_may_own_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+printf '%s\n%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=proc-records' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=identity-publication' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    "$(printf '%s\n%s' \
+        'non-retained helper-boundary PR smoke MayOwn launch category: identity-observer-exit' \
+        'non-retained helper-boundary PR smoke MayOwn observer failure stage: preflight-runtime')"
 
 for may_own_preexec_category in \
     arguments \

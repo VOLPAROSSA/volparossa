@@ -657,6 +657,508 @@ while IFS= read -r assigned_preexec_diagnostic_category; do
         "$assigned_preexec_diagnostic_category" || exit 1
 done <"$preexec_assigned_categories"
 
+may_own_driver_start_reporter_contract=$tmp/may-own-driver-start-reporter-contract.sh
+sed -n '/^report_may_own_driver_start_failure_stage() {$/,/^}$/p' \
+    "$gate" >"$may_own_driver_start_reporter_contract"
+may_own_driver_start_reporter=$tmp/may-own-driver-start-reporter.sh
+{
+    sed -n '/^production_start_failure_stage_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^may_own_driver_entry_failure_stage_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^report_may_own_driver_start_failure_stage() {$/,/^}$/p' "$gate"
+} >"$may_own_driver_start_reporter"
+sh -n "$may_own_driver_start_reporter"
+may_own_driver_start_reporter_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    awk '
+        /vp_capture_file_is_safe "\$may_own_driver_start_failure_file"/ {
+            start_safe_file = NR; start_safe_file_count++
+        }
+        /may_own_driver_start_failure_file\.next/ {
+            start_next_path[++start_next_path_count] = NR
+        }
+        /may_own_driver_start_failure_size" -le 128 \]/ {
+            start_size_bound = NR; start_size_bound_count++
+        }
+        /may_own_driver_start_failure_prefix=VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=/ {
+            start_prefix = NR; start_prefix_count++
+        }
+        /production_start_failure_stage_is_safe/ {
+            start_allowlist = NR; start_allowlist_count++
+        }
+        /\| cmp -s - "\$may_own_driver_start_failure_file"/ {
+            start_exact = NR; start_exact_count++
+        }
+        /may_own_driver_entry_failure_file\.next/ {
+            entry_next_path[++entry_next_path_count] = NR
+        }
+        /\[ "\$may_own_driver_start_failure_stage" = preflight-runtime \]/ {
+            entry_scope = NR; entry_scope_count++
+        }
+        /vp_capture_file_is_safe "\$may_own_driver_entry_failure_file"/ {
+            entry_safe_file = NR; entry_safe_file_count++
+        }
+        /may_own_driver_entry_failure_size" -le 128 \]/ {
+            entry_size_bound = NR; entry_size_bound_count++
+        }
+        /may_own_driver_entry_failure_prefix=VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=/ {
+            entry_prefix = NR; entry_prefix_count++
+        }
+        /may_own_driver_entry_failure_stage_is_safe/ {
+            entry_allowlist = NR; entry_allowlist_count++
+        }
+        /\| cmp -s - "\$may_own_driver_entry_failure_file"/ {
+            entry_exact = NR; entry_exact_count++
+        }
+        /VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=%s/ {
+            start_output = NR; start_output_count++
+        }
+        /VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=%s/ {
+            entry_output = NR; entry_output_count++
+        }
+        END {
+            valid = start_safe_file_count == 1 && start_next_path_count == 2
+            valid = valid && start_size_bound_count == 1
+            valid = valid && start_prefix_count == 1
+            valid = valid && start_allowlist_count == 1
+            valid = valid && start_exact_count == 1
+            valid = valid && entry_next_path_count == 2
+            valid = valid && entry_scope_count == 1
+            valid = valid && entry_safe_file_count == 1
+            valid = valid && entry_size_bound_count == 1
+            valid = valid && entry_prefix_count == 1
+            valid = valid && entry_allowlist_count == 1
+            valid = valid && entry_exact_count == 1
+            valid = valid && start_output_count == 1
+            valid = valid && entry_output_count == 1
+            valid = valid && start_safe_file < start_next_path[1]
+            valid = valid && start_next_path[1] <= start_next_path[2]
+            valid = valid && start_next_path[2] < start_size_bound
+            valid = valid && start_size_bound < start_prefix
+            valid = valid && start_prefix < start_allowlist
+            valid = valid && start_allowlist < start_exact
+            valid = valid && start_exact < entry_next_path[1]
+            valid = valid && entry_next_path[1] <= entry_next_path[2]
+            valid = valid && entry_next_path[2] < entry_scope
+            valid = valid && entry_scope < entry_safe_file
+            valid = valid && entry_safe_file < entry_size_bound
+            valid = valid && entry_size_bound < entry_prefix
+            valid = valid && entry_prefix < entry_allowlist
+            valid = valid && entry_allowlist < entry_exact
+            valid = valid && entry_exact < start_output
+            valid = valid && start_output < entry_output
+            if (!valid) exit 1
+        }
+    ' "$1"
+}
+may_own_driver_start_reporter_contract_is_exact \
+    "$may_own_driver_start_reporter_contract" || exit 1
+if ! awk '
+    /report_may_own_driver_start_failure_stage \|\| :/ {
+        diagnostic = NR; diagnostic_count++
+    }
+    /failed '\''MayOwn first driver-side observer exited before identity proof'\''/ {
+        failure = NR; failure_count++
+    }
+    END {
+        if (diagnostic_count != 1 || failure_count != 1 \
+            || diagnostic >= failure) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'MayOwn observer death is not diagnosed before fail-closed exit' >&2
+    exit 1
+fi
+may_own_driver_start_reporter_allowlist_mutant=$tmp/may-own-driver-reporter-allowlist-mutant
+sed 's/production_start_failure_stage_is_safe/true/' \
+    "$may_own_driver_start_reporter_contract" \
+    >"$may_own_driver_start_reporter_allowlist_mutant"
+may_own_driver_entry_reporter_allowlist_mutant=$tmp/may-own-driver-entry-reporter-allowlist-mutant
+sed 's/may_own_driver_entry_failure_stage_is_safe/true/' \
+    "$may_own_driver_start_reporter_contract" \
+    >"$may_own_driver_entry_reporter_allowlist_mutant"
+may_own_driver_entry_reporter_scope_mutant=$tmp/may-own-driver-entry-reporter-scope-mutant
+sed 's/= preflight-runtime ]/= identity-publication ]/' \
+    "$may_own_driver_start_reporter_contract" \
+    >"$may_own_driver_entry_reporter_scope_mutant"
+may_own_driver_start_reporter_exact_mutant=$tmp/may-own-driver-reporter-exact-mutant
+sed 's/cmp -s -/cmp -n 0 -/' "$may_own_driver_start_reporter_contract" \
+    >"$may_own_driver_start_reporter_exact_mutant"
+may_own_driver_start_reporter_size_mutant=$tmp/may-own-driver-reporter-size-mutant
+sed 's/-le 128/-le 1280/' "$may_own_driver_start_reporter_contract" \
+    >"$may_own_driver_start_reporter_size_mutant"
+may_own_driver_start_reporter_next_mutant=$tmp/may-own-driver-reporter-next-mutant
+sed 's/start_failure_file\.next/start_failure_file.pending/g' \
+    "$may_own_driver_start_reporter_contract" \
+    >"$may_own_driver_start_reporter_next_mutant"
+for may_own_driver_start_reporter_mutant in \
+    "$may_own_driver_start_reporter_allowlist_mutant" \
+    "$may_own_driver_entry_reporter_allowlist_mutant" \
+    "$may_own_driver_entry_reporter_scope_mutant" \
+    "$may_own_driver_start_reporter_exact_mutant" \
+    "$may_own_driver_start_reporter_size_mutant" \
+    "$may_own_driver_start_reporter_next_mutant"
+do
+    sh -n "$may_own_driver_start_reporter_mutant"
+    if may_own_driver_start_reporter_contract_is_exact \
+        "$may_own_driver_start_reporter_mutant"; then
+        printf 'MayOwn driver-stage reporter accepted mutant: %s\n' \
+            "${may_own_driver_start_reporter_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+vp_capture_file_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    [ "$(stat -Lc '%u:%g:%a:%h' "$1" 2>/dev/null || true)" = \
+        "$(id -u):$(id -g):600:1" ]
+}
+# shellcheck disable=SC1090
+. "$may_own_driver_start_reporter"
+may_own_driver_start_stage_root=$tmp/may-own-driver-start-stage
+mkdir -m 0700 "$may_own_driver_start_stage_root"
+mkdir -m 0700 "$may_own_driver_start_stage_root/may-own-output"
+temporary_stage=$may_own_driver_start_stage_root
+may_own_driver_start_stage_file=$temporary_stage/may-own-output/start.failure
+may_own_driver_start_reporter_stdout=$tmp/may-own-driver-start-reporter.stdout
+may_own_driver_start_reporter_stderr=$tmp/may-own-driver-start-reporter.stderr
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-publication' \
+    >"$may_own_driver_start_stage_file"
+chmod 0600 "$may_own_driver_start_stage_file"
+report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"
+[ ! -s "$may_own_driver_start_reporter_stdout" ]
+[ "$(cat "$may_own_driver_start_reporter_stderr")" = \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=identity-publication' ]
+may_own_driver_entry_stage_file=$temporary_stage/may-own-output/may-own.driver-entry.failure
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=preflight-runtime' \
+    >"$may_own_driver_start_stage_file"
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+    >"$may_own_driver_entry_stage_file"
+chmod 0600 "$may_own_driver_entry_stage_file"
+report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"
+[ ! -s "$may_own_driver_start_reporter_stdout" ]
+[ "$(cat "$may_own_driver_start_reporter_stderr")" = \
+    "$(printf '%s\n%s' \
+        'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+        'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members')" ]
+for rejected_may_own_driver_entry_stage in private-detail unknown-stage; do
+    printf 'VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=%s\n' \
+        "$rejected_may_own_driver_entry_stage" \
+        >"$may_own_driver_entry_stage_file"
+    if report_may_own_driver_start_failure_stage \
+        >"$may_own_driver_start_reporter_stdout" \
+        2>"$may_own_driver_start_reporter_stderr"; then
+        printf 'MayOwn reporter accepted unsafe entry stage: %s\n' \
+            "$rejected_may_own_driver_entry_stage" >&2
+        exit 1
+    fi
+    [ ! -s "$may_own_driver_start_reporter_stdout" ]
+    [ ! -s "$may_own_driver_start_reporter_stderr" ]
+done
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=proc-records' \
+    'VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+    >"$may_own_driver_entry_stage_file"
+if report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"; then
+    printf '%s\n' 'MayOwn reporter accepted multiple entry stages' >&2
+    exit 1
+fi
+chmod 0644 "$may_own_driver_entry_stage_file"
+if report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"; then
+    printf '%s\n' 'MayOwn reporter accepted unsafe entry metadata' >&2
+    exit 1
+fi
+chmod 0600 "$may_own_driver_entry_stage_file"
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+    >"$may_own_driver_entry_stage_file"
+: >"$may_own_driver_entry_stage_file.next"
+chmod 0600 "$may_own_driver_entry_stage_file.next"
+if report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"; then
+    printf '%s\n' 'MayOwn reporter accepted a pending entry stage' >&2
+    exit 1
+fi
+rm -f -- "$may_own_driver_entry_stage_file.next"
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-publication' \
+    >"$may_own_driver_start_stage_file"
+if report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"; then
+    printf '%s\n' 'MayOwn reporter accepted an out-of-scope entry stage' >&2
+    exit 1
+fi
+rm -f -- "$may_own_driver_entry_stage_file"
+for rejected_may_own_driver_start_stage in private-detail unknown-stage; do
+    printf 'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=%s\n' \
+        "$rejected_may_own_driver_start_stage" \
+        >"$may_own_driver_start_stage_file"
+    if report_may_own_driver_start_failure_stage \
+        >"$may_own_driver_start_reporter_stdout" \
+        2>"$may_own_driver_start_reporter_stderr"; then
+        printf 'MayOwn reporter accepted unsafe stage: %s\n' \
+            "$rejected_may_own_driver_start_stage" >&2
+        exit 1
+    fi
+    [ ! -s "$may_own_driver_start_reporter_stdout" ]
+    [ ! -s "$may_own_driver_start_reporter_stderr" ]
+done
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-socket' \
+    'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-publication' \
+    >"$may_own_driver_start_stage_file"
+if report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"; then
+    printf '%s\n' 'MayOwn reporter accepted multiple stages' >&2
+    exit 1
+fi
+chmod 0644 "$may_own_driver_start_stage_file"
+if report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"; then
+    printf '%s\n' 'MayOwn reporter accepted unsafe metadata' >&2
+    exit 1
+fi
+chmod 0600 "$may_own_driver_start_stage_file"
+rm -f -- "$may_own_driver_start_stage_file"
+if report_may_own_driver_start_failure_stage \
+    >"$may_own_driver_start_reporter_stdout" \
+    2>"$may_own_driver_start_reporter_stderr"; then
+    printf '%s\n' 'MayOwn reporter accepted a missing stage' >&2
+    exit 1
+fi
+
+may_own_driver_entry_contract=$tmp/may-own-driver-entry-contract.sh
+sed -n '/^may_own_driver_entry_contract_is_exact() {$/,/^}$/p' \
+    "$hook" >"$may_own_driver_entry_contract"
+sh -n "$may_own_driver_entry_contract"
+may_own_driver_entry_categories='arguments unit-name gid main-pid observer-pid proc-records process-credentials observer-cgroup-record observer-cgroup-length observer-cgroup-boundary manager-main-pid network-namespace control-pid service-cgroup-procs service-cgroup-members'
+may_own_driver_entry_mapping_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    awk '
+        /^    may_own_driver_entry_failure_stage=[a-z]/ {
+            stage[++stage_count] = $0
+            stage_line[stage_count] = NR
+        }
+        /^    may_own_driver_entry_failure_stage=$/ {
+            clear = NR; clear_count++
+        }
+        /\[ "\$#" -eq 3 \] \|\| return 1/ { predicate[1] = NR; count[1]++ }
+        /unit_name_is_safe "\$hook_driver_unit" \|\| return 1/ { predicate[2] = NR; count[2]++ }
+        /number_is_safe "\$hook_driver_gid" \|\| return 1/ { predicate[3] = NR; count[3]++ }
+        /number_is_safe "\$hook_driver_main_pid" \|\| return 1/ { predicate[4] = NR; count[4]++ }
+        /\[ "\$\$" != "\$hook_driver_main_pid" \] \|\| return 1/ { predicate[5] = NR; count[5]++ }
+        /\[ -f "\$hook_driver_status" \]/ { predicate[6] = NR; count[6]++ }
+        /\/usr\/bin\/awk -v expected_gid="\$hook_driver_gid"/ { predicate[7] = NR; count[7]++ }
+        /hook_driver_cgroup=\$\(\/usr\/bin\/awk/ { predicate[8] = NR; count[8]++ }
+        /\$\{#hook_driver_cgroup\}" -le 4096/ { predicate[9] = NR; count[9]++ }
+        /^    case \$hook_driver_cgroup in$/ { predicate[10] = NR; count[10]++ }
+        /unit_main_pid "\$hook_driver_unit"/ { predicate[11] = NR; count[11]++ }
+        /hook_driver_network_identity=\$\(stat -Lc/ { predicate[12] = NR; count[12]++ }
+        /org\.freedesktop\.systemd1\.Service ControlPID/ { predicate[13] = NR; count[13]++ }
+        /\[ -f "\$hook_driver_service_procs" \]/ { predicate[14] = NR; count[14]++ }
+        /\/usr\/bin\/awk -v expected_pid="\$hook_driver_main_pid"/ { predicate[15] = NR; count[15]++ }
+        END {
+            expected[1] = "arguments"
+            expected[2] = "unit-name"
+            expected[3] = "gid"
+            expected[4] = "main-pid"
+            expected[5] = "observer-pid"
+            expected[6] = "proc-records"
+            expected[7] = "process-credentials"
+            expected[8] = "observer-cgroup-record"
+            expected[9] = "observer-cgroup-length"
+            expected[10] = "observer-cgroup-boundary"
+            expected[11] = "manager-main-pid"
+            expected[12] = "network-namespace"
+            expected[13] = "control-pid"
+            expected[14] = "service-cgroup-procs"
+            expected[15] = "service-cgroup-members"
+            valid = stage_count == 15 && clear_count == 1
+            for (i = 1; i <= 15; i++) {
+                valid = valid && stage[i] == "    may_own_driver_entry_failure_stage=" expected[i]
+                valid = valid && count[i] == 1
+                valid = valid && stage_line[i] < predicate[i]
+                if (i < 15) valid = valid && predicate[i] < stage_line[i + 1]
+            }
+            valid = valid && predicate[15] < clear
+            if (!valid) exit 1
+        }
+    ' "$1"
+}
+may_own_driver_entry_mapping_is_exact "$may_own_driver_entry_contract" \
+    || exit 1
+
+may_own_driver_entry_stage_functions=$tmp/may-own-driver-entry-stage-functions.sh
+sed -n '/^may_own_driver_entry_failure_stage_is_safe() {$/,/^}$/p' \
+    "$hook" >"$may_own_driver_entry_stage_functions"
+sh -n "$may_own_driver_entry_stage_functions"
+# shellcheck disable=SC1090
+. "$may_own_driver_entry_stage_functions"
+for may_own_driver_entry_category in $may_own_driver_entry_categories; do
+    may_own_driver_entry_failure_stage_is_safe \
+        "$may_own_driver_entry_category" || exit 1
+done
+for unsafe_may_own_driver_entry_category in \
+    '' private-detail /tmp/value 'service-cgroup-members value'
+do
+    if may_own_driver_entry_failure_stage_is_safe \
+        "$unsafe_may_own_driver_entry_category"; then
+        printf 'MayOwn driver-entry allowlist accepted unsafe category: %s\n' \
+            "$unsafe_may_own_driver_entry_category" >&2
+        exit 1
+    fi
+done
+
+may_own_driver_entry_mutation_index=0
+for may_own_driver_entry_category in $may_own_driver_entry_categories; do
+    may_own_driver_entry_mutation_index=$((may_own_driver_entry_mutation_index + 1))
+    may_own_driver_entry_mutant=$tmp/may-own-driver-entry-mutant.$may_own_driver_entry_mutation_index
+    sed "s/may_own_driver_entry_failure_stage=$may_own_driver_entry_category$/may_own_driver_entry_failure_stage=private-detail/" \
+        "$may_own_driver_entry_contract" >"$may_own_driver_entry_mutant"
+    sh -n "$may_own_driver_entry_mutant"
+    if may_own_driver_entry_mapping_is_exact "$may_own_driver_entry_mutant"; then
+        printf 'MayOwn driver-entry mapping accepted mutant: %s\n' \
+            "$may_own_driver_entry_category" >&2
+        exit 1
+    fi
+done
+may_own_driver_entry_predicate_mutant=$tmp/may-own-driver-entry-predicate-mutant
+sed 's/unit_main_pid "\$hook_driver_unit"/unit_removed_main_pid "\$hook_driver_unit"/' \
+    "$may_own_driver_entry_contract" >"$may_own_driver_entry_predicate_mutant"
+if may_own_driver_entry_mapping_is_exact \
+    "$may_own_driver_entry_predicate_mutant"; then
+    printf '%s\n' 'MayOwn driver-entry mapping accepted a missing predicate' >&2
+    exit 1
+fi
+may_own_driver_entry_clear_mutant=$tmp/may-own-driver-entry-clear-mutant
+sed 's/^    may_own_driver_entry_failure_stage=$/    :/' \
+    "$may_own_driver_entry_contract" >"$may_own_driver_entry_clear_mutant"
+if may_own_driver_entry_mapping_is_exact "$may_own_driver_entry_clear_mutant"; then
+    printf '%s\n' 'MayOwn driver-entry mapping accepted a retained success stage' >&2
+    exit 1
+fi
+
+may_own_driver_entry_publisher_contract=$tmp/may-own-driver-entry-publisher-contract.sh
+sed -n '/^publish_may_own_driver_entry_failure() {$/,/^}$/p' \
+    "$hook" >"$may_own_driver_entry_publisher_contract"
+may_own_driver_entry_publisher_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    awk '
+        /\[ "\$may_own_driver_observer_mode" = yes \] \|\| return 1/ { observer = NR; observer_count++ }
+        /\[ "\$start_failure_armed" = yes \] \|\| return 1/ { armed = NR; armed_count++ }
+        /\[ "\$start_failure_stage" = preflight-runtime \] \|\| return 1/ { scope = NR; scope_count++ }
+        /may_own_driver_entry_failure_stage_is_safe/ { allowlist = NR; allowlist_count++ }
+        /write_private_file "\$may_own_driver_entry_failure_record"/ { writer = NR; writer_count++ }
+        /VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=\$may_own_driver_entry_failure_stage/ { payload = NR; payload_count++ }
+        END {
+            valid = observer_count == 1 && armed_count == 1
+            valid = valid && scope_count == 1 && allowlist_count == 1
+            valid = valid && writer_count == 1 && payload_count == 1
+            valid = valid && observer < armed && armed < scope
+            valid = valid && scope < allowlist && allowlist < writer
+            valid = valid && writer < payload
+            if (!valid) exit 1
+        }
+    ' "$1"
+}
+may_own_driver_entry_publisher_contract_is_exact \
+    "$may_own_driver_entry_publisher_contract" || exit 1
+may_own_driver_entry_publisher_scope_mutant=$tmp/may-own-driver-entry-publisher-scope-mutant
+sed 's/= preflight-runtime ]/= identity-publication ]/' \
+    "$may_own_driver_entry_publisher_contract" \
+    >"$may_own_driver_entry_publisher_scope_mutant"
+may_own_driver_entry_publisher_allowlist_mutant=$tmp/may-own-driver-entry-publisher-allowlist-mutant
+sed 's/may_own_driver_entry_failure_stage_is_safe/true/' \
+    "$may_own_driver_entry_publisher_contract" \
+    >"$may_own_driver_entry_publisher_allowlist_mutant"
+may_own_driver_entry_publisher_writer_mutant=$tmp/may-own-driver-entry-publisher-writer-mutant
+sed 's/write_private_file/printf/' "$may_own_driver_entry_publisher_contract" \
+    >"$may_own_driver_entry_publisher_writer_mutant"
+for may_own_driver_entry_publisher_mutant in \
+    "$may_own_driver_entry_publisher_scope_mutant" \
+    "$may_own_driver_entry_publisher_allowlist_mutant" \
+    "$may_own_driver_entry_publisher_writer_mutant"
+do
+    sh -n "$may_own_driver_entry_publisher_mutant"
+    if may_own_driver_entry_publisher_contract_is_exact \
+        "$may_own_driver_entry_publisher_mutant"; then
+        printf 'MayOwn driver-entry publisher accepted mutant: %s\n' \
+            "${may_own_driver_entry_publisher_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+may_own_driver_entry_publisher=$tmp/may-own-driver-entry-publisher.sh
+{
+    cat "$may_own_driver_entry_stage_functions"
+    cat "$may_own_driver_entry_publisher_contract"
+} >"$may_own_driver_entry_publisher"
+write_private_file() {
+    [ "$#" -eq 2 ] || return 1
+    published_may_own_driver_entry_path=$1
+    published_may_own_driver_entry_payload=$2
+}
+# shellcheck disable=SC1090
+. "$may_own_driver_entry_publisher"
+# shellcheck disable=SC2034
+may_own_driver_observer_mode=yes
+# shellcheck disable=SC2034
+start_failure_armed=yes
+start_failure_stage=preflight-runtime
+may_own_driver_entry_failure_stage=service-cgroup-members
+may_own_driver_entry_failure_record=$tmp/may-own.driver-entry.failure
+published_may_own_driver_entry_path=
+published_may_own_driver_entry_payload=
+publish_may_own_driver_entry_failure
+[ "$published_may_own_driver_entry_path" = \
+    "$may_own_driver_entry_failure_record" ]
+[ "$published_may_own_driver_entry_payload" = \
+    'VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' ]
+for rejected_may_own_driver_entry_category in '' private-detail unknown-stage; do
+    may_own_driver_entry_failure_stage=$rejected_may_own_driver_entry_category
+    if publish_may_own_driver_entry_failure; then
+        printf 'MayOwn driver-entry publisher accepted unsafe stage: %s\n' \
+            "$rejected_may_own_driver_entry_category" >&2
+        exit 1
+    fi
+done
+# shellcheck disable=SC2034
+may_own_driver_entry_failure_stage=service-cgroup-members
+# shellcheck disable=SC2034
+start_failure_stage=identity-publication
+if publish_may_own_driver_entry_failure; then
+    printf '%s\n' 'MayOwn driver-entry publisher accepted an unsafe scope' >&2
+    exit 1
+fi
+
+if ! awk '
+    /if ! may_own_driver_entry_contract_is_exact/ { contract = NR; contract_count++ }
+    /publish_may_own_driver_entry_failure \|\| :/ { publish = NR; publish_count++ }
+    /fail '\''MayOwn driver observer boundary is not exact'\''/ { failure = NR; failure_count++ }
+    END {
+        valid = contract_count == 1 && publish_count == 1 && failure_count == 1
+        valid = valid && contract < publish && publish < failure
+        if (!valid) exit 1
+    }
+' "$hook"; then
+    printf '%s\n' 'MayOwn driver-entry failure is not safely published before exit' >&2
+    exit 1
+fi
+
 observer_preexec_contract=$tmp/observer-preexec-contract
 sed -n '/^[[:space:]]*pre-exec-one|pre-exec-two|pre-exec-three)/,/^[[:space:]]*;;$/p' \
     "$observer" >"$observer_preexec_contract"

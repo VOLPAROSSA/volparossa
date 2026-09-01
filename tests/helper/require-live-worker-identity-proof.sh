@@ -1009,6 +1009,30 @@ production_start_failure_stage_is_safe() {
     esac
 }
 
+may_own_driver_entry_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        arguments|\
+        unit-name|\
+        gid|\
+        main-pid|\
+        observer-pid|\
+        proc-records|\
+        process-credentials|\
+        observer-cgroup-record|\
+        observer-cgroup-length|\
+        observer-cgroup-boundary|\
+        manager-main-pid|\
+        network-namespace|\
+        control-pid|\
+        service-cgroup-procs|\
+        service-cgroup-members)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 restart_successor_start_failure_category() {
     [ "$#" -eq 1 ] || return 1
     restart_start_failure_file=$1
@@ -3712,6 +3736,65 @@ report_may_own_preexec_barrier_failure_stage() {
         "$may_own_preexec_barrier_failure_stage" || return 1
     printf 'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=%s\n' \
         "$may_own_preexec_barrier_failure_stage" >&2
+}
+
+report_may_own_driver_start_failure_stage() {
+    may_own_driver_start_failure_file=$temporary_stage/may-own-output/start.failure
+    vp_capture_file_is_safe "$may_own_driver_start_failure_file" || return 1
+    [ ! -e "$may_own_driver_start_failure_file.next" ] \
+        && [ ! -L "$may_own_driver_start_failure_file.next" ] || return 1
+    may_own_driver_start_failure_size=$(stat -Lc '%s' \
+        "$may_own_driver_start_failure_file" 2>/dev/null) || return 1
+    [ "$may_own_driver_start_failure_size" -ge 1 ] \
+        && [ "$may_own_driver_start_failure_size" -le 128 ] || return 1
+    may_own_driver_start_failure_record=$(cat \
+        "$may_own_driver_start_failure_file") || return 1
+    may_own_driver_start_failure_prefix=VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=
+    case $may_own_driver_start_failure_record in
+        "$may_own_driver_start_failure_prefix"*)
+            may_own_driver_start_failure_stage=${may_own_driver_start_failure_record#"$may_own_driver_start_failure_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    production_start_failure_stage_is_safe \
+        "$may_own_driver_start_failure_stage" || return 1
+    printf '%s%s\n' "$may_own_driver_start_failure_prefix" \
+        "$may_own_driver_start_failure_stage" \
+        | cmp -s - "$may_own_driver_start_failure_file" || return 1
+    may_own_driver_entry_failure_file=$temporary_stage/may-own-output/may-own.driver-entry.failure
+    may_own_driver_entry_failure_stage=
+    [ ! -e "$may_own_driver_entry_failure_file.next" ] \
+        && [ ! -L "$may_own_driver_entry_failure_file.next" ] || return 1
+    if [ -e "$may_own_driver_entry_failure_file" ] \
+        || [ -L "$may_own_driver_entry_failure_file" ]; then
+        [ "$may_own_driver_start_failure_stage" = preflight-runtime ] \
+            || return 1
+        vp_capture_file_is_safe "$may_own_driver_entry_failure_file" || return 1
+        may_own_driver_entry_failure_size=$(stat -Lc '%s' \
+            "$may_own_driver_entry_failure_file" 2>/dev/null) || return 1
+        [ "$may_own_driver_entry_failure_size" -ge 1 ] \
+            && [ "$may_own_driver_entry_failure_size" -le 128 ] || return 1
+        may_own_driver_entry_failure_record=$(cat \
+            "$may_own_driver_entry_failure_file") || return 1
+        may_own_driver_entry_failure_prefix=VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=
+        case $may_own_driver_entry_failure_record in
+            "$may_own_driver_entry_failure_prefix"*)
+                may_own_driver_entry_failure_stage=${may_own_driver_entry_failure_record#"$may_own_driver_entry_failure_prefix"}
+                ;;
+            *) return 1 ;;
+        esac
+        may_own_driver_entry_failure_stage_is_safe \
+            "$may_own_driver_entry_failure_stage" || return 1
+        printf '%s%s\n' "$may_own_driver_entry_failure_prefix" \
+            "$may_own_driver_entry_failure_stage" \
+            | cmp -s - "$may_own_driver_entry_failure_file" || return 1
+    fi
+    printf 'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=%s\n' \
+        "$may_own_driver_start_failure_stage" >&2
+    if [ -n "$may_own_driver_entry_failure_stage" ]; then
+        printf 'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=%s\n' \
+            "$may_own_driver_entry_failure_stage" >&2
+    fi
 }
 
 may_own_service_shape_is_exact() {
@@ -7226,8 +7309,10 @@ if [ "$proof_ok" = yes ]; then
         || failed 'MayOwn first driver-side observer could not be started'
     may_own_wait=0
     while ! vp_capture_file_is_safe "$temporary_stage/may-own-output/unit.identity"; do
-        kill -0 "$may_own_driver_observer_pid" 2>/dev/null \
-            || failed 'MayOwn first driver-side observer exited before identity proof'
+        if ! kill -0 "$may_own_driver_observer_pid" 2>/dev/null; then
+            report_may_own_driver_start_failure_stage || :
+            failed 'MayOwn first driver-side observer exited before identity proof'
+        fi
         may_own_wait=$((may_own_wait + 1))
         [ "$may_own_wait" -lt 1200 ] \
             || failed 'MayOwn first invocation identity did not appear'

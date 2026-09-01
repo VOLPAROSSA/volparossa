@@ -68,9 +68,11 @@ may_own_third_boundary_record=$proof_directory/may-own.third-boundary
 may_own_resumed_record=$proof_directory/may-own.resumed
 may_own_driver_second_ready_record=$proof_directory/may-own.driver-second-ready
 may_own_driver_third_ready_record=$proof_directory/may-own.driver-third-ready
+may_own_driver_entry_failure_record=$proof_directory/may-own.driver-entry.failure
 may_own_relay_mode=no
 may_own_driver_observer_mode=no
 may_own_driver_expected_main_pid=
+may_own_driver_entry_failure_stage=
 functional_peer_public_key=$functional_relay_public_key
 functional_peer_endpoint=$functional_underlay_address:$functional_relay_listen_port
 functional_exit_peer_public_key=$functional_exit_relay_public_key
@@ -301,6 +303,30 @@ start_failure_stage_is_safe() {
     esac
 }
 
+may_own_driver_entry_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        arguments|\
+        unit-name|\
+        gid|\
+        main-pid|\
+        observer-pid|\
+        proc-records|\
+        process-credentials|\
+        observer-cgroup-record|\
+        observer-cgroup-length|\
+        observer-cgroup-boundary|\
+        manager-main-pid|\
+        network-namespace|\
+        control-pid|\
+        service-cgroup-procs|\
+        service-cgroup-members)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 restart_start_failure_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -409,6 +435,16 @@ publish_start_failure() {
         "VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=$start_failure_stage" \
         || return 1
     start_failure_published=yes
+}
+
+publish_may_own_driver_entry_failure() {
+    [ "$may_own_driver_observer_mode" = yes ] || return 1
+    [ "$start_failure_armed" = yes ] || return 1
+    [ "$start_failure_stage" = preflight-runtime ] || return 1
+    may_own_driver_entry_failure_stage_is_safe \
+        "$may_own_driver_entry_failure_stage" || return 1
+    write_private_file "$may_own_driver_entry_failure_record" \
+        "VOLPAROSSA_HELPER_V3_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=$may_own_driver_entry_failure_stage"
 }
 
 publish_restart_initial_release_authorized() {
@@ -1379,19 +1415,26 @@ probe_output_is_exact() {
 }
 
 may_own_driver_entry_contract_is_exact() {
+    may_own_driver_entry_failure_stage=arguments
     [ "$#" -eq 3 ] || return 1
     hook_driver_unit=$1
     hook_driver_gid=$2
     hook_driver_main_pid=$3
+    may_own_driver_entry_failure_stage=unit-name
     unit_name_is_safe "$hook_driver_unit" || return 1
+    may_own_driver_entry_failure_stage=gid
     number_is_safe "$hook_driver_gid" || return 1
+    may_own_driver_entry_failure_stage=main-pid
     number_is_safe "$hook_driver_main_pid" || return 1
+    may_own_driver_entry_failure_stage=observer-pid
     [ "$$" != "$hook_driver_main_pid" ] || return 1
     hook_driver_status=/proc/$$/status
     hook_driver_cgroup_record=/proc/$$/cgroup
+    may_own_driver_entry_failure_stage=proc-records
     [ -f "$hook_driver_status" ] && [ ! -L "$hook_driver_status" ] \
         && [ -f "$hook_driver_cgroup_record" ] \
         && [ ! -L "$hook_driver_cgroup_record" ] || return 1
+    may_own_driver_entry_failure_stage=process-credentials
     /usr/bin/awk -v expected_gid="$hook_driver_gid" '
         $1 == "Uid:" {
             uid_count++
@@ -1419,6 +1462,7 @@ may_own_driver_entry_contract_is_exact() {
                 || groups_count != 1 || nnp_count != 1) exit 1
         }
     ' "$hook_driver_status" || return 1
+    may_own_driver_entry_failure_stage=observer-cgroup-record
     hook_driver_cgroup=$(/usr/bin/awk '
         NR == 1 && $0 ~ /^0::\// {
             print substr($0, 4)
@@ -1428,7 +1472,9 @@ may_own_driver_entry_contract_is_exact() {
         { invalid = 1 }
         END { if (invalid || NR != 1 || accepted != 1) exit 1 }
     ' "$hook_driver_cgroup_record") || return 1
+    may_own_driver_entry_failure_stage=observer-cgroup-length
     [ "${#hook_driver_cgroup}" -le 4096 ] || return 1
+    may_own_driver_entry_failure_stage=observer-cgroup-boundary
     case $hook_driver_cgroup in
         "/system.slice/$hook_driver_unit"|"/system.slice/$hook_driver_unit/"*)
             return 1
@@ -1436,23 +1482,29 @@ may_own_driver_entry_contract_is_exact() {
         /*) ;;
         *) return 1 ;;
     esac
+    may_own_driver_entry_failure_stage=manager-main-pid
     [ "$(unit_main_pid "$hook_driver_unit")" = "$hook_driver_main_pid" ] \
         || return 1
+    may_own_driver_entry_failure_stage=network-namespace
     hook_driver_network_identity=$(stat -Lc '%d:%i' /proc/$$/ns/net) \
         || return 1
     [ "$hook_driver_network_identity" = \
         "$(stat -Lc '%d:%i' "/proc/$hook_driver_main_pid/ns/net")" ] \
         || return 1
+    may_own_driver_entry_failure_stage=control-pid
     [ "$(unit_u32_property "$hook_driver_unit" \
         org.freedesktop.systemd1.Service ControlPID)" = 0 ] || return 1
     hook_driver_service_cgroup=/sys/fs/cgroup/system.slice/$hook_driver_unit
     hook_driver_service_procs=$hook_driver_service_cgroup/cgroup.procs
+    may_own_driver_entry_failure_stage=service-cgroup-procs
     [ -f "$hook_driver_service_procs" ] \
         && [ ! -L "$hook_driver_service_procs" ] || return 1
+    may_own_driver_entry_failure_stage=service-cgroup-members
     /usr/bin/awk -v expected_pid="$hook_driver_main_pid" '
         NR > 32 || $0 != expected_pid { invalid = 1 }
         END { if (invalid || NR < 1) exit 1 }
-    ' "$hook_driver_service_procs"
+    ' "$hook_driver_service_procs" || return 1
+    may_own_driver_entry_failure_stage=
 }
 
 run_probe() {
@@ -6581,10 +6633,12 @@ may_own_start_hook() {
     may_own_driver_expected_main_pid=$7
     [ "$may_own_driver_observer_mode" = yes ] \
         || fail 'MayOwn start hook is not driver-observed'
-    may_own_driver_entry_contract_is_exact \
+    if ! may_own_driver_entry_contract_is_exact \
         "$hook_may_own_unit" "$hook_may_own_gid" \
-        "$may_own_driver_expected_main_pid" \
-        || fail 'MayOwn driver observer boundary is not exact'
+        "$may_own_driver_expected_main_pid"; then
+        publish_may_own_driver_entry_failure || :
+        fail 'MayOwn driver observer boundary is not exact'
+    fi
     hook_may_own_driver_invocation=$(unit_invocation_id "$hook_may_own_unit") \
         || fail 'MayOwn driver invocation is unavailable'
     if [ ! -e "$may_own_first_boundary_record" ] \
