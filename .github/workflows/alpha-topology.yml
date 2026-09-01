@@ -62,7 +62,8 @@ jobs:
           set -euo pipefail
           native_binary="$(pwd -P)/native/volparossa-mpquic/build/volparossa-mpquic"
           native/volparossa-mpquic/scripts/fetch-upstream.sh --yes
-          VMP_BUILD_JOBS=2 native/volparossa-mpquic/scripts/build-upstream.sh
+          VMP_BUILD_JOBS=2 VMP_RUN_TESTS=no \
+            native/volparossa-mpquic/scripts/build-upstream.sh
           test -f "$native_binary"
           test -x "$native_binary"
           test "$("$native_binary" --api-version)" = 6

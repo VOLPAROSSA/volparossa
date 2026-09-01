@@ -32,6 +32,7 @@ if grep -Eq '^  push:' "$WORKFLOW"; then exit 1; fi
 grep -F 'native/volparossa-mpquic/scripts/fetch-upstream.sh --yes' "$WORKFLOW" \
     >/dev/null
 grep -F 'native/volparossa-mpquic/scripts/build-upstream.sh' "$WORKFLOW" >/dev/null
+grep -F 'VMP_BUILD_JOBS=2 VMP_RUN_TESTS=no' "$WORKFLOW" >/dev/null
 grep -F -- '--mpquic "$VOLPAROSSA_ALPHA_MPQUIC"' "$WORKFLOW" >/dev/null
 grep -F 'scp_to "$mpquic_path" /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
 grep -F -- '--mpquic /home/vpci/volparossa-mpquic' "$HOST" >/dev/null

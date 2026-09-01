@@ -11,12 +11,22 @@ build_root="$component_root/build/upstream"
 source_stage="$build_root/source"
 native_build="$component_root/build/native-cmake"
 jobs=${VMP_BUILD_JOBS:-2}
+run_tests=${VMP_RUN_TESTS:-yes}
 mqvpn_patch="$repo_root/patches/volparossa-mqvpn.patch"
 mqvpn_exit_patch="$repo_root/patches/volparossa-mqvpn-exit-paths.patch"
 xquic_patch="$repo_root/patches/volparossa-xquic.patch"
 mqvpn_patch_sha256=91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887
 mqvpn_exit_patch_sha256=da22508590dd066852344ac685cb1fc53dfdfaebaed16353ae53f8675f7e1427
 xquic_patch_sha256=acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b
+
+case $run_tests in
+    yes) build_testing=ON ;;
+    no) build_testing=OFF ;;
+    *)
+        echo "ERROR: VMP_RUN_TESTS must be yes or no" >&2
+        exit 2
+        ;;
+esac
 
 "$script_dir/verify-upstream.sh"
 
@@ -116,17 +126,24 @@ cmake --build "$xquic_build" --parallel "$jobs"
 cmake -E remove_directory "$mqvpn_build"
 cmake -S "$mqvpn_source" -B "$mqvpn_build" \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-    -DBUILD_TESTING=ON \
+    -DBUILD_TESTING="$build_testing" \
     -DBORINGSSL_BUILD_DIR="$boringssl_build" \
     -DBORINGSSL_INCLUDE_DIR="$boringssl_source/include" \
     -DXQUIC_BUILD_DIR="$xquic_build"
 cmake --build "$mqvpn_build" --parallel "$jobs"
-ctest --test-dir "$mqvpn_build" --output-on-failure
+if [ "$run_tests" = yes ]; then
+    ctest --test-dir "$mqvpn_build" --output-on-failure
+fi
 
 cmake -E remove_directory "$native_build"
-cmake -S "$component_root" -B "$native_build" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON -DVMP_BUILD_DAEMON=ON
+cmake -S "$component_root" -B "$native_build" \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DBUILD_TESTING="$build_testing" \
+    -DVMP_BUILD_DAEMON=ON
 cmake --build "$native_build" --parallel "$jobs"
-ctest --test-dir "$native_build" --output-on-failure
+if [ "$run_tests" = yes ]; then
+    ctest --test-dir "$native_build" --output-on-failure
+fi
 
 artifact="$component_root/build/volparossa-mpquic"
 if [ ! -f "$artifact" ]; then
@@ -135,6 +152,11 @@ if [ ! -f "$artifact" ]; then
 fi
 chmod 0755 "$artifact"
 
-echo "upstream source, daemon, and bounded native unit tests completed"
+if [ "$run_tests" = yes ]; then
+    echo "upstream source, daemon, and bounded native unit tests completed"
+    echo "No VOLPAROSSA multipath acceptance claim follows from these unit tests."
+else
+    echo "upstream source and daemon build completed; tests were explicitly skipped"
+    echo "No VOLPAROSSA multipath acceptance claim follows from a build-only check."
+fi
 echo "artifact: $artifact"
-echo "No VOLPAROSSA multipath acceptance claim follows from these unit tests."
