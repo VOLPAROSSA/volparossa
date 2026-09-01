@@ -136,6 +136,7 @@ const MAX_LEDGER_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
 const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
 const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
 const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
+const AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS: u64 = 1_000;
 const PROVIDER_OBSERVATION_TTL_MS: u64 = 120_000;
 const CLIENT_PRESELECTION_TIMEOUT: Duration = Duration::from_secs(TUNNEL_SETUP_TIMEOUT_SECONDS);
 
@@ -1052,6 +1053,19 @@ struct ForwardedExitKey {
     exit_peer: Libp2pPeerId,
 }
 
+enum AutomaticExitFetchAttemptState {
+    InFlight(oneshot::Receiver<Result<ExitForwardResponse, OutboundReservationError>>),
+    RetryNotBefore(u64),
+}
+
+struct AutomaticExitFetchAttempt {
+    key: ForwardedExitKey,
+    authorized_control: DirectRelayCapability,
+    request: ExitForwardRequest,
+    dispatch_attempts: usize,
+    state: AutomaticExitFetchAttemptState,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ForwardedIngestAuthority {
     authorized_control: DirectRelayCapability,
@@ -1360,8 +1374,7 @@ pub struct DiscoveryRuntime {
     relay_advertisement_requests: HashMap<request_response::OutboundRequestId, Libp2pPeerId>,
     exit_provider_peers: HashMap<Libp2pPeerId, u64>,
     automatic_exit_fetches: HashMap<ForwardedExitKey, u64>,
-    automatic_exit_fetch_receivers:
-        Vec<oneshot::Receiver<Result<ExitForwardResponse, OutboundReservationError>>>,
+    automatic_exit_fetch_attempts: Vec<AutomaticExitFetchAttempt>,
     direct_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
     local_relay_snapshot: Option<DirectRelayCapability>,
     forwarded_exits: HashMap<ForwardedExitKey, ForwardedExitCapability>,
@@ -1492,7 +1505,7 @@ impl DiscoveryRuntime {
             relay_advertisement_requests: HashMap::new(),
             exit_provider_peers: HashMap::new(),
             automatic_exit_fetches: HashMap::new(),
-            automatic_exit_fetch_receivers: Vec::new(),
+            automatic_exit_fetch_attempts: Vec::new(),
             direct_relays: HashMap::new(),
             local_relay_snapshot: None,
             forwarded_exits: HashMap::new(),
@@ -3072,12 +3085,6 @@ impl DiscoveryRuntime {
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
         self.automatic_exit_fetches
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
-        self.automatic_exit_fetch_receivers.retain_mut(|receiver| {
-            matches!(
-                receiver.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            )
-        });
         if self.forwarded_exit_fail_closed_until_ms <= now_ms {
             self.forwarded_exit_fail_closed_until_ms = 0;
         }
@@ -3985,20 +3992,16 @@ impl DiscoveryRuntime {
     /// current direct Relay, and only the normal forwarded-provenance commit can make the response
     /// selectable.
     fn schedule_exit_advertisement_fetches(&mut self) {
-        if !self.roles.client
-            || self.automatic_exit_fetch_receivers.len() >= self.candidate_limit.max(1)
-        {
+        if !self.roles.client {
             return;
         }
         let now_ms = unix_millis();
+        self.drive_automatic_exit_fetch_attempts(now_ms);
         self.automatic_exit_fetches
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
-        self.automatic_exit_fetch_receivers.retain_mut(|receiver| {
-            matches!(
-                receiver.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            )
-        });
+        if self.automatic_exit_fetch_attempts.len() >= self.candidate_limit.max(1) {
+            return;
+        }
 
         let mut controls = self
             .direct_relays
@@ -4017,7 +4020,7 @@ impl DiscoveryRuntime {
         exits.sort_by(|(left, _), (right, _)| left.to_bytes().cmp(&right.to_bytes()));
 
         for (exit_peer, provider_expiry_ms) in exits {
-            if self.automatic_exit_fetch_receivers.len() >= self.candidate_limit.max(1)
+            if self.automatic_exit_fetch_attempts.len() >= self.candidate_limit.max(1)
                 || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
             {
                 continue;
@@ -4038,6 +4041,10 @@ impl DiscoveryRuntime {
                     .automatic_exit_fetches
                     .get(&key)
                     .is_some_and(|expiry| *expiry > now_ms)
+                || self
+                    .automatic_exit_fetch_attempts
+                    .iter()
+                    .any(|pending| pending.key == key)
             {
                 continue;
             }
@@ -4066,20 +4073,102 @@ impl DiscoveryRuntime {
             };
             let (reply, receiver) = oneshot::channel();
             self.automatic_exit_fetches.insert(key, deadline_unix_ms);
-            self.begin_client_forward(control.peer_id, request, reply);
-            let request_key = ClientForwardKey {
-                control_relay_peer: control.peer_id,
-                forward_id,
-            };
-            if self.client_forward_index.contains_key(&request_key)
-                || self.completed_client_forwards.contains_key(&request_key)
-                || self.retry_client_forwards.contains_key(&request_key)
-            {
-                self.automatic_exit_fetch_receivers.push(receiver);
-            } else {
-                self.automatic_exit_fetches.remove(&key);
-            }
+            self.begin_client_forward(control.peer_id, request.clone(), reply);
+            self.automatic_exit_fetch_attempts
+                .push(AutomaticExitFetchAttempt {
+                    key,
+                    authorized_control: control,
+                    request,
+                    dispatch_attempts: 1,
+                    state: AutomaticExitFetchAttemptState::InFlight(receiver),
+                });
         }
+    }
+
+    fn drive_automatic_exit_fetch_attempts(&mut self, now_ms: u64) {
+        let attempts = std::mem::take(&mut self.automatic_exit_fetch_attempts);
+        let mut retained = Vec::with_capacity(attempts.len());
+        for mut attempt in attempts {
+            match &mut attempt.state {
+                AutomaticExitFetchAttemptState::InFlight(receiver) => match receiver.try_recv() {
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        retained.push(attempt);
+                        continue;
+                    }
+                    Ok(Err(
+                        OutboundReservationError::Busy
+                        | OutboundReservationError::Capacity
+                        | OutboundReservationError::SendFailed
+                        | OutboundReservationError::AmbiguousAfterDispatch,
+                    )) if attempt.dispatch_attempts < MAX_DISPATCH_ATTEMPTS => {
+                        let retry_at_ms =
+                            now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS);
+                        self.automatic_exit_fetches.insert(attempt.key, retry_at_ms);
+                        attempt.state = AutomaticExitFetchAttemptState::RetryNotBefore(retry_at_ms);
+                        retained.push(attempt);
+                        continue;
+                    }
+                    Ok(Ok(_) | Err(_)) | Err(oneshot::error::TryRecvError::Closed) => continue,
+                },
+                AutomaticExitFetchAttemptState::RetryNotBefore(retry_at_ms)
+                    if *retry_at_ms > now_ms =>
+                {
+                    retained.push(attempt);
+                    continue;
+                }
+                AutomaticExitFetchAttemptState::RetryNotBefore(_) => {}
+            }
+
+            if attempt.dispatch_attempts >= MAX_DISPATCH_ATTEMPTS
+                || !self.automatic_exit_fetch_retry_is_current(&attempt, now_ms)
+            {
+                continue;
+            }
+            let (reply, receiver) = oneshot::channel();
+            self.begin_client_forward(
+                attempt.key.control_relay_peer,
+                attempt.request.clone(),
+                reply,
+            );
+            attempt.dispatch_attempts = attempt.dispatch_attempts.saturating_add(1);
+            attempt.state = AutomaticExitFetchAttemptState::InFlight(receiver);
+            self.automatic_exit_fetches
+                .insert(attempt.key, attempt.request.deadline_unix_ms());
+            retained.push(attempt);
+        }
+        self.automatic_exit_fetch_attempts = retained;
+    }
+
+    fn automatic_exit_fetch_retry_is_current(
+        &self,
+        attempt: &AutomaticExitFetchAttempt,
+        now_ms: u64,
+    ) -> bool {
+        let request = &attempt.request;
+        request.validate().is_ok()
+            && forward_request_scope_matches(
+                request,
+                ExitForwardOperation::FetchExitAdvertisement,
+                now_ms,
+            )
+            && request.control_relay_peer_id() == attempt.key.control_relay_peer.to_bytes()
+            && request.exit_peer_id() == attempt.key.exit_peer.to_bytes()
+            && self
+                .exit_provider_peers
+                .get(&attempt.key.exit_peer)
+                .is_some_and(|expires_at_ms| *expires_at_ms > now_ms.saturating_add(1_000))
+            && self.forwarded_exit_peer_is_eligible(attempt.key.exit_peer, now_ms)
+            && !self.forwarded_exits.contains_key(&attempt.key)
+            && self
+                .direct_relays
+                .get(&attempt.key.control_relay_peer)
+                .is_some_and(|current| {
+                    direct_relay_authority_lineage_matches(
+                        current,
+                        &attempt.authorized_control,
+                        request.deadline_unix_ms(),
+                    )
+                })
     }
 
     async fn handle_exit_forward_event(
@@ -12851,6 +12940,102 @@ mod tests {
             &too_long,
             ExitForwardOperation::FetchExitAdvertisement,
             now_ms
+        ));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_automatic_exit_fetch_retries_exact_lineage_after_short_backoff() {
+        let mut fixture = fixture(RolesConfig::default());
+        let control_identity = Identity::generate();
+        let exit_peer = Identity::generate().peer_id().to_owned();
+        let now_ms = unix_millis();
+        let deadline_unix_ms = now_ms.saturating_add(25_000);
+        let forward_id = [73; FORWARD_ID_BYTES];
+        let (control, request) = authorize_fetch(
+            &mut fixture,
+            &control_identity,
+            exit_peer,
+            forward_id,
+            deadline_unix_ms,
+        );
+        let key = ForwardedExitKey {
+            control_relay_peer: control.peer_id,
+            exit_peer,
+        };
+        let (reply, receiver) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_forward(control.peer_id, request.clone(), reply);
+        let request_id = *fixture
+            .runtime
+            .pending_client_forwards
+            .keys()
+            .next()
+            .expect("initial automatic dispatch");
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(key, deadline_unix_ms);
+        fixture
+            .runtime
+            .automatic_exit_fetch_attempts
+            .push(AutomaticExitFetchAttempt {
+                key,
+                authorized_control: control.clone(),
+                request: request.clone(),
+                dispatch_attempts: 1,
+                state: AutomaticExitFetchAttemptState::InFlight(receiver),
+            });
+        assert_eq!(
+            fixture
+                .runtime
+                .fail_client_forward(request_id, control.peer_id),
+            OutboundEventOutcome::Failed
+        );
+
+        fixture.runtime.drive_automatic_exit_fetch_attempts(now_ms);
+
+        let retry_at_ms = now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS);
+        assert_eq!(
+            fixture.runtime.automatic_exit_fetches.get(&key).copied(),
+            Some(retry_at_ms)
+        );
+        assert!(fixture.runtime.pending_client_forwards.is_empty());
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert!(matches!(
+            fixture.runtime.automatic_exit_fetch_attempts[0].state,
+            AutomaticExitFetchAttemptState::RetryNotBefore(value) if value == retry_at_ms
+        ));
+
+        fixture
+            .runtime
+            .drive_automatic_exit_fetch_attempts(retry_at_ms);
+
+        let logical_key = ClientForwardKey {
+            control_relay_peer: control.peer_id,
+            forward_id,
+        };
+        assert!(
+            fixture
+                .runtime
+                .client_forward_index
+                .contains_key(&logical_key)
+        );
+        assert!(
+            !fixture
+                .runtime
+                .retry_client_forwards
+                .contains_key(&logical_key)
+        );
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        let attempt = &fixture.runtime.automatic_exit_fetch_attempts[0];
+        assert_eq!(attempt.key, key);
+        assert_eq!(attempt.request, request);
+        assert_eq!(attempt.dispatch_attempts, 2);
+        assert!(matches!(
+            attempt.state,
+            AutomaticExitFetchAttemptState::InFlight(_)
         ));
     }
 
