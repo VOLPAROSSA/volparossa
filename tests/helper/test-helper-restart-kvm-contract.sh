@@ -211,11 +211,13 @@ grep -Eq '(^|[[:space:]])dd([[:space:]]|$)' "$command_preflight"
 
 # PID 1 is configured with the fixed launcher for restart evidence while the
 # running process image remains the real helper. Both identities are fenced:
-# ordinary production keeps its direct entrypoint, restart mode requires the
+# ordinary production keeps its direct entrypoint, launcher-identity mode requires the
 # launcher, and both typed systemd records receive that exact expectation.
 launch_entrypoint_contract=$tmp/restart-launch-entrypoint-contract
 sed -n '/^capture_systemd_launch_contract() {$/,/^}$/p' \
     "$hook" >"$launch_entrypoint_contract"
+grep -Fx '    case $restart_launcher_identity_mode in' \
+    "$launch_entrypoint_contract" >/dev/null
 grep -Fx '        no) hook_launch_entrypoint=$production_helper ;;' \
     "$launch_entrypoint_contract" >/dev/null
 grep -Fx '        yes) hook_launch_entrypoint=$restart_launcher ;;' \
@@ -223,6 +225,36 @@ grep -Fx '        yes) hook_launch_entrypoint=$restart_launcher ;;' \
 test "$(grep -Fc '"$hook_launch_entrypoint") || return 1' \
     "$launch_entrypoint_contract")" -eq 2
 grep -F 'capture_launch_image_identity "$production_helper"' "$hook" >/dev/null
+restart_start_hook_contract=$tmp/restart-start-hook-contract
+sed -n '/^restart_start_hook() {$/,/^}$/p' "$hook" \
+    >"$restart_start_hook_contract"
+if ! awk '
+    /if \[ ! -e "\$restart_crash_record" \]/ {
+        first = NR
+        first_count++
+    }
+    /^        restart_launcher_identity_mode=yes$/ {
+        launcher = NR
+        launcher_count++
+    }
+    /^        restart_exact_present_mode=yes$/ {
+        flow = NR
+        flow_count++
+    }
+    /^        start_hook "\$@"$/ {
+        start = NR
+        start_count++
+    }
+    END {
+        valid = first_count == 1 && launcher_count == 1
+        valid = valid && flow_count == 1 && start_count == 1
+        valid = valid && first < launcher && launcher < flow && flow < start
+        if (!valid) exit 1
+    }
+' "$restart_start_hook_contract"; then
+    printf '%s\n' 'restart launch identity and flow modes are not independently bound' >&2
+    exit 1
+fi
 
 # The pre-kill authorization is a single fixed private record published
 # before the functional release byte. Exercise its exact producer state and

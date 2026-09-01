@@ -61,6 +61,7 @@ restart_resumed_record=$proof_directory/restart.resumed
 restart_readiness_failure_record=$proof_directory/restart.readiness-failure
 restart_journal_settled_state_record=$proof_directory/restart.journal.settled.state
 restart_exact_present_mode=no
+restart_launcher_identity_mode=no
 may_own_debugger_armed_record=$proof_directory/may-own.debugger-armed
 may_own_first_boundary_record=$proof_directory/may-own.first-boundary
 may_own_second_boundary_record=$proof_directory/may-own.second-boundary
@@ -1049,7 +1050,7 @@ capture_systemd_launch_contract() {
     unit_name_is_safe "$hook_launch_unit" || return 1
     number_is_safe "$hook_launch_pid" || return 1
     number_is_safe "$hook_launch_gid" || return 1
-    case $restart_exact_present_mode in
+    case $restart_launcher_identity_mode in
         no) hook_launch_entrypoint=$production_helper ;;
         yes) hook_launch_entrypoint=$restart_launcher ;;
         *) return 1 ;;
@@ -6316,6 +6317,7 @@ restart_start_hook() {
     hook_restart_gid=$3
     hook_restart_groups=$4
     if [ ! -e "$restart_crash_record" ] && [ ! -L "$restart_crash_record" ]; then
+        restart_launcher_identity_mode=yes
         restart_exact_present_mode=yes
         start_hook "$@"
         fail 'restart first invocation crossed the forced-crash boundary'
@@ -6734,7 +6736,7 @@ may_own_start_hook() {
         || fail 'MayOwn driver invocation is unavailable'
     if [ ! -e "$may_own_first_boundary_record" ] \
         && [ ! -L "$may_own_first_boundary_record" ]; then
-        restart_exact_present_mode=yes
+        restart_launcher_identity_mode=yes
         may_own_relay_mode=yes
         start_hook "$1" "$2" "$3" "$4" "$5" "$6"
         fail 'MayOwn first invocation crossed the forced-crash boundary'

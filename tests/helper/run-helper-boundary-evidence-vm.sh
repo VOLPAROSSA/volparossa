@@ -697,7 +697,7 @@ report_non_retained_may_own_launch_failure_category() {
         "$non_retained_may_own_driver_start_prefix" \
         "$non_retained_diagnostic") || :
     case $non_retained_may_own_category:$non_retained_may_own_driver_start_count in
-        identity-observer-exit:1)
+        identity-observer-exit:1|service-observer-exit:1)
             non_retained_may_own_driver_start_line=$(grep -F \
                 "$non_retained_may_own_driver_start_prefix" \
                 "$non_retained_diagnostic") || return 1
@@ -710,7 +710,7 @@ report_non_retained_may_own_launch_failure_category() {
             non_retained_production_launch_stage_is_safe \
                 "$non_retained_may_own_driver_start_stage" || return 1
             ;;
-        identity-observer-exit:*) return 1 ;;
+        identity-observer-exit:*|service-observer-exit:*) return 1 ;;
         *:0) ;;
         *) return 1 ;;
     esac
@@ -720,7 +720,8 @@ report_non_retained_may_own_launch_failure_category() {
         "$non_retained_may_own_driver_entry_prefix" \
         "$non_retained_diagnostic") || :
     case $non_retained_may_own_category:$non_retained_may_own_driver_start_stage:$non_retained_may_own_driver_entry_count in
-        identity-observer-exit:preflight-runtime:1)
+        identity-observer-exit:preflight-runtime:1|\
+        service-observer-exit:preflight-runtime:1)
             non_retained_may_own_driver_entry_line=$(grep -F \
                 "$non_retained_may_own_driver_entry_prefix" \
                 "$non_retained_diagnostic") || return 1
@@ -733,7 +734,8 @@ report_non_retained_may_own_launch_failure_category() {
             non_retained_may_own_driver_entry_stage_is_safe \
                 "$non_retained_may_own_driver_entry_stage" || return 1
             ;;
-        identity-observer-exit:preflight-runtime:0) ;;
+        identity-observer-exit:preflight-runtime:0|\
+        service-observer-exit:preflight-runtime:0) ;;
         *:*:0) ;;
         *) return 1 ;;
     esac

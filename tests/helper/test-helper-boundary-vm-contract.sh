@@ -1494,7 +1494,8 @@ while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
         printf '%s\n' \
             'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=shape-cgroup-stat' \
             >>"$branch_failure_diagnostic"
-    elif [ "$may_own_category" = identity-observer-exit ]; then
+    elif [ "$may_own_category" = identity-observer-exit ] \
+        || [ "$may_own_category" = service-observer-exit ]; then
         printf '%s\n%s\n' \
             'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
             'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
@@ -1511,10 +1512,11 @@ while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
             "$(printf '%s\n%s' \
                 "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category" \
                 'non-retained helper-boundary PR smoke MayOwn preexec category: shape-cgroup-stat')"
-    elif [ "$may_own_category" = identity-observer-exit ]; then
+    elif [ "$may_own_category" = identity-observer-exit ] \
+        || [ "$may_own_category" = service-observer-exit ]; then
         test "$(cat "$last_stderr")" = \
             "$(printf '%s\n%s\n%s' \
-                'non-retained helper-boundary PR smoke MayOwn launch category: identity-observer-exit' \
+                "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category" \
                 'non-retained helper-boundary PR smoke MayOwn observer failure stage: preflight-runtime' \
                 'non-retained helper-boundary PR smoke MayOwn driver-entry failure stage: service-cgroup-members')"
     else

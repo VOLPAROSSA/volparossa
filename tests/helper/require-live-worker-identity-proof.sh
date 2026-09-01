@@ -7452,9 +7452,11 @@ if [ "$proof_ok" = yes ]; then
                 || failed 'MayOwn first service shape is not production-exact'
             failed 'MayOwn first service shape is not production-exact'
         fi
-        [ "$(capture_process_starttime "$may_own_driver_observer_pid" \
-            2>/dev/null || true)" = "$may_own_driver_observer_starttime" ] \
-            || failed 'MayOwn first driver-side observer exited before service convergence'
+        if [ "$(capture_process_starttime "$may_own_driver_observer_pid" \
+            2>/dev/null || true)" != "$may_own_driver_observer_starttime" ]; then
+            report_may_own_driver_start_failure_stage || :
+            failed 'MayOwn first driver-side observer exited before service convergence'
+        fi
         [ "$(capture_process_starttime "$may_own_debugger_pid" \
             2>/dev/null || true)" = "$may_own_debugger_starttime" ] \
             || failed 'MayOwn first debugger exited before service convergence'

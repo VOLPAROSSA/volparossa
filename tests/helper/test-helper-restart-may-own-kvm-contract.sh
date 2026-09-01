@@ -754,14 +754,21 @@ may_own_driver_start_reporter_contract_is_exact \
     "$may_own_driver_start_reporter_contract" || exit 1
 if ! awk '
     /report_may_own_driver_start_failure_stage \|\| :/ {
-        diagnostic = NR; diagnostic_count++
+        diagnostic[++diagnostic_count] = NR
     }
     /failed '\''MayOwn first driver-side observer exited before identity proof'\''/ {
-        failure = NR; failure_count++
+        identity_failure = NR; identity_failure_count++
+    }
+    /failed '\''MayOwn first driver-side observer exited before service convergence'\''/ {
+        service_failure = NR; service_failure_count++
     }
     END {
-        if (diagnostic_count != 1 || failure_count != 1 \
-            || diagnostic >= failure) exit 1
+        valid = diagnostic_count == 2 && identity_failure_count == 1
+        valid = valid && service_failure_count == 1
+        valid = valid && diagnostic[1] < identity_failure
+        valid = valid && identity_failure < diagnostic[2]
+        valid = valid && diagnostic[2] < service_failure
+        if (!valid) exit 1
     }
 ' "$gate"; then
     printf '%s\n' 'MayOwn observer death is not diagnosed before fail-closed exit' >&2
@@ -1546,8 +1553,11 @@ may_own_launcher_mode_contract_is_exact() {
         /if \[ ! -e "\$may_own_first_boundary_record" \]/ {
             first = NR; first_count++
         }
-        /^        restart_exact_present_mode=yes$/ {
+        /^        restart_launcher_identity_mode=yes$/ {
             launcher = NR; launcher_count++
+        }
+        /^        restart_exact_present_mode=yes$/ {
+            restart_flow_count++
         }
         /^        may_own_relay_mode=yes$/ { relay = NR; relay_count++ }
         /^        start_hook "\$1" "\$2" "\$3" "\$4" "\$5" "\$6"$/ {
@@ -1555,6 +1565,7 @@ may_own_launcher_mode_contract_is_exact() {
         }
         END {
             valid = first_count == 1 && launcher_count == 1
+            valid = valid && restart_flow_count == 0
             valid = valid && relay_count == 1 && start_count == 1
             valid = valid && first < launcher && launcher < relay && relay < start
             if (!valid) exit 1
@@ -1567,7 +1578,7 @@ may_own_launcher_mode_contract_is_exact "$may_own_start_hook_contract" \
         exit 1
     }
 may_own_launcher_mode_mutant=$tmp/may-own-launcher-mode-mutant.sh
-sed '/^        restart_exact_present_mode=yes$/d' \
+sed '/^        restart_launcher_identity_mode=yes$/d' \
     "$may_own_start_hook_contract" >"$may_own_launcher_mode_mutant"
 sh -n "$may_own_launcher_mode_mutant"
 if may_own_launcher_mode_contract_is_exact "$may_own_launcher_mode_mutant"; then
