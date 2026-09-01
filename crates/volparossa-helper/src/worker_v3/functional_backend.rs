@@ -7497,6 +7497,144 @@ mod tests {
         );
     }
 
+    fn contains_in_order(source: &str, needles: &[&str]) -> bool {
+        let mut remainder = source;
+        for needle in needles {
+            let Some(index) = remainder.find(needle) else {
+                return false;
+            };
+            remainder = &remainder[index + needle.len()..];
+        }
+        true
+    }
+
+    fn phase_split_namespace_custody_contract(worker: &str, functional: &str) -> bool {
+        let Some(worker_end) = worker.find("#[cfg(test)]\nmod tests {") else {
+            return false;
+        };
+        let worker = &worker[..worker_end];
+        let Some(functional_end) = functional.find("#[cfg(test)]\nmod tests {") else {
+            return false;
+        };
+        let functional = &functional[..functional_end];
+        let Some(reaped_start) = worker.find("struct ReapedWorkerRestartCustody {") else {
+            return false;
+        };
+        let Some(reaped_end_offset) =
+            worker[reaped_start..].find("\nimpl WorkerRecoveryIdentitySource {")
+        else {
+            return false;
+        };
+        let reaped = &worker[reaped_start..reaped_start + reaped_end_offset];
+        if !reaped.contains("restart: crate::worker_sandbox::PinnedWorkerRestartCustody,")
+            || reaped.contains("pending:")
+            || reaped.contains("WorkerRecoveryIdentitySource")
+        {
+            return false;
+        }
+        let Some(conversion_start) = worker.find("    fn into_reaped_restart_custody(") else {
+            return false;
+        };
+        let Some(conversion_end_offset) =
+            worker[conversion_start..].find("\n}\n\nimpl ReapedWorkerRestartCustody {")
+        else {
+            return false;
+        };
+        let conversion = &worker[conversion_start..conversion_start + conversion_end_offset];
+        if !contains_in_order(
+            conversion,
+            &[
+                "if self.pending.coordinates != reaped.coordinates",
+                "let Self {",
+                "pending,",
+                "restart_custody,",
+                "drop(pending);",
+                "ReapedWorkerRestartCustody {",
+                "restart: restart_custody,",
+            ],
+        ) {
+            return false;
+        }
+
+        let Some(cleanup_start) = functional.find("    async fn cleanup_exact(") else {
+            return false;
+        };
+        let Some(cleanup_end_offset) =
+            functional[cleanup_start..].find("\n    async fn settle_durable_cleanup(")
+        else {
+            return false;
+        };
+        let cleanup = &functional[cleanup_start..cleanup_start + cleanup_end_offset];
+        if !contains_in_order(
+            cleanup,
+            &[
+                "WorkerGenerationReap::Confirmed(proof) =>",
+                "let recovery = entry.recovery.take();",
+                "recovery.into_reaped_restart_custody(&proof)",
+                "entry.worker_cleanup.replace(proof)",
+                "entry.restart_custody.replace(restart_custody)",
+                "let parent_absent =",
+            ],
+        ) {
+            return false;
+        }
+
+        let Some(settle_start) = functional.find("    async fn settle_durable_cleanup(") else {
+            return false;
+        };
+        let Some(settle_end_offset) =
+            functional[settle_start..].find("\n    fn restore_durable_cleanup(")
+        else {
+            return false;
+        };
+        let settle = &functional[settle_start..settle_start + settle_end_offset];
+        contains_in_order(
+            settle,
+            &[
+                "manager_absence_proven != entry.restart_custody.is_none()",
+                "entry.restart_custody.take()",
+                "BorrowedCustodyPair::new(",
+                "remove_current_process_custody(",
+                ".verify_exact_target(custody.custody_name, &binding)",
+                "ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(",
+                "drop(restart_custody.take());",
+                "handle.confirm_manager_absent_until(proof, deadline)",
+                "self.restore_durable_cleanup(key, custody, None);",
+            ],
+        ) && functional.matches("drop(restart_custody.take());").count() == 1
+    }
+
+    #[test]
+    fn production_terminal_destroy_releases_namespace_custody_by_proven_phase() {
+        let worker = include_str!("../worker_v3.rs");
+        let functional = include_str!("functional_backend.rs");
+        assert!(phase_split_namespace_custody_contract(worker, functional));
+
+        let pending_leak = worker.replacen("drop(pending);", "let _pending = pending;", 1);
+        assert!(!phase_split_namespace_custody_contract(
+            &pending_leak,
+            functional
+        ));
+        let restart_leak = functional.replacen(
+            "drop(restart_custody.take());",
+            "let _restart_custody = restart_custody.take();",
+            1,
+        );
+        assert!(!phase_split_namespace_custody_contract(
+            worker,
+            &restart_leak
+        ));
+        let retained_local_fd = functional.replacen(
+            "self.restore_durable_cleanup(key, custody, None);",
+            "self.restore_durable_cleanup(key, custody, restart_custody);",
+            1,
+        );
+        assert!(!phase_split_namespace_custody_contract(
+            worker,
+            &retained_local_fd
+        ));
+    }
+
     #[test]
     fn opaque_same_runtime_settlement_has_one_private_production_path() {
         let source = include_str!("functional_backend.rs");
