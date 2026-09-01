@@ -3706,6 +3706,7 @@ may_own_preexec_barrier_failure_stage_is_safe() {
         shape-mainpid-argument|\
         shape-invocation-argument|\
         shape-count-arguments|\
+        shape-membership-mode|\
         shape-type|\
         shape-restart-usec|\
         shape-control-pid|\
@@ -3720,7 +3721,13 @@ may_own_preexec_barrier_failure_stage_is_safe() {
         shape-control-group-id|\
         shape-cgroup-path|\
         shape-cgroup-procs|\
+        shape-active-boundary|\
+        shape-worker-child|\
+        shape-worker-starttime|\
+        shape-worker-parent|\
+        shape-worker-cgroup|\
         shape-cgroup-members|\
+        shape-worker-stability|\
         shape-cgroup-type|\
         shape-cgroup-stat|\
         record-size|\
@@ -3833,6 +3840,283 @@ may_own_cgroup_members_are_exact() {
     ' "$may_own_members_file"
 }
 
+may_own_active_cgroup_members_are_exact() {
+    [ "$#" -eq 3 ] || return 1
+    may_own_active_members_file=$1
+    may_own_active_members_main_pid=$2
+    may_own_active_members_worker_pid=$3
+    for may_own_active_member_pid in \
+        "$may_own_active_members_main_pid" "$may_own_active_members_worker_pid"
+    do
+        case $may_own_active_member_pid in
+            ''|0|0*|*[!0-9]*) return 1 ;;
+        esac
+        [ "${#may_own_active_member_pid}" -le 10 ] \
+            && [ "$may_own_active_member_pid" -le 4194304 ] || return 1
+    done
+    [ "$may_own_active_members_main_pid" != \
+        "$may_own_active_members_worker_pid" ] || return 1
+    [ -f "$may_own_active_members_file" ] \
+        && [ ! -L "$may_own_active_members_file" ] || return 1
+    /usr/bin/awk \
+        -v expected_main="$may_own_active_members_main_pid" \
+        -v expected_worker="$may_own_active_members_worker_pid" '
+        NR > 32 || NF != 1 { invalid = 1; next }
+        $1 != expected_main && $1 != expected_worker { invalid = 1; next }
+        seen[$1]++ { invalid = 1; next }
+        END {
+            if (invalid || NR != 2 || seen[expected_main] != 1 \
+                || seen[expected_worker] != 1) exit 1
+        }
+    ' "$may_own_active_members_file"
+}
+
+may_own_direct_helper_child() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_child_parent_pid=$1
+    case $may_own_child_parent_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#may_own_child_parent_pid}" -le 10 ] \
+        && [ "$may_own_child_parent_pid" -le 4194304 ] || return 1
+    may_own_child_files=0
+    for may_own_child_file in \
+        /proc/"$may_own_child_parent_pid"/task/*/children
+    do
+        [ -f "$may_own_child_file" ] && [ ! -L "$may_own_child_file" ] \
+            || return 1
+        may_own_child_files=$((may_own_child_files + 1))
+        [ "$may_own_child_files" -le 256 ] || return 1
+    done
+    [ "$may_own_child_files" -ge 1 ] || return 1
+    /usr/bin/awk '
+        {
+            for (field = 1; field <= NF; field++) {
+                if ($field !~ /^[1-9][0-9]*$/ || length($field) > 10 \
+                    || $field > 4194304 || seen[$field]++) invalid = 1
+                child = $field
+                children++
+            }
+        }
+        END {
+            if (invalid || children != 1) exit 1
+            print child
+        }
+    ' /proc/"$may_own_child_parent_pid"/task/*/children
+}
+
+may_own_worker_status_record_is_exact() {
+    [ "$#" -eq 3 ] || return 1
+    may_own_status_file=$1
+    may_own_status_worker_pid=$2
+    may_own_status_main_pid=$3
+    [ -f "$may_own_status_file" ] && [ ! -L "$may_own_status_file" ] \
+        || return 1
+    /usr/bin/awk \
+        -v expected_worker="$may_own_status_worker_pid" \
+        -v expected_parent="$may_own_status_main_pid" '
+        $1 == "State:" {
+            states++
+            if (NF < 2 || $2 != "t") invalid = 1
+        }
+        $1 == "Pid:" {
+            pids++
+            if (NF != 2 || $2 != expected_worker) invalid = 1
+        }
+        $1 == "PPid:" {
+            parents++
+            if (NF != 2 || $2 != expected_parent) invalid = 1
+        }
+        $1 == "NSpid:" {
+            namespace_pids++
+            if (NF != 2 || $2 != expected_worker) invalid = 1
+        }
+        $1 == "Threads:" {
+            threads++
+            if (NF != 2 || $2 != 1) invalid = 1
+        }
+        END {
+            if (invalid || states != 1 || pids != 1 || parents != 1 \
+                || namespace_pids != 1 || threads != 1) exit 1
+        }
+    ' "$may_own_status_file"
+}
+
+may_own_worker_status_is_exact() {
+    [ "$#" -eq 2 ] || return 1
+    may_own_status_worker_pid=$1
+    may_own_status_main_pid=$2
+    for may_own_status_pid in \
+        "$may_own_status_worker_pid" "$may_own_status_main_pid"
+    do
+        case $may_own_status_pid in
+            ''|0|0*|*[!0-9]*) return 1 ;;
+        esac
+        [ "${#may_own_status_pid}" -le 10 ] \
+            && [ "$may_own_status_pid" -le 4194304 ] || return 1
+    done
+    [ "$may_own_status_worker_pid" != "$may_own_status_main_pid" ] \
+        || return 1
+    may_own_status_file=/proc/$may_own_status_worker_pid/status
+    [ -f "$may_own_status_file" ] && [ ! -L "$may_own_status_file" ] \
+        || return 1
+    may_own_worker_status_record_is_exact \
+        "$may_own_status_file" "$may_own_status_worker_pid" \
+        "$may_own_status_main_pid"
+}
+
+may_own_worker_cgroup_is_exact() {
+    [ "$#" -eq 2 ] || return 1
+    may_own_worker_cgroup_pid=$1
+    may_own_worker_cgroup_expected=$2
+    case $may_own_worker_cgroup_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "$may_own_worker_cgroup_expected" = "/system.slice/$unit_name" ] \
+        || return 1
+    may_own_worker_cgroup_file=/proc/$may_own_worker_cgroup_pid/cgroup
+    [ -f "$may_own_worker_cgroup_file" ] \
+        && [ ! -L "$may_own_worker_cgroup_file" ] || return 1
+    /usr/bin/awk -v expected="0::$may_own_worker_cgroup_expected" '
+        NR != 1 || NF != 1 || $1 != expected { invalid = 1 }
+        END { if (invalid || NR != 1) exit 1 }
+    ' "$may_own_worker_cgroup_file"
+}
+
+may_own_colon_identity_is_safe() {
+    [ "$#" -eq 2 ] || return 1
+    may_own_colon_identity=$1
+    may_own_colon_fields=$2
+    case $may_own_colon_fields in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    case $may_own_colon_identity in
+        ''|*[!0-9:]*|:*|*:|*::*) return 1 ;;
+    esac
+    [ "${#may_own_colon_identity}" -le 160 ] || return 1
+    printf '%s\n' "$may_own_colon_identity" | /usr/bin/awk \
+        -F: -v expected_fields="$may_own_colon_fields" '
+        NR != 1 || NF != expected_fields { invalid = 1 }
+        {
+            for (field = 1; field <= NF; field++) {
+                if ($field !~ /^(0|[1-9][0-9]*)$/ \
+                    || length($field) > 20) invalid = 1
+            }
+        }
+        END { if (invalid || NR != 1) exit 1 }
+    '
+}
+
+may_own_active_custody_boundary_is_exact() {
+    [ "$#" -eq 6 ] || return 1
+    may_own_boundary_file=$1
+    may_own_boundary_invocation=$2
+    may_own_boundary_main_pid=$3
+    may_own_boundary_worker_pid=$4
+    may_own_boundary_worker_starttime=$5
+    may_own_boundary_cgroup_identity=$6
+    unit_invocation_id_is_safe "$may_own_boundary_invocation" || return 1
+    for may_own_boundary_number in \
+        "$may_own_boundary_main_pid" "$may_own_boundary_worker_pid" \
+        "$may_own_boundary_worker_starttime"
+    do
+        case $may_own_boundary_number in
+            ''|0|0*|*[!0-9]*) return 1 ;;
+        esac
+        [ "${#may_own_boundary_number}" -le 20 ] || return 1
+    done
+    [ "$may_own_boundary_main_pid" != "$may_own_boundary_worker_pid" ] \
+        || return 1
+    may_own_kernel_object_identity_is_safe \
+        "$may_own_boundary_cgroup_identity" || return 1
+    vp_capture_file_is_safe "$may_own_boundary_file" || return 1
+    may_own_boundary_size=$(stat -Lc '%s' "$may_own_boundary_file") \
+        || return 1
+    [ "$may_own_boundary_size" -ge 1 ] \
+        && [ "$may_own_boundary_size" -le 2048 ] || return 1
+    [ "$(/usr/bin/awk 'END { print NR }' "$may_own_boundary_file")" = 13 ] \
+        || return 1
+    [ "$(sed -n '2p' "$may_own_boundary_file")" = \
+        "$may_own_boundary_invocation" ] \
+        && [ "$(sed -n '3p' "$may_own_boundary_file")" = \
+            "$may_own_boundary_main_pid" ] \
+        && [ "$(sed -n '5p' "$may_own_boundary_file")" = 2 ] \
+        && [ "$(sed -n '7p' "$may_own_boundary_file")" = \
+            'crash-boundary-v1=worker_v3::DurableCustodyPublicationTerminalGuard::retain_published' ] \
+        && [ "$(sed -n '8p' "$may_own_boundary_file")" = \
+            "$may_own_boundary_worker_pid" ] \
+        && [ "$(sed -n '9p' "$may_own_boundary_file")" = \
+            "$may_own_boundary_worker_starttime" ] \
+        && [ "$(sed -n '13p' "$may_own_boundary_file")" = \
+            "$may_own_boundary_cgroup_identity" ] || return 1
+    may_own_boundary_custody=$(sed -n '4p' "$may_own_boundary_file") \
+        || return 1
+    case $may_own_boundary_custody in
+        volparossa-custody-v1-*) ;;
+        *) return 1 ;;
+    esac
+    [ "${#may_own_boundary_custody}" -eq 86 ] || return 1
+    may_own_boundary_custody_digest=${may_own_boundary_custody#volparossa-custody-v1-}
+    case $may_own_boundary_custody_digest in
+        ''|*[!0-9a-f]*) return 1 ;;
+    esac
+    may_own_kernel_object_identity_is_safe \
+        "$(sed -n '10p' "$may_own_boundary_file")" \
+        && may_own_colon_identity_is_safe \
+            "$(sed -n '11p' "$may_own_boundary_file")" 7 \
+        && may_own_colon_identity_is_safe \
+            "$(sed -n '12p' "$may_own_boundary_file")" 7 \
+        && may_own_kernel_object_identity_is_safe \
+            "$may_own_boundary_cgroup_identity"
+}
+
+may_own_active_custody_worker_is_exact() {
+    [ "$#" -eq 7 ] || return 1
+    may_own_active_main_pid=$1
+    may_own_active_invocation=$2
+    may_own_active_worker_pid=$3
+    may_own_active_worker_starttime=$4
+    may_own_active_cgroup_identity=$5
+    may_own_active_boundary=$6
+    may_own_active_procs=$7
+    may_own_preexec_barrier_failure_stage=shape-active-boundary
+    may_own_active_custody_boundary_is_exact \
+        "$may_own_active_boundary" "$may_own_active_invocation" \
+        "$may_own_active_main_pid" "$may_own_active_worker_pid" \
+        "$may_own_active_worker_starttime" \
+        "$may_own_active_cgroup_identity" || return 1
+    may_own_preexec_barrier_failure_stage=shape-worker-child
+    [ "$(may_own_direct_helper_child "$may_own_active_main_pid")" = \
+        "$may_own_active_worker_pid" ] || return 1
+    may_own_preexec_barrier_failure_stage=shape-worker-starttime
+    [ "$(capture_process_starttime "$may_own_active_worker_pid")" = \
+        "$may_own_active_worker_starttime" ] || return 1
+    may_own_preexec_barrier_failure_stage=shape-worker-parent
+    may_own_worker_status_is_exact \
+        "$may_own_active_worker_pid" "$may_own_active_main_pid" || return 1
+    may_own_preexec_barrier_failure_stage=shape-worker-cgroup
+    may_own_worker_cgroup_is_exact \
+        "$may_own_active_worker_pid" "/system.slice/$unit_name" || return 1
+    [ "$(stat -Lc '%d:%i' "/sys/fs/cgroup/system.slice/$unit_name")" = \
+        "$may_own_active_cgroup_identity" ] || return 1
+    may_own_preexec_barrier_failure_stage=shape-cgroup-members
+    may_own_active_cgroup_members_are_exact \
+        "$may_own_active_procs" "$may_own_active_main_pid" \
+        "$may_own_active_worker_pid" || return 1
+    may_own_preexec_barrier_failure_stage=shape-worker-stability
+    [ "$(may_own_direct_helper_child "$may_own_active_main_pid")" = \
+        "$may_own_active_worker_pid" ] \
+        && [ "$(capture_process_starttime "$may_own_active_worker_pid")" = \
+            "$may_own_active_worker_starttime" ] \
+        && may_own_worker_status_is_exact \
+            "$may_own_active_worker_pid" "$may_own_active_main_pid" \
+        && may_own_worker_cgroup_is_exact \
+            "$may_own_active_worker_pid" "/system.slice/$unit_name" \
+        && may_own_active_cgroup_members_are_exact \
+            "$may_own_active_procs" "$may_own_active_main_pid" \
+            "$may_own_active_worker_pid"
+}
+
 may_own_cgroup_stat_is_exact() {
     [ "$#" -eq 1 ] || return 1
     may_own_stat_file=$1
@@ -3912,11 +4196,12 @@ may_own_host_service_cgroup_identity() {
 
 may_own_service_shape_is_exact() {
     may_own_preexec_barrier_failure_stage=arguments
-    [ "$#" -eq 4 ] || return 1
+    [ "$#" -ge 5 ] || return 1
     may_own_shape_main_pid=$1
     may_own_shape_invocation=$2
     may_own_shape_restarts=$3
     may_own_shape_fdstore=$4
+    may_own_shape_membership=$5
     may_own_preexec_barrier_failure_stage=shape-mainpid-argument
     case $may_own_shape_main_pid in
         ''|0|0*|*[!0-9]*) return 1 ;;
@@ -3926,6 +4211,20 @@ may_own_service_shape_is_exact() {
     may_own_preexec_barrier_failure_stage=shape-count-arguments
     case $may_own_shape_restarts:$may_own_shape_fdstore in
         *[!0-9:]*|:*|*:) return 1 ;;
+    esac
+    may_own_preexec_barrier_failure_stage=shape-membership-mode
+    case $may_own_shape_membership in
+        main-only)
+            [ "$#" -eq 5 ] || return 1
+            ;;
+        active-custody)
+            [ "$#" -eq 9 ] || return 1
+            may_own_shape_worker_pid=$6
+            may_own_shape_worker_starttime=$7
+            may_own_shape_cgroup_identity=$8
+            may_own_shape_boundary=$9
+            ;;
+        *) return 1 ;;
     esac
     may_own_preexec_barrier_failure_stage=shape-type
     [ "$(systemctl show --property=Type --value "$unit_name")" = simple ] \
@@ -3977,10 +4276,19 @@ may_own_service_shape_is_exact() {
     [ -f "$may_own_shape_procs" ] && [ ! -L "$may_own_shape_procs" ] \
         || return 1
     may_own_preexec_barrier_failure_stage=shape-cgroup-members
-    /usr/bin/awk -v expected_pid="$may_own_shape_main_pid" '
-        NR > 32 || $0 != expected_pid { invalid = 1 }
-        END { if (invalid || NR < 1) exit 1 }
-    ' "$may_own_shape_procs" || return 1
+    case $may_own_shape_membership in
+        main-only)
+            may_own_cgroup_members_are_exact \
+                "$may_own_shape_procs" "$may_own_shape_main_pid" || return 1
+            ;;
+        active-custody)
+            may_own_active_custody_worker_is_exact \
+                "$may_own_shape_main_pid" "$may_own_shape_invocation" \
+                "$may_own_shape_worker_pid" "$may_own_shape_worker_starttime" \
+                "$may_own_shape_cgroup_identity" "$may_own_shape_boundary" \
+                "$may_own_shape_procs" || return 1
+            ;;
+    esac
     may_own_preexec_barrier_failure_stage=shape-cgroup-type
     [ "$(cat "$may_own_shape_cgroup/cgroup.type")" = domain ] || return 1
     may_own_preexec_barrier_failure_stage=shape-cgroup-stat
@@ -4053,7 +4361,7 @@ may_own_preexec_barrier_is_exact() {
     unit_description_matches_marker || return 1
     while ! may_own_service_shape_is_exact "$may_own_barrier_main_pid" \
         "$may_own_barrier_invocation" "$may_own_barrier_restarts" \
-        "$may_own_barrier_fdstore"
+        "$may_own_barrier_fdstore" main-only
     do
         [ "$may_own_preexec_barrier_failure_stage" = shape-cgroup-members ] \
             || return 1
@@ -4284,12 +4592,26 @@ may_own_cgroup_is_fully_frozen() {
 }
 
 freeze_may_own_cgroup_before_forced_crash() {
-    [ "$#" -eq 1 ] || return 1
+    [ "$#" -ge 2 ] || return 1
     may_own_freeze_main_pid=$1
-    may_own_service_shape_is_exact "$may_own_freeze_main_pid" \
-        "$unit_invocation_id" \
-        "$(systemctl show --property=NRestarts --value "$unit_name")" 2 \
-        || return 1
+    may_own_freeze_membership=$2
+    case $may_own_freeze_membership in
+        main-only)
+            [ "$#" -eq 2 ] || return 1
+            may_own_service_shape_is_exact "$may_own_freeze_main_pid" \
+                "$unit_invocation_id" \
+                "$(systemctl show --property=NRestarts --value "$unit_name")" \
+                2 main-only || return 1
+            ;;
+        active-custody)
+            [ "$#" -eq 6 ] || return 1
+            may_own_service_shape_is_exact "$may_own_freeze_main_pid" \
+                "$unit_invocation_id" \
+                "$(systemctl show --property=NRestarts --value "$unit_name")" \
+                2 active-custody "$3" "$4" "$5" "$6" || return 1
+            ;;
+        *) return 1 ;;
+    esac
     [ "$may_own_cgroup" = "/sys/fs/cgroup/system.slice/$unit_name" ] \
         || return 1
     [ -f "$may_own_cgroup/cgroup.freeze" ] \
@@ -7366,9 +7688,9 @@ if [ "$proof_ok" = yes ]; then
         'ignore 1 2' \
         'commands' \
         'silent' \
-        "shell while [ ! -f $may_own_first_driver_release ]; do /usr/bin/sleep 0.05; done" \
         "shell /usr/bin/nsenter --mount=/proc/$may_own_pid_one/ns/mnt -- /run/volparossa-helper-may-own-observer armed $unit_name $agent_gid $may_own_pid_one" \
-        "shell /usr/bin/nsenter --mount=/proc/$may_own_pid_one/ns/mnt -- /run/volparossa-helper-may-own-observer first-publication $unit_name $agent_gid $may_own_pid_one" \
+        "shell /usr/bin/nsenter --mount=/proc/$may_own_pid_one/ns/mnt --net=/proc/$may_own_pid_one/ns/net -- /run/volparossa-helper-may-own-observer first-publication $unit_name $agent_gid $may_own_pid_one $worker_uid $worker_gid" \
+        "shell while [ ! -f $may_own_first_driver_release ]; do /usr/bin/sleep 0.05; done" \
         "shell printf '%s\\n' VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_FIRST_KILL_READY_V1=pass >$may_own_first_kill_ready" \
         "shell while [ ! -f $may_own_first_freeze_release ]; do /usr/bin/sleep 0.05; done" \
         'kill' \
@@ -7443,42 +7765,50 @@ if [ "$proof_ok" = yes ]; then
             "$may_own_pid_one" ]; then
         failed 'MayOwn first invocation is not hook-bound'
     fi
+    may_own_first_boundary=$temporary_stage/may-own-output/may-own.first-boundary
+    may_own_preexec_barrier_failure_stage=shape-active-boundary
     may_own_wait=0
-    while ! may_own_service_shape_is_exact "$may_own_pid_one" \
-        "$may_own_invocation_one" 0 2
-    do
-        if [ "$may_own_preexec_barrier_failure_stage" != shape-fdstore-count ]; then
+    while ! vp_capture_file_is_safe "$may_own_first_boundary"; do
+        if [ -e "$may_own_first_boundary" ] \
+            || [ -L "$may_own_first_boundary" ]; then
             report_may_own_preexec_barrier_failure_stage \
-                || failed 'MayOwn first service shape is not production-exact'
-            failed 'MayOwn first service shape is not production-exact'
+                || failed 'MayOwn first active-custody diagnostic is invalid'
+            failed 'MayOwn first active-custody boundary is unsafe'
         fi
         if [ "$(capture_process_starttime "$may_own_driver_observer_pid" \
             2>/dev/null || true)" != "$may_own_driver_observer_starttime" ]; then
             report_may_own_driver_start_failure_stage || :
-            failed 'MayOwn first driver-side observer exited before service convergence'
+            failed 'MayOwn first driver-side observer exited before active custody'
         fi
         [ "$(capture_process_starttime "$may_own_debugger_pid" \
             2>/dev/null || true)" = "$may_own_debugger_starttime" ] \
-            || failed 'MayOwn first debugger exited before service convergence'
+            || failed 'MayOwn first debugger exited before active custody'
         [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
             "$may_own_invocation_one" ] \
-            || failed 'MayOwn first invocation changed before service convergence'
+            || failed 'MayOwn first invocation changed before active custody'
         [ "$(capture_process_starttime "$may_own_pid_one" \
             2>/dev/null || true)" = "$may_own_pid_one_starttime" ] \
-            || failed 'MayOwn first MainPID changed before service convergence'
-        may_own_shape_observed_fdstore=$(systemctl show \
-            --property=NFileDescriptorStore --value "$unit_name" \
-            2>/dev/null || true)
+            || failed 'MayOwn first MainPID changed before active custody'
         may_own_wait=$((may_own_wait + 1))
-        [ "$may_own_wait" -lt 600 ] \
-            || failed 'MayOwn first descriptor store did not converge'
-        case $may_own_shape_observed_fdstore in
-            2) continue ;;
-            0|1) ;;
-            *) failed 'MayOwn first descriptor-store convergence is invalid' ;;
-        esac
+        if [ "$may_own_wait" -ge 600 ]; then
+            report_may_own_preexec_barrier_failure_stage \
+                || failed 'MayOwn first active-custody diagnostic is invalid'
+            failed 'MayOwn first active custody did not become observable'
+        fi
         sleep 0.05
     done
+    may_own_worker_one=$(sed -n '8p' "$may_own_first_boundary") \
+        || failed 'MayOwn first active worker PID is unavailable'
+    may_own_worker_one_starttime=$(sed -n '9p' "$may_own_first_boundary") \
+        || failed 'MayOwn first active worker birth token is unavailable'
+    if ! may_own_service_shape_is_exact "$may_own_pid_one" \
+        "$may_own_invocation_one" 0 2 active-custody \
+        "$may_own_worker_one" "$may_own_worker_one_starttime" \
+        "$may_own_driver_cgroup_identity" "$may_own_first_boundary"; then
+        report_may_own_preexec_barrier_failure_stage \
+            || failed 'MayOwn first active-custody diagnostic is invalid'
+        failed 'MayOwn first service shape is not production-exact'
+    fi
     if [ ! -f "$may_own_cgroup/cgroup.freeze" ] \
         || [ -L "$may_own_cgroup/cgroup.freeze" ] \
         || [ "$(stat -Lc '%u:%g:%a:%h' "$may_own_cgroup/cgroup.freeze" \
@@ -7501,6 +7831,9 @@ if [ "$proof_ok" = yes ]; then
         'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_FIRST_KILL_READY_V1=pass' ] \
         || failed 'MayOwn first kill-ready marker is invalid'
     freeze_may_own_cgroup_before_forced_crash "$may_own_pid_one" \
+        active-custody "$may_own_worker_one" \
+        "$may_own_worker_one_starttime" "$may_own_driver_cgroup_identity" \
+        "$may_own_first_boundary" \
         || failed 'MayOwn cgroup did not freeze before the first crash'
     vp_capture_run "$may_own_first_freeze_release" \
         printf '%s\n' \
@@ -7670,7 +8003,7 @@ if [ "$proof_ok" = yes ]; then
         failed 'MayOwn second driver-ready record is invalid'
     fi
     may_own_service_shape_is_exact "$may_own_pid_two" \
-        "$may_own_invocation_two" 1 2 \
+        "$may_own_invocation_two" 1 2 main-only \
         || failed 'MayOwn second service shape is not production-exact'
     vp_capture_run "$may_own_second_driver_release" \
         printf '%s\n' \
@@ -7688,7 +8021,7 @@ if [ "$proof_ok" = yes ]; then
     [ "$(cat "$may_own_second_kill_ready")" = \
         'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_SECOND_KILL_READY_V1=pass' ] \
         || failed 'MayOwn second kill-ready marker is invalid'
-    freeze_may_own_cgroup_before_forced_crash "$may_own_pid_two" \
+    freeze_may_own_cgroup_before_forced_crash "$may_own_pid_two" main-only \
         || failed 'MayOwn cgroup did not freeze before the second crash'
     vp_capture_run "$may_own_second_freeze_release" \
         printf '%s\n' \
@@ -7853,7 +8186,7 @@ if [ "$proof_ok" = yes ]; then
         failed 'MayOwn third driver-ready record is invalid'
     fi
     may_own_service_shape_is_exact "$may_own_pid_three" \
-        "$may_own_invocation_three" 2 2 \
+        "$may_own_invocation_three" 2 2 main-only \
         || failed 'MayOwn third service shape is not production-exact'
     vp_capture_run "$may_own_third_driver_release" \
         printf '%s\n' \

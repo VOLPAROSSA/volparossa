@@ -527,18 +527,24 @@ non_retained_may_own_launch_failure_category() {
             printf '%s\n' identity-binding ;;
         'MayOwn first service shape is not production-exact')
             printf '%s\n' service-shape ;;
-        'MayOwn first descriptor-store convergence is invalid')
-            printf '%s\n' service-fdstore-shape ;;
-        'MayOwn first driver-side observer exited before service convergence')
+        'MayOwn first active-custody diagnostic is invalid')
+            printf '%s\n' active-custody-diagnostic ;;
+        'MayOwn first active-custody boundary is unsafe')
+            printf '%s\n' service-shape ;;
+        'MayOwn first driver-side observer exited before active custody')
             printf '%s\n' service-observer-exit ;;
-        'MayOwn first debugger exited before service convergence')
+        'MayOwn first debugger exited before active custody')
             printf '%s\n' service-debugger-exit ;;
-        'MayOwn first invocation changed before service convergence')
+        'MayOwn first invocation changed before active custody')
             printf '%s\n' service-invocation-drift ;;
-        'MayOwn first MainPID changed before service convergence')
+        'MayOwn first MainPID changed before active custody')
             printf '%s\n' service-mainpid-drift ;;
-        'MayOwn first descriptor store did not converge')
-            printf '%s\n' service-fdstore-timeout ;;
+        'MayOwn first active custody did not become observable')
+            printf '%s\n' service-shape ;;
+        'MayOwn first active worker PID is unavailable')
+            printf '%s\n' active-worker-pid ;;
+        'MayOwn first active worker birth token is unavailable')
+            printf '%s\n' active-worker-starttime ;;
         'MayOwn cgroup freezer is unavailable')
             printf '%s\n' freezer-shape ;;
         'MayOwn first debugger driver release could not be published')
@@ -585,6 +591,7 @@ non_retained_may_own_preexec_barrier_stage_is_safe() {
         shape-mainpid-argument|\
         shape-invocation-argument|\
         shape-count-arguments|\
+        shape-membership-mode|\
         shape-type|\
         shape-restart-usec|\
         shape-control-pid|\
@@ -599,7 +606,13 @@ non_retained_may_own_preexec_barrier_stage_is_safe() {
         shape-control-group-id|\
         shape-cgroup-path|\
         shape-cgroup-procs|\
+        shape-active-boundary|\
+        shape-worker-child|\
+        shape-worker-starttime|\
+        shape-worker-parent|\
+        shape-worker-cgroup|\
         shape-cgroup-members|\
+        shape-worker-stability|\
         shape-cgroup-type|\
         shape-cgroup-stat|\
         record-size|\

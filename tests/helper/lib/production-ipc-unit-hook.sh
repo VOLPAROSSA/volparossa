@@ -1791,13 +1791,18 @@ helper_has_no_children() {
 }
 
 worker_status_from_process_fd_is_exact() {
-    [ "$#" -eq 6 ] || return 1
+    [ "$#" -eq 6 ] || [ "$#" -eq 7 ] || return 1
     hook_worker_process_fd=$1
     hook_worker_pid=$2
     hook_parent_pid=$3
     hook_worker_uid=$4
     hook_worker_gid=$5
     hook_worker_parent_filters=$6
+    hook_worker_state_mode=${7:-running}
+    case $hook_worker_state_mode in
+        running|tracing-stop) ;;
+        *) return 1 ;;
+    esac
     fd_number_is_safe "$hook_worker_process_fd" || return 1
     for hook_number in \
         "$hook_worker_pid" "$hook_parent_pid" "$hook_worker_uid" \
@@ -1813,10 +1818,14 @@ worker_status_from_process_fd_is_exact() {
         -v expected_parent="$hook_parent_pid" \
         -v expected_uid="$hook_worker_uid" \
         -v expected_gid="$hook_worker_gid" \
-        -v expected_filters="$hook_worker_expected_filters" '
+        -v expected_filters="$hook_worker_expected_filters" \
+        -v expected_state_mode="$hook_worker_state_mode" '
         $1 == "State:" {
             state_count++
-            if (NF < 2 || $2 !~ /^(R|S|D)$/) invalid = 1
+            if (NF < 2) invalid = 1
+            if (expected_state_mode == "running" \
+                && $2 !~ /^(R|S|D)$/) invalid = 1
+            if (expected_state_mode == "tracing-stop" && $2 != "t") invalid = 1
             next
         }
         $1 == "Pid:" {
@@ -1918,6 +1927,34 @@ capture_process_starttime_from_fd() {
     [ -f "$hook_worker_stat" ] && [ ! -L "$hook_worker_stat" ] || return 1
     hook_worker_stat_line=$(cat "$hook_worker_stat") || return 1
     process_starttime_from_stat "$hook_worker_stat_line" "$hook_worker_pid"
+}
+
+traced_worker_identity_from_process_fd() {
+    # At the MayOwn crash boundary GDB owns the inferior and has not yet
+    # consumed the outer driver's release marker. The worker must therefore be
+    # the same exact process before and after two lowercase tracing-stop status
+    # observations; a job-control stop or runnable worker is not equivalent.
+    [ "$#" -eq 6 ] || return 1
+    hook_worker_process_fd=$1
+    hook_worker_pid=$2
+    hook_parent_pid=$3
+    hook_worker_uid=$4
+    hook_worker_gid=$5
+    hook_worker_parent_filters=$6
+    hook_worker_starttime=$(capture_process_starttime_from_fd \
+        "$hook_worker_process_fd" "$hook_worker_pid") || return 1
+    worker_status_from_process_fd_is_exact \
+        "$hook_worker_process_fd" "$hook_worker_pid" "$hook_parent_pid" \
+        "$hook_worker_uid" "$hook_worker_gid" \
+        "$hook_worker_parent_filters" tracing-stop || return 1
+    [ "$(capture_process_starttime_from_fd \
+        "$hook_worker_process_fd" "$hook_worker_pid")" = \
+        "$hook_worker_starttime" ] || return 1
+    worker_status_from_process_fd_is_exact \
+        "$hook_worker_process_fd" "$hook_worker_pid" "$hook_parent_pid" \
+        "$hook_worker_uid" "$hook_worker_gid" \
+        "$hook_worker_parent_filters" tracing-stop || return 1
+    printf '%s\n' "$hook_worker_starttime"
 }
 
 worker_identity_from_process_fd() {
@@ -6518,9 +6555,158 @@ may_own_socket_is_absent_or_initial() {
     [ ! -e "$helper_socket" ] && [ ! -L "$helper_socket" ]
 }
 
+may_own_active_cgroup_is_exact() {
+    [ "$#" -eq 3 ] || return 1
+    hook_may_own_active_unit=$1
+    hook_may_own_active_main_pid=$2
+    hook_may_own_active_worker_pid=$3
+    unit_name_is_safe "$hook_may_own_active_unit" || return 1
+    for hook_may_own_active_pid in \
+        "$hook_may_own_active_main_pid" "$hook_may_own_active_worker_pid"
+    do
+        number_is_safe "$hook_may_own_active_pid" || return 1
+    done
+    [ "$hook_may_own_active_main_pid" != \
+        "$hook_may_own_active_worker_pid" ] || return 1
+    hook_may_own_active_control_group=/system.slice/$hook_may_own_active_unit
+    hook_may_own_active_cgroup=/sys/fs/cgroup$hook_may_own_active_control_group
+    [ -d "$hook_may_own_active_cgroup" ] \
+        && [ ! -L "$hook_may_own_active_cgroup" ] || return 1
+    hook_may_own_active_procs=$hook_may_own_active_cgroup/cgroup.procs
+    [ -f "$hook_may_own_active_procs" ] \
+        && [ ! -L "$hook_may_own_active_procs" ] || return 1
+    hook_may_own_active_cgroup_identity=$(stat -Lc '%d:%i' \
+        "$hook_may_own_active_cgroup") || return 1
+    kernel_object_identity_is_safe \
+        "$hook_may_own_active_cgroup_identity" || return 1
+    /usr/bin/awk \
+        -v expected_main="$hook_may_own_active_main_pid" \
+        -v expected_worker="$hook_may_own_active_worker_pid" '
+        NR > 32 || NF != 1 { invalid = 1; next }
+        $1 != expected_main && $1 != expected_worker { invalid = 1; next }
+        seen[$1]++ { invalid = 1; next }
+        END {
+            if (invalid || NR != 2 || seen[expected_main] != 1 \
+                || seen[expected_worker] != 1) exit 1
+        }
+    ' "$hook_may_own_active_procs" || return 1
+    hook_may_own_worker_cgroup=/proc/$hook_may_own_active_worker_pid/cgroup
+    [ -f "$hook_may_own_worker_cgroup" ] \
+        && [ ! -L "$hook_may_own_worker_cgroup" ] || return 1
+    /usr/bin/awk -v expected="0::$hook_may_own_active_control_group" '
+        NR != 1 || NF != 1 || $1 != expected { invalid = 1 }
+        END { if (invalid || NR != 1) exit 1 }
+    ' "$hook_may_own_worker_cgroup" || return 1
+    [ "$(stat -Lc '%d:%i' "$hook_may_own_active_cgroup")" = \
+        "$hook_may_own_active_cgroup_identity" ] || return 1
+    printf '%s\n' "$hook_may_own_active_cgroup_identity"
+}
+
+may_own_observe_active_worker_custody() {
+    [ "$#" -eq 6 ] || return 1
+    hook_may_own_active_unit=$1
+    hook_may_own_active_main_pid=$2
+    hook_may_own_active_worker_uid=$3
+    hook_may_own_active_worker_gid=$4
+    hook_may_own_expected_custody=$5
+    hook_may_own_active_agent_gid=$6
+    unit_name_is_safe "$hook_may_own_active_unit" || return 1
+    for hook_may_own_active_number in \
+        "$hook_may_own_active_main_pid" \
+        "$hook_may_own_active_worker_uid" \
+        "$hook_may_own_active_worker_gid" \
+        "$hook_may_own_active_agent_gid"
+    do
+        number_is_safe "$hook_may_own_active_number" || return 1
+    done
+    [ "$hook_may_own_active_worker_uid" = \
+        "$hook_may_own_active_worker_gid" ] || return 1
+    custody_fd_name_is_safe "$hook_may_own_expected_custody" || return 1
+    private_file_is_safe "$proof_directory/unit.identity" || return 1
+    hook_may_own_active_parent_contract=$(sed -n '6p' \
+        "$proof_directory/unit.identity") || return 1
+    hook_may_own_active_parent_filters=$(process_contract_filter_count \
+        "$hook_may_own_active_parent_contract" \
+        "$hook_may_own_active_agent_gid") || return 1
+    hook_may_own_active_worker_pid=$(direct_helper_child \
+        "$hook_may_own_active_main_pid") || return 1
+    capture_parent_worker_custody \
+        "$hook_may_own_active_main_pid" \
+        "$hook_may_own_active_worker_pid" || return 1
+    hook_may_own_active_pidfd_count=$hook_custody_pidfd_count
+    hook_may_own_active_pidfd_identity=$hook_custody_pidfd_identity
+    hook_may_own_active_pidfd_fd=$hook_custody_pidfd_fd
+    hook_may_own_active_process_count=$hook_custody_process_count
+    hook_may_own_active_process_identity=$hook_custody_process_identity
+    hook_may_own_active_process_fd=$hook_custody_process_fd
+    hook_may_own_active_namespace_count=$hook_custody_namespace_count
+    hook_may_own_active_namespace_identity=$hook_custody_namespace_identity
+    hook_may_own_active_namespace_fd=$hook_custody_namespace_fd
+    hook_may_own_active_pidfd_descriptor=$(capture_fdstore_descriptor_identity \
+        "/proc/$hook_may_own_active_main_pid/fd/$hook_may_own_active_pidfd_fd") \
+        || return 1
+    hook_may_own_active_namespace_descriptor=$(capture_fdstore_descriptor_identity \
+        "/proc/$hook_may_own_active_main_pid/fd/$hook_may_own_active_namespace_fd") \
+        || return 1
+    hook_may_own_active_custody=$(unit_fdstore_exact_active_custody \
+        "$hook_may_own_active_unit" \
+        "$hook_may_own_active_pidfd_descriptor" \
+        "$hook_may_own_active_namespace_descriptor") || return 1
+    [ "$hook_may_own_active_custody" = \
+        "$hook_may_own_expected_custody" ] || return 1
+    command exec 9<"/proc/$hook_may_own_active_main_pid/fd/$hook_may_own_active_process_fd" \
+        || return 1
+    hook_may_own_active_worker_starttime=$(traced_worker_identity_from_process_fd \
+        9 "$hook_may_own_active_worker_pid" \
+        "$hook_may_own_active_main_pid" \
+        "$hook_may_own_active_worker_uid" \
+        "$hook_may_own_active_worker_gid" \
+        "$hook_may_own_active_parent_filters") || return 1
+    command exec 9>&- || return 1
+    hook_may_own_active_cgroup_identity=$(may_own_active_cgroup_is_exact \
+        "$hook_may_own_active_unit" "$hook_may_own_active_main_pid" \
+        "$hook_may_own_active_worker_pid") || return 1
+    capture_parent_worker_custody \
+        "$hook_may_own_active_main_pid" \
+        "$hook_may_own_active_worker_pid" || return 1
+    [ "$hook_custody_pidfd_count" = "$hook_may_own_active_pidfd_count" ] \
+        && [ "$hook_custody_pidfd_identity" = \
+            "$hook_may_own_active_pidfd_identity" ] \
+        && [ "$hook_custody_pidfd_fd" = \
+            "$hook_may_own_active_pidfd_fd" ] \
+        && [ "$hook_custody_process_count" = \
+            "$hook_may_own_active_process_count" ] \
+        && [ "$hook_custody_process_identity" = \
+            "$hook_may_own_active_process_identity" ] \
+        && [ "$hook_custody_process_fd" = \
+            "$hook_may_own_active_process_fd" ] \
+        && [ "$hook_custody_namespace_count" = \
+            "$hook_may_own_active_namespace_count" ] \
+        && [ "$hook_custody_namespace_identity" = \
+            "$hook_may_own_active_namespace_identity" ] \
+        && [ "$hook_custody_namespace_fd" = \
+            "$hook_may_own_active_namespace_fd" ] \
+        && [ "$(direct_helper_child "$hook_may_own_active_main_pid")" = \
+            "$hook_may_own_active_worker_pid" ] \
+        && may_own_active_cgroup_is_exact \
+            "$hook_may_own_active_unit" "$hook_may_own_active_main_pid" \
+            "$hook_may_own_active_worker_pid" >/dev/null || return 1
+}
+
 may_own_observe_hook() {
-    [ "$#" -eq 4 ] || fail 'MayOwn observer argument count is invalid'
-    hook_may_own_phase=$1
+    hook_may_own_phase=${1:-}
+    case $hook_may_own_phase in
+        first-publication)
+            [ "$#" -eq 6 ] \
+                || fail 'MayOwn observer argument count is invalid'
+            hook_may_own_worker_uid=$5
+            hook_may_own_worker_gid=$6
+            ;;
+        *)
+            [ "$#" -eq 4 ] \
+                || fail 'MayOwn observer argument count is invalid'
+            ;;
+    esac
     hook_may_own_unit=$2
     hook_may_own_gid=$3
     hook_may_own_main_pid=$4
@@ -6597,6 +6783,14 @@ may_own_observe_hook() {
             ;;
     esac
 
+    if [ "$hook_may_own_phase" = first-publication ]; then
+        may_own_observe_active_worker_custody \
+            "$hook_may_own_unit" "$hook_may_own_main_pid" \
+            "$hook_may_own_worker_uid" "$hook_may_own_worker_gid" \
+            "$hook_may_own_custody" "$hook_may_own_gid" \
+            || fail 'MayOwn active worker custody is not affine'
+    fi
+
     hook_may_own_first_invocation=
     hook_may_own_second_invocation=
     hook_may_own_first_custody=
@@ -6642,11 +6836,17 @@ may_own_observe_hook() {
                 || fail 'MayOwn first socket identity is unavailable'
             hook_may_own_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
                 || fail 'MayOwn first boundary time is unavailable'
-            hook_may_own_record=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+            hook_may_own_record=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
                 "$hook_may_own_time" "$hook_may_own_invocation" \
                 "$hook_may_own_main_pid" "$hook_may_own_custody" 2 \
                 "$hook_may_own_socket" \
-                'crash-boundary-v1=worker_v3::DurableCustodyPublicationTerminalGuard::retain_published') \
+                'crash-boundary-v1=worker_v3::DurableCustodyPublicationTerminalGuard::retain_published' \
+                "$hook_may_own_active_worker_pid" \
+                "$hook_may_own_active_worker_starttime" \
+                "$hook_may_own_active_process_identity" \
+                "$hook_may_own_active_pidfd_descriptor" \
+                "$hook_may_own_active_namespace_descriptor" \
+                "$hook_may_own_active_cgroup_identity") \
                 || fail 'MayOwn first boundary record is unavailable'
             write_private_file "$may_own_first_boundary_record" \
                 "$hook_may_own_record" \

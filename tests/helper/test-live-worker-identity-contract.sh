@@ -5648,8 +5648,8 @@ if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
 fi
 # These patterns are also literal hook-source contracts; shell expansion would weaken the check.
 # shellcheck disable=SC2016
-if [ "$(grep -Fc 'capture_fdstore_descriptor_identity' "$ipc_hook")" -ne 7 ] \
-    || [ "$(grep -Fc 'unit_fdstore_exact_active_custody' "$ipc_hook")" -ne 5 ] \
+if [ "$(grep -Fc 'capture_fdstore_descriptor_identity' "$ipc_hook")" -ne 9 ] \
+    || [ "$(grep -Fc 'unit_fdstore_exact_active_custody' "$ipc_hook")" -ne 6 ] \
     || [ "$(grep -Fc 'unit_fdstore_prior_custody_is_absent' "$ipc_hook")" -ne 4 ] \
     || [ "$(grep -Fc 'fdstore_dump_exact_custody_name' "$ipc_hook")" -ne 2 ] \
     || [ "$(grep -Fc 'prove-settled-journal' "$ipc_hook")" -ne 2 ] \
@@ -6321,7 +6321,7 @@ done
 if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
     "$ipc_hook" >/dev/null \
     || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
-        "$ipc_hook")" -ne 21 ] \
+        "$ipc_hook")" -ne 23 ] \
     || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
         "$ipc_hook")" -ne 1 ]; then
     printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2
@@ -7441,6 +7441,7 @@ for required_hook_contract in \
     'process_contract_filter_count() {' \
     'fd_number_is_safe() {' \
     'worker_status_from_process_fd_is_exact() {' \
+    'traced_worker_identity_from_process_fd() {' \
     'worker_identity_from_process_fd() {' \
     'capture_process_starttime_from_fd() {' \
     'hook_worker_expected_filters=$((hook_worker_parent_filters + 1))' \

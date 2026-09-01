@@ -60,8 +60,9 @@ for mutation in type restart post; do
 done
 
 # The driver re-observes PID 1's shape while each external observer is alive.
-# It accepts documented repeated reads of the same MainPID in cgroup.procs,
-# never another process, and requires an empty ExecStartPost command list.
+# Pre-exec and recovery phases require only MainPID; the stopped active-custody
+# phase requires MainPID plus one separately affine worker. Both modes retain
+# the same empty ExecStartPost and exact manager contract.
 shape_contract=$tmp/shape-function
 sed -n '/^may_own_service_shape_is_exact() {$/,/^}$/p' \
     "$gate" >"$shape_contract"
@@ -77,16 +78,26 @@ if ! awk '
     /--property=ControlGroupId/ { cgroup_id = NR; cgroup_id_count++ }
     /--property=ExecStartPost --value/ { post = NR; post_count++ }
     /cgroup\.procs/ { procs = NR; procs_count++ }
-    /\$0 != expected_pid/ { exact_pid = NR; exact_pid_count++ }
+    /may_own_shape_membership=\$5/ { membership = NR; membership_count++ }
+    /^        main-only\)$/ { main_mode = NR; main_mode_count++ }
+    /^        active-custody\)$/ { active_mode = NR; active_mode_count++ }
+    /may_own_cgroup_members_are_exact/ { main_members = NR; main_members_count++ }
+    /may_own_active_custody_worker_is_exact/ {
+        active_members = NR; active_members_count++
+    }
     END {
         valid = type_count == 1 && restart_count == 1 && control_count == 1
         valid = valid && main_count == 1 && invocation_count == 1
         valid = valid && restarts_count == 1 && fdstore_count == 1
         valid = valid && cgroup_count == 1 && cgroup_id_count == 1
         valid = valid && post_count == 1 && procs_count == 1
-        valid = valid && exact_pid_count == 1
+        valid = valid && membership_count == 1
+        valid = valid && main_mode_count == 2 && active_mode_count == 2
+        valid = valid && main_members_count == 1 && active_members_count == 1
         valid = valid && type < restart && restart < control && control < main
-        valid = valid && main < post && post < procs && procs < exact_pid
+        valid = valid && membership < type
+        valid = valid && main < post && post < procs
+        valid = valid && procs < main_members && main_members < active_members
         if (!valid) exit 1
     }
 ' "$shape_contract"; then
@@ -114,6 +125,139 @@ do
     grep -F "$exact_shape_field" "$shape_contract" >/dev/null
 done
 [ "$(grep -Fc 'may_own_service_shape_is_exact "$may_own_pid_' "$gate")" -eq 3 ]
+
+# The active phase accepts exactly the affine two-member set. A third PID,
+# replacement worker, duplicate or collapsed MainPID/worker identity is a hard
+# failure; order in cgroup.procs is immaterial.
+active_members_contract=$tmp/active-members-function
+sed -n '/^may_own_active_cgroup_members_are_exact() {$/,/^}$/p' \
+    "$gate" >"$active_members_contract"
+active_members_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'NR > 32 || NF != 1' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '$1 != expected_main && $1 != expected_worker' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'seen[$1]++' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'invalid || NR != 2 || seen[expected_main] != 1' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'seen[expected_worker] != 1' "$1")" -eq 1 ]
+}
+active_members_source_is_exact "$active_members_contract" || exit 1
+sh -n "$active_members_contract"
+# shellcheck disable=SC1090
+. "$active_members_contract"
+active_members_exact=$tmp/active-members.exact
+active_members_reversed=$tmp/active-members.reversed
+active_members_third=$tmp/active-members.third
+active_members_unaffine=$tmp/active-members.unaffine
+active_members_duplicate=$tmp/active-members.duplicate
+printf '%s\n' 101 202 >"$active_members_exact"
+printf '%s\n' 202 101 >"$active_members_reversed"
+printf '%s\n' 101 202 303 >"$active_members_third"
+printf '%s\n' 101 303 >"$active_members_unaffine"
+printf '%s\n' 101 202 202 >"$active_members_duplicate"
+may_own_active_cgroup_members_are_exact "$active_members_exact" 101 202
+may_own_active_cgroup_members_are_exact "$active_members_reversed" 101 202
+for active_members_mutant in \
+    "$active_members_third" "$active_members_unaffine" \
+    "$active_members_duplicate"
+do
+    if may_own_active_cgroup_members_are_exact \
+        "$active_members_mutant" 101 202; then
+        printf 'active custody accepted member mutant: %s\n' \
+            "${active_members_mutant##*/}" >&2
+        exit 1
+    fi
+done
+if may_own_active_cgroup_members_are_exact "$active_members_exact" 101 101; then
+    printf '%s\n' 'active custody accepted collapsed MainPID/worker identity' >&2
+    exit 1
+fi
+active_members_count_mutant=$tmp/active-members-count-mutant
+sed 's/invalid || NR != 2/invalid || NR < 2/' \
+    "$active_members_contract" >"$active_members_count_mutant"
+active_members_worker_mutant=$tmp/active-members-worker-mutant
+sed 's/seen\[expected_worker\] != 1/seen[expected_worker] < 1/' \
+    "$active_members_contract" >"$active_members_worker_mutant"
+for active_members_source_mutant in \
+    "$active_members_count_mutant" "$active_members_worker_mutant"
+do
+    sh -n "$active_members_source_mutant"
+    if active_members_source_is_exact "$active_members_source_mutant"; then
+        printf 'active member source contract accepted mutant: %s\n' \
+            "${active_members_source_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+# The active worker is held at GDB's publication breakpoint while both the
+# hook-side and outer predicates run. Linux reports that ptrace boundary as
+# lowercase `t`; runnable, sleeping, uninterruptible, job-control-stopped, or
+# uppercase tracing variants are not phase-equivalent.
+active_status_contract=$tmp/active-status-function
+sed -n '/^may_own_worker_status_record_is_exact() {$/,/^}$/p' \
+    "$gate" >"$active_status_contract"
+active_status_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc '$2 != "t"' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '$2 !~ /^(R|S|D)$/' "$1")" -eq 0 ] \
+        && [ "$(grep -Fc 'states != 1' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'threads != 1' "$1")" -eq 1 ]
+}
+active_status_source_is_exact "$active_status_contract" || exit 1
+sh -n "$active_status_contract"
+# shellcheck disable=SC1090
+. "$active_status_contract"
+write_active_status_fixture() {
+    [ "$#" -eq 2 ] || return 1
+    active_status_fixture=$1
+    active_status_state=$2
+    printf '%s\n' \
+        "State: $active_status_state (contract fixture)" \
+        'Pid: 202' \
+        'PPid: 101' \
+        'NSpid: 202' \
+        'Threads: 1' >"$active_status_fixture"
+}
+active_status_exact=$tmp/active-status.t
+write_active_status_fixture "$active_status_exact" t
+may_own_worker_status_record_is_exact "$active_status_exact" 202 101
+for active_status_state in R S D T; do
+    active_status_mutant=$tmp/active-status.$active_status_state
+    write_active_status_fixture "$active_status_mutant" "$active_status_state"
+    if may_own_worker_status_record_is_exact \
+        "$active_status_mutant" 202 101; then
+        printf 'active custody accepted non-tracing-stop state: %s\n' \
+            "$active_status_state" >&2
+        exit 1
+    fi
+done
+active_status_state_mutant=$tmp/active-status-state-mutant
+sed 's/$2 != "t"/$2 != "R"/' \
+    "$active_status_contract" >"$active_status_state_mutant"
+sh -n "$active_status_state_mutant"
+if active_status_source_is_exact "$active_status_state_mutant"; then
+    printf '%s\n' 'active status source contract accepted state mutant' >&2
+    exit 1
+fi
+
+active_worker_contract=$tmp/active-worker-function
+sed -n '/^may_own_active_custody_worker_is_exact() {$/,/^}$/p' \
+    "$gate" >"$active_worker_contract"
+for active_worker_predicate in \
+    'may_own_active_custody_boundary_is_exact' \
+    'may_own_direct_helper_child "$may_own_active_main_pid"' \
+    'capture_process_starttime "$may_own_active_worker_pid"' \
+    'may_own_worker_status_is_exact' \
+    'may_own_worker_cgroup_is_exact' \
+    'may_own_active_cgroup_members_are_exact'
+do
+    grep -F "$active_worker_predicate" "$active_worker_contract" >/dev/null
+done
+[ "$(grep -Fc 'may_own_direct_helper_child "$may_own_active_main_pid"' \
+    "$active_worker_contract")" -eq 2 ]
+[ "$(grep -Fc 'capture_process_starttime "$may_own_active_worker_pid"' \
+    "$active_worker_contract")" -eq 2 ]
+[ "$(grep -Fc 'may_own_active_cgroup_members_are_exact' \
+    "$active_worker_contract")" -eq 2 ]
 
 # FIFO-gated successors are manager/cgroup-bound while the fixed launcher is
 # still MainPID. GDB and the outside-cgroup pre-exec observer arm before release;
@@ -178,17 +322,26 @@ freeze_contract=$tmp/freeze-function
 sed -n '/^freeze_may_own_cgroup_before_forced_crash() {$/,/^}$/p' \
     "$gate" >"$freeze_contract"
 if ! awk '
-    /may_own_service_shape_is_exact/ { shape = NR; shape_count++ }
+    /may_own_service_shape_is_exact/ {
+        if (!shape_first) shape_first = NR
+        shape_last = NR
+        shape_count++
+    }
+    /^        main-only\)$/ { main_mode = NR; main_mode_count++ }
+    /^        active-custody\)$/ { active_mode = NR; active_mode_count++ }
     /1 >"\$may_own_cgroup\/cgroup\.freeze"/ { request = NR; request_count++ }
     /may_own_cgroup_frozen=yes/ { tracked = NR; tracked_count++ }
     /cat "\$may_own_cgroup\/cgroup\.freeze"/ { readback = NR; readback_count++ }
     /may_own_cgroup_is_fully_frozen/ { complete = NR; complete_count++ }
     /capture_process_starttime "\$may_own_debugger_pid"/ { debugger = NR; debugger_count++ }
     END {
-        valid = shape_count == 1 && request_count == 1 && tracked_count == 1
+        valid = shape_count == 2 && request_count == 1 && tracked_count == 1
+        valid = valid && main_mode_count == 1 && active_mode_count == 1
         valid = valid && readback_count == 1 && complete_count == 1
         valid = valid && debugger_count == 1
-        valid = valid && shape < request && request < tracked
+        valid = valid && main_mode < shape_first && shape_first < active_mode
+        valid = valid && active_mode < shape_last && shape_last < request
+        valid = valid && request < tracked
         valid = valid && tracked < readback && readback < complete
         valid = valid && complete < debugger
         if (!valid) exit 1
@@ -197,6 +350,9 @@ if ! awk '
     printf '%s\n' 'MayOwn cgroup freeze contract is incomplete' >&2
     exit 1
 fi
+grep -F '2 main-only || return 1' "$freeze_contract" >/dev/null
+grep -F '2 active-custody "$3" "$4" "$5" "$6" || return 1' \
+    "$freeze_contract" >/dev/null
 frozen_event_contract=$tmp/frozen-event-function
 sed -n '/^may_own_cgroup_is_fully_frozen() {$/,/^}$/p' \
     "$gate" >"$frozen_event_contract"
@@ -325,4 +481,4 @@ grep -F 'if members.len() != 1 || !members.contains(&current_main_pid) {' \
     "$custody_shape" >/dev/null
 
 printf '%s\n' \
-    'PASS: MayOwn restart runner exactly matches production Type/simple, 3s restart, and single-MainPID service shape.'
+    'PASS: MayOwn restart runner exactly matches production Type/simple, 3s restart, and phase-affine service shape.'

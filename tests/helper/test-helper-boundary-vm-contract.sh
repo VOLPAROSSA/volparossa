@@ -1556,13 +1556,16 @@ MayOwn first driver-side observer could not be started|driver-observer-start|may
 MayOwn first driver-side observer exited before identity proof|identity-observer-exit|may-own-first-crash
 MayOwn first invocation identity did not appear|identity-timeout|may-own-first-crash
 MayOwn first invocation is not hook-bound|identity-binding|may-own-first-crash
+MayOwn first active-custody diagnostic is invalid|active-custody-diagnostic|may-own-first-crash
+MayOwn first active-custody boundary is unsafe|service-shape|may-own-first-crash
+MayOwn first driver-side observer exited before active custody|service-observer-exit|may-own-first-crash
+MayOwn first debugger exited before active custody|service-debugger-exit|may-own-first-crash
+MayOwn first invocation changed before active custody|service-invocation-drift|may-own-first-crash
+MayOwn first MainPID changed before active custody|service-mainpid-drift|may-own-first-crash
+MayOwn first active custody did not become observable|service-shape|may-own-first-crash
+MayOwn first active worker PID is unavailable|active-worker-pid|may-own-first-crash
+MayOwn first active worker birth token is unavailable|active-worker-starttime|may-own-first-crash
 MayOwn first service shape is not production-exact|service-shape|may-own-first-crash
-MayOwn first descriptor-store convergence is invalid|service-fdstore-shape|may-own-first-crash
-MayOwn first driver-side observer exited before service convergence|service-observer-exit|may-own-first-crash
-MayOwn first debugger exited before service convergence|service-debugger-exit|may-own-first-crash
-MayOwn first invocation changed before service convergence|service-invocation-drift|may-own-first-crash
-MayOwn first MainPID changed before service convergence|service-mainpid-drift|may-own-first-crash
-MayOwn first descriptor store did not converge|service-fdstore-timeout|may-own-first-crash
 MayOwn cgroup freezer is unavailable|freezer-shape|may-own-first-crash
 MayOwn first debugger driver release could not be published|driver-release|may-own-first-crash
 MayOwn first debugger exited before the freeze fence|freeze-fence-exit|may-own-first-crash
@@ -1585,7 +1588,7 @@ sed -n '/^[[:space:]]*driver_phase=may-own-first-crash$/,/^[[:space:]]*driver_ph
 may_own_first_crash_reasons=$temporary_directory/may-own-first-crash.reasons
 sed -n "s/.*failed '\([^']*\)'.*/\1/p" \
     "$may_own_first_crash_segment" >"$may_own_first_crash_reasons"
-test "$(wc -l <"$may_own_first_crash_reasons")" -eq 36
+test "$(wc -l <"$may_own_first_crash_reasons")" -eq 40
 while IFS= read -r may_own_first_crash_reason; do
     test "$(grep -Fc "'$may_own_first_crash_reason')" \
         "$branch_failure_functions")" -eq 1
@@ -1666,6 +1669,7 @@ for may_own_preexec_category in \
     shape-mainpid-argument \
     shape-invocation-argument \
     shape-count-arguments \
+    shape-membership-mode \
     shape-type \
     shape-restart-usec \
     shape-control-pid \
@@ -1680,7 +1684,13 @@ for may_own_preexec_category in \
     shape-control-group-id \
     shape-cgroup-path \
     shape-cgroup-procs \
+    shape-active-boundary \
+    shape-worker-child \
+    shape-worker-starttime \
+    shape-worker-parent \
+    shape-worker-cgroup \
     shape-cgroup-members \
+    shape-worker-stability \
     shape-cgroup-type \
     shape-cgroup-stat \
     record-size \

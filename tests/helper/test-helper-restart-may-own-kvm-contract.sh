@@ -194,6 +194,9 @@ if ! awk '
     in_block && /set breakpoint pending on/ { pending = NR; pending_count++ }
     in_block && /tcatch exec/ { catch_exec = NR; catch_count++ }
     in_block && /may-own-observer first-publication/ { publication = NR; publication_count++ }
+    in_block && /while \[ ! -f \$may_own_first_driver_release \]/ {
+        driver_release = NR; driver_release_count++
+    }
     in_block && /^[[:space:]]*\047kill\047/ { inferior_kill = NR; inferior_kill_count++ }
     in_block && /signal SIGKILL/ { invalid_signal++ }
     in_block && /may-own-observer armed/ { armed = NR; armed_count++ }
@@ -203,18 +206,163 @@ if ! awk '
     END {
         valid = start > 0 && breakpoint_count == 1 && ignore_count == 1
         valid = valid && pending_count == 1 && catch_count == 1
-        valid = valid && publication_count == 1 && inferior_kill_count == 1
+        valid = valid && publication_count == 1 && driver_release_count == 1
+        valid = valid && inferior_kill_count == 1
         valid = valid && invalid_signal == 0
         valid = valid && armed_count == 1 && finish > 0
         valid = valid && start < breakpoint && breakpoint < ignore
         valid = valid && pending < breakpoint && breakpoint < ignore
         valid = valid && ignore < armed && armed < publication
-        valid = valid && publication < inferior_kill
+        valid = valid && publication < driver_release
+        valid = valid && driver_release < inferior_kill
         valid = valid && inferior_kill < catch_exec && catch_exec < finish
         if (!valid) exit 1
     }
 ' "$gate"; then
     printf '%s\n' 'MayOwn first forced-crash debugger sequence is not exact' >&2
+    exit 1
+fi
+grep -F -- '--net=/proc/$may_own_pid_one/ns/net -- /run/volparossa-helper-may-own-observer first-publication' \
+    "$gate" >/dev/null
+grep -F 'first-publication $unit_name $agent_gid $may_own_pid_one $worker_uid $worker_gid' \
+    "$gate" >/dev/null
+
+# At that exact publication breakpoint the staged observer joins the helper's
+# mount and network namespaces, binds the unique direct worker to parent-owned
+# process/pidfd/netns descriptors, revalidates those descriptors against the
+# manager FD store and Relay journal, then publishes the bounded identity used
+# by the outer active-cgroup predicate.
+may_own_active_observer_contract=$tmp/may-own-active-observer-contract.sh
+sed -n '/^may_own_observe_active_worker_custody() {$/,/^}$/p' \
+    "$hook" >"$may_own_active_observer_contract"
+may_own_active_observer_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_active_observer_source=$1
+    [ "$(grep -Fc 'direct_helper_child' \
+        "$may_own_active_observer_source")" -eq 2 ] \
+        && [ "$(grep -Fc 'capture_parent_worker_custody' \
+            "$may_own_active_observer_source")" -eq 2 ] \
+        && [ "$(grep -Fc 'capture_fdstore_descriptor_identity' \
+            "$may_own_active_observer_source")" -eq 2 ] \
+        && [ "$(grep -Fc 'unit_fdstore_exact_active_custody' \
+            "$may_own_active_observer_source")" -eq 1 ] \
+        && [ "$(grep -Fc 'traced_worker_identity_from_process_fd' \
+            "$may_own_active_observer_source")" -eq 1 ] \
+        && [ "$(grep -Fc '$(worker_identity_from_process_fd' \
+            "$may_own_active_observer_source")" -eq 0 ] \
+        && [ "$(grep -Fc 'may_own_active_cgroup_is_exact' \
+            "$may_own_active_observer_source")" -eq 2 ] \
+        && [ "$(grep -Fc '"$hook_may_own_active_custody" = \' \
+            "$may_own_active_observer_source")" -eq 1 ] \
+        && [ "$(grep -Fc '"$hook_may_own_expected_custody" ]' \
+            "$may_own_active_observer_source")" -eq 1 ]
+}
+may_own_active_observer_contract_is_exact \
+    "$may_own_active_observer_contract" || {
+        printf '%s\n' 'MayOwn active worker observer is not descriptor-affine' >&2
+        exit 1
+    }
+for may_own_active_observer_mutation in descriptor cgroup worker; do
+    may_own_active_observer_mutant=$tmp/may-own-active-observer-$may_own_active_observer_mutation-mutant.sh
+    case $may_own_active_observer_mutation in
+        descriptor)
+            sed '0,/unit_fdstore_exact_active_custody/s//true/' \
+                "$may_own_active_observer_contract" \
+                >"$may_own_active_observer_mutant"
+            ;;
+        cgroup)
+            sed '0,/may_own_active_cgroup_is_exact/s//true/' \
+                "$may_own_active_observer_contract" \
+                >"$may_own_active_observer_mutant"
+            ;;
+        worker)
+            sed '0,/traced_worker_identity_from_process_fd/s//worker_identity_from_process_fd/' \
+                "$may_own_active_observer_contract" \
+                >"$may_own_active_observer_mutant"
+            ;;
+    esac
+    sh -n "$may_own_active_observer_mutant"
+    if may_own_active_observer_contract_is_exact \
+        "$may_own_active_observer_mutant"; then
+        printf 'MayOwn active observer accepted mutant: %s\n' \
+            "$may_own_active_observer_mutation" >&2
+        exit 1
+    fi
+done
+
+may_own_traced_identity_contract=$tmp/may-own-traced-identity-contract.sh
+sed -n '/^traced_worker_identity_from_process_fd() {$/,/^}$/p' \
+    "$hook" >"$may_own_traced_identity_contract"
+may_own_traced_identity_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'capture_process_starttime_from_fd' "$1")" -eq 2 ] \
+        && [ "$(grep -Fc 'worker_status_from_process_fd_is_exact' "$1")" -eq 2 ] \
+        && [ "$(grep -Fc '"$hook_worker_parent_filters" tracing-stop' "$1")" -eq 2 ]
+}
+may_own_traced_identity_contract_is_exact \
+    "$may_own_traced_identity_contract" || {
+        printf '%s\n' 'MayOwn traced worker identity is not stably pinned' >&2
+        exit 1
+    }
+may_own_traced_identity_mutant=$tmp/may-own-traced-identity-mutant.sh
+sed '0,/"$hook_worker_parent_filters" tracing-stop/s//"$hook_worker_parent_filters" running/' \
+    "$may_own_traced_identity_contract" >"$may_own_traced_identity_mutant"
+sh -n "$may_own_traced_identity_mutant"
+if may_own_traced_identity_contract_is_exact \
+    "$may_own_traced_identity_mutant"; then
+    printf '%s\n' 'MayOwn traced identity accepted running-state mutant' >&2
+    exit 1
+fi
+
+may_own_worker_status_contract=$tmp/may-own-worker-status-contract.sh
+sed -n '/^worker_status_from_process_fd_is_exact() {$/,/^}$/p' \
+    "$hook" >"$may_own_worker_status_contract"
+[ "$(grep -Fc 'expected_state_mode == "tracing-stop" && $2 != "t"' \
+    "$may_own_worker_status_contract")" -eq 1 ]
+[ "$(grep -Fc 'expected_state_mode == "running"' \
+    "$may_own_worker_status_contract")" -eq 1 ]
+[ "$(grep -Fc 'running|tracing-stop)' \
+    "$may_own_worker_status_contract")" -eq 1 ]
+
+may_own_observe_contract=$tmp/may-own-observe-contract.sh
+sed -n '/^may_own_observe_hook() {$/,/^}$/p' "$hook" \
+    >"$may_own_observe_contract"
+if ! awk '
+    /first-publication\)$/ {
+        if (!first_mode) first_mode = NR
+        first_mode_count++
+    }
+    /\[ "\$#" -eq 6 \]/ { arity = NR; arity_count++ }
+    /"\$probe" prove-restart-may-own-relay \\$/ {
+        journal = NR; journal_count++
+    }
+    /may_own_observe_active_worker_custody/ { active = NR; active_count++ }
+    /hook_may_own_record=\$\(printf .*%s/ {
+        if (!record) record = NR
+        record_count++
+    }
+    /"\$hook_may_own_active_worker_pid"/ { worker = NR; worker_count++ }
+    /"\$hook_may_own_active_worker_starttime"/ { birth = NR; birth_count++ }
+    /"\$hook_may_own_active_process_identity"/ { process = NR; process_count++ }
+    /"\$hook_may_own_active_pidfd_descriptor"/ { pidfd = NR; pidfd_count++ }
+    /"\$hook_may_own_active_namespace_descriptor"/ { netns = NR; netns_count++ }
+    /"\$hook_may_own_active_cgroup_identity"/ { cgroup = NR; cgroup_count++ }
+    END {
+        valid = first_mode_count == 2 && arity_count == 1
+        valid = valid && journal_count == 1 && active_count == 1
+        valid = valid && record_count == 3 && worker_count == 1
+        valid = valid && birth_count == 1 && process_count == 1
+        valid = valid && pidfd_count == 1 && netns_count == 1
+        valid = valid && cgroup_count == 1
+        valid = valid && first_mode < arity && arity < journal
+        valid = valid && journal < active && active < record
+        valid = valid && record < worker && worker < birth
+        valid = valid && birth < process && process < pidfd
+        valid = valid && pidfd < netns && netns < cgroup
+        if (!valid) exit 1
+    }
+' "$may_own_observe_contract"; then
+    printf '%s\n' 'MayOwn first boundary omits affine active-custody identity' >&2
     exit 1
 fi
 
@@ -623,7 +771,7 @@ sh -n "$preexec_diagnostic_functions"
 . "$preexec_diagnostic_functions"
 preexec_diagnostic_stdout=$tmp/preexec-diagnostic.stdout
 preexec_diagnostic_stderr=$tmp/preexec-diagnostic.stderr
-preexec_diagnostic_categories='arguments starttime publication-unsafe publication-timeout lineage-mainpid lineage-invocation lineage-starttime lineage-marker shape-mainpid-argument shape-invocation-argument shape-count-arguments shape-type shape-restart-usec shape-control-pid shape-main-pid shape-invocation shape-restarts shape-fdstore-count shape-fdstore-max shape-fdstore-preserve shape-exec-start-post shape-control-group shape-control-group-id shape-cgroup-path shape-cgroup-procs shape-cgroup-members shape-cgroup-type shape-cgroup-stat record-size expectation-create expectation-write record-content launcher-executable launcher-script-fd launcher-script-flags freezer'
+preexec_diagnostic_categories='arguments starttime publication-unsafe publication-timeout lineage-mainpid lineage-invocation lineage-starttime lineage-marker shape-mainpid-argument shape-invocation-argument shape-count-arguments shape-membership-mode shape-type shape-restart-usec shape-control-pid shape-main-pid shape-invocation shape-restarts shape-fdstore-count shape-fdstore-max shape-fdstore-preserve shape-exec-start-post shape-control-group shape-control-group-id shape-cgroup-path shape-cgroup-procs shape-active-boundary shape-worker-child shape-worker-starttime shape-worker-parent shape-worker-cgroup shape-cgroup-members shape-worker-stability shape-cgroup-type shape-cgroup-stat record-size expectation-create expectation-write record-content launcher-executable launcher-script-fd launcher-script-flags freezer'
 for preexec_diagnostic_category in $preexec_diagnostic_categories; do
     may_own_preexec_barrier_failure_stage_is_safe \
         "$preexec_diagnostic_category" || exit 1
@@ -648,7 +796,7 @@ do
         exit 1
     fi
 done
-[ "$(grep -Fc 'report_may_own_preexec_barrier_failure_stage \' "$gate")" -eq 4 ]
+[ "$(grep -Fc 'report_may_own_preexec_barrier_failure_stage \' "$gate")" -eq 6 ]
 preexec_assigned_categories=$tmp/preexec-assigned-categories
 sed -n 's/^[[:space:]]*may_own_preexec_barrier_failure_stage=\([a-z][a-z0-9-]*\)$/\1/p' \
     "$gate" >"$preexec_assigned_categories"
@@ -759,7 +907,7 @@ if ! awk '
     /failed '\''MayOwn first driver-side observer exited before identity proof'\''/ {
         identity_failure = NR; identity_failure_count++
     }
-    /failed '\''MayOwn first driver-side observer exited before service convergence'\''/ {
+    /failed '\''MayOwn first driver-side observer exited before active custody'\''/ {
         service_failure = NR; service_failure_count++
     }
     END {
@@ -1296,51 +1444,65 @@ if ! awk '
     exit 1
 fi
 
-may_own_first_shape_wait=$tmp/may-own-first-shape-wait.sh
-sed -n '/^    while ! may_own_service_shape_is_exact "\$may_own_pid_one"/,/^    done$/p' \
-    "$gate" >"$may_own_first_shape_wait"
-sh -n "$may_own_first_shape_wait"
-may_own_first_shape_wait_is_exact() {
+may_own_first_active_wait=$tmp/may-own-first-active-wait.sh
+sed -n '/^    may_own_first_boundary=\$temporary_stage/,/^    vp_capture_run "\$may_own_first_driver_release"/p' \
+    "$gate" | sed '$d' >"$may_own_first_active_wait"
+sh -n "$may_own_first_active_wait"
+may_own_first_active_wait_is_exact() {
     [ "$#" -eq 1 ] || return 1
-    may_own_first_shape_source=$1
+    may_own_first_active_source=$1
     [ "$(grep -Fc \
-        '"$may_own_preexec_barrier_failure_stage" != shape-fdstore-count' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
+        'may_own_preexec_barrier_failure_stage=shape-active-boundary' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'while ! vp_capture_file_is_safe "$may_own_first_boundary"; do' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '[ -e "$may_own_first_boundary" ]' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '[ -L "$may_own_first_boundary" ]; then' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc 'report_may_own_preexec_barrier_failure_stage' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
-    [ "$(grep -Fc -- \
-        '--property=NFileDescriptorStore --value "$unit_name"' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
-    [ "$(grep -Fxc '            2) continue ;;' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
-    [ "$(grep -Fxc '            0|1) ;;' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
+        "$may_own_first_active_source")" -eq 3 ] || return 1
     [ "$(grep -Fc 'capture_process_starttime "$may_own_driver_observer_pid"' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
+        "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc '"$may_own_driver_observer_starttime"' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
+        "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc 'capture_process_starttime "$may_own_debugger_pid"' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
+        "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc '"$may_own_debugger_starttime"' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
+        "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc 'unit_current_invocation_id' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
+        "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc 'capture_process_starttime "$may_own_pid_one"' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
-    [ "$(grep -Fc '"$may_own_wait" -lt 600' \
-        "$may_own_first_shape_source")" -eq 1 ] || return 1
+        "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '"$may_own_wait" -ge 600' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'may_own_worker_one=$(sed -n '\''8p'\'' "$may_own_first_boundary")' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'may_own_worker_one_starttime=$(sed -n '\''9p'\'' "$may_own_first_boundary")' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '0 2 active-custody \' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '"$may_own_driver_cgroup_identity" "$may_own_first_boundary"; then' \
+        "$may_own_first_active_source")" -eq 1 ] || return 1
     awk '
         /may_own_wait=\$\(\(may_own_wait \+ 1\)\)/ {
             increment = NR
             increment_count++
         }
-        /"\$may_own_wait" -lt 600/ {
+        /"\$may_own_wait" -ge 600/ {
             bound = NR
             bound_count++
         }
-        /^[[:space:]]*2\) continue ;;/ {
-            converged = NR
-            converged_count++
+        /may_own_worker_one=\$\(sed -n/ {
+            worker = NR
+            worker_count++
+        }
+        /may_own_service_shape_is_exact "\$may_own_pid_one"/ {
+            shape = NR
+            shape_count++
         }
         /^[[:space:]]*sleep 0\.05$/ {
             sleep_line = NR
@@ -1348,40 +1510,45 @@ may_own_first_shape_wait_is_exact() {
         }
         END {
             valid = increment_count == 1 && bound_count == 1
-            valid = valid && converged_count == 1 && sleep_count == 1
-            valid = valid && increment < bound && bound < converged
-            valid = valid && converged < sleep_line
+            valid = valid && worker_count == 1 && shape_count == 1
+            valid = valid && sleep_count == 1
+            valid = valid && increment < bound && bound < sleep_line
+            valid = valid && sleep_line < worker && worker < shape
             if (!valid) exit 1
         }
-    ' "$may_own_first_shape_source" || return 1
+    ' "$may_own_first_active_source" || return 1
 }
-may_own_first_shape_wait_is_exact "$may_own_first_shape_wait" \
+may_own_first_active_wait_is_exact "$may_own_first_active_wait" \
     || {
-        printf '%s\n' 'MayOwn first FD-store convergence wait is not exact' >&2
+        printf '%s\n' 'MayOwn first active-custody wait is not exact' >&2
         exit 1
     }
-may_own_first_shape_stage_mutant=$tmp/may-own-first-shape-stage-mutant.sh
-sed 's/= shape-fdstore-count/= shape-cgroup-members/' \
-    "$may_own_first_shape_wait" >"$may_own_first_shape_stage_mutant"
-may_own_first_shape_count_mutant=$tmp/may-own-first-shape-count-mutant.sh
-sed 's/^            0|1) ;;/            0|1|2) ;;/' \
-    "$may_own_first_shape_wait" >"$may_own_first_shape_count_mutant"
-may_own_first_shape_observer_identity_mutant=$tmp/may-own-first-shape-observer-identity-mutant.sh
+may_own_first_active_stage_mutant=$tmp/may-own-first-active-stage-mutant.sh
+sed 's/=shape-active-boundary/=shape-cgroup-members/' \
+    "$may_own_first_active_wait" >"$may_own_first_active_stage_mutant"
+may_own_first_active_mode_mutant=$tmp/may-own-first-active-mode-mutant.sh
+sed 's/0 2 active-custody/0 2 main-only/' \
+    "$may_own_first_active_wait" >"$may_own_first_active_mode_mutant"
+may_own_first_active_worker_mutant=$tmp/may-own-first-active-worker-mutant.sh
+sed "s/sed -n '8p'/sed -n '10p'/" \
+    "$may_own_first_active_wait" >"$may_own_first_active_worker_mutant"
+may_own_first_active_observer_identity_mutant=$tmp/may-own-first-active-observer-identity-mutant.sh
 sed 's/"$may_own_driver_observer_starttime"/"$may_own_debugger_starttime"/' \
-    "$may_own_first_shape_wait" >"$may_own_first_shape_observer_identity_mutant"
-may_own_first_shape_debugger_identity_mutant=$tmp/may-own-first-shape-debugger-identity-mutant.sh
+    "$may_own_first_active_wait" >"$may_own_first_active_observer_identity_mutant"
+may_own_first_active_debugger_identity_mutant=$tmp/may-own-first-active-debugger-identity-mutant.sh
 sed 's/"$may_own_debugger_starttime"/"$may_own_driver_observer_starttime"/' \
-    "$may_own_first_shape_wait" >"$may_own_first_shape_debugger_identity_mutant"
-for may_own_first_shape_mutant in \
-    "$may_own_first_shape_stage_mutant" \
-    "$may_own_first_shape_count_mutant" \
-    "$may_own_first_shape_observer_identity_mutant" \
-    "$may_own_first_shape_debugger_identity_mutant"
+    "$may_own_first_active_wait" >"$may_own_first_active_debugger_identity_mutant"
+for may_own_first_active_mutant in \
+    "$may_own_first_active_stage_mutant" \
+    "$may_own_first_active_mode_mutant" \
+    "$may_own_first_active_worker_mutant" \
+    "$may_own_first_active_observer_identity_mutant" \
+    "$may_own_first_active_debugger_identity_mutant"
 do
-    sh -n "$may_own_first_shape_mutant"
-    if may_own_first_shape_wait_is_exact "$may_own_first_shape_mutant"; then
-        printf 'MayOwn first shape wait accepted mutant: %s\n' \
-            "${may_own_first_shape_mutant##*/}" >&2
+    sh -n "$may_own_first_active_mutant"
+    if may_own_first_active_wait_is_exact "$may_own_first_active_mutant"; then
+        printf 'MayOwn first active wait accepted mutant: %s\n' \
+            "${may_own_first_active_mutant##*/}" >&2
         exit 1
     fi
 done
