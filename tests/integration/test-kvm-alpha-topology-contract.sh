@@ -220,6 +220,8 @@ grep -F '.a10_unverifiable_ech.evidence.destination_egress_connections_for_denia
     "$WORKFLOW" >/dev/null
 grep -F 'relay1_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
 grep -F 'after_marker.relay2_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
+grep -F 'def is_ipv4_multicast(address):' "$GUEST" >/dev/null
+grep -F 'not is_ipv4_multicast(destination)' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A11",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A12",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A13",success:$success' "$GUEST" >/dev/null

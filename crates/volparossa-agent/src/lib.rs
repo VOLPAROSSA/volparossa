@@ -405,6 +405,9 @@ async fn run_client_tcp_ingress(
         };
         let now_ms = unix_millis();
         let Some(policy) = state.read().await.active_policy(now_ms) else {
+            let mut state = state.write().await;
+            state.record_policy_rejection();
+            state.log(LogLevel::Warn, "INGRESS_TCP_POLICY_DENIED", now_ms);
             continue;
         };
         let ingress = match observed.authorize(&policy, now_ms).await {
@@ -466,6 +469,10 @@ async fn run_client_tcp_ingress(
             }
             let activation_ms = unix_millis();
             let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "INGRESS_TCP_STREAM_FAILED", activation_ms);
                 return;
             };
             let (level, message) = if routes

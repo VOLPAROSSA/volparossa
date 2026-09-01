@@ -17,6 +17,11 @@ use volparossa_policy::{
     ProtocolPort, TransportProtocol, TrustStore, TrustedMaintainer, sign_manifest,
 };
 
+// The disposable VM runner has a forty-minute outer budget and creates its manifest before
+// discovery/bootstrap acceptance starts. Keep this development-only policy bounded, but valid for
+// the complete run instead of silently losing all ingress policy during the later A08-A10 phases.
+const ACCEPTANCE_POLICY_LIFETIME_MS: u64 = 60 * 60 * 1_000;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os().skip(1);
     let directory = arguments.next().ok_or("missing fixture directory")?;
@@ -42,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         POLICY_PROTOCOL_VERSION,
         now.saturating_sub(1_000),
         now.saturating_sub(1_000),
-        now.saturating_add(600_000),
+        now.saturating_add(ACCEPTANCE_POLICY_LIFETIME_MS),
     )?;
     specification.add_rule(DestinationRule::exact_ip(
         IpAddr::V4(Ipv4Addr::new(10, 241, 31, 2)),

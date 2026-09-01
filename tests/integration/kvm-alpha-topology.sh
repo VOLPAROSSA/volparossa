@@ -1970,6 +1970,12 @@ def stop(*_unused):
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 deadline = time.monotonic() + 1800
+
+
+def is_ipv4_multicast(address):
+    return 224 <= int(address.split(".", 1)[0]) <= 239
+
+
 while running and time.monotonic() < deadline:
     readable, _, _ = select.select(list(sockets), [], [], 0.2)
     for capture in readable:
@@ -2069,7 +2075,13 @@ while running and time.monotonic() < deadline:
                     counters["client_leg_packets"] += 1
                 if interface == exit_interface:
                     counters["exit_leg_packets"] += 1
-                if source not in allowed or destination not in allowed:
+                # libp2p mDNS is expected control-plane discovery on these interfaces. It is not
+                # a routed unicast dataplane header and must not make the A11 privacy proof fail.
+                if (
+                    not is_ipv4_multicast(source)
+                    and not is_ipv4_multicast(destination)
+                    and (source not in allowed or destination not in allowed)
+                ):
                     counters["unexpected_outer_packets"] += 1
                 if is_wireguard_data and {source, destination} == {
                     "43.159.1.1",
