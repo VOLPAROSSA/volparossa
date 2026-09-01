@@ -4457,7 +4457,7 @@ mod tests {
         );
         let parameters = client_preselection_parameters(&config).expect("MPTCP parameters");
         let (_, _, _, _, _, minimum_other, _, _) = parameters.fields_for_test();
-        assert_eq!(minimum_other, 3);
+        assert_eq!(minimum_other, 4);
 
         config.tcp.enabled = false;
         config.selection.minimum_multipath_paths = 2;
@@ -4468,7 +4468,7 @@ mod tests {
         );
         let parameters = client_preselection_parameters(&config).expect("MPQUIC parameters");
         let (_, _, _, _, _, minimum_other, _, _) = parameters.fields_for_test();
-        assert_eq!(minimum_other, 2);
+        assert_eq!(minimum_other, 3);
 
         config.quic.allow_degraded_single_path = true;
         assert_eq!(
