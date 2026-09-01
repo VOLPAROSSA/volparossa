@@ -58,6 +58,8 @@ pub enum ExitForwardOperation {
     NativeProbeReady = 8,
     /// Data-Relay-to-Exit terminal Start chain requesting one helper-proven Exit result.
     NativeProbeResult = 9,
+    /// Data-Relay-to-Exit activation after the Client committed the exact final UDP route.
+    UdpSessionStart = 10,
 }
 
 /// Endpoint-bearing data-Relay request for the selected Exit's private readiness phase.
@@ -297,6 +299,15 @@ impl ExitForwardRequest {
                 )
                 .map_err(|_| ForwardingRpcError::InvalidFrame)?
                 .validate()?;
+            }
+            ExitForwardOperation::UdpSessionStart => {
+                decode_canonical::<crate::UdpSessionStartRequest>(
+                    &self.canonical_request,
+                    frame_limit(),
+                )
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?;
             }
             ExitForwardOperation::Unspecified => {
                 return Err(ForwardingRpcError::InvalidOperation(self.operation));
@@ -888,6 +899,7 @@ fn validate_granted_responses(
         ExitForwardOperation::NativeProbeResult => {
             validate_exact_types(responses, &[ControlMessageType::NativeProbeExitResult])
         }
+        ExitForwardOperation::UdpSessionStart => validate_udp_session_signal(responses),
         ExitForwardOperation::Unspecified => Err(ForwardingRpcError::InvalidOperation(0)),
     }
 }
@@ -965,10 +977,21 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
         | ExitForwardOperation::NativeProbeAuthorize
         | ExitForwardOperation::NativeProbeReady
         | ExitForwardOperation::NativeProbeResult
+        | ExitForwardOperation::UdpSessionStart
         | ExitForwardOperation::Unspecified => {
             Err(ForwardingRpcError::InvalidOperation(operation as i32))
         }
     }
+}
+
+fn validate_udp_session_signal(responses: &[Vec<u8>]) -> Result<(), ForwardingRpcError> {
+    let [encoded] = responses else {
+        return Err(ForwardingRpcError::InvalidFrame);
+    };
+    decode_canonical::<crate::UdpExitSessionSignal>(encoded, frame_limit())
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)
 }
 
 fn validate_native_probe_authorization_chain(encoded: &[u8]) -> Result<(), ForwardingRpcError> {

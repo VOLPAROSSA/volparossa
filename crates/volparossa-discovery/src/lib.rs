@@ -12,6 +12,7 @@ mod preselection_responder;
 mod preselection_transaction;
 mod preselection_wire;
 mod reservations;
+mod udp_session;
 
 use std::{
     collections::HashMap,
@@ -94,6 +95,7 @@ pub use reservations::{
     MAX_DATAPATH_RELAY_FRAME_BYTES,
 };
 use reservations::{DatapathRelayCodec, datapath_relay_behaviour};
+pub use udp_session::{UdpExitSessionSignal, UdpSessionFrameError, UdpSessionStartRequest};
 use volparossa_protocol::{
     MAX_CONTROL_MESSAGE_SIZE, SignedEnvelope, decode_canonical, node_id_from_public_key,
 };

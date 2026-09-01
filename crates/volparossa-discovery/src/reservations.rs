@@ -51,6 +51,8 @@ pub enum DatapathRelayOperation {
     NativeProbeStart = 4,
     /// Obtain the standard nested reservation for an exact native Start before activation.
     NativeProbeAuthorize = 5,
+    /// Commit the exact data Relay and obtain the Exit's committed UDP session signal.
+    UdpSessionStart = 6,
 }
 
 /// Canonical direct datapath-relay request.
@@ -158,6 +160,18 @@ impl DatapathRelayRequest {
                     &self.client_signed_request,
                     ControlMessageType::NativeProbeStart,
                 )
+            }
+            DatapathRelayOperation::UdpSessionStart => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                decode_canonical::<crate::UdpSessionStartRequest>(
+                    &self.client_signed_request,
+                    frame_limit(),
+                )
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)
             }
             DatapathRelayOperation::Unspecified => {
                 Err(DatapathRelayRpcError::InvalidOperation(self.operation))
@@ -350,6 +364,9 @@ impl DatapathRelayResponse {
                     DatapathRelayOperation::NativeProbeAuthorize => {
                         ControlMessageType::RelayReservation
                     }
+                    DatapathRelayOperation::UdpSessionStart => {
+                        return validate_udp_session_signal(&self.signed_response);
+                    }
                     DatapathRelayOperation::Unspecified => {
                         return Err(DatapathRelayRpcError::InvalidOperation(self.operation));
                     }
@@ -419,6 +436,13 @@ impl DatapathRelayResponse {
     pub fn signed_response(&self) -> &[u8] {
         &self.signed_response
     }
+}
+
+fn validate_udp_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcError> {
+    decode_canonical::<crate::UdpExitSessionSignal>(encoded, frame_limit())
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)
 }
 
 /// Datapath-relay frame validation failure.
