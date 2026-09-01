@@ -544,8 +544,9 @@ requires no helper, network-state or journal cleanup because reservation dispatc
 The older scalar complete-path second stage remains only as a clearly dormant test boundary; the
 new plan neither calls nor trusts it. C2c supplies the private ownership and actor-resolution link
 to the existing phase-B transaction, but production Connect currently consumes the Prepared
-handoff only through the first native Permit and does not drive Relay-ready, helper-backed native
-probing or phase-B with real providers.
+handoff through the first native Permit and the exact selected data-Relay Ready RPC. It does not
+yet drive helper-backed native probing or phase-B with real providers; in particular, no production
+exchange obtains the standard signed Relay reservation required after Client endpoint preparation.
 Consequently the real
 resolver/transport path is not invoked by phase A in production. C2c adds no new wire,
 provider or helper implementation, so it causes no production network/host mutation, and the

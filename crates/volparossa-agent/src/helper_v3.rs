@@ -471,7 +471,13 @@ impl RuntimeBoundPreparedLeaseBatch {
         &self.prepared
     }
 
-    fn destroy_request(&self) -> DestroyContext {
+    /// Return the exact helper process identity retained by this affine owner.
+    #[must_use]
+    pub(crate) const fn helper_runtime_id(&self) -> [u8; 32] {
+        self.helper_runtime_id
+    }
+
+    pub(crate) fn destroy_request(&self) -> DestroyContext {
         DestroyContext {
             route_context_id: self.prepare.route_context_id.clone(),
             context_handle: self.prepared.context_handle.clone(),

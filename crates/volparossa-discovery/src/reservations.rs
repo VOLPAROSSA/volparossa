@@ -45,6 +45,10 @@ pub enum DatapathRelayOperation {
     /// Wire framing only. Production remains unavailable until a safe probe handshake exists.
     ExecuteProbe = 1,
     ReservePath = 2,
+    /// Deliver one endpoint-free native request/Permit pair to the exact data Relay.
+    NativeProbeReady = 3,
+    /// Deliver one client endpoint-bearing native start only to that same data Relay.
+    NativeProbeStart = 4,
 }
 
 /// Canonical direct datapath-relay request.
@@ -131,6 +135,25 @@ impl DatapathRelayRequest {
                 validate_signed_type(
                     &self.client_signed_request,
                     ControlMessageType::RelayReservationRequest,
+                )
+            }
+            DatapathRelayOperation::NativeProbeReady => {
+                validate_signed_type(
+                    &self.client_signed_request,
+                    ControlMessageType::NativeProbePermitRequest,
+                )?;
+                validate_signed_type(
+                    &self.exit_signed_authorization,
+                    ControlMessageType::NativeProbePermit,
+                )
+            }
+            DatapathRelayOperation::NativeProbeStart => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                validate_signed_type(
+                    &self.client_signed_request,
+                    ControlMessageType::NativeProbeStart,
                 )
             }
             DatapathRelayOperation::Unspecified => {
@@ -315,6 +338,12 @@ impl DatapathRelayResponse {
                 let expected = match operation {
                     DatapathRelayOperation::ExecuteProbe => ControlMessageType::RelayProbeResult,
                     DatapathRelayOperation::ReservePath => ControlMessageType::RelayReservation,
+                    DatapathRelayOperation::NativeProbeReady => {
+                        ControlMessageType::NativeProbeRelayReady
+                    }
+                    DatapathRelayOperation::NativeProbeStart => {
+                        ControlMessageType::NativeProbeRelayResult
+                    }
                     DatapathRelayOperation::Unspecified => {
                         return Err(DatapathRelayRpcError::InvalidOperation(self.operation));
                     }
@@ -650,6 +679,48 @@ mod tests {
         );
         assert!(reserved.is_ok());
 
+        let ready = DatapathRelayRequest::new(
+            vec![3; REQUEST_ID_LENGTH],
+            relay_node.clone(),
+            relay_peer.clone(),
+            DEADLINE,
+            DatapathRelayOperation::NativeProbeReady,
+            envelope(ControlMessageType::NativeProbePermitRequest),
+            envelope(ControlMessageType::NativeProbePermit),
+        );
+        assert!(ready.is_ok());
+        assert!(
+            DatapathRelayResponse::granted(
+                vec![3; REQUEST_ID_LENGTH],
+                DatapathRelayOperation::NativeProbeReady,
+                relay_node.clone(),
+                relay_peer.clone(),
+                envelope(ControlMessageType::NativeProbeRelayReady),
+            )
+            .is_ok()
+        );
+
+        let start = DatapathRelayRequest::new(
+            vec![4; REQUEST_ID_LENGTH],
+            relay_node.clone(),
+            relay_peer.clone(),
+            DEADLINE,
+            DatapathRelayOperation::NativeProbeStart,
+            envelope(ControlMessageType::NativeProbeStart),
+            Vec::new(),
+        );
+        assert!(start.is_ok());
+        assert!(
+            DatapathRelayResponse::granted(
+                vec![4; REQUEST_ID_LENGTH],
+                DatapathRelayOperation::NativeProbeStart,
+                relay_node.clone(),
+                relay_peer.clone(),
+                envelope(ControlMessageType::NativeProbeRelayResult),
+            )
+            .is_ok()
+        );
+
         let leaked = DatapathRelayResponse::new(
             vec![3; REQUEST_ID_LENGTH],
             DatapathRelayOperation::ReservePath,
@@ -689,6 +760,20 @@ mod tests {
             Vec::new(),
         );
         assert!(matches!(wrong, Err(DatapathRelayRpcError::InvalidFrame)));
+
+        let native_start_with_exit_bytes = DatapathRelayRequest::new(
+            vec![2; REQUEST_ID_LENGTH],
+            relay_identity().0,
+            relay_identity().1,
+            DEADLINE,
+            DatapathRelayOperation::NativeProbeStart,
+            envelope(ControlMessageType::NativeProbeStart),
+            envelope(ControlMessageType::NativeProbePermit),
+        );
+        assert!(matches!(
+            native_start_with_exit_bytes,
+            Err(DatapathRelayRpcError::InvalidFrame)
+        ));
     }
 
     fn reserve_request() -> DatapathRelayRequest {

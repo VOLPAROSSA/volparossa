@@ -381,6 +381,61 @@ pub struct VerifiedNativeProbeResult {
     _exit_result: VerifiedControlMessage<NativeProbeExitResult>,
 }
 
+impl VerifiedNativeProbePermit {
+    /// Borrow the exact path scope after both endpoint-free signatures and bindings passed.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal verified control message has been corrupted after
+    /// construction. The verifier rejects a Permit without this scope.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.permit
+            .message()
+            .scope
+            .as_ref()
+            .expect("verified native Permit always carries a scope")
+    }
+}
+
+impl VerifiedNativeProbeRelayReady {
+    /// Borrow the exact path scope retained by the verified data-Relay readiness.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal verified control message has been corrupted after
+    /// construction. The verifier rejects readiness without this scope.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.relay_ready
+            .message()
+            .scope
+            .as_ref()
+            .expect("verified native Relay readiness always carries a scope")
+    }
+
+    /// Borrow the helper-prepared `RelayClient` endpoint disclosed only to this client.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal verified control message has been corrupted after
+    /// construction. The verifier rejects readiness without this endpoint.
+    #[must_use]
+    pub fn relay_client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.relay_ready
+            .message()
+            .relay_client_endpoint
+            .as_ref()
+            .expect("verified native Relay readiness always carries an endpoint")
+    }
+
+    /// Absolute signed expiry of this readiness phase.
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.relay_ready.message().expires_at_ms
+    }
+}
+
 impl IssuedNativeProbeStart {
     /// Borrow the exact client-signed start for delivery only to the selected data Relay.
     #[must_use]

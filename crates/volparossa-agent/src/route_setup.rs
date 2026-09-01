@@ -3,8 +3,8 @@
 //! Stored advertisements may nominate identities for selection, but they never authorize an RPC.
 //! Every control relay, forwarded exit, and prospective datapath relay is resolved again through
 //! the discovery actor immediately before setup. The local Connect boundary now owns one affine
-//! A1/native-preselection attempt through the first Exit Permit; production still stops before
-//! Relay readiness and helper preparation.
+//! A1/native-preselection attempt through exact data-Relay readiness; production still stops
+//! before helper preparation.
 
 #![allow(
     dead_code,
@@ -102,13 +102,13 @@ enum ClientRouteControlState {
     #[default]
     Idle,
     Connecting,
-    AwaitingRelayReady(Box<selection_bridge::ClientNativePreselection>),
+    AwaitingHelperPrepare(Box<selection_bridge::ClientNativeRelayReady>),
 }
 
 /// Detail-free current production boundary reached by a successful bootstrap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClientRouteProgress {
-    AwaitingRelayReady,
+    AwaitingHelperPrepare,
 }
 
 /// Stable local classification for a failed client-route bootstrap.
@@ -118,6 +118,7 @@ pub(crate) enum ClientRouteConnectError {
     InvalidProfile,
     PreselectionUnavailable,
     NativePermitUnavailable,
+    NativeRelayUnavailable,
 }
 
 impl ClientRouteControl {
@@ -139,8 +140,8 @@ impl ClientRouteControl {
         let mut state = self.state.lock().await;
         match result {
             Ok(attempt) => {
-                *state = ClientRouteControlState::AwaitingRelayReady(Box::new(attempt));
-                Ok(ClientRouteProgress::AwaitingRelayReady)
+                *state = ClientRouteControlState::AwaitingHelperPrepare(Box::new(attempt));
+                Ok(ClientRouteProgress::AwaitingHelperPrepare)
             }
             Err(error) => {
                 *state = ClientRouteControlState::Idle;
@@ -158,15 +159,19 @@ impl ClientRouteControl {
 async fn begin_client_route(
     config: &Config,
     discovery: &DiscoveryControlHandle,
-) -> Result<selection_bridge::ClientNativePreselection, ClientRouteConnectError> {
+) -> Result<selection_bridge::ClientNativeRelayReady, ClientRouteConnectError> {
     let parameters = client_preselection_parameters(config)?;
     let prepared = discovery
         .prepare_client_preselection(parameters)
         .await
         .map_err(map_preselection_error)?;
-    selection_bridge::begin_client_native_preselection(prepared, discovery)
+    let preselection = selection_bridge::begin_client_native_preselection(prepared, discovery)
         .await
-        .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)
+        .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
+    preselection
+        .dispatch_relay_ready(discovery)
+        .await
+        .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)
 }
 
 fn client_preselection_parameters(
@@ -4686,7 +4691,9 @@ mod tests {
                     .map_err(|_| FakeTransportError::Definitive)?;
                     ControlMessageType::RelayReservation
                 }
-                DatapathRelayOperation::Unspecified => {
+                DatapathRelayOperation::NativeProbeReady
+                | DatapathRelayOperation::NativeProbeStart
+                | DatapathRelayOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
             };
@@ -4998,7 +5005,9 @@ mod tests {
                         .encoded()
                         .to_vec()
                 }
-                DatapathRelayOperation::Unspecified => return Err(RealTransportError),
+                DatapathRelayOperation::NativeProbeReady
+                | DatapathRelayOperation::NativeProbeStart
+                | DatapathRelayOperation::Unspecified => return Err(RealTransportError),
             };
             DatapathRelayResponse::granted(
                 request.request_id().to_vec(),

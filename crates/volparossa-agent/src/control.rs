@@ -135,7 +135,7 @@ pub async fn serve_control(
                 let request_context = context.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
-                    process_connection(stream, request_context).await
+                    Box::pin(process_connection(stream, request_context)).await
                 });
             }
             Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
@@ -158,7 +158,7 @@ async fn process_connection(
         .await
         .map_err(|_| ControlServerError::Timeout)?
         .map_err(|_| ControlServerError::InvalidFrame)?;
-    let response = handle_request(request, &context).await;
+    let response = Box::pin(handle_request(request, &context)).await;
     timeout(CONTROL_TIMEOUT, write_response(&mut stream, &response))
         .await
         .map_err(|_| ControlServerError::Timeout)?
@@ -270,10 +270,10 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
         .connect(&context.config, &context.discovery)
         .await
     {
-        Ok(ClientRouteProgress::AwaitingRelayReady) => (
+        Ok(ClientRouteProgress::AwaitingHelperPrepare) => (
             ControlResult::Unavailable,
-            "NATIVE_RELAY_READY_UNAVAILABLE",
-            "CONNECT_NATIVE_PERMIT_READY",
+            "NATIVE_HELPER_PREPARE_UNAVAILABLE",
+            "CONNECT_NATIVE_RELAY_READY",
         ),
         Err(ClientRouteConnectError::Busy) => (
             ControlResult::InvalidState,
@@ -294,6 +294,11 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             ControlResult::Unavailable,
             "NATIVE_PERMIT_UNAVAILABLE",
             "CONNECT_NATIVE_PERMIT_UNAVAILABLE",
+        ),
+        Err(ClientRouteConnectError::NativeRelayUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_RELAY_READY_UNAVAILABLE",
+            "CONNECT_NATIVE_RELAY_READY_UNAVAILABLE",
         ),
     };
     context

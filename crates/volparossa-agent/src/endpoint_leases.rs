@@ -10,6 +10,7 @@ use std::{
 };
 
 use thiserror::Error;
+use volparossa_protocol::WireguardEndpoint;
 use volparossa_routing::{
     ContextRole, HELPER_PROTOCOL_VERSION, HelperRequest, PrepareLeaseBatch, PreparedLease,
     PreparedLeaseBatch, UnderlayEvidence, WireguardRole, encode_request, helper_request,
@@ -111,6 +112,19 @@ pub fn bind_prepared_endpoint_leases(
         context_handle,
         client_leases,
     })
+}
+
+/// Convert one already validated helper endpoint into its canonical signed-control shape.
+pub(crate) fn protocol_endpoint_for_native(endpoint: PublicWireGuardEndpoint) -> WireguardEndpoint {
+    let underlay_ip = match endpoint.underlay_ip() {
+        IpAddr::V4(address) => address.octets().to_vec(),
+        IpAddr::V6(address) => address.octets().to_vec(),
+    };
+    WireguardEndpoint {
+        public_key: endpoint.public_key().as_bytes().to_vec(),
+        underlay_ip,
+        listen_port: u32::from(endpoint.listen_port()),
+    }
 }
 
 fn validate_prepare_plan(

@@ -21,7 +21,8 @@ use zeroize::Zeroizing;
 
 use volparossa_core::{Bandwidth, IpFamily, ServiceRole, Transport as SelectionTransport};
 use volparossa_discovery::{
-    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
+    DatapathRelayOperation, DatapathRelayRequest, DatapathRelayResponse, ExitForwardOperation,
+    ExitForwardRequest, ExitForwardResponse, ForwardStatus,
 };
 use volparossa_protocol::{
     IssuedNativeProbeStart, MAX_NATIVE_PROBE_CANDIDATES, MAX_NATIVE_PROBE_LIFETIME_MS,
@@ -65,6 +66,14 @@ pub(crate) enum NativePreselectionError {
     PermitRejected,
     #[error("the selected Exit is unavailable for native Permit")]
     PermitUnavailable,
+    #[error("native data-Relay dispatch wrapper or response is invalid")]
+    InvalidRelayDispatch,
+    #[error("native data-Relay transport is unavailable")]
+    RelayTransportUnavailable,
+    #[error("the selected data Relay rejected the native phase")]
+    RelayRejected,
+    #[error("the selected data Relay is unavailable for the native phase")]
+    RelayUnavailable,
 }
 
 /// Affine owner of one exact snapshot and every not-yet-dispatched path authority.
@@ -119,6 +128,14 @@ pub(super) struct AwaitingNativeRelayReady {
     deadline: NativeAttemptDeadline,
 }
 
+/// Affine Ready dispatch addressed only to the exact selected data Relay.
+#[must_use = "a native Relay Ready dispatch must be executed or dropped"]
+pub(super) struct NativeRelayReadyDispatch {
+    awaiting: AwaitingNativeRelayReady,
+    relay_peer: Libp2pPeerId,
+    request: DatapathRelayRequest,
+}
+
 /// Relay readiness verified and waiting only for a local helper-prepared Client endpoint.
 #[must_use = "an armed native probe must be started once or dropped"]
 pub(super) struct ArmedNativeProbe {
@@ -137,6 +154,15 @@ pub(super) struct AwaitingNativeResult {
     _challenge: Zeroizing<[u8; KEY_BYTES]>,
     candidate: NativeCandidateTemplate,
     deadline: NativeAttemptDeadline,
+    response_deadline_ms: u64,
+}
+
+/// Affine Start dispatch addressed only to the data Relay that minted readiness.
+#[must_use = "a native Relay Start dispatch must be executed or dropped"]
+pub(super) struct NativeRelayStartDispatch {
+    awaiting: AwaitingNativeResult,
+    relay_peer: Libp2pPeerId,
+    request: DatapathRelayRequest,
 }
 
 /// Terminal exact cryptographic chain; deliberately not route-admission or usability evidence.
@@ -163,6 +189,8 @@ struct NativeCandidateTemplate {
     control: PreselectionActorBinding,
     exit: PreselectionActorBinding,
     forward_id: [u8; ID_BYTES],
+    probe_id: [u8; ID_BYTES],
+    start_request_id: [u8; ID_BYTES],
     preselection_capacity_ceiling: Bandwidth,
 }
 
@@ -402,6 +430,10 @@ where
                 forward_id: request_nonce[..ID_BYTES]
                     .try_into()
                     .map_err(|_| NativePreselectionError::InvalidCandidateSet)?,
+                probe_id,
+                start_request_id: start_nonce[..ID_BYTES]
+                    .try_into()
+                    .map_err(|_| NativePreselectionError::InvalidCandidateSet)?,
                 preselection_capacity_ceiling: relay
                     .preselection_capacity_ceiling
                     .component_min(exit.preselection_capacity_ceiling),
@@ -627,6 +659,29 @@ impl AwaitingNativeRelayReady {
         (&self.relay_request, &self.relay_permit)
     }
 
+    /// Consume this authority into a direct RPC targeting only its selected data Relay.
+    pub(super) fn into_relay_ready_dispatch(
+        self,
+    ) -> Result<NativeRelayReadyDispatch, NativePreselectionError> {
+        let relay_peer = Libp2pPeerId::from_bytes(&self.candidate.data_relay.peer_id)
+            .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        let request = DatapathRelayRequest::new(
+            self.candidate.probe_id.to_vec(),
+            self.candidate.data_relay.node_id.clone(),
+            self.candidate.data_relay.peer_id.clone(),
+            self.deadline.expires_at_ms,
+            DatapathRelayOperation::NativeProbeReady,
+            self.relay_request.clone(),
+            self.relay_permit.clone(),
+        )
+        .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        Ok(NativeRelayReadyDispatch {
+            awaiting: self,
+            relay_peer,
+            request,
+        })
+    }
+
     /// Consume the permit after verifying readiness signed by the exact data Relay.
     pub(super) fn accept_relay_ready(
         self,
@@ -652,7 +707,58 @@ impl AwaitingNativeRelayReady {
     }
 }
 
+impl NativeRelayReadyDispatch {
+    /// Dispatch readiness once and consume only an exactly correlated signed Relay response.
+    pub(super) async fn execute(
+        self,
+        discovery: &DiscoveryControlHandle,
+        replay: &mut ReplayCache,
+    ) -> Result<ArmedNativeProbe, NativePreselectionError> {
+        let Self {
+            awaiting,
+            relay_peer,
+            request,
+        } = self;
+        let response = discovery
+            .request_datapath_relay(relay_peer, request)
+            .await
+            .map_err(map_relay_transport)?;
+        accept_relay_response(
+            awaiting,
+            &response,
+            DatapathRelayOperation::NativeProbeReady,
+            replay,
+            AwaitingNativeRelayReady::accept_relay_ready,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn request_for_test(&self) -> (&Libp2pPeerId, &DatapathRelayRequest) {
+        (&self.relay_peer, &self.request)
+    }
+
+    #[cfg(test)]
+    fn accept_response_for_test(
+        self,
+        response: &DatapathRelayResponse,
+        replay: &mut ReplayCache,
+    ) -> Result<ArmedNativeProbe, NativePreselectionError> {
+        accept_relay_response(
+            self.awaiting,
+            response,
+            DatapathRelayOperation::NativeProbeReady,
+            replay,
+            AwaitingNativeRelayReady::accept_relay_ready,
+        )
+    }
+}
+
 impl ArmedNativeProbe {
+    /// Borrow the immutable signed path scope for downstream authority binding.
+    pub(super) fn path_scope(&self) -> &NativeProbePathScope {
+        self.relay_ready.scope()
+    }
+
     /// Consume readiness and bind the helper-prepared Client endpoint into one signed start.
     pub(super) fn start(
         self,
@@ -660,6 +766,7 @@ impl ArmedNativeProbe {
     ) -> Result<AwaitingNativeResult, NativePreselectionError> {
         let now_ms = crate::unix_millis();
         self.deadline.ensure_live(now_ms, Instant::now())?;
+        let response_deadline_ms = self.relay_ready.expires_at_ms();
         let issued_start = sign_native_probe_start(
             self.relay_ready,
             client_endpoint,
@@ -672,7 +779,26 @@ impl ArmedNativeProbe {
             _challenge: self.challenge,
             candidate: self.candidate,
             deadline: self.deadline,
+            response_deadline_ms,
         })
+    }
+
+    /// Exact helper route context and remote `RelayClient` binding for local preparation.
+    pub(super) fn helper_scope(
+        &self,
+    ) -> Result<([u8; ID_BYTES], &NativeProbeEndpointBinding, u64), NativePreselectionError> {
+        let route_context_id = self
+            .relay_ready
+            .scope()
+            .probe_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        Ok((
+            route_context_id,
+            self.relay_ready.relay_client_endpoint(),
+            self.relay_ready.expires_at_ms(),
+        ))
     }
 }
 
@@ -680,6 +806,29 @@ impl AwaitingNativeResult {
     /// Borrow the signed start for delivery only to the exact data Relay.
     pub(super) fn encoded_start(&self) -> &[u8] {
         self.issued_start.encoded_start()
+    }
+
+    /// Consume the signed start into a direct RPC to the exact readiness-signing data Relay.
+    pub(super) fn into_relay_start_dispatch(
+        self,
+    ) -> Result<NativeRelayStartDispatch, NativePreselectionError> {
+        let relay_peer = Libp2pPeerId::from_bytes(&self.candidate.data_relay.peer_id)
+            .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        let request = DatapathRelayRequest::new(
+            self.candidate.start_request_id.to_vec(),
+            self.candidate.data_relay.node_id.clone(),
+            self.candidate.data_relay.peer_id.clone(),
+            self.response_deadline_ms,
+            DatapathRelayOperation::NativeProbeStart,
+            self.issued_start.encoded_start().to_vec(),
+            Vec::new(),
+        )
+        .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        Ok(NativeRelayStartDispatch {
+            awaiting: self,
+            relay_peer,
+            request,
+        })
     }
 
     /// Consume the in-flight authority after exact local and signed remote proof verification.
@@ -703,6 +852,104 @@ impl AwaitingNativeResult {
             _candidate: self.candidate,
         })
     }
+}
+
+impl NativeRelayStartDispatch {
+    /// Dispatch Start once and retain the signed result until local helper proof is available.
+    pub(super) async fn execute(
+        self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<(AwaitingNativeResult, Vec<u8>), NativePreselectionError> {
+        let Self {
+            awaiting,
+            relay_peer,
+            request,
+        } = self;
+        let response = discovery
+            .request_datapath_relay(relay_peer, request)
+            .await
+            .map_err(map_relay_transport)?;
+        response
+            .validate()
+            .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        if response.request_id() != awaiting.candidate.start_request_id
+            || response.validated_operation().ok() != Some(DatapathRelayOperation::NativeProbeStart)
+            || response.relay_node_id() != awaiting.candidate.data_relay.node_id
+            || response.relay_peer_id() != awaiting.candidate.data_relay.peer_id
+        {
+            return Err(NativePreselectionError::InvalidRelayDispatch);
+        }
+        match response
+            .validated_status()
+            .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?
+        {
+            ForwardStatus::Granted => Ok((awaiting, response.signed_response().to_vec())),
+            ForwardStatus::Rejected => Err(NativePreselectionError::RelayRejected),
+            ForwardStatus::Unavailable => Err(NativePreselectionError::RelayUnavailable),
+            ForwardStatus::Unspecified => Err(NativePreselectionError::InvalidRelayDispatch),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn request_for_test(&self) -> (&Libp2pPeerId, &DatapathRelayRequest) {
+        (&self.relay_peer, &self.request)
+    }
+}
+
+fn accept_relay_response<T, F>(
+    awaiting: T,
+    response: &DatapathRelayResponse,
+    operation: DatapathRelayOperation,
+    replay: &mut ReplayCache,
+    accept: F,
+) -> Result<ArmedNativeProbe, NativePreselectionError>
+where
+    T: RelayResponseExpectation,
+    F: FnOnce(T, Vec<u8>, &mut ReplayCache) -> Result<ArmedNativeProbe, NativePreselectionError>,
+{
+    response
+        .validate()
+        .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+    if response.request_id() != awaiting.expected_request_id()
+        || response.validated_operation().ok() != Some(operation)
+        || response.relay_node_id() != awaiting.expected_relay_node_id()
+        || response.relay_peer_id() != awaiting.expected_relay_peer_id()
+    {
+        return Err(NativePreselectionError::InvalidRelayDispatch);
+    }
+    match response
+        .validated_status()
+        .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?
+    {
+        ForwardStatus::Granted => accept(awaiting, response.signed_response().to_vec(), replay),
+        ForwardStatus::Rejected => Err(NativePreselectionError::RelayRejected),
+        ForwardStatus::Unavailable => Err(NativePreselectionError::RelayUnavailable),
+        ForwardStatus::Unspecified => Err(NativePreselectionError::InvalidRelayDispatch),
+    }
+}
+
+trait RelayResponseExpectation {
+    fn expected_request_id(&self) -> &[u8];
+    fn expected_relay_node_id(&self) -> &[u8];
+    fn expected_relay_peer_id(&self) -> &[u8];
+}
+
+impl RelayResponseExpectation for AwaitingNativeRelayReady {
+    fn expected_request_id(&self) -> &[u8] {
+        &self.candidate.probe_id
+    }
+
+    fn expected_relay_node_id(&self) -> &[u8] {
+        &self.candidate.data_relay.node_id
+    }
+
+    fn expected_relay_peer_id(&self) -> &[u8] {
+        &self.candidate.data_relay.peer_id
+    }
+}
+
+fn map_relay_transport(_: OutboundReservationError) -> NativePreselectionError {
+    NativePreselectionError::RelayTransportUnavailable
 }
 
 fn invalid_prepared(_: SelectionBridgeError) -> NativePreselectionError {
@@ -901,12 +1148,474 @@ where
 }
 
 #[cfg(test)]
+mod dispatch_tests {
+    use libp2p::identity;
+    use volparossa_protocol::{
+        NativeProbePermit, NativeProbeRelayReady, ObservationAddressFamily, RelayAuthorization,
+        RelayReservation, SignedEnvelope, Transport, WireguardEndpoint, native_probe_permit_hash,
+        native_probe_permit_request_hash, verify_native_probe_permit,
+    };
+
+    use super::*;
+
+    struct ReadyFixture {
+        awaiting: AwaitingNativeRelayReady,
+        relay_key: SigningKey,
+        exit_key: SigningKey,
+        scope: NativeProbePathScope,
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine Ready/Start smoke keeps the exact signed transcript visible"
+    )]
+    fn native_ready_and_start_dispatches_are_exact_and_relay_only() {
+        let ReadyFixture {
+            awaiting,
+            relay_key: _,
+            exit_key: _,
+            scope,
+        } = ready_fixture();
+        let expected_relay = scope.data_relay.as_ref().expect("data Relay");
+        let dispatch = awaiting
+            .into_relay_ready_dispatch()
+            .expect("Ready dispatch");
+        let (relay_peer, request) = dispatch.request_for_test();
+        assert_eq!(relay_peer.to_bytes(), expected_relay.peer_id);
+        assert_eq!(request.request_id(), scope.probe_id);
+        assert_eq!(request.relay_node_id(), expected_relay.node_id);
+        assert_eq!(request.relay_peer_id(), expected_relay.peer_id);
+        assert_eq!(
+            request.validated_operation().expect("Ready operation"),
+            DatapathRelayOperation::NativeProbeReady
+        );
+        assert_envelope_type(
+            request.client_signed_request(),
+            volparossa_protocol::ControlMessageType::NativeProbePermitRequest,
+        );
+        assert_envelope_type(
+            request.exit_signed_authorization(),
+            volparossa_protocol::ControlMessageType::NativeProbePermit,
+        );
+
+        let ReadyFixture {
+            awaiting,
+            relay_key,
+            exit_key: _,
+            scope,
+        } = ready_fixture();
+        let now_ms = crate::unix_millis();
+        let relay_endpoint = endpoint_binding(&scope.probe_id, 11, [8, 8, 8, 8], 41_001);
+        let ready = NativeProbeRelayReady {
+            permit_hash: native_probe_permit_hash(&awaiting.relay_permit)
+                .expect("Permit hash")
+                .to_vec(),
+            exit_ready_hash: vec![7; KEY_BYTES],
+            scope: Some(scope.clone()),
+            relay_client_endpoint: Some(relay_endpoint.clone()),
+            ready_at_ms: now_ms,
+            expires_at_ms: scope.attempt_expires_at_ms,
+            nonce: vec![21; KEY_BYTES],
+        };
+        let signed_ready = sign_control_message(
+            &ready,
+            &relay_key,
+            now_ms,
+            ready.expires_at_ms,
+            [21; KEY_BYTES],
+            native_time_policy(),
+        )
+        .expect("signed Ready");
+        let relay = scope.data_relay.as_ref().expect("data Relay");
+        let response = DatapathRelayResponse::granted(
+            scope.probe_id.clone(),
+            DatapathRelayOperation::NativeProbeReady,
+            relay.node_id.clone(),
+            relay.peer_id.clone(),
+            signed_ready,
+        )
+        .expect("Ready response");
+        let mut replay_cache = ReplayCache::new(4).expect("replay");
+        let armed = awaiting
+            .into_relay_ready_dispatch()
+            .expect("Ready dispatch")
+            .accept_response_for_test(&response, &mut replay_cache)
+            .expect("verified Ready");
+        let (route_context, observed_relay, _) = armed.helper_scope().expect("helper scope");
+        assert_eq!(route_context.as_slice(), scope.probe_id);
+        assert_eq!(observed_relay, &relay_endpoint);
+        let client_endpoint = endpoint_binding(&scope.probe_id, 31, [1, 1, 1, 1], 42_001);
+        let start = armed.start(client_endpoint).expect("signed Start");
+        let dispatch = start.into_relay_start_dispatch().expect("Start dispatch");
+        let (relay_peer, request) = dispatch.request_for_test();
+        let expected_relay = scope.data_relay.as_ref().expect("data Relay");
+        assert_eq!(relay_peer.to_bytes(), expected_relay.peer_id);
+        assert_eq!(request.request_id(), &[13; ID_BYTES]);
+        assert_eq!(request.relay_node_id(), expected_relay.node_id);
+        assert_eq!(request.relay_peer_id(), expected_relay.peer_id);
+        assert_eq!(
+            request.validated_operation().expect("Start operation"),
+            DatapathRelayOperation::NativeProbeStart
+        );
+        assert!(request.exit_signed_authorization().is_empty());
+        assert_envelope_type(
+            request.client_signed_request(),
+            volparossa_protocol::ControlMessageType::NativeProbeStart,
+        );
+
+        let ReadyFixture {
+            awaiting,
+            relay_key,
+            exit_key: _,
+            scope,
+        } = ready_fixture();
+        let ready = NativeProbeRelayReady {
+            permit_hash: native_probe_permit_hash(&awaiting.relay_permit)
+                .expect("Permit hash")
+                .to_vec(),
+            exit_ready_hash: vec![7; KEY_BYTES],
+            scope: Some(scope.clone()),
+            relay_client_endpoint: Some(endpoint_binding(
+                &scope.probe_id,
+                11,
+                [8, 8, 8, 8],
+                41_001,
+            )),
+            ready_at_ms: crate::unix_millis(),
+            expires_at_ms: scope.attempt_expires_at_ms,
+            nonce: vec![22; KEY_BYTES],
+        };
+        let signed_ready = sign_control_message(
+            &ready,
+            &relay_key,
+            ready.ready_at_ms,
+            ready.expires_at_ms,
+            [22; KEY_BYTES],
+            native_time_policy(),
+        )
+        .expect("signed Ready mutant");
+        let relay = scope.data_relay.as_ref().expect("data Relay");
+        let wrong_id = DatapathRelayResponse::granted(
+            vec![99; ID_BYTES],
+            DatapathRelayOperation::NativeProbeReady,
+            relay.node_id.clone(),
+            relay.peer_id.clone(),
+            signed_ready,
+        )
+        .expect("wrong-ID response is structurally valid");
+        let mut replay_cache = ReplayCache::new(4).expect("replay");
+        assert!(matches!(
+            awaiting
+                .into_relay_ready_dispatch()
+                .expect("Ready dispatch")
+                .accept_response_for_test(&wrong_id, &mut replay_cache),
+            Err(NativePreselectionError::InvalidRelayDispatch)
+        ));
+    }
+
+    #[test]
+    fn helper_activation_requires_exact_standard_relay_authority() {
+        let ReadyFixture {
+            awaiting: _,
+            relay_key,
+            exit_key,
+            scope,
+        } = ready_fixture();
+        let now_ms = crate::unix_millis();
+        let local = WireguardEndpoint {
+            public_key: vec![32; KEY_BYTES],
+            underlay_ip: vec![1, 1, 1, 1],
+            listen_port: 42_001,
+        };
+        let remote = WireguardEndpoint {
+            public_key: vec![12; KEY_BYTES],
+            underlay_ip: vec![8, 8, 8, 8],
+            listen_port: 41_001,
+        };
+        let signed = signed_relay_activation_authority(
+            &scope, &relay_key, &exit_key, &local, &remote, now_ms,
+        );
+        let mut replay_cache = ReplayCache::new(4).expect("replay");
+        super::super::verify_native_client_activation_authority(
+            &scope,
+            &local,
+            &remote,
+            scope.attempt_expires_at_ms / 1_000,
+            &signed,
+            now_ms,
+            &mut replay_cache,
+        )
+        .expect("exact activation authority");
+
+        let mut wrong_local = local;
+        wrong_local.public_key = vec![99; KEY_BYTES];
+        let mut replay_cache = ReplayCache::new(4).expect("mutant replay");
+        assert!(matches!(
+            super::super::verify_native_client_activation_authority(
+                &scope,
+                &wrong_local,
+                &remote,
+                scope.attempt_expires_at_ms / 1_000,
+                &signed,
+                now_ms,
+                &mut replay_cache,
+            ),
+            Err(super::super::ClientNativeProbeError::HelperCorrelation)
+        ));
+    }
+
+    fn ready_fixture() -> ReadyFixture {
+        let now_ms = crate::unix_millis();
+        let expires_at_ms = now_ms + MAX_NATIVE_PROBE_LIFETIME_MS;
+        let relay_key = SigningKey::from_bytes(&[3; KEY_BYTES]);
+        let control_key = SigningKey::from_bytes(&[4; KEY_BYTES]);
+        let exit_key = SigningKey::from_bytes(&[5; KEY_BYTES]);
+        let session_key = SigningKey::from_bytes(&[6; KEY_BYTES]);
+        let relay = actor(&relay_key, expires_at_ms + 1_000);
+        let control = actor(&control_key, expires_at_ms + 1_000);
+        let exit = actor(&exit_key, expires_at_ms + 1_000);
+        let session_public_key = session_key.verifying_key().to_bytes();
+        let scope = NativeProbePathScope {
+            attempt_id: vec![1; ID_BYTES],
+            probe_id: vec![2; ID_BYTES],
+            candidate_set_hash: vec![3; KEY_BYTES],
+            candidate_ordinal: 1,
+            data_relay: Some(relay.clone()),
+            control: Some(control.clone()),
+            exit: Some(exit.clone()),
+            client_session_id: node_id_from_public_key(&session_public_key).to_vec(),
+            client_session_public_key: session_public_key.to_vec(),
+            transport: Transport::TcpMptcp as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: 1,
+            policy_hash: vec![4; KEY_BYTES],
+            policy_expires_at_ms: expires_at_ms + 1_000,
+            challenge_hash: native_probe_challenge_hash(&[12; KEY_BYTES]).to_vec(),
+            attempt_expires_at_ms: expires_at_ms,
+        };
+        let request = NativeProbePermitRequest {
+            scope: Some(scope.clone()),
+            created_at_ms: now_ms,
+            expires_at_ms,
+            nonce: vec![8; KEY_BYTES],
+        };
+        let signed_request = sign_control_message(
+            &request,
+            &session_key,
+            now_ms,
+            expires_at_ms,
+            [8; KEY_BYTES],
+            native_time_policy(),
+        )
+        .expect("signed request");
+        let permit = NativeProbePermit {
+            request_hash: native_probe_permit_request_hash(&signed_request)
+                .expect("request hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            issued_at_ms: now_ms,
+            expires_at_ms,
+            nonce: vec![9; KEY_BYTES],
+        };
+        let signed_permit = sign_control_message(
+            &permit,
+            &exit_key,
+            now_ms,
+            expires_at_ms,
+            [9; KEY_BYTES],
+            native_time_policy(),
+        )
+        .expect("signed Permit");
+        let mut replay_cache = ReplayCache::new(2).expect("replay");
+        let verified_permit = verify_native_probe_permit(
+            signed_request.clone(),
+            signed_permit.clone(),
+            now_ms,
+            &mut replay_cache,
+        )
+        .expect("verified Permit");
+        ReadyFixture {
+            awaiting: AwaitingNativeRelayReady {
+                verified_permit,
+                relay_request: signed_request,
+                relay_permit: signed_permit,
+                session_key,
+                challenge: Zeroizing::new([12; KEY_BYTES]),
+                start_nonce: [13; KEY_BYTES],
+                candidate: NativeCandidateTemplate {
+                    candidate_ordinal: 1,
+                    data_relay: relay,
+                    control,
+                    exit,
+                    forward_id: [14; ID_BYTES],
+                    probe_id: [2; ID_BYTES],
+                    start_request_id: [13; ID_BYTES],
+                    preselection_capacity_ceiling: Bandwidth::new(10, 10).expect("capacity"),
+                },
+                deadline: NativeAttemptDeadline {
+                    created_at_ms: now_ms,
+                    expires_at_ms,
+                    monotonic_expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            },
+            relay_key,
+            exit_key,
+            scope,
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture makes every nested signed Relay authority field explicit"
+    )]
+    fn signed_relay_activation_authority(
+        scope: &NativeProbePathScope,
+        relay_key: &SigningKey,
+        exit_key: &SigningKey,
+        local: &WireguardEndpoint,
+        remote: &WireguardEndpoint,
+        now_ms: u64,
+    ) -> Vec<u8> {
+        let relay = scope.data_relay.as_ref().expect("data Relay");
+        let exit = scope.exit.as_ref().expect("Exit");
+        let control = scope.control.as_ref().expect("control Relay");
+        let relay_exit = WireguardEndpoint {
+            public_key: vec![62; KEY_BYTES],
+            underlay_ip: vec![9, 9, 9, 9],
+            listen_port: 43_001,
+        };
+        let exit_endpoint = WireguardEndpoint {
+            public_key: vec![72; KEY_BYTES],
+            underlay_ip: vec![7, 7, 7, 7],
+            listen_port: 44_001,
+        };
+        let authorization = RelayAuthorization {
+            reservation_id: vec![31; ID_BYTES],
+            route_context_id: scope.probe_id.clone(),
+            path_id: 1,
+            relay_node_id: relay.node_id.clone(),
+            exit_node_id: exit.node_id.clone(),
+            client_session_id: scope.client_session_id.clone(),
+            allowed_transports: vec![scope.transport],
+            maximum_up_mbps: 10,
+            maximum_down_mbps: 10,
+            client_wireguard_public_key: local.public_key.clone(),
+            exit_wireguard_endpoint: Some(exit_endpoint.clone()),
+            policy_hash: scope.policy_hash.clone(),
+            created_at_ms: now_ms,
+            expires_at_ms: scope.attempt_expires_at_ms,
+            nonce: vec![41; KEY_BYTES],
+            relay_peer_id: relay.peer_id.clone(),
+            capability_id: vec![42; ID_BYTES],
+            client_session_public_key: scope.client_session_public_key.clone(),
+            exit_boot_id: vec![43; ID_BYTES],
+            hold_id: vec![44; ID_BYTES],
+            finalize_id: vec![45; ID_BYTES],
+            control_relay_node_id: control.node_id.clone(),
+            control_relay_peer_id: control.peer_id.clone(),
+            exit_peer_id: exit.peer_id.clone(),
+        };
+        let signed_exit = sign_control_message(
+            &authorization,
+            exit_key,
+            now_ms,
+            scope.attempt_expires_at_ms,
+            [41; KEY_BYTES],
+            native_time_policy(),
+        )
+        .expect("signed Exit authorization");
+        let reservation = RelayReservation {
+            reservation_id: authorization.reservation_id.clone(),
+            route_context_id: authorization.route_context_id.clone(),
+            path_id: authorization.path_id,
+            relay_node_id: authorization.relay_node_id.clone(),
+            exit_node_id: authorization.exit_node_id.clone(),
+            client_session_id: authorization.client_session_id.clone(),
+            allowed_transports: authorization.allowed_transports.clone(),
+            maximum_up_mbps: authorization.maximum_up_mbps,
+            maximum_down_mbps: authorization.maximum_down_mbps,
+            client_wireguard_public_key: authorization.client_wireguard_public_key.clone(),
+            relay_client_wireguard_endpoint: Some(remote.clone()),
+            relay_exit_wireguard_endpoint: Some(relay_exit),
+            exit_wireguard_endpoint: authorization.exit_wireguard_endpoint.clone(),
+            policy_hash: authorization.policy_hash.clone(),
+            created_at_ms: authorization.created_at_ms,
+            expires_at_ms: authorization.expires_at_ms,
+            nonce: vec![51; KEY_BYTES],
+            exit_authorization: signed_exit,
+            relay_peer_id: authorization.relay_peer_id.clone(),
+            capability_id: authorization.capability_id.clone(),
+            client_session_public_key: authorization.client_session_public_key.clone(),
+            exit_boot_id: authorization.exit_boot_id.clone(),
+            hold_id: authorization.hold_id.clone(),
+            finalize_id: authorization.finalize_id.clone(),
+            control_relay_node_id: authorization.control_relay_node_id.clone(),
+            control_relay_peer_id: authorization.control_relay_peer_id.clone(),
+            exit_peer_id: authorization.exit_peer_id.clone(),
+            signed_client_relay_request_sha256: vec![52; KEY_BYTES],
+        };
+        sign_control_message(
+            &reservation,
+            relay_key,
+            now_ms,
+            scope.attempt_expires_at_ms,
+            [51; KEY_BYTES],
+            native_time_policy(),
+        )
+        .expect("signed Relay reservation")
+    }
+
+    fn actor(key: &SigningKey, expires_at_ms: u64) -> PreselectionActorBinding {
+        let public_key = key.verifying_key().to_bytes();
+        let ed25519 = identity::ed25519::PublicKey::try_from_bytes(&public_key).expect("Ed25519");
+        let peer_id = identity::PublicKey::from(ed25519).to_peer_id();
+        PreselectionActorBinding {
+            node_id: node_id_from_public_key(&public_key).to_vec(),
+            peer_id: peer_id.to_bytes(),
+            public_key: public_key.to_vec(),
+            advertisement_sequence: 1,
+            advertisement_expires_at_ms: expires_at_ms,
+            advertisement_payload_hash: vec![5; KEY_BYTES],
+            capability_expires_at_ms: expires_at_ms,
+        }
+    }
+
+    fn endpoint_binding(
+        route_context_id: &[u8],
+        seed: u8,
+        address: [u8; 4],
+        port: u32,
+    ) -> NativeProbeEndpointBinding {
+        NativeProbeEndpointBinding {
+            helper_runtime_id: vec![seed; KEY_BYTES],
+            route_context_id: route_context_id.to_vec(),
+            endpoint: Some(WireguardEndpoint {
+                public_key: vec![seed + 1; KEY_BYTES],
+                underlay_ip: address.to_vec(),
+                listen_port: port,
+            }),
+            prepared_lease_commitment: vec![seed + 2; KEY_BYTES],
+        }
+    }
+
+    fn assert_envelope_type(encoded: &[u8], expected: volparossa_protocol::ControlMessageType) {
+        let envelope: SignedEnvelope = volparossa_protocol::decode_canonical(
+            encoded,
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("canonical envelope");
+        assert_eq!(envelope.message_type, expected as i32);
+    }
+}
+
+#[cfg(test)]
 mod source_contract_tests {
     #[test]
     fn owner_is_affine_and_carries_no_a1_reachability_claim() {
         let source = include_str!("native_preselection.rs");
         let product = source
-            .rsplit_once("#[cfg(test)]\nmod source_contract_tests")
+            .split_once("#[cfg(test)]\nmod dispatch_tests")
             .expect("source-contract test boundary")
             .0;
         for declaration in [
@@ -915,8 +1624,10 @@ mod source_contract_tests {
             "pub(super) struct AwaitingNativePermit {",
             "pub(super) struct NativePermitForwardDispatch {",
             "pub(super) struct AwaitingNativeRelayReady {",
+            "pub(super) struct NativeRelayReadyDispatch {",
             "pub(super) struct ArmedNativeProbe {",
             "pub(super) struct AwaitingNativeResult {",
+            "pub(super) struct NativeRelayStartDispatch {",
             "pub(super) struct BoundNativePathProof {",
         ] {
             let before = product

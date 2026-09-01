@@ -208,9 +208,13 @@ separate user bytes from tunnel bytes. Output never contains private keys.
 
 At present, a production `connect` cannot complete. It now starts an operator-profile-bound A1
 preselection attempt and can dispatch the first endpoint-free native Permit only through the exact
-selected control Relay, but it returns `Unavailable` no later than the missing Relay-ready stage.
-Helper `Prepare`, complete native probe/result orchestration, route admission, and client ingress
-remain unavailable or blocked. Operators must not interpret a prepared Permit, successful
+selected control Relay, then dispatches the endpoint-free Permit pair only to its selected data
+Relay and verifies exact signed readiness. It returns `Unavailable` before helper `Prepare`.
+The helper endpoint/result state seam exists and refuses activation without an exact standard
+Exit/Relay-signed reservation for the prepared Client key. The Relay-side Ready/Start provider,
+post-Prepare reservation exchange, client dataplane challenge injection, complete native probe
+orchestration, route admission, and client ingress remain unavailable or blocked. Operators must
+not interpret a prepared Permit, successful
 configuration, v4 peer-codec tests, or service role state as an active route.
 
 ## Crash and cleanup

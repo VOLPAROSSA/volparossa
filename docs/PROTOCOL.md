@@ -567,9 +567,16 @@ attempt with real evidence and capacity is not reserved twice. Tests use an expl
 matches exact expected permit/result bytes after normal cryptographic and scope verification;
 there is no accept-all production or test provider.
 
-The `/volparossa/datapath-relay/4` ExecuteProbe wrapper is framing only and does not change this
-boundary. Likewise, signed route binding is not helper/kernel tunnel evidence and does not mark the
-capacity ledger tunnel-established. Real helper-owned endpoint preparation, readiness,
+The `/volparossa/datapath-relay/4` `ExecuteProbe` wrapper is framing only and does not change this
+boundary. The same v4 wrapper now also gives native preselection two exact operations:
+`NativeProbeReady` carries only a client-signed endpoint-free request plus its Exit-signed Permit and
+accepts only `NativeProbeRelayReady`; `NativeProbeStart` carries only the client-signed Start and
+accepts only `NativeProbeRelayResult`. Both target the selected data Relay identity and retain
+separate 16-byte correlation IDs. These wrappers are still not helper/kernel tunnel evidence and do
+not mark the capacity ledger tunnel-established. The strict helper additionally refuses Client
+activation until a standard nested Exit/Relay-signed `RelayReservation` binds the helper-prepared
+Client key, selected Relay endpoint, exact route context and hard expiry. Neither native wrapper
+currently obtains that post-Prepare authority. Real helper-owned endpoint preparation, readiness,
 activation, handshake/counter proof, route supervision, and cleanup remain required before a
 production datapath can be claimed.
 

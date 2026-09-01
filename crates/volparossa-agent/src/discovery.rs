@@ -75,10 +75,11 @@ use volparossa_protocol::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
     ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
     ExitReservationConfirmation, ExitReservationFinalizeRequest, MAX_NATIVE_PROBE_LIFETIME_MS,
-    NativeProbePathScope, NativeProbePermitRequest, NodeAdvertisement as WireAdvertisement,
-    ObservationAddressFamily, PreselectionActorBinding, RelayAuthorization, RelayProbePermit,
-    RelayProbePermitRequest, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy,
-    Transport, decode_canonical, encode_canonical, node_id_from_public_key, verify_control_message,
+    NativeProbePathScope, NativeProbePermitRequest, NativeProbeStart,
+    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, PreselectionActorBinding,
+    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservationRequest,
+    ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
+    node_id_from_public_key, verify_control_message, verify_native_probe_permit,
 };
 use volparossa_relay::{RelayService, RelayServiceConfig};
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
@@ -5307,6 +5308,7 @@ impl DiscoveryRuntime {
         force_control_revoke: bool,
     ) -> Option<u64> {
         let control_authority_changed = force_control_revoke
+            || !relay_authorized
             || self.direct_relays.get(&peer).is_some_and(|current| {
                 current.node_id != accepted.node_id
                     || current.peer_id != accepted.peer_id
@@ -6245,8 +6247,68 @@ fn datapath_request_scope_matches(
         DatapathRelayOperation::ReservePath => {
             reserve_path_scope_matches(request, now_ms, &mut replay)
         }
+        DatapathRelayOperation::NativeProbeReady => {
+            native_probe_ready_scope_matches(request, now_ms, &mut replay)
+        }
+        DatapathRelayOperation::NativeProbeStart => {
+            native_probe_start_scope_matches(request, now_ms, &mut replay)
+        }
         DatapathRelayOperation::Unspecified => false,
     }
+}
+
+fn native_probe_ready_scope_matches(
+    wrapper: &DatapathRelayRequest,
+    now_ms: u64,
+    replay: &mut ReplayCache,
+) -> bool {
+    let Ok(permit) = verify_native_probe_permit(
+        wrapper.client_signed_request().to_vec(),
+        wrapper.exit_signed_authorization().to_vec(),
+        now_ms,
+        replay,
+    ) else {
+        return false;
+    };
+    let scope = permit.scope();
+    let Some(data_relay) = scope.data_relay.as_ref() else {
+        return false;
+    };
+    wrapper.request_id() == scope.probe_id
+        && wrapper.deadline_unix_ms() == scope.attempt_expires_at_ms
+        && wrapper.relay_node_id() == data_relay.node_id
+        && wrapper.relay_peer_id() == data_relay.peer_id
+}
+
+fn native_probe_start_scope_matches(
+    wrapper: &DatapathRelayRequest,
+    now_ms: u64,
+    replay: &mut ReplayCache,
+) -> bool {
+    let Ok(start) = verify_control_message::<NativeProbeStart>(
+        wrapper.client_signed_request(),
+        now_ms,
+        TimePolicy {
+            maximum_lifetime_ms: MAX_NATIVE_PROBE_LIFETIME_MS,
+            maximum_clock_skew_ms: TimePolicy::default().maximum_clock_skew_ms,
+        },
+        replay,
+    ) else {
+        return false;
+    };
+    let nonce = *start.nonce();
+    let expires_at_ms = start.expires_at_ms();
+    let start = start.into_message();
+    let Some(scope) = start.scope.as_ref() else {
+        return false;
+    };
+    let Some(data_relay) = scope.data_relay.as_ref() else {
+        return false;
+    };
+    wrapper.request_id() == &nonce[..FORWARD_ID_BYTES]
+        && wrapper.deadline_unix_ms() == expires_at_ms
+        && wrapper.relay_node_id() == data_relay.node_id
+        && wrapper.relay_peer_id() == data_relay.peer_id
 }
 
 #[allow(

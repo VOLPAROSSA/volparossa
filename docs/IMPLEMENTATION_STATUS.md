@@ -1086,10 +1086,20 @@ single clean-build A01--A15 run; the score is not a release claim.
   bounded candidate owner, wraps the first signed native Permit request with the exact selected
   control-Relay and Exit lineage, and dispatches it through `request_exit_forward` only to that
   control Relay. Exact wrapper/correlation/operation/Exit checks and protocol verification consume
-  a granted Permit; the remaining candidates, replay cache and verified Permit stay owned together
-  by the local route gate. Connect still returns `Unavailable` at Relay-ready, and disconnect drops
-  this pre-helper owner before helper cleanup. No Relay-ready client dispatcher, helper-prepared
-  native endpoint, native result, route admission or usable dataplane proof exists yet.
+  a granted Permit. The affine continuation then sends the exact endpoint-free request/Permit pair
+  directly to only the selected data Relay over typed `NativeProbeReady` framing, verifies the
+  wrapper identity, operation, status and signed `NativeProbeRelayReady`, and retains the remaining
+  candidates and replay state with that readiness. The next typed seam binds a same-connection
+  helper runtime and one exact prepared Client lease into the native endpoint commitment and
+  retains exact Destroy authority. It permits Activate only after separately verifying the standard
+  nested Exit/Relay-signed `RelayReservation` against the selected actors, route context, policy,
+  prepared Client key, Relay endpoint and helper hard expiry. The later affine states build exact
+  Activate/Commit requests, sign `NativeProbeStart` only after exact helper activation, and verify
+  the correlated `NativeProbeRelayResult` together with non-zero helper commit facts.
+  Connect still returns `Unavailable` before helper Prepare; disconnect therefore drops only this
+  pre-helper owner before global helper cleanup. The Relay-side native Ready/Start provider, the
+  post-Prepare standard Relay-reservation exchange, and the client dataplane challenge injector are
+  not implemented, so no native result, route admission or usable dataplane proof exists yet.
   The swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to
