@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Cheap static contract for the manually dispatched KVM alpha runner.
+# Cheap static contract for the manually or integration-PR dispatched KVM alpha runner.
 # shellcheck disable=SC2016
 set -eu
 
@@ -24,9 +24,11 @@ done
 
 [ -f "$WORKFLOW" ] && [ ! -L "$WORKFLOW" ]
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
-if grep -Eq '^  (push|pull_request):' "$WORKFLOW"; then
-    exit 1
-fi
+grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
+grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \
+    >/dev/null
+grep -F "github.head_ref == 'feature/alpha-vertical-runtime'" "$WORKFLOW" >/dev/null
+if grep -Eq '^  push:' "$WORKFLOW"; then exit 1; fi
 
 [ "$(grep -Fc 'launch_helper client "$CLIENT"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay1 "$R1"' "$GUEST")" -eq 1 ]
@@ -42,9 +44,12 @@ grep -F -- '--property=FileDescriptorStorePreserve=yes' "$GUEST" >/dev/null
 grep -F -- '--property="BindPaths=$WORK/runtime-$node:/run/volparossa"' "$GUEST" >/dev/null
 grep -F 'VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock' "$GUEST" >/dev/null
 grep -F 'DIRECT_CLIENT_EXIT_REACHABLE' "$GUEST" >/dev/null
-if grep -F 'ip -n "$CLIENT" route add 46.162.3.1' "$GUEST"; then
-    exit 1
-fi
+grep -F 'ip -n "$underlay_ns" link add underlay type dummy' "$GUEST" >/dev/null
+grep -F 'ip -n "$underlay_ns" route add default dev underlay scope global' "$GUEST" >/dev/null
+[ "$(grep -Fc 'add_public_underlay ' "$GUEST")" -eq 4 ]
+grep -F 'ip -n "$CLIENT" route add unreachable "$forbidden/32"' "$GUEST" >/dev/null
+grep -F '10.241.31.1 10.241.31.2 46.162.3.1' "$GUEST" >/dev/null
+if grep -E 'ip -n "\$CLIENT" route add (unicast )?46\.162\.3\.1' "$GUEST"; then exit 1; fi
 if grep -F 'link_nodes "$CLIENT"' "$GUEST" | grep -F '"$EXIT_NODE"'; then
     exit 1
 fi

@@ -30,6 +30,7 @@ print_plan() {
         'VOLPAROSSA production-helper alpha topology plan:' \
         '  require one disposable Debian 13 amd64 KVM guest with systemd v257 as PID 1;' \
         '  create Client, Relay 1, Relay 2, Exit and destination network namespaces;' \
+        '  give each product node one disposable public underlay and fail-closed default;' \
         '  create only Client-Relay, Relay-Exit and Exit-destination underlay links;' \
         '  launch four distinct transient production-helper service instances;' \
         '  bind each helper and agent privately to its node-owned /run/volparossa;' \
@@ -344,15 +345,28 @@ link_nodes() {
     ip -n "$right_ns" link set "$right_name" up
 }
 
+add_public_underlay() {
+    underlay_ns=$1
+    underlay_address=$2
+    ip -n "$underlay_ns" link add underlay type dummy
+    ip -n "$underlay_ns" address add "$underlay_address/32" dev underlay
+    ip -n "$underlay_ns" link set underlay up
+    # The helper deliberately selects only a non-loopback directly assigned public
+    # address whose interface owns the sole main-table universe-scope default.
+    # Explicit peer routes below still carry all topology packets; this disposable
+    # default has no peer and therefore cannot create a hidden Client -> Exit path.
+    ip -n "$underlay_ns" route add default dev underlay scope global
+}
+
 link_nodes "$CLIENT" cr1 10.241.11.1/30 "$R1" r1c 10.241.11.2/30
 link_nodes "$CLIENT" cr2 10.241.12.1/30 "$R2" r2c 10.241.12.2/30
 link_nodes "$R1" r1x 10.241.21.1/30 "$EXIT_NODE" xr1 10.241.21.2/30
 link_nodes "$R2" r2x 10.241.22.1/30 "$EXIT_NODE" xr2 10.241.22.2/30
 link_nodes "$EXIT_NODE" xd 10.241.31.1/30 "$DEST" dx 10.241.31.2/30
-ip -n "$CLIENT" address add 43.159.1.1/32 dev lo
-ip -n "$R1" address add 44.160.1.1/32 dev lo
-ip -n "$R2" address add 45.161.2.1/32 dev lo
-ip -n "$EXIT_NODE" address add 46.162.3.1/32 dev lo
+add_public_underlay "$CLIENT" 43.159.1.1
+add_public_underlay "$R1" 44.160.1.1
+add_public_underlay "$R2" 45.161.2.1
+add_public_underlay "$EXIT_NODE" 46.162.3.1
 ip -n "$CLIENT" route add 44.160.1.1/32 via 10.241.11.2 dev cr1 src 43.159.1.1
 ip -n "$CLIENT" route add 45.161.2.1/32 via 10.241.12.2 dev cr2 src 43.159.1.1
 ip -n "$R1" route add 43.159.1.1/32 via 10.241.11.1 dev r1c src 44.160.1.1
@@ -361,7 +375,8 @@ ip -n "$R2" route add 43.159.1.1/32 via 10.241.12.1 dev r2c src 45.161.2.1
 ip -n "$R2" route add 46.162.3.1/32 via 10.241.22.2 dev r2x src 45.161.2.1
 ip -n "$EXIT_NODE" route add 44.160.1.1/32 via 10.241.21.1 dev xr1 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 45.161.2.1/32 via 10.241.22.1 dev xr2 src 46.162.3.1
-for forbidden in 10.241.21.2 10.241.22.2 10.241.31.2; do
+for forbidden in 10.241.21.2 10.241.22.2 10.241.31.1 10.241.31.2 46.162.3.1; do
+    ip -n "$CLIENT" route add unreachable "$forbidden/32"
     if ip -n "$CLIENT" route get "$forbidden" >/dev/null 2>&1; then
         fail DIRECT_CLIENT_EXIT_REACHABLE
     fi
