@@ -1003,6 +1003,10 @@ production_start_failure_stage_is_safe() {
         functional-exit-cleanup-namespace-close|\
         functional-exit-cleanup-fdstore-absence|\
         functional-exit-cleanup-parent-custody|\
+        functional-exit-cleanup-parent-custody-pidfd|\
+        functional-exit-cleanup-parent-custody-procfd|\
+        functional-exit-cleanup-parent-custody-foreign-netns|\
+        functional-exit-cleanup-parent-custody-fd-scan|\
         functional-relay-pair-ready|\
         functional-relay-pair-worker-observation|\
         functional-relay-pair-fixtures|\

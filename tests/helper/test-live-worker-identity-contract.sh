@@ -588,6 +588,10 @@ printf '%s\n' \
     functional-exit-cleanup-namespace-close \
     functional-exit-cleanup-fdstore-absence \
     functional-exit-cleanup-parent-custody \
+    functional-exit-cleanup-parent-custody-pidfd \
+    functional-exit-cleanup-parent-custody-procfd \
+    functional-exit-cleanup-parent-custody-foreign-netns \
+    functional-exit-cleanup-parent-custody-fd-scan \
     functional-relay-pair-ready \
     functional-relay-pair-worker-observation \
     functional-relay-pair-fixtures \
@@ -6224,6 +6228,10 @@ cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
 }
 start_failure_stage=
 hook_stage_index=0
+expected_production_monotone_start_stages=$temporary_directory/expected-production-monotone-start-stages
+grep -Ev '^functional-exit-cleanup-parent-custody-(pidfd|procfd|foreign-netns|fd-scan)$' \
+    "$expected_production_start_stages" \
+    >"$expected_production_monotone_start_stages"
 while IFS= read -r hook_start_stage; do
     hook_stage_index=$((hook_stage_index + 1))
     if [ "$hook_stage_index" -eq 1 ]; then
@@ -6236,11 +6244,29 @@ while IFS= read -r hook_start_stage; do
             exit 1
         }
     fi
-done <"$expected_production_start_stages"
+done <"$expected_production_monotone_start_stages"
 [ "$start_failure_stage" = publication ] || {
     printf '%s\n' 'production hook start stage did not reach publication' >&2
     exit 1
 }
+for hook_custody_failure_stage in pidfd procfd foreign-netns fd-scan; do
+    start_failure_stage=functional-exit-cleanup-parent-custody
+    advance_start_failure_stage \
+        "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" \
+        || {
+            printf 'production hook rejected custody diagnostic stage: %s\n' \
+                "$hook_custody_failure_stage" >&2
+            exit 1
+        }
+    [ "$start_failure_stage" = \
+        "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" ] \
+        || exit 1
+    if advance_start_failure_stage functional-relay-pair-ready; then
+        printf 'production hook advanced past custody diagnostic stage: %s\n' \
+            "$hook_custody_failure_stage" >&2
+        exit 1
+    fi
+done
 if advance_start_failure_stage identity-socket \
     || { start_failure_stage=preflight-runtime; advance_start_failure_stage active-lock; }; then
     printf '%s\n' 'production hook start stage accepted a skipped or regressed transition' >&2
@@ -8283,19 +8309,27 @@ exercise_no_custody_wait_contract() (
     custody_observations=0
     helper_holds_no_worker_custody() {
         custody_observations=$((custody_observations + 1))
-        [ "$custody_observations" -eq 3 ]
+        if [ "$custody_observations" -eq 3 ]; then
+            hook_custody_failure_stage=none
+            return 0
+        fi
+        hook_custody_failure_stage=pidfd
+        return 1
     }
     wait_for_helper_no_worker_custody 4242
     [ "$custody_observations" -eq 3 ]
+    [ "$hook_custody_failure_stage" = none ]
     custody_observations=0
     helper_holds_no_worker_custody() {
         custody_observations=$((custody_observations + 1))
+        hook_custody_failure_stage=procfd
         return 1
     }
     if wait_for_helper_no_worker_custody 4242; then
         exit 1
     fi
     [ "$custody_observations" -eq 100 ]
+    [ "$hook_custody_failure_stage" = procfd ]
 )
 exercise_no_custody_wait_contract || {
     printf '%s\n' 'worker-custody retirement wait does not converge or fail closed' >&2
@@ -8314,6 +8348,121 @@ do
     if no_custody_wait_source_is_exact "$no_custody_wait_mutant"; then
         printf 'worker-custody retirement wait accepted mutant: %s\n' \
             "${no_custody_wait_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+no_custody_predicate_contract=$temporary_directory/no-custody-predicate-contract.sh
+sed -n '/^helper_holds_no_worker_custody() {$/,/^}$/p' \
+    "$ipc_hook" >"$no_custody_predicate_contract"
+# These are literal hook-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+no_custody_predicate_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'hook_custody_failure_stage=fd-scan' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=pidfd' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=procfd' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=foreign-netns' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=none' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc "'anon_inode:[pidfd]'" "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '/proc/[1-9][0-9]*)' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'net:\[[1-9][0-9]*\])' "$1")" -eq 1 ] \
+        && [ "$(grep -Ec '(^|[[:space:]])(echo|logger|printf)([[:space:]]|$)' \
+            "$1")" -eq 0 ]
+}
+no_custody_predicate_source_is_exact "$no_custody_predicate_contract" || {
+    printf '%s\n' 'worker-custody predicate diagnostics are not fixed and value-free' >&2
+    exit 1
+}
+sh -n "$no_custody_predicate_contract"
+no_custody_predicate_target_mutant=$temporary_directory/no-custody-predicate-target-mutant.sh
+sed "s/'anon_inode:\[pidfd\]'/'anon_inode:[worker-pidfd]'/" \
+    "$no_custody_predicate_contract" >"$no_custody_predicate_target_mutant"
+no_custody_predicate_stage_mutant=$temporary_directory/no-custody-predicate-stage-mutant.sh
+sed 's/hook_custody_failure_stage=foreign-netns/hook_custody_failure_stage=none/' \
+    "$no_custody_predicate_contract" >"$no_custody_predicate_stage_mutant"
+for no_custody_predicate_mutant in \
+    "$no_custody_predicate_target_mutant" "$no_custody_predicate_stage_mutant"
+do
+    sh -n "$no_custody_predicate_mutant"
+    if no_custody_predicate_source_is_exact "$no_custody_predicate_mutant"; then
+        printf 'worker-custody predicate accepted diagnostic mutant: %s\n' \
+            "${no_custody_predicate_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+exit_custody_diagnostic_contract=$temporary_directory/exit-custody-diagnostic-contract.sh
+{
+    printf '%s\n' 'exit_custody_diagnostic_probe() {'
+    # This is a literal hook-source range; expansion here would defeat it.
+    # shellcheck disable=SC2016
+    sed -n \
+        '/^    if ! wait_for_helper_no_worker_custody "\$hook_functional_main_pid"; then$/,/^    fi$/p' \
+        "$ipc_hook"
+    printf '%s\n' '}'
+} >"$exit_custody_diagnostic_contract"
+# This is a literal hook-source contract; expansion here would defeat it.
+# shellcheck disable=SC2016
+exit_custody_diagnostic_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'pidfd|procfd|foreign-netns|fd-scan) ;;' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"functional-exit-cleanup-parent-custody-$hook_custody_failure_stage"' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '|| true' "$1")" -eq 0 ]
+}
+exit_custody_diagnostic_source_is_exact "$exit_custody_diagnostic_contract" || {
+    printf '%s\n' 'exit-custody failure diagnostic is not fixed and value-free' >&2
+    exit 1
+}
+sh -n "$exit_custody_diagnostic_contract"
+# shellcheck disable=SC1090,SC2034,SC2317
+exercise_exit_custody_diagnostic_contract() (
+    . "$exit_custody_diagnostic_contract"
+    hook_functional_main_pid=4242
+    wait_for_helper_no_worker_custody() { return 1; }
+    advance_start_failure_stage() {
+        [ "$#" -eq 1 ] || return 1
+        observed_custody_failure_stage=$1
+    }
+    for hook_custody_failure_stage in pidfd procfd foreign-netns fd-scan; do
+        observed_custody_failure_stage=
+        if exit_custody_diagnostic_probe; then
+            exit 1
+        fi
+        [ "$observed_custody_failure_stage" = \
+            "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" ] \
+            || exit 1
+    done
+    hook_custody_failure_stage=private-value
+    observed_custody_failure_stage=
+    if exit_custody_diagnostic_probe; then
+        exit 1
+    fi
+    [ -z "$observed_custody_failure_stage" ]
+)
+exercise_exit_custody_diagnostic_contract || {
+    printf '%s\n' 'exit-custody diagnostic is not bounded to fixed categories' >&2
+    exit 1
+}
+exit_custody_category_mutant=$temporary_directory/exit-custody-category-mutant.sh
+sed 's/pidfd|procfd|foreign-netns|fd-scan/pidfd|procfd|foreign-netns|fd-scan|private-value/' \
+    "$exit_custody_diagnostic_contract" >"$exit_custody_category_mutant"
+exit_custody_binding_mutant=$temporary_directory/exit-custody-binding-mutant.sh
+# This is a literal hook-source mutation; expansion here would defeat it.
+# shellcheck disable=SC2016
+sed 's/parent-custody-\$hook_custody_failure_stage/parent-custody-fd-scan/' \
+    "$exit_custody_diagnostic_contract" >"$exit_custody_binding_mutant"
+for exit_custody_diagnostic_mutant in \
+    "$exit_custody_category_mutant" "$exit_custody_binding_mutant"
+do
+    sh -n "$exit_custody_diagnostic_mutant"
+    if exit_custody_diagnostic_source_is_exact \
+        "$exit_custody_diagnostic_mutant"; then
+        printf 'exit-custody diagnostic accepted mutant: %s\n' \
+            "${exit_custody_diagnostic_mutant##*/}" >&2
         exit 1
     fi
 done

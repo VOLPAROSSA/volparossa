@@ -299,6 +299,10 @@ start_failure_stage_is_safe() {
         functional-exit-cleanup-namespace-close|\
         functional-exit-cleanup-fdstore-absence|\
         functional-exit-cleanup-parent-custody|\
+        functional-exit-cleanup-parent-custody-pidfd|\
+        functional-exit-cleanup-parent-custody-procfd|\
+        functional-exit-cleanup-parent-custody-foreign-netns|\
+        functional-exit-cleanup-parent-custody-fd-scan|\
         functional-relay-pair-ready|\
         functional-relay-pair-worker-observation|\
         functional-relay-pair-fixtures|\
@@ -434,6 +438,10 @@ advance_start_failure_stage() {
         functional-exit-cleanup-process-close:functional-exit-cleanup-namespace-close|\
         functional-exit-cleanup-namespace-close:functional-exit-cleanup-fdstore-absence|\
         functional-exit-cleanup-fdstore-absence:functional-exit-cleanup-parent-custody|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-pidfd|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-procfd|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-fd-scan|\
         functional-exit-cleanup-parent-custody:functional-relay-pair-ready|\
         functional-relay-pair-ready:functional-relay-pair-worker-observation|\
         functional-relay-pair-worker-observation:functional-relay-pair-fixtures|\
@@ -4869,6 +4877,7 @@ unit_fdstore_prior_custody_is_absent() {
 }
 
 helper_holds_no_worker_custody() {
+    hook_custody_failure_stage=fd-scan
     [ "$#" -eq 1 ] || return 1
     hook_custody_parent_pid=$1
     number_is_safe "$hook_custody_parent_pid" || return 1
@@ -4884,16 +4893,31 @@ helper_holds_no_worker_custody() {
         [ "$hook_custody_count" -le 512 ] || return 1
         hook_custody_target=$(readlink "$hook_custody_path" 2>/dev/null) || return 1
         case $hook_custody_target in
-            'anon_inode:[pidfd]'|/proc/[1-9][0-9]*) return 1 ;;
+            'anon_inode:[pidfd]')
+                hook_custody_failure_stage=pidfd
+                return 1
+                ;;
+            /proc/[1-9][0-9]*)
+                hook_custody_failure_stage=procfd
+                return 1
+                ;;
             net:\[[1-9][0-9]*\])
-                hook_custody_observed_identity=$(capture_parent_namespace_fd_identity \
-                    "$hook_custody_parent_pid" "$hook_custody_fd") || return 1
-                [ "$hook_custody_observed_identity" = \
-                    "$hook_custody_parent_namespace" ] || return 1
+                if ! hook_custody_observed_identity=$( \
+                    capture_parent_namespace_fd_identity \
+                        "$hook_custody_parent_pid" "$hook_custody_fd"
+                ); then
+                    return 1
+                fi
+                if [ "$hook_custody_observed_identity" != \
+                    "$hook_custody_parent_namespace" ]; then
+                    hook_custody_failure_stage=foreign-netns
+                    return 1
+                fi
                 ;;
         esac
     done
-    [ "$hook_custody_count" -ge 1 ]
+    [ "$hook_custody_count" -ge 1 ] || return 1
+    hook_custody_failure_stage=none
 }
 
 wait_for_helper_no_worker_custody() {
@@ -5769,7 +5793,16 @@ run_functional_client_lease_probe() {
     unit_fdstore_prior_custody_is_absent \
         "$hook_functional_unit" "$hook_functional_exit_custody_name" || return 1
     advance_start_failure_stage functional-exit-cleanup-parent-custody || return 1
-    wait_for_helper_no_worker_custody "$hook_functional_main_pid" || return 1
+    if ! wait_for_helper_no_worker_custody "$hook_functional_main_pid"; then
+        case $hook_custody_failure_stage in
+            pidfd|procfd|foreign-netns|fd-scan) ;;
+            *) return 1 ;;
+        esac
+        advance_start_failure_stage \
+            "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" \
+            || return 1
+        return 1
+    fi
 
     printf '%s' "$functional_release_byte" >&6 || return 1
     hook_functional_relay_pair_ready_output=$(printf '%s\n%s\n%s\n%s\n%s' \
