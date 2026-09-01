@@ -297,12 +297,23 @@ and affine states, never by ordering wall clocks owned by different nodes; each 
 enforces its own bounded lifetime, expiry ceiling and the normal clock-skew policy. Replay failures
 and cross-binding substitutions roll back only the newly admitted entries and fail closed.
 
-This is deliberately a callerless contract/test foundation. It has no production runtime caller,
-typed Exit actor producer, helper provisioning, challenge delivery, live WireGuard probe, measured
-readiness/capacity, terminal helper-evidence consumer, usability promotion or route admission. The
-generic wire structs and generic envelope signer are not production authority. In particular, this
-foundation cannot set `network_address_usable = true`; the existing hard filter continues to reject
-its output.
+This is deliberately a callerless contract/test foundation. A module-private, non-Clone Exit
+wire-phase owner exists, but its typed projection from the `Copy` `ExitEndpointLease` proves neither
+helper-resource custody nor same-connection runtime provenance or cleanup authority. The private
+helper/datapath observation has no constructor. It has no production runtime caller, helper
+lifecycle/cleanup ownership, challenge delivery, live WireGuard probe, measured readiness/capacity,
+terminal helper-evidence producer, usability promotion or route admission. The generic wire structs
+and generic envelope signer are not production authority. In particular, this foundation cannot
+set `network_address_usable = true`; the existing hard filter continues to reject its output.
+
+The Exit test seam receives authenticated node and Peer-ID values as raw call arguments and checks
+them exactly against the signed actors. With no runtime caller, those values are not yet
+connection-owned provenance. Permit, ExitReady and ExitResult each cap their own lifetime at the
+lower of the parent expiry and local production time plus 30 seconds. Private phase owners retain
+the process-unique Exit boot incarnation and reject cross-restart consumption. The dedicated
+request replay cache is bounded and expiry-pruned but intentionally process-local and is reset by a
+restart; boot-incarnation rejection, rather than replay persistence, keeps an old phase owner from
+crossing that boundary.
 
 Discovery composes A1c wire protocols without changing A0 or adding a protobuf wrapper.
 `/volparossa/preselection-observation/4` carries an exact canonical Relay or forwarded
@@ -415,8 +426,13 @@ production only: it makes no Fresh, readiness, capacity, reservation, route or d
 
 A production discovery owner now drives the snapshot, native-agnostic sampler, exact affine
 request/bind lineage, A1a/A1c join and opaque Prepared handoff. The private callerless child and v4
-native-probe contract can consume that handoff only through a test seam; typed Exit producers, a
-production runtime caller, helper provisioning, challenge transport, live dataplane evidence,
+native-probe contract can consume that handoff only through a test seam. A separate module-private,
+non-Clone Exit wire-phase owner verifies the exact client/control/Exit actor and active-policy
+bindings while producing Permit, ExitReady and ExitResult in tests. The raw authenticated-channel
+arguments still have no production connection-owned source. Its typed
+`ExitEndpointLease` projection is not helper-resource custody or cleanup authority, and its result
+requires a private helper/datapath observation type with no constructor. A production runtime
+caller, real same-helper custody/lifecycle and challenge providers, live dataplane evidence,
 measured readiness/capacity, usability promotion, route admission and reservation are still absent.
 The fixed alpha score remains
 **11/100 (11%)**.

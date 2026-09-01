@@ -454,11 +454,18 @@ data Relay alone verifies the hidden Relay-Exit and Exit endpoints and all four 
 topology before signing its result. The terminal client state relies on that exact affine signed
 chain for hidden topology and does not itself create or independently attest helper evidence.
 
-No typed Exit producer, production caller, helper provisioning, one-shot challenge delivery, live
-WireGuard probe, measured readiness/capacity, terminal helper-evidence consumer, usability promotion
-or route admission exists. Generic wire values and the generic envelope signer are not production
-actor authority. The child therefore cannot set `network_address_usable = true`, and the reported
-usable production candidate count remains zero.
+A separate module-private, non-Clone Exit wire-phase owner produces Permit, ExitReady and ExitResult
+in tests only after enabled-role, exact active-policy, Exit/control/data-Relay actor and Peer-ID
+equality checks. Those authenticated-channel values are still raw test-seam arguments, not
+connection-owned production provenance. Its readiness state consumes a typed projection from the `Copy`
+`ExitEndpointLease`; that projection proves neither helper-resource custody nor same-connection
+runtime provenance or cleanup authority. Its result consumes a private exact-runtime/context/
+commitment and challenge observation with no constructor. There is still no production caller,
+helper provisioning/lifecycle/cleanup ownership, one-shot challenge delivery, live WireGuard probe,
+measured readiness/capacity, terminal helper-evidence producer, usability promotion or route
+admission. Generic wire values and the generic envelope signer are not production actor authority.
+The child therefore cannot set `network_address_usable = true`, and the reported usable production
+candidate count remains zero.
 
 Phase A still selects the exclusively forwarded exit first. It then uses only hard-filtered local
 peer evidence and the existing randomized 70/20/10 score bands to choose a seed-dependent

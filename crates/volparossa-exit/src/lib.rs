@@ -12,6 +12,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[allow(
+    dead_code,
+    reason = "callerless affine Exit foundation awaits its same-helper and datapath providers"
+)]
+mod native_preselection;
 mod reservation_v4;
 
 pub use reservation_v4::{
@@ -491,6 +496,7 @@ pub struct ExitService {
     permit_replay: ReplayCache,
     finalize_replay: ReplayCache,
     probe_replay: ReplayCache,
+    native_probe_request_replay: ReplayCache,
     confirmation_replay: ReplayCache,
     relay_confirmation_replay: ReplayCache,
     route_replay: ReplayCache,
@@ -584,6 +590,7 @@ impl ExitService {
             permit_replay: ReplayCache::new(config.replay_capacity)?,
             finalize_replay: ReplayCache::new(config.replay_capacity)?,
             probe_replay: ReplayCache::new(config.replay_capacity)?,
+            native_probe_request_replay: ReplayCache::new(config.replay_capacity)?,
             confirmation_replay: ReplayCache::new(config.replay_capacity)?,
             relay_confirmation_replay: ReplayCache::new(config.replay_capacity)?,
             route_replay: ReplayCache::new(config.replay_capacity)?,
