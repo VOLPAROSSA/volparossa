@@ -53,7 +53,9 @@ use forwarding::{
 };
 pub use peerlink::{PeerLink, PeerLinkError};
 use preselection_responder::PreselectionResponderState;
-pub use preselection_responder::{DirectPreselectionResponderError, LocalPreselectionPolicy};
+pub use preselection_responder::{
+    DirectPreselectionResponderError, LocalPreselectionPolicy, UpstreamPreselectionResponderError,
+};
 pub use preselection_transaction::{
     BoundClientPreselectionTransport, BoundUpstreamPreselectionTransport,
     ClientPreselectionDispatch, ClientPreselectionResponseArrival, ClientPreselectionTransaction,
@@ -1240,8 +1242,8 @@ impl DiscoveryService {
     /// active outbound dispatch are sealed into opaque arrivals whose private instance identity
     /// and arrival clocks are captured here; stale or unowned responses are dropped. Thus neither
     /// raw request nor raw response messages cross the `DiscoveryService` boundary. Call
-    /// [`Self::next_event_with_direct_preselection_responder`] to enable the currently implemented
-    /// direct-Relay responder. No upstream responder exists yet, so upstream requests fail closed.
+    /// [`Self::next_event_with_preselection_responders`] to enable the role-gated direct-Relay and
+    /// upstream-Exit responders.
     pub async fn next_event(&mut self) -> DiscoveryEvent {
         loop {
             let event = self.next_internal_event().await;

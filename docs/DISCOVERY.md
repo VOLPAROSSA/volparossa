@@ -24,8 +24,8 @@ The current discovery crate composes:
   client-to-control/direct-relay hop and `/volparossa/preselection-observation-upstream/4` for the
   control-relay-to-exit hop; both behaviours have independent dormant one-at-a-time affine
   context/dispatch/bind/cancel seams; public event pumps expose no inbound response channel, the
-  direct Relay has a dormant service-owned signer/responder, and the upstream Exit responder and
-  runtime/agent caller remain absent;
+  direct Relay and upstream Exit have one role-gated service-owned signer/responder pump, and the
+  outbound attempt owner plus control Relay's signed prefix wrapper remain absent;
 - refusal-test constants, but no registered behaviour or fallback, for advertisement v1/v2/v3 and the
   retired direct reservation v2 identifiers; and
 - a process-local MemoryTransport used by hermetic swarm integration tests, not as a network or
@@ -154,25 +154,25 @@ field directly into the shared normalized prefix type and checks its public rang
 constructs a representative host IP. That normalized value alone proves neither provenance nor
 origin truth.
 
-A0 still has no production network owner, sampler, forwarded responder, or conversion into
+A0 still has no production outbound attempt owner, sampler, control-signed forwarded wrapper, or conversion into
 `FreshPeerEvidence`, `FreshEvidenceBatch`, or `CandidateEvidence`. Discovery composes
 request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
 dispatch one request, bind an opaque matching response arrival sealed and timestamped by the
 originating service's private pump to a current unique connection proof, or cancel that exact
 dispatch; upstream sending remains separate.
 
-Discovery now also contains a direct-Relay response poll seam, but the agent event loop does not
-call it yet. The poll owner obtains a typed inbound request directly from the same service's swarm;
+Discovery now also contains a role-gated Relay/Exit response poll seam called by the agent event
+loop while an exact active policy is present. The poll owner obtains a typed inbound request
+directly from the same service's swarm;
 the raw behaviour-local request IDs, `ConnectionId` and response channel never cross its public
 caller boundary and therefore cannot be transplanted between service instances. The ordinary
 public event pump closes both client-hop and upstream inbound preselection channels without
 yielding them. It seals responses for the exact active outbound dispatch into opaque
 instance-bound arrival values before returning them and drops stale/unowned responses. The
-direct-responder pump consumes client-hop requests internally, applies the same response sealing,
-and also closes upstream requests because no upstream responder exists. No
-public pump yields a raw preselection request or response message. It synchronously
+responder pump consumes both role-appropriate inbound hops internally and applies the same response
+sealing. No public pump yields a raw preselection request or response message. Each responder synchronously
 requires the exact event `ConnectionId` to rebind a unique current authenticated peer/family
-witness. It then cryptographically re-verifies the exact currently served local Relay
+witness. It then cryptographically re-verifies the exact currently served local Relay or Exit
 advertisement and its Peer/node/public-key identity, requires nonzero ASN, advertised
 transport/family support and the
 exact supplied active policy version/hash/expiry, and signs an exact request-bound receipt through
@@ -181,17 +181,19 @@ fresh fallible CSPRNG nonce, type, payload hash, request hash, challenge, actor 
 120-second no-rollback request-hash tombstone is inserted before signing; 1024 global and 16 per
 authenticated peer are the hard bounds. Duplicate requests, exhausted bounds, stale or substituted
 authority, ambiguous lineage and signing failure return no response. The affine connection proof
-is retained until the exact response-channel handoff and exposes no getter.
+is retained until the exact response-channel handoff and exposes no getter. An upstream request
+additionally requires `forwarded_control`'s public key and Peer ID to be the exact authenticated
+Relay, while its challenged actor must be the exact local Exit.
 
-That responder records no origin claim, RTT, capacity, reachability, reservation, route or Fresh
-authority. The production discovery actor now polls its private direct-Relay responder only while
-the immutable Relay role and an exact active threshold-verified policy snapshot are present. It
+These responders record no origin claim, RTT, capacity, reachability, reservation, route or Fresh
+authority. The production discovery actor polls its private responder only while an immutable
+Relay or Exit role and an exact active threshold-verified policy snapshot are present. It
 uses the same actor-owned permanent identity, and a policy command cancels the poll before applying
-the replacement. The responder still requires an exact currently served Relay advertisement;
+the replacement. A response still requires an exact currently served role advertisement;
 production deliberately publishes no usable Relay/Exit capability before dataplane readiness is
 proved, so no successful production response or readiness claim follows from this lifecycle
-connection yet. Forwarded Exit upstream receipt production, the control-signed prefix wrapper, the
-outbound attempt owner and the A0 response-verification/A1a join owner remain absent. Dormant A1a
+connection yet. The control-signed prefix wrapper, the outbound attempt owner and the A0
+response-verification/A1a join owner remain absent. Dormant A1a
 remains only a static consumer of verifier/consume functions. The opaque transcripts, transport
 proof and wire wrappers are not yet local freshness, capacity, or route authority.
 
@@ -305,14 +307,14 @@ raw-event bind, preselection response-channel or response-sending API; transport
 use the private raw pump, while public real-swarm proofs bind both sealed response types.
 Independent client-hop and upstream request-response behaviours intentionally collide with the
 originating behaviour-local outbound ID, yet their real responses cannot bind when sealed by
-another service. Production upstream requests close unanswered until the missing Exit responder is
-implemented.
+another service. The service-owned Exit responder now consumes an admitted upstream request
+without exposing its channel.
 
-A separate production-compiled direct-Relay poll owns each raw inbound client-hop event and its
-response channel inside the originating `DiscoveryService`. It binds the authenticated peer,
+A separate production-compiled role-gated poll owns each raw inbound direct-Relay or upstream-Exit
+event and its response channel inside the originating `DiscoveryService`. It binds the authenticated peer,
 event-local `ConnectionId` and requested native family to one unique current private connection
 lineage and retains that opaque affine proof through response handoff. It re-verifies the exact
-currently served signed Relay advertisement and local Peer/node/key identity, requires non-zero ASN,
+currently served signed role advertisement and local Peer/node/key identity, requires non-zero ASN,
 advertised transport/family support and the exact active policy version/hash/expiry, and signs the
 request hash, challenge, actor, scope, local observation time and bounded validity with the same
 permanent identity. The v4 envelope also binds sender, time, expiry, a fresh fallibly generated
@@ -321,8 +323,10 @@ CSPRNG nonce, message type, payload hash and Ed25519 signature. Exact request ha
 peer. Replay, resource exhaustion, signer failure, stale authority and ambiguous lineage fail
 closed without a response. A real two-swarm test proves that the originating channel carries the
 exact signed receipt. Separate real transport regressions prove that the ordinary public pump never
-yields an inbound channel, the direct-only pump never yields an upstream channel, and a sibling
-service cannot answer a channel captured by the originating service's private test pump.
+yields an inbound channel and a sibling service cannot answer a channel captured by the
+originating service's private test pump. A second real two-swarm proof sends an upstream request
+from an authenticated Relay and verifies the exact Exit-signed receipt on only its originating
+channel; the responder mints no control Relay prefix wrapper.
 
 The responder emits no origin claim, RTT or capacity measurement and grants no Fresh evidence,
 reservation, route or admission authority. There is still no runtime/agent caller, upstream

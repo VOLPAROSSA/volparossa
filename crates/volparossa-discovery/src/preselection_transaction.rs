@@ -2786,7 +2786,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_responder_pump_closes_upstream_request_without_exposing_its_channel() {
+    async fn responder_pump_closes_upstream_request_without_exact_exit_authority() {
         let relay_key = identity::Keypair::generate_ed25519();
         let exit_key = identity::Keypair::generate_ed25519();
         let exit_public_key = raw_public_key(&exit_key);
@@ -2819,7 +2819,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 tokio::select! {
-                    event = exit.next_event_with_direct_preselection_responder(
+                    event = exit.next_event_with_preselection_responders(
                         policy,
                         exit_public_key,
                         &mut signer,
@@ -2847,7 +2847,7 @@ mod tests {
                                     },
                                 ),
                             ) if request_id == outbound => {
-                                panic!("direct-only pump unexpectedly permitted an upstream response")
+                                panic!("responder unexpectedly permitted an unauthorised upstream response")
                             }
                             _ => {}
                         }
@@ -3614,7 +3614,7 @@ mod tests {
             .next()
             .expect("responder production");
         let responder_pump = responder_production
-            .split("pub async fn next_event_with_direct_preselection_responder")
+            .split("pub async fn next_event_with_preselection_responders")
             .nth(1)
             .expect("signed responder pump")
             .split("/// Validate, connection-bind")

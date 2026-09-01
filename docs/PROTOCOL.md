@@ -252,35 +252,37 @@ relay to equal `forwarded_control` and the actor to equal the local exit. These 
 raw response channels remain behind a private pump. The ordinary public event pump closes inbound
 requests on both hops, drops stale/unowned responses, and replaces responses for the exact active
 dispatch with service-sealed opaque arrivals;
-the direct-responder pump does the same while owning direct Relay requests internally and closing
-upstream requests because that responder is not implemented. No public pump yields a raw
+the role-gated responder pump does the same while owning direct Relay and upstream Exit requests
+internally. No public pump yields a raw
 preselection request or response message, and no public API accepts a raw response event or
 response channel or sends either response type. Real independent client-hop and upstream
 request-response behaviours deliberately reproduce the same behaviour-local outbound ID and prove
 that their responses, even when sealed by a sibling service, cannot bind the originating dispatch.
 
-Discovery also exposes one production-compiled direct-Relay response poll transaction. It takes
-each typed inbound request directly from the same service's swarm, so its behaviour-local request
+Discovery also exposes one production-compiled role-gated Relay/Exit response poll transaction. It
+takes each typed inbound request directly from the same service's swarm, so its behaviour-local request
 ID, response channel and `ConnectionId` cannot be transplanted across service instances. That exact
 `ConnectionId`, authenticated peer and requested native family rebind to a unique current private
-connection witness; it cryptographically re-verifies the exact currently served local Relay
-advertisement; requires nonzero ASN, matching local identity,
+connection witness; it cryptographically re-verifies the exact currently served local Relay or
+Exit advertisement; requires nonzero ASN, matching local identity,
 advertised transport/family support and exact active policy; tombstones the exact request hash for
 120 seconds under fixed 1024-global/16-per-peer limits; and signs the bound receipt with a fresh
 fallibly generated CSPRNG nonce. It retains the affine connection proof through the exact libp2p
-response-channel handoff. Replay, stale authority, ambiguity, capacity or signing failures emit no
-response. A real two-swarm test proves that the originating channel carries the exact signed
+response-channel handoff. For the upstream hop, the `forwarded_control` public key and Peer ID must
+also derive the exact authenticated Relay and the challenged actor must be the exact local Exit.
+Replay, stale authority, ambiguity, capacity or signing failures emit no response. Real two-swarm
+tests prove that each originating direct and upstream channel carries only its exact role-signed
 receipt. Companion transport regressions prove that neither public pump exposes an inbound channel
-and that a sibling service cannot answer a privately captured originating channel. The receipt
+and that a sibling service cannot answer a privately captured originating channel. Each receipt
 includes no prefix, endpoint, RTT, capacity, reachability, admission,
 reservation, route-session or evidence authority. The production discovery actor now polls this
-private seam only with its immutable Relay role, an exact active threshold-verified policy snapshot
+private seam only with an immutable Relay or Exit role, an exact active threshold-verified policy snapshot
 and the same actor-owned permanent identity. A policy command cancels the outstanding poll before
 the actor applies the replacement. Successful response production additionally requires an exact
-currently served Relay advertisement. Production intentionally advertises no usable Relay/Exit
+currently served role advertisement. Production intentionally advertises no usable Relay/Exit
 capability before dataplane readiness is proved, so this lifecycle caller remains fail closed and
-does not make the responder, a transport, or a route ready. The upstream Exit responder/control
-wrapper and signer remain absent. A later outbound owner must consume the unchanged response bytes,
+does not make the responder, a transport, or a route ready. The control Relay's affine signed
+prefix wrapper remains absent. A later outbound owner must consume the unchanged response bytes,
 retained caller context and opaque proofs together before any observation can become usable. There
 is no production A0 response-verification/replay consumer, A1a exact-set join or Fresh-evidence
 conversion. The fixed alpha score remains **11/100 (11%)**.

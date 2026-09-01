@@ -1,9 +1,9 @@
 //! Bounded request-response wire types for the dormant A1c transaction boundary.
 //!
 //! Sibling modules own affine client-hop and relay-to-exit dispatch, connection binding, and
-//! role-gated response seams. The direct-Relay hop also has a signed response poll seam. The
-//! upstream hop remains callerless and has no signer or responder; the direct responder has no
-//! agent/runtime caller.
+//! role-gated response seams. Both inbound hops have one service-owned signed response poll seam;
+//! the outbound transaction owner and the Relay's control-signed forwarding wrapper remain
+//! absent.
 //!
 //! Both codecs preserve exact canonical A0 bytes. They perform only state-free canonical,
 //! version, type, payload-local, and envelope-binding validation. Cryptographic verification,

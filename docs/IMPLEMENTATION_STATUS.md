@@ -1061,39 +1061,42 @@ single clean-build A01--A15 run; the score is not a release claim.
   `forwarded_control` and the actor to the local exit. These request predicates and raw response
   channels stay behind a private event pump: the ordinary public pump closes both inbound hops,
   drops stale/unowned responses and seals only the exact active response into an opaque
-  instance-bound arrival, while the direct-responder pump
-  applies the same response sealing, internally consumes only direct Relay requests and closes
-  upstream requests unanswered. No public pump yields a raw preselection request or response
+  instance-bound arrival, while the role-gated responder pump
+  applies the same response sealing and internally consumes direct Relay and upstream Exit
+  requests. No public pump yields a raw preselection request or response
   message, and no public raw-event bind, response-channel or preselection response-send API exists.
-  A separate production-compiled direct-Relay response poll
-  owner obtains each typed inbound client-hop event directly from its own swarm, so the
+  A separate production-compiled role-gated response poll
+  owner obtains each typed inbound client-hop or upstream event directly from its own swarm, so the
   behaviour-local request ID,
   response channel and `ConnectionId` cannot be transplanted across service instances. It requires
   that exact event-local authenticated `ConnectionId` and unique current native-family lineage,
   and retains the opaque affine proof until response handoff.
   It re-verifies the exact currently served local advertisement signature and local Peer/node/key,
-  requires a nonzero-ASN Relay advertisement supporting the requested transport/family and the
+  requires a nonzero-ASN Relay or Exit advertisement supporting the requested transport/family and the
   exact active policy version/hash/expiry, and signs the request hash, challenge, actor, scope,
   local observation time and bounded validity with the same permanent identity. The canonical v4
   envelope thereby binds sender, timestamp, expiry, fresh fallible CSPRNG nonce, message type,
   payload hash and Ed25519 signature. Exact request hashes enter a 120-second no-rollback tombstone
   before signing, with 1024 global and 16-per-authenticated-peer limits; replay, capacity
   exhaustion, signer failure, stale authority and ambiguous lineage fail closed. A real two-swarm
-  test proves that the originating response channel carries the exact signed receipt; companion
+  tests prove that the originating direct and upstream response channels carry the exact
+  role-signed receipt; companion
   transport regressions prove the public pumps expose no inbound channel and a sibling service
   cannot answer the originating service's privately captured channel. A public real-swarm proof
   binds both sealed response hops; separate independent client and upstream request-response
   behaviours deliberately reproduce the same behaviour-local outbound ID, but their real response
   cannot bind when sealed by another service. It emits no
   origin claim, RTT, capacity measurement, Fresh evidence, admission, reservation or route
-  authority. The production discovery actor now selects this private responder pump only for its
-  immutable Relay role and an exact currently active threshold-verified policy snapshot, and lends
+  authority. For the upstream hop, the forwarded-control key and Peer ID must derive the exact
+  authenticated Relay and the actor must be the exact local Exit. The production discovery actor
+  now selects this private responder pump only for an immutable Relay or Exit role and an exact
+  currently active threshold-verified policy snapshot, and lends
   the same actor-owned permanent identity only for the synchronous signing callback. Policy
   application cancels that poll branch before the actor can observe the next event. The responder
-  still requires an exact currently served Relay advertisement; because production deliberately
+  still requires an exact currently served role advertisement; because production deliberately
   publishes no usable Relay/Exit capability before dataplane readiness is proved, this lifecycle
   integration emits no successful production response and makes no readiness claim yet. The
-  forwarded Exit upstream responder/control wrapper and signer are still absent. There is still no
+  control Relay's affine signed prefix wrapper is still absent. There is still no
   outbound production attempt owner, sampler, A0 response-verification/replay consumer, A1a
   exact-set join, or conversion into fresh local evidence.
   A future A1c boundary must consume and exact-set join these real request/connection proofs before

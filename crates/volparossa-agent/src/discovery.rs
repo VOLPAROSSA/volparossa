@@ -1194,7 +1194,7 @@ impl DiscoveryRuntime {
             let responder_policy = {
                 let now_ms = unix_millis();
                 let policy = state.read().await.policy_snapshot(now_ms);
-                direct_preselection_responder_policy(self.roles, &policy, now_ms)
+                preselection_responder_policy(self.roles, &policy, now_ms)
             };
             tokio::select! {
                 changed = shutdown.changed() => {
@@ -4775,12 +4775,12 @@ impl DiscoveryRuntime {
     }
 }
 
-fn direct_preselection_responder_policy(
+fn preselection_responder_policy(
     roles: RolesConfig,
     policy: &AgentPolicySnapshot,
     now_ms: u64,
 ) -> Option<LocalPreselectionPolicy> {
-    if !roles.relay || !policy.active || policy.expires_at_ms <= now_ms {
+    if !(roles.relay || roles.exit) || !policy.active || policy.expires_at_ms <= now_ms {
         return None;
     }
     let hash = fixed_bytes::<32>(&policy.policy_hash)?;
@@ -4798,7 +4798,7 @@ async fn next_actor_discovery_event(
     };
     let mut signer = |message: &[u8]| identity.sign(message).ok();
     service
-        .next_event_with_direct_preselection_responder(policy, public_key, &mut signer)
+        .next_event_with_preselection_responders(policy, public_key, &mut signer)
         .await
 }
 
@@ -6093,7 +6093,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_preselection_responder_authority_is_exactly_relay_and_active_policy_scoped() {
+    fn preselection_responder_authority_is_role_gated_and_active_policy_scoped() {
         let now_ms = unix_millis();
         let active = AgentPolicySnapshot {
             manifest_version: 7,
@@ -6108,7 +6108,21 @@ mod tests {
             exit: false,
         };
         assert_eq!(
-            direct_preselection_responder_policy(relay_roles, &active, now_ms),
+            preselection_responder_policy(relay_roles, &active, now_ms),
+            LocalPreselectionPolicy::new(
+                active.manifest_version,
+                [0x5a; 32],
+                active.expires_at_ms,
+            )
+            .ok(),
+        );
+        let exit_roles = RolesConfig {
+            client: false,
+            relay: false,
+            exit: true,
+        };
+        assert_eq!(
+            preselection_responder_policy(exit_roles, &active, now_ms),
             LocalPreselectionPolicy::new(
                 active.manifest_version,
                 [0x5a; 32],
@@ -6132,19 +6146,16 @@ mod tests {
             (relay_roles, zero_version),
             (relay_roles, expired),
         ] {
-            assert_eq!(
-                direct_preselection_responder_policy(roles, &policy, now_ms),
-                None,
-            );
+            assert_eq!(preselection_responder_policy(roles, &policy, now_ms), None,);
         }
     }
 
     #[test]
-    fn discovery_actor_polls_only_the_private_direct_preselection_responder_seam() {
+    fn discovery_actor_polls_only_the_private_role_gated_preselection_responder_seam() {
         let source = include_str!("discovery.rs");
         let run = braced_item(source, "pub async fn run(");
         assert_eq!(
-            run.matches("direct_preselection_responder_policy(self.roles, &policy, now_ms)")
+            run.matches("preselection_responder_policy(self.roles, &policy, now_ms)")
                 .count(),
             1,
         );
@@ -6155,7 +6166,7 @@ mod tests {
         let actor_pump = braced_item(source, "async fn next_actor_discovery_event(");
         assert_eq!(
             actor_pump
-                .matches("next_event_with_direct_preselection_responder")
+                .matches("next_event_with_preselection_responders")
                 .count(),
             1,
         );

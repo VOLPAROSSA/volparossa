@@ -24,7 +24,8 @@ use volparossa_protocol::{
 
 use crate::{
     ClientPreselectionObservationRequest, ClientPreselectionObservationResponse, DiscoveryService,
-    MAX_PRESELECTION_REQUEST_SIZE, connection_provenance::BoundConnectionObservation,
+    MAX_PRESELECTION_REQUEST_SIZE, UpstreamPreselectionObservationRequest,
+    UpstreamPreselectionObservationResponse, connection_provenance::BoundConnectionObservation,
 };
 
 const REQUEST_TOMBSTONE_LIFETIME: Duration = Duration::from_secs(120);
@@ -99,6 +100,46 @@ pub enum DirectPreselectionResponderError {
     ResponseChannel,
 }
 
+/// Detail-free fail-closed rejection at the upstream Exit responder boundary.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum UpstreamPreselectionResponderError {
+    /// The immutable discovery role does not admit upstream Exit responses.
+    #[error("upstream preselection responder role is disabled")]
+    Role,
+    /// The request event, canonical bytes, target, scope, or lifetime is invalid.
+    #[error("invalid upstream preselection observation request")]
+    Request,
+    /// The exact current local advertisement, policy, or signing identity is unavailable.
+    #[error("upstream preselection responder authority is unavailable")]
+    Authority,
+    /// The authenticated Relay or its exact current connection lineage is unavailable.
+    #[error("upstream preselection responder provenance is unavailable")]
+    Provenance,
+    /// The exact request was already admitted inside the retained tombstone window.
+    #[error("upstream preselection observation request replay")]
+    Replay,
+    /// The global or per-peer fixed live-tombstone bound is exhausted.
+    #[error("upstream preselection responder resource limit reached")]
+    ResourceLimit,
+    /// Wall or monotonic time is unavailable or cannot represent the fixed window.
+    #[error("upstream preselection responder time is unavailable")]
+    Time,
+    /// The external permanent identity refused or emitted an invalid Ed25519 signature.
+    #[error("upstream preselection observation signing failed")]
+    Signing,
+    /// The exact response channel closed before the bound response was handed to libp2p.
+    #[error("upstream preselection observation response channel closed")]
+    ResponseChannel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TombstoneError {
+    Replay,
+    ResourceLimit,
+    Time,
+}
+
 struct RequestTombstone {
     authenticated_peer: PeerId,
     expires_at: Instant,
@@ -120,10 +161,10 @@ impl PreselectionResponderState {
         request_hash: [u8; 32],
         authenticated_peer: PeerId,
         now: Instant,
-    ) -> Result<(), DirectPreselectionResponderError> {
+    ) -> Result<(), TombstoneError> {
         self.requests.retain(|_, entry| entry.expires_at > now);
         if self.requests.contains_key(&request_hash) {
-            return Err(DirectPreselectionResponderError::Replay);
+            return Err(TombstoneError::Replay);
         }
         if self.requests.len() >= MAX_REQUEST_TOMBSTONES
             || self
@@ -133,11 +174,11 @@ impl PreselectionResponderState {
                 .count()
                 >= MAX_REQUEST_TOMBSTONES_PER_PEER
         {
-            return Err(DirectPreselectionResponderError::ResourceLimit);
+            return Err(TombstoneError::ResourceLimit);
         }
         let expires_at = now
             .checked_add(REQUEST_TOMBSTONE_LIFETIME)
-            .ok_or(DirectPreselectionResponderError::Time)?;
+            .ok_or(TombstoneError::Time)?;
         self.requests.insert(
             request_hash,
             RequestTombstone {
@@ -154,13 +195,24 @@ struct PreparedDirectPreselectionResponse {
     response: ClientPreselectionObservationResponse,
 }
 
-struct LocalRelayAuthority {
+struct PreparedUpstreamPreselectionResponse {
+    transport_proof: BoundConnectionObservation,
+    response: UpstreamPreselectionObservationResponse,
+}
+
+struct LocalPreselectionAuthority {
     actor: PreselectionActorBinding,
     advertisement: NodeAdvertisement,
 }
 
+#[derive(Clone, Copy)]
+enum LocalResponderRole {
+    Relay,
+    Exit,
+}
+
 impl DiscoveryService {
-    /// Advance discovery while internally handling direct-Relay observation requests.
+    /// Advance discovery while internally handling direct-Relay and upstream-Exit requests.
     ///
     /// A request event never crosses the caller boundary: this method obtains it directly from
     /// this service's swarm and immediately passes it to the private responder. Consequently a
@@ -169,11 +221,12 @@ impl DiscoveryService {
     /// without a response and polling continues until another discovery event is available.
     ///
     /// The supplied signing closure should delegate to the same permanent Ed25519 identity used
-    /// to build this discovery service. The agent discovery actor calls this seam only for its
-    /// immutable Relay role and a currently active threshold-verified policy snapshot; the
-    /// responder still independently requires an exact current locally served Relay
-    /// advertisement before it can emit a response.
-    pub async fn next_event_with_direct_preselection_responder<F>(
+    /// to build this discovery service. The agent discovery actor calls this seam only while an
+    /// immutable Relay or Exit role and a currently active threshold-verified policy snapshot are
+    /// present. Each responder independently requires its exact current locally served role
+    /// advertisement before it can emit a response. The upstream response is only the Exit-signed
+    /// receipt: this boundary does not mint the Relay's prefix wrapper or any usable evidence.
+    pub async fn next_event_with_preselection_responders<F>(
         &mut self,
         policy: LocalPreselectionPolicy,
         signer_public_key: [u8; 32],
@@ -201,15 +254,18 @@ impl DiscoveryService {
                 }
                 libp2p::swarm::SwarmEvent::Behaviour(
                     crate::BehaviourEvent::PreselectionObservationUpstream(
-                        request_response::Event::Message {
+                        event @ request_response::Event::Message {
                             message: request_response::Message::Request { .. },
                             ..
                         },
                     ),
                 ) => {
-                    // The upstream Exit responder and signer do not exist yet. Retaining or
-                    // exposing its behaviour-local channel would allow a different service owner
-                    // to answer it, so this request is deliberately closed without a response.
+                    let _ = self.respond_upstream_preselection_observation_event(
+                        event,
+                        policy,
+                        signer_public_key,
+                        |message| signer(message),
+                    );
                 }
                 event => {
                     if let Some(event) = self.sanitize_public_event(event) {
@@ -223,7 +279,7 @@ impl DiscoveryService {
     /// Validate, connection-bind, replay-admit, sign, and send one direct-relay observation reply.
     ///
     /// This remains private so the raw behaviour-local event and response channel can only arrive
-    /// through `next_event_with_direct_preselection_responder`. The responder verifies the
+    /// through `next_event_with_preselection_responders`. The responder verifies the
     /// returned signature and binds it to the exact currently served signed advertisement before
     /// emitting canonical bytes. There is no suspension point between the connection-lineage check
     /// and response handoff.
@@ -349,7 +405,8 @@ impl DiscoveryService {
         let request_hash = preselection_observation_request_hash(canonical_request)
             .map_err(|_| DirectPreselectionResponderError::Request)?;
         self.preselection_responder
-            .reserve(request_hash, authenticated_peer, now_mono)?;
+            .reserve(request_hash, authenticated_peer, now_mono)
+            .map_err(direct_tombstone_error)?;
 
         let valid_until_ms = typed
             .expires_at_ms
@@ -358,7 +415,7 @@ impl DiscoveryService {
         if valid_until_ms <= now_ms {
             return Err(DirectPreselectionResponderError::Time);
         }
-        let nonce = mint_response_nonce()?;
+        let nonce = mint_response_nonce().ok_or(DirectPreselectionResponderError::Signing)?;
         let receipt = PreselectionObservationReceipt {
             request_hash: request_hash.to_vec(),
             challenge: typed.challenge.clone(),
@@ -386,58 +443,240 @@ impl DiscoveryService {
         })
     }
 
+    /// Validate, connection-bind, replay-admit, sign, and send one upstream Exit reply.
+    ///
+    /// The raw event and response channel stay private to the service that observed them. The
+    /// authenticated remote must be the exact Ed25519-derived `forwarded_control` Relay, while the
+    /// challenged actor must be this service's exact active Exit advertisement. There is no
+    /// suspension point between lineage binding and response handoff.
+    fn respond_upstream_preselection_observation_event<F>(
+        &mut self,
+        event: request_response::Event<
+            UpstreamPreselectionObservationRequest,
+            UpstreamPreselectionObservationResponse,
+        >,
+        policy: LocalPreselectionPolicy,
+        signer_public_key: [u8; 32],
+        signer: F,
+    ) -> Result<(), UpstreamPreselectionResponderError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        let request_response::Event::Message {
+            peer,
+            connection_id,
+            message:
+                request_response::Message::Request {
+                    request, channel, ..
+                },
+        } = event
+        else {
+            return Err(UpstreamPreselectionResponderError::Request);
+        };
+        let now_ms = system_unix_millis().map_err(|_| UpstreamPreselectionResponderError::Time)?;
+        let prepared = self.prepare_upstream_preselection_response_at(
+            peer,
+            connection_id,
+            &request,
+            policy,
+            signer_public_key,
+            signer,
+            now_ms,
+            Instant::now(),
+        )?;
+        let PreparedUpstreamPreselectionResponse {
+            transport_proof,
+            response,
+        } = prepared;
+        let sent = self
+            .swarm
+            .behaviour_mut()
+            .preselection_observation_upstream
+            .send_response(channel, response)
+            .map_err(|_| UpstreamPreselectionResponderError::ResponseChannel);
+        drop(transport_proof);
+        sent
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one exact event, policy, signer, and dual-clock transaction boundary"
+    )]
+    fn prepare_upstream_preselection_response_at<F>(
+        &mut self,
+        authenticated_relay: PeerId,
+        connection_id: ConnectionId,
+        request: &UpstreamPreselectionObservationRequest,
+        policy: LocalPreselectionPolicy,
+        signer_public_key: [u8; 32],
+        signer: F,
+        now_ms: u64,
+        now_mono: Instant,
+    ) -> Result<PreparedUpstreamPreselectionResponse, UpstreamPreselectionResponderError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        if !self.protocol_roles.exit() {
+            return Err(UpstreamPreselectionResponderError::Role);
+        }
+        let canonical_request = request.as_encoded();
+        let typed: PreselectionObservationRequest =
+            decode_canonical(canonical_request, MAX_PRESELECTION_REQUEST_SIZE)
+                .map_err(|_| UpstreamPreselectionResponderError::Request)?;
+        typed
+            .validate()
+            .map_err(|_| UpstreamPreselectionResponderError::Request)?;
+        let scope = typed
+            .scope
+            .as_ref()
+            .ok_or(UpstreamPreselectionResponderError::Request)?;
+        let role = PreselectionObservationRole::try_from(scope.role)
+            .map_err(|_| UpstreamPreselectionResponderError::Request)?;
+        let family = upstream_observation_family(scope)?;
+        let control = typed
+            .forwarded_control
+            .as_ref()
+            .ok_or(UpstreamPreselectionResponderError::Request)?;
+        if role != PreselectionObservationRole::Exit
+            || typed.created_at_ms > now_ms
+            || now_ms >= typed.expires_at_ms
+            || authenticated_relay == *self.local_peer_id()
+            || control.peer_id != authenticated_relay.to_bytes()
+            || peer_id_for_actor(control) != Some(authenticated_relay)
+        {
+            return Err(UpstreamPreselectionResponderError::Request);
+        }
+        let authority = self.local_exit_authority(policy, signer_public_key, scope, now_ms)?;
+        if typed.actor.as_ref() != Some(&authority.actor)
+            || scope.policy_version != policy.version
+            || scope.policy_hash.as_slice() != policy.hash
+            || scope.policy_expires_at_ms != policy.expires_at_ms
+        {
+            return Err(UpstreamPreselectionResponderError::Authority);
+        }
+
+        let witness = self
+            .swarm
+            .behaviour()
+            .connection_provenance
+            .unique_witness(authenticated_relay, family)
+            .ok_or(UpstreamPreselectionResponderError::Provenance)?;
+        let transport = self
+            .swarm
+            .behaviour()
+            .connection_provenance
+            .bind(witness, authenticated_relay, connection_id)
+            .ok_or(UpstreamPreselectionResponderError::Provenance)?;
+        let request_hash = preselection_observation_request_hash(canonical_request)
+            .map_err(|_| UpstreamPreselectionResponderError::Request)?;
+        self.preselection_responder
+            .reserve(request_hash, authenticated_relay, now_mono)
+            .map_err(upstream_tombstone_error)?;
+
+        let valid_until_ms = typed
+            .expires_at_ms
+            .min(authority.advertisement.expires_at_ms)
+            .min(policy.expires_at_ms);
+        if valid_until_ms <= now_ms {
+            return Err(UpstreamPreselectionResponderError::Time);
+        }
+        let nonce = mint_response_nonce().ok_or(UpstreamPreselectionResponderError::Signing)?;
+        let receipt = PreselectionObservationReceipt {
+            request_hash: request_hash.to_vec(),
+            challenge: typed.challenge.clone(),
+            actor: typed.actor.clone(),
+            scope: typed.scope.clone(),
+            observed_at_ms: now_ms,
+            valid_until_ms,
+            nonce: nonce.to_vec(),
+        };
+        let encoded_response = sign_control_message_with(
+            &receipt,
+            signer_public_key,
+            now_ms,
+            valid_until_ms,
+            nonce,
+            TimePolicy::default(),
+            signer,
+        )
+        .map_err(|_| UpstreamPreselectionResponderError::Signing)?;
+        let response = UpstreamPreselectionObservationResponse::from_canonical(encoded_response)
+            .map_err(|_| UpstreamPreselectionResponderError::Signing)?;
+        Ok(PreparedUpstreamPreselectionResponse {
+            transport_proof: transport,
+            response,
+        })
+    }
+
     fn local_relay_authority(
         &self,
         policy: LocalPreselectionPolicy,
         signer_public_key: [u8; 32],
         scope: &PreselectionObservationScope,
         now_ms: u64,
-    ) -> Result<LocalRelayAuthority, DirectPreselectionResponderError> {
-        let encoded = self
-            .local_advertisement
-            .as_deref()
-            .ok_or(DirectPreselectionResponderError::Authority)?;
-        let envelope: SignedEnvelope = decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE)
-            .map_err(|_| DirectPreselectionResponderError::Authority)?;
-        let mut replay =
-            ReplayCache::new(1).map_err(|_| DirectPreselectionResponderError::Authority)?;
+    ) -> Result<LocalPreselectionAuthority, DirectPreselectionResponderError> {
+        self.local_preselection_authority(
+            policy,
+            signer_public_key,
+            scope,
+            now_ms,
+            LocalResponderRole::Relay,
+        )
+        .ok_or(DirectPreselectionResponderError::Authority)
+    }
+
+    fn local_exit_authority(
+        &self,
+        policy: LocalPreselectionPolicy,
+        signer_public_key: [u8; 32],
+        scope: &PreselectionObservationScope,
+        now_ms: u64,
+    ) -> Result<LocalPreselectionAuthority, UpstreamPreselectionResponderError> {
+        self.local_preselection_authority(
+            policy,
+            signer_public_key,
+            scope,
+            now_ms,
+            LocalResponderRole::Exit,
+        )
+        .ok_or(UpstreamPreselectionResponderError::Authority)
+    }
+
+    fn local_preselection_authority(
+        &self,
+        policy: LocalPreselectionPolicy,
+        signer_public_key: [u8; 32],
+        scope: &PreselectionObservationScope,
+        now_ms: u64,
+        required_role: LocalResponderRole,
+    ) -> Option<LocalPreselectionAuthority> {
+        let encoded = self.local_advertisement.as_deref()?;
+        let envelope: SignedEnvelope = decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE).ok()?;
+        let mut replay = ReplayCache::new(1).ok()?;
         let verified = verify_control_message::<NodeAdvertisement>(
             encoded,
             now_ms,
             TimePolicy::default(),
             &mut replay,
         )
-        .map_err(|_| DirectPreselectionResponderError::Authority)?;
+        .ok()?;
         let advertisement = verified.into_message();
-        let local_peer = peer_id_for_ed25519(&signer_public_key)
-            .ok_or(DirectPreselectionResponderError::Authority)?;
-        let roles = advertisement
-            .roles
-            .as_ref()
-            .ok_or(DirectPreselectionResponderError::Authority)?;
-        let capabilities = advertisement
-            .capabilities
-            .as_ref()
-            .ok_or(DirectPreselectionResponderError::Authority)?;
-        let advertised_policy = advertisement
-            .policy
-            .as_ref()
-            .ok_or(DirectPreselectionResponderError::Authority)?;
-        let network = advertisement
-            .network
-            .as_ref()
-            .ok_or(DirectPreselectionResponderError::Authority)?;
-        let payload_hash: [u8; 32] = envelope
-            .payload_hash
-            .as_slice()
-            .try_into()
-            .map_err(|_| DirectPreselectionResponderError::Authority)?;
+        let local_peer = peer_id_for_ed25519(&signer_public_key)?;
+        let roles = advertisement.roles.as_ref()?;
+        let capabilities = advertisement.capabilities.as_ref()?;
+        let advertised_policy = advertisement.policy.as_ref()?;
+        let network = advertisement.network.as_ref()?;
+        let payload_hash: [u8; 32] = envelope.payload_hash.as_slice().try_into().ok()?;
+        let role_enabled = match required_role {
+            LocalResponderRole::Relay => roles.relay,
+            LocalResponderRole::Exit => roles.exit,
+        };
         if *self.local_peer_id() != local_peer
             || verified_sender_mismatch(&envelope, &signer_public_key)
             || advertisement.node_id != node_id_from_public_key(&signer_public_key)
             || advertisement.peer_id != local_peer.to_bytes()
             || advertisement.sequence_number == 0
-            || !roles.relay
+            || !role_enabled
             || network.asn == 0
             || payload_hash == [0; 32]
             || advertised_policy.whitelist_version != policy.version
@@ -446,7 +685,7 @@ impl DiscoveryService {
             || advertisement.expires_at_ms > policy.expires_at_ms
             || !capability_supports_scope(capabilities, scope)
         {
-            return Err(DirectPreselectionResponderError::Authority);
+            return None;
         }
         let actor = PreselectionActorBinding {
             node_id: advertisement.node_id.clone(),
@@ -457,10 +696,26 @@ impl DiscoveryService {
             advertisement_payload_hash: payload_hash.to_vec(),
             capability_expires_at_ms: advertisement.expires_at_ms.min(policy.expires_at_ms),
         };
-        Ok(LocalRelayAuthority {
+        Some(LocalPreselectionAuthority {
             actor,
             advertisement,
         })
+    }
+}
+
+fn direct_tombstone_error(error: TombstoneError) -> DirectPreselectionResponderError {
+    match error {
+        TombstoneError::Replay => DirectPreselectionResponderError::Replay,
+        TombstoneError::ResourceLimit => DirectPreselectionResponderError::ResourceLimit,
+        TombstoneError::Time => DirectPreselectionResponderError::Time,
+    }
+}
+
+fn upstream_tombstone_error(error: TombstoneError) -> UpstreamPreselectionResponderError {
+    match error {
+        TombstoneError::Replay => UpstreamPreselectionResponderError::Replay,
+        TombstoneError::ResourceLimit => UpstreamPreselectionResponderError::ResourceLimit,
+        TombstoneError::Time => UpstreamPreselectionResponderError::Time,
     }
 }
 
@@ -474,6 +729,11 @@ fn peer_id_for_ed25519(public_key: &[u8; 32]) -> Option<PeerId> {
     Some(identity::PublicKey::from(public_key).to_peer_id())
 }
 
+fn peer_id_for_actor(actor: &PreselectionActorBinding) -> Option<PeerId> {
+    let public_key: [u8; 32] = actor.public_key.as_slice().try_into().ok()?;
+    peer_id_for_ed25519(&public_key)
+}
+
 fn observation_family(
     scope: &PreselectionObservationScope,
 ) -> Result<IpFamily, DirectPreselectionResponderError> {
@@ -483,6 +743,18 @@ fn observation_family(
         ObservationAddressFamily::Ipv4 => Ok(IpFamily::Ipv4),
         ObservationAddressFamily::Ipv6 => Ok(IpFamily::Ipv6),
         ObservationAddressFamily::Unspecified => Err(DirectPreselectionResponderError::Request),
+    }
+}
+
+fn upstream_observation_family(
+    scope: &PreselectionObservationScope,
+) -> Result<IpFamily, UpstreamPreselectionResponderError> {
+    match ObservationAddressFamily::try_from(scope.address_family)
+        .map_err(|_| UpstreamPreselectionResponderError::Request)?
+    {
+        ObservationAddressFamily::Ipv4 => Ok(IpFamily::Ipv4),
+        ObservationAddressFamily::Ipv6 => Ok(IpFamily::Ipv6),
+        ObservationAddressFamily::Unspecified => Err(UpstreamPreselectionResponderError::Request),
     }
 }
 
@@ -511,15 +783,13 @@ fn system_unix_millis() -> Result<u64, DirectPreselectionResponderError> {
     u64::try_from(duration.as_millis()).map_err(|_| DirectPreselectionResponderError::Time)
 }
 
-fn mint_response_nonce() -> Result<[u8; 32], DirectPreselectionResponderError> {
+fn mint_response_nonce() -> Option<[u8; 32]> {
     let mut nonce = [0; 32];
-    OsRng
-        .try_fill_bytes(&mut nonce)
-        .map_err(|_| DirectPreselectionResponderError::Signing)?;
+    OsRng.try_fill_bytes(&mut nonce).ok()?;
     if nonce == [0; 32] {
-        return Err(DirectPreselectionResponderError::Signing);
+        return None;
     }
-    Ok(nonce)
+    Some(nonce)
 }
 
 #[cfg(test)]
@@ -637,6 +907,47 @@ mod tests {
         }
     }
 
+    fn exit_advertisement(
+        exit_key: &identity::Keypair,
+        exit_public_key: [u8; 32],
+    ) -> NodeAdvertisement {
+        let mut advertisement = relay_advertisement(exit_key, exit_public_key);
+        advertisement.roles = Some(AdvertisementRoles {
+            client: false,
+            relay: false,
+            exit: true,
+        });
+        let capacity = advertisement
+            .capacity
+            .as_mut()
+            .expect("advertisement capacity");
+        capacity.operator_relay_limit_up_mbps = 0;
+        capacity.operator_relay_limit_down_mbps = 0;
+        capacity.operator_exit_limit_up_mbps = 100;
+        capacity.operator_exit_limit_down_mbps = 100;
+        capacity.free_relay_slots = 0;
+        capacity.free_exit_slots = 4;
+        advertisement
+    }
+
+    fn actor_for(
+        key: &identity::Keypair,
+        public_key: [u8; 32],
+        sequence: u64,
+        payload_hash: [u8; 32],
+        expires_at_ms: u64,
+    ) -> PreselectionActorBinding {
+        PreselectionActorBinding {
+            node_id: node_id_from_public_key(&public_key).to_vec(),
+            peer_id: key.public().to_peer_id().to_bytes(),
+            public_key: public_key.to_vec(),
+            advertisement_sequence: sequence,
+            advertisement_expires_at_ms: expires_at_ms,
+            advertisement_payload_hash: payload_hash.to_vec(),
+            capability_expires_at_ms: expires_at_ms,
+        }
+    }
+
     fn listener(remote: &str) -> ConnectedPoint {
         ConnectedPoint::Listener {
             local_addr: "/ip4/127.0.0.1/tcp/4001"
@@ -729,6 +1040,82 @@ mod tests {
         }
     }
 
+    struct UpstreamFixture {
+        service: DiscoveryService,
+        exit_key: identity::Keypair,
+        exit_public_key: [u8; 32],
+        relay_peer: PeerId,
+        exit_actor: PreselectionActorBinding,
+        control_actor: PreselectionActorBinding,
+        policy: LocalPreselectionPolicy,
+    }
+
+    async fn upstream_fixture() -> UpstreamFixture {
+        tokio::task::yield_now().await;
+        let exit_key = identity::Keypair::generate_ed25519();
+        let exit_public_key = raw_public_key(&exit_key);
+        let advertisement = exit_advertisement(&exit_key, exit_public_key);
+        advertisement.validate().expect("valid Exit advertisement");
+        let signed = sign_control_message_with(
+            &advertisement,
+            exit_public_key,
+            NOW_MS,
+            ADVERTISEMENT_EXPIRY_MS,
+            [61; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&exit_key, message),
+        )
+        .expect("signed local Exit advertisement");
+        let envelope: SignedEnvelope =
+            decode_canonical(&signed, MAX_CONTROL_MESSAGE_SIZE).expect("signed envelope");
+        let exit_actor = actor_for(
+            &exit_key,
+            exit_public_key,
+            advertisement.sequence_number,
+            envelope
+                .payload_hash
+                .as_slice()
+                .try_into()
+                .expect("payload hash"),
+            ADVERTISEMENT_EXPIRY_MS,
+        );
+        let relay_key = identity::Keypair::generate_ed25519();
+        let relay_public_key = raw_public_key(&relay_key);
+        let relay_peer = relay_key.public().to_peer_id();
+        let control_actor = actor_for(
+            &relay_key,
+            relay_public_key,
+            13,
+            [62; 32],
+            ADVERTISEMENT_EXPIRY_MS,
+        );
+        let mut service = DiscoveryService::new_with_protocol_roles(
+            exit_key.clone(),
+            DiscoveryProtocolRoles::new(false, false, true),
+        )
+        .expect("Exit discovery");
+        service
+            .set_local_advertisement(signed)
+            .expect("serve local Exit advertisement");
+        establish(
+            &mut service,
+            relay_peer,
+            CONNECTION,
+            &listener("/ip4/1.1.1.8/tcp/443"),
+            0,
+        );
+        UpstreamFixture {
+            service,
+            exit_key,
+            exit_public_key,
+            relay_peer,
+            exit_actor,
+            control_actor,
+            policy: LocalPreselectionPolicy::new(POLICY_VERSION, POLICY_HASH, POLICY_EXPIRY_MS)
+                .expect("policy"),
+        }
+    }
+
     async fn connect_and_capture_listener_lineage(
         client: &mut DiscoveryService,
         relay: &mut DiscoveryService,
@@ -812,6 +1199,34 @@ mod tests {
         .expect("wire request")
     }
 
+    fn upstream_request(
+        exit: PreselectionActorBinding,
+        control: PreselectionActorBinding,
+        challenge: u8,
+        family: ObservationAddressFamily,
+    ) -> UpstreamPreselectionObservationRequest {
+        let request = PreselectionObservationRequest {
+            protocol_version: volparossa_protocol::PROTOCOL_VERSION,
+            challenge: vec![challenge; 32],
+            actor: Some(exit),
+            scope: Some(PreselectionObservationScope {
+                role: PreselectionObservationRole::Exit as i32,
+                transport: Transport::UdpSinglePath as i32,
+                address_family: family as i32,
+                policy_version: POLICY_VERSION,
+                policy_hash: POLICY_HASH.to_vec(),
+                policy_expires_at_ms: POLICY_EXPIRY_MS,
+            }),
+            forwarded_control: Some(control),
+            created_at_ms: NOW_MS,
+            expires_at_ms: NOW_MS + 4_000,
+        };
+        UpstreamPreselectionObservationRequest::from_canonical(
+            encode_canonical(&request, MAX_CONTROL_PAYLOAD_SIZE).expect("canonical request"),
+        )
+        .expect("wire upstream request")
+    }
+
     fn rejection(
         result: Result<PreparedDirectPreselectionResponse, DirectPreselectionResponderError>,
         context: &str,
@@ -819,6 +1234,15 @@ mod tests {
         result
             .err()
             .unwrap_or_else(|| panic!("unexpected prepared response: {context}"))
+    }
+
+    fn upstream_rejection(
+        result: Result<PreparedUpstreamPreselectionResponse, UpstreamPreselectionResponderError>,
+        context: &str,
+    ) -> UpstreamPreselectionResponderError {
+        result
+            .err()
+            .unwrap_or_else(|| panic!("unexpected prepared upstream response: {context}"))
     }
 
     #[tokio::test]
@@ -862,6 +1286,327 @@ mod tests {
             &mut replay,
         )
         .expect("complete direct transcript");
+    }
+
+    #[tokio::test]
+    async fn exact_current_upstream_request_is_exit_signed_and_request_bound() {
+        let mut fixture = upstream_fixture().await;
+        let request = upstream_request(
+            fixture.exit_actor.clone(),
+            fixture.control_actor.clone(),
+            63,
+            ObservationAddressFamily::Ipv4,
+        );
+        let canonical_request = request.as_encoded().to_vec();
+        let prepared = fixture
+            .service
+            .prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &request,
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            )
+            .expect("prepared upstream response");
+        assert!(size_of_val(&prepared.transport_proof) > 0);
+        let signed = prepared.response.as_encoded();
+        let envelope: SignedEnvelope =
+            decode_canonical(signed, MAX_CONTROL_MESSAGE_SIZE).expect("canonical response");
+        assert_eq!(
+            envelope.message_type,
+            volparossa_protocol::ControlMessageType::PreselectionObservationReceipt as i32
+        );
+        assert_eq!(envelope.sender_public_key, fixture.exit_public_key);
+        assert_eq!(envelope.timestamp_ms, NOW_MS + 100);
+        assert_eq!(envelope.expires_at_ms, NOW_MS + 4_000);
+        let mut replay = ReplayCache::new(2).expect("replay cache");
+        let receipt = verify_control_message::<PreselectionObservationReceipt>(
+            signed,
+            NOW_MS + 200,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("verified Exit receipt")
+        .into_message();
+        assert_eq!(
+            receipt.request_hash,
+            preselection_observation_request_hash(&canonical_request)
+                .expect("request hash")
+                .to_vec()
+        );
+        assert_eq!(receipt.challenge, vec![63; 32]);
+        assert_eq!(receipt.actor, Some(fixture.exit_actor));
+        assert_eq!(
+            receipt.scope.expect("receipt scope").role,
+            PreselectionObservationRole::Exit as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_role_and_signing_failure_fail_closed_and_tombstone_exact_replay() {
+        let mut fixture = upstream_fixture().await;
+        let request = upstream_request(
+            fixture.exit_actor.clone(),
+            fixture.control_actor.clone(),
+            73,
+            ObservationAddressFamily::Ipv4,
+        );
+        let signing = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &request,
+                fixture.policy,
+                fixture.exit_public_key,
+                |_| None,
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "upstream signer refusal",
+        );
+        assert_eq!(signing, UpstreamPreselectionResponderError::Signing);
+        let replay = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &request,
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 200,
+                Instant::now(),
+            ),
+            "upstream replay after signer refusal",
+        );
+        assert_eq!(replay, UpstreamPreselectionResponderError::Replay);
+
+        let mut relay_only = DiscoveryService::new_with_protocol_roles(
+            fixture.exit_key.clone(),
+            DiscoveryProtocolRoles::new(false, true, false),
+        )
+        .expect("Relay-only discovery");
+        let role = upstream_rejection(
+            relay_only.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &request,
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 200,
+                Instant::now(),
+            ),
+            "upstream responder disabled by immutable role",
+        );
+        assert_eq!(role, UpstreamPreselectionResponderError::Role);
+    }
+
+    #[tokio::test]
+    async fn upstream_responder_enforces_the_shared_exact_per_relay_bound_without_eviction() {
+        let mut fixture = upstream_fixture().await;
+        let now_mono = Instant::now();
+        for offset in 0..MAX_REQUEST_TOMBSTONES_PER_PEER {
+            let challenge = u8::try_from(offset + 80).expect("bounded challenge");
+            let prepared = fixture
+                .service
+                .prepare_upstream_preselection_response_at(
+                    fixture.relay_peer,
+                    ConnectionId::new_unchecked(CONNECTION),
+                    &upstream_request(
+                        fixture.exit_actor.clone(),
+                        fixture.control_actor.clone(),
+                        challenge,
+                        ObservationAddressFamily::Ipv4,
+                    ),
+                    fixture.policy,
+                    fixture.exit_public_key,
+                    |message| sign_with_key(&fixture.exit_key, message),
+                    NOW_MS + 100,
+                    now_mono,
+                )
+                .expect("within exact per-Relay tombstone bound");
+            drop(prepared);
+        }
+        let resource = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &upstream_request(
+                    fixture.exit_actor,
+                    fixture.control_actor,
+                    120,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                now_mono,
+            ),
+            "seventeenth live upstream request",
+        );
+        assert_eq!(resource, UpstreamPreselectionResponderError::ResourceLimit);
+        assert_eq!(
+            fixture.service.preselection_responder.requests.len(),
+            MAX_REQUEST_TOMBSTONES_PER_PEER
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one adversarial matrix for authenticated Relay and exact Exit authority"
+    )]
+    async fn upstream_relay_identity_policy_exit_authority_and_lineage_are_exact() {
+        let mut fixture = upstream_fixture().await;
+        let wrong_relay = identity::Keypair::generate_ed25519();
+        let wrong_relay_peer = wrong_relay.public().to_peer_id();
+        let wrong_authenticated = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                wrong_relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &upstream_request(
+                    fixture.exit_actor.clone(),
+                    fixture.control_actor.clone(),
+                    64,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "substituted authenticated Relay",
+        );
+        assert_eq!(
+            wrong_authenticated,
+            UpstreamPreselectionResponderError::Request
+        );
+
+        let mut peer_key_substitution = fixture.control_actor.clone();
+        let substituted_public = raw_public_key(&wrong_relay);
+        peer_key_substitution.public_key = substituted_public.to_vec();
+        peer_key_substitution.node_id = node_id_from_public_key(&substituted_public).to_vec();
+        let peer_key_substitution = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &upstream_request(
+                    fixture.exit_actor.clone(),
+                    peer_key_substitution,
+                    65,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "Relay public key does not derive authenticated Peer ID",
+        );
+        assert_eq!(
+            peer_key_substitution,
+            UpstreamPreselectionResponderError::Request
+        );
+
+        let mut substituted_exit = fixture.exit_actor.clone();
+        substituted_exit.advertisement_payload_hash[0] ^= 1;
+        let authority_substitution = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &upstream_request(
+                    substituted_exit,
+                    fixture.control_actor.clone(),
+                    66,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "substituted Exit advertisement",
+        );
+        assert_eq!(
+            authority_substitution,
+            UpstreamPreselectionResponderError::Authority
+        );
+
+        let wrong_policy =
+            LocalPreselectionPolicy::new(POLICY_VERSION + 1, POLICY_HASH, POLICY_EXPIRY_MS)
+                .expect("shaped policy");
+        let policy_substitution = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &upstream_request(
+                    fixture.exit_actor.clone(),
+                    fixture.control_actor.clone(),
+                    67,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                wrong_policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "substituted active policy",
+        );
+        assert_eq!(
+            policy_substitution,
+            UpstreamPreselectionResponderError::Authority
+        );
+
+        let wrong_connection = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION + 1),
+                &upstream_request(
+                    fixture.exit_actor.clone(),
+                    fixture.control_actor.clone(),
+                    68,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "substituted event connection",
+        );
+        assert_eq!(
+            wrong_connection,
+            UpstreamPreselectionResponderError::Provenance
+        );
+
+        let wrong_family = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &upstream_request(
+                    fixture.exit_actor,
+                    fixture.control_actor,
+                    69,
+                    ObservationAddressFamily::Ipv6,
+                ),
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "substituted native family",
+        );
+        assert_eq!(wrong_family, UpstreamPreselectionResponderError::Provenance);
     }
 
     #[tokio::test]
@@ -989,7 +1734,7 @@ mod tests {
                             _ => {}
                         }
                     }
-                    _ = relay.next_event_with_direct_preselection_responder(
+                    _ = relay.next_event_with_preselection_responders(
                         policy,
                         relay_public_key,
                         &mut signer,
@@ -1094,6 +1839,169 @@ mod tests {
         })
         .await
         .expect("transplanted response channel omission timeout");
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one complete real Relay-to-Exit request, response handoff, and signature proof"
+    )]
+    async fn service_owned_poll_sends_exit_receipt_only_to_the_authenticated_relay_channel() {
+        let exit_key = identity::Keypair::generate_ed25519();
+        let exit_public_key = raw_public_key(&exit_key);
+        let relay_key = identity::Keypair::generate_ed25519();
+        let relay_public_key = raw_public_key(&relay_key);
+        let mut exit = DiscoveryService::new_with_protocol_roles(
+            exit_key.clone(),
+            DiscoveryProtocolRoles::new(false, false, true),
+        )
+        .expect("Exit discovery");
+        let mut relay = DiscoveryService::new_with_protocol_roles(
+            relay_key.clone(),
+            DiscoveryProtocolRoles::new(false, true, false),
+        )
+        .expect("Relay discovery");
+        let relay_peer = *relay.local_peer_id();
+        let exit_peer = *exit.local_peer_id();
+        let now_ms = system_unix_millis().expect("current wall time");
+        let advertisement_expiry = now_ms + 30_000;
+        let policy_expiry = now_ms + 60_000;
+        let mut advertisement = exit_advertisement(&exit_key, exit_public_key);
+        advertisement.measured_at_ms = now_ms;
+        advertisement.expires_at_ms = advertisement_expiry;
+        let signed_advertisement = sign_control_message_with(
+            &advertisement,
+            exit_public_key,
+            now_ms,
+            advertisement_expiry,
+            [70; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&exit_key, message),
+        )
+        .expect("signed current Exit advertisement");
+        let envelope: SignedEnvelope =
+            decode_canonical(&signed_advertisement, MAX_CONTROL_MESSAGE_SIZE)
+                .expect("advertisement envelope");
+        exit.set_local_advertisement(signed_advertisement)
+            .expect("serve Exit advertisement");
+        let exit_actor = actor_for(
+            &exit_key,
+            exit_public_key,
+            advertisement.sequence_number,
+            envelope
+                .payload_hash
+                .as_slice()
+                .try_into()
+                .expect("payload hash"),
+            advertisement_expiry,
+        );
+        let control_actor = actor_for(
+            &relay_key,
+            relay_public_key,
+            14,
+            [71; 32],
+            advertisement_expiry,
+        );
+        let typed_request = PreselectionObservationRequest {
+            protocol_version: volparossa_protocol::PROTOCOL_VERSION,
+            challenge: vec![72; 32],
+            actor: Some(exit_actor),
+            scope: Some(PreselectionObservationScope {
+                role: PreselectionObservationRole::Exit as i32,
+                transport: Transport::UdpSinglePath as i32,
+                address_family: ObservationAddressFamily::Ipv4 as i32,
+                policy_version: POLICY_VERSION,
+                policy_hash: POLICY_HASH.to_vec(),
+                policy_expires_at_ms: policy_expiry,
+            }),
+            forwarded_control: Some(control_actor),
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms + 4_000,
+        };
+        let canonical_request =
+            encode_canonical(&typed_request, MAX_CONTROL_PAYLOAD_SIZE).expect("canonical request");
+        let wire_request =
+            UpstreamPreselectionObservationRequest::from_canonical(canonical_request.clone())
+                .expect("wire request");
+        let policy = LocalPreselectionPolicy::new(POLICY_VERSION, POLICY_HASH, policy_expiry)
+            .expect("current policy");
+
+        let (exit_connection, old_endpoint) =
+            connect_and_capture_listener_lineage(&mut relay, &mut exit).await;
+        let public_endpoint = listener("/ip4/1.1.1.8/tcp/443");
+        exit.swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::AddressChange(AddressChange {
+                peer_id: relay_peer,
+                connection_id: exit_connection,
+                old: &old_endpoint,
+                new: &public_endpoint,
+            }));
+        let outbound = relay
+            .swarm
+            .behaviour_mut()
+            .preselection_observation_upstream
+            .send_request(&exit_peer, wire_request);
+        let mut signer = |message: &[u8]| sign_with_key(&exit_key, message);
+        let signed_response = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    event = relay.next_internal_event() => {
+                        match event {
+                            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservationUpstream(
+                                request_response::Event::Message {
+                                    peer,
+                                    message: request_response::Message::Response {
+                                        request_id,
+                                        response,
+                                    },
+                                    ..
+                                },
+                            )) if peer == exit_peer && request_id == outbound => {
+                                break response;
+                            }
+                            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservationUpstream(
+                                request_response::Event::OutboundFailure {
+                                    request_id,
+                                    error,
+                                    ..
+                                },
+                            )) if request_id == outbound => {
+                                panic!("upstream response transport failed: {error}");
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = exit.next_event_with_preselection_responders(
+                        policy,
+                        exit_public_key,
+                        &mut signer,
+                    ) => {}
+                }
+            }
+        })
+        .await
+        .expect("Exit response timeout");
+        let mut response_replay_cache = ReplayCache::new(2).expect("response replay cache");
+        let receipt = verify_control_message::<PreselectionObservationReceipt>(
+            signed_response.as_encoded(),
+            system_unix_millis().expect("verification wall time"),
+            TimePolicy::default(),
+            &mut response_replay_cache,
+        )
+        .expect("Exit-signed receipt")
+        .into_message();
+        assert_eq!(
+            receipt.request_hash,
+            preselection_observation_request_hash(&canonical_request)
+                .expect("request hash")
+                .to_vec()
+        );
+        assert_eq!(
+            receipt.scope.expect("receipt scope").role,
+            PreselectionObservationRole::Exit as i32
+        );
     }
 
     #[tokio::test]
@@ -1454,13 +2362,13 @@ mod tests {
         }
         assert_eq!(
             state.reserve([200; 32], peer, now),
-            Err(DirectPreselectionResponderError::ResourceLimit)
+            Err(TombstoneError::ResourceLimit)
         );
         let mut first_hash = [0; 32];
         first_hash[..8].copy_from_slice(&1_u64.to_be_bytes());
         assert_eq!(
             state.reserve(first_hash, other, now),
-            Err(DirectPreselectionResponderError::Replay)
+            Err(TombstoneError::Replay)
         );
         state
             .reserve(
@@ -1490,7 +2398,7 @@ mod tests {
         let extra_peer = identity::Keypair::generate_ed25519().public().to_peer_id();
         assert_eq!(
             state.reserve([255; 32], extra_peer, now),
-            Err(DirectPreselectionResponderError::ResourceLimit)
+            Err(TombstoneError::ResourceLimit)
         );
         assert_eq!(state.requests.len(), MAX_REQUEST_TOMBSTONES);
     }
@@ -1551,8 +2459,10 @@ mod tests {
         }
         assert!(!production.contains("pub fn for_test"));
         assert!(!production.contains("pub(crate) fn for_test"));
-        assert!(production.contains("pub async fn next_event_with_direct_preselection_responder"));
+        assert!(production.contains("pub async fn next_event_with_preselection_responders"));
         assert!(!production.contains("pub fn respond_direct_preselection_observation_event"));
+        assert!(!production.contains("pub fn respond_upstream_preselection_observation_event"));
+        assert!(!production.contains("pub fn prepare_upstream_preselection_response_at"));
         assert_eq!(
             production
                 .matches("match self.next_internal_event().await")
@@ -1560,6 +2470,7 @@ mod tests {
             1
         );
         assert!(production.contains("BehaviourEvent::PreselectionObservationUpstream"));
+        assert!(production.contains("UpstreamPreselectionObservationResponse::from_canonical"));
         assert!(!production.contains("TODO"));
         assert!(!production.contains("unimplemented!"));
 
