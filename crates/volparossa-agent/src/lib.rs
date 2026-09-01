@@ -169,7 +169,7 @@ impl Agent {
             None
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let routes = ClientRouteControl::default();
+        let routes = ClientRouteControl::new(self.paths.mpquic_socket.clone());
         let control_context = ControlContext {
             state: Arc::clone(&self.state),
             config: Arc::clone(&self.config),

@@ -24,6 +24,7 @@ use std::{
     fmt,
     future::Future,
     net::{IpAddr, SocketAddrV4},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -48,15 +49,17 @@ use volparossa_core::{
 use volparossa_discovery::{
     DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation, DatapathRelayRequest,
     DatapathRelayResponse, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
-    ExitMptcpSessionSignal as DiscoveryExitMptcpSessionSignal, ForwardStatus,
-    MptcpSessionPathProof, MptcpSessionStartRequest,
-    UdpExitSessionSignal as DiscoveryUdpExitSessionSignal, UdpSessionStartRequest,
+    ExitMpquicSessionSignal, ExitMptcpSessionSignal as DiscoveryExitMptcpSessionSignal,
+    ForwardStatus, MpquicSessionPathProof, MpquicSessionStartRequest, MptcpSessionPathProof,
+    MptcpSessionStartRequest, UdpExitSessionSignal as DiscoveryUdpExitSessionSignal,
+    UdpSessionStartRequest,
 };
 use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{
     MAX_CONTROL_MESSAGE_SIZE, ProbeAddressFamily, ProbeLegEvidence, ReplayCache, SignedEnvelope,
     TimePolicy, Transport, decode_canonical, encode_canonical,
 };
+use volparossa_quic::NativeClient;
 use volparossa_reservation::{
     ClientNativeRouteAuthorization, ExitReservationIntent, RelayPathIntent, ReservationCoordinator,
     SignedExitFinalizeRequest, SignedProbePermitRequest, VerifiedExitCapacityHold,
@@ -84,7 +87,7 @@ use volparossa_udp::{
 };
 #[cfg(test)]
 use volparossa_wireguard::overlay_addresses;
-use volparossa_wireguard::{HelperContextHandle, PublicWireGuardEndpoint};
+use volparossa_wireguard::{HELPER_HANDLE_BYTES, HelperContextHandle, PublicWireGuardEndpoint};
 
 use crate::{
     client_ingress::{
@@ -100,8 +103,10 @@ use crate::{
         HelperClient, HelperClientError, PrepareLeaseBatchFailure, PrepareReconciliationAuthority,
         RuntimeBoundPreparedLeaseBatch,
     },
+    mpquic_runtime::{ProductionMpquicPreflight, ProductionMpquicSession},
     mptcp_flow_runtime::{ActiveProductionMptcpClientFlow, activate_production_mptcp_client_flow},
     mptcp_transport::{ClientMptcpTransport, ExitMptcpListenerSignal},
+    paths::DEFAULT_MPQUIC_SOCKET,
 };
 use retirement::{PreparedContextOwner, RetirementOutcome, RetirementSink, RetirementSupervisor};
 
@@ -117,11 +122,19 @@ const CLIENT_SINGLE_RELAY_UDP_PORT: u16 = 40_001;
 const MAXIMUM_EXIT_CERTIFICATE_DER_BYTES: usize = 64 * 1_024;
 const MAXIMUM_TCP_STREAM_CHUNK_BYTES: usize = 64 * 1_024;
 const OPEN_TCP_LIFETIME_MS: u64 = 60_000;
+const MPQUIC_READY_WAIT: Duration = Duration::from_secs(10);
 
 /// Cloneable single-owner gate for the local Connect route bootstrap.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ClientRouteControl {
     state: Arc<Mutex<ClientRouteControlState>>,
+    mpquic_socket: Arc<PathBuf>,
+}
+
+impl Default for ClientRouteControl {
+    fn default() -> Self {
+        Self::new(PathBuf::from(DEFAULT_MPQUIC_SOCKET))
+    }
 }
 
 #[derive(Default)]
@@ -144,6 +157,7 @@ enum ClientTransportState {
     TcpActive(ActiveProductionMptcpClientFlow),
     UdpReady(CertificateBoundProductionUdpRoute),
     UdpActive(ActiveProductionUdpRoute),
+    Mpquic(Box<ProductionMpquicSession>),
 }
 
 impl EstablishedClientRoute {
@@ -152,7 +166,8 @@ impl EstablishedClientRoute {
             ClientTransportState::UdpReady(_) => ClientRouteProgress::UdpRouteReady,
             ClientTransportState::TcpMptcp(_)
             | ClientTransportState::TcpActive(_)
-            | ClientTransportState::UdpActive(_) => ClientRouteProgress::TransportActive,
+            | ClientTransportState::UdpActive(_)
+            | ClientTransportState::Mpquic(_) => ClientRouteProgress::TransportActive,
         }
     }
 
@@ -165,14 +180,17 @@ impl EstablishedClientRoute {
                 let _ = flow.shutdown(&self.helper).await;
             }
             ClientTransportState::UdpReady(route) => {
-                let _ = route.disconnect().await;
+                let _ = Box::pin(route.disconnect()).await;
             }
             ClientTransportState::UdpActive(route) => {
                 let _ = route.shutdown().await;
             }
+            ClientTransportState::Mpquic(session) => {
+                let _ = session.shutdown().await;
+            }
         }
         if let Some(route) = self.route {
-            let _ = route.disconnect().await;
+            let _ = Box::pin(route.disconnect()).await;
         }
         let _ = self.orchestrator.shutdown().await;
     }
@@ -231,6 +249,13 @@ pub(crate) enum ClientRouteConnectError {
 }
 
 impl ClientRouteControl {
+    pub(crate) fn new(mpquic_socket: PathBuf) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
+            mpquic_socket: Arc::new(mpquic_socket),
+        }
+    }
+
     /// Select and establish one normal relay-only MPTCP route for transparent TCP ingress.
     ///
     /// The transport-specific view prevents an enabled UDP profile from changing this TCP flow
@@ -281,7 +306,11 @@ impl ClientRouteControl {
                 {
                     Ok(completed) => {
                         Box::pin(admit_completed_native_route(
-                            completed, config, discovery, helper,
+                            completed,
+                            config,
+                            discovery,
+                            helper,
+                            self.mpquic_socket.as_ref().clone(),
                         ))
                         .await
                     }
@@ -562,7 +591,7 @@ impl ClientRouteControl {
             return Err(ClientRouteConnectError::Busy);
         };
         if route.is_some() {
-            let _ = ready.disconnect().await;
+            let _ = Box::pin(ready.disconnect()).await;
             if let Some(route) = route {
                 let _ = route.disconnect().await;
             }
@@ -694,7 +723,11 @@ fn client_open_tcp_material(
         &mut replay,
     )
     .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-    let identity = established.native_authorization.native_route_identity();
+    let identity = established
+        .native_authorization
+        .as_ref()
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+        .native_route_identity();
     let certificate_sha256: [u8; 32] = identity
         .certificate_sha256
         .as_slice()
@@ -740,18 +773,34 @@ fn client_open_tcp_material(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-closed transport-specific route admission transaction"
+)]
 async fn admit_completed_native_route(
     completed: selection_bridge::CompletedClientNativeProbe,
     config: &Config,
     discovery: &DiscoveryControlHandle,
     helper: &HelperClient,
+    mpquic_socket: PathBuf,
 ) -> Result<EstablishedClientRoute, ClientRouteConnectError> {
     let (transport, _) = client_native_path_requirement(config)?;
-    if transport == Transport::MultipathQuic {
-        let _ = helper.cleanup_owned().await;
-        return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
-    }
-    let client_native_instance_id = random_runtime_instance_id()?;
+    let mpquic_preflight = if transport == Transport::MultipathQuic {
+        let native = NativeClient::new(mpquic_socket)
+            .map_err(|_| ClientRouteConnectError::NativeTransportIdentityUnavailable)?;
+        Some(
+            ProductionMpquicPreflight::new(native)
+                .await
+                .map_err(|_| ClientRouteConnectError::NativeTransportIdentityUnavailable)?,
+        )
+    } else {
+        None
+    };
+    let client_native_instance_id = mpquic_preflight
+        .as_ref()
+        .map_or_else(random_runtime_instance_id, |preflight| {
+            Ok(*preflight.native_instance_id())
+        })?;
     let Ok(admission) = completed.into_route_admission(client_native_instance_id) else {
         let _ = helper.cleanup_owned().await;
         return Err(ClientRouteConnectError::RouteAdmissionUnavailable);
@@ -820,6 +869,56 @@ async fn admit_completed_native_route(
                     let _ = orchestrator.shutdown().await;
                     Err(error)
                 }
+            }
+        }
+        Ok(mut route) if route.selected_transport() == Some(Transport::MultipathQuic) => {
+            let Some(preflight) = mpquic_preflight else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
+            };
+            let signal = start_mpquic_exit_session(&route, discovery, crate::unix_millis()).await;
+            let Ok(signal) = signal else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let Ok(context_handle): Result<[u8; HELPER_HANDLE_BYTES], _> =
+                route.context_handle().try_into()
+            else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let Some(authorization) = route.established.native_authorization.take() else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let mut grants = route.established.relay_grants.clone();
+            grants.sort_unstable_by_key(VerifiedRelayGrant::path_id);
+            let session = preflight
+                .establish_committed(
+                    helper,
+                    context_handle,
+                    authorization,
+                    &grants,
+                    &signal,
+                    crate::unix_millis(),
+                    MPQUIC_READY_WAIT,
+                )
+                .await;
+            if let Ok(session) = session {
+                Ok(EstablishedClientRoute {
+                    transport: ClientTransportState::Mpquic(Box::new(session)),
+                    route: Some(route),
+                    orchestrator,
+                    helper: helper.clone(),
+                })
+            } else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
             }
         }
         Ok(route) => {
@@ -3377,16 +3476,20 @@ impl PreparedProductionUdpRoute {
         signal: UdpExitSessionSignal,
     ) -> Result<CertificateBoundProductionUdpRoute, ProductionUdpCertificateFailure> {
         let certificate_der = signal.certificate_der;
-        let identity = self
-            .route
-            .established
-            .native_authorization
-            .native_route_identity();
+        let Some(authorization) = self.route.established.native_authorization.as_ref() else {
+            return Err(ProductionUdpCertificateFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::ExitCertificate,
+            });
+        };
+        let identity = authorization.native_route_identity();
+        let expected_certificate_sha256 = identity.certificate_sha256.clone();
+        let server_name = identity.tls_server_name.clone();
         let digest = Sha256::digest(&certificate_der);
-        if identity.certificate_sha256.len() != digest.len()
+        if expected_certificate_sha256.len() != digest.len()
             || digest
                 .as_slice()
-                .ct_eq(identity.certificate_sha256.as_slice())
+                .ct_eq(expected_certificate_sha256.as_slice())
                 .unwrap_u8()
                 != 1
         {
@@ -3415,7 +3518,6 @@ impl PreparedProductionUdpRoute {
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         };
-        let server_name = identity.tls_server_name.clone();
         Ok(CertificateBoundProductionUdpRoute {
             prepared: self,
             client_config,
@@ -3550,8 +3652,13 @@ fn verified_single_relay_udp_path(
     if path.reservation_id() != &route.request.parameters.reservation_id
         || path.route_context_id() != &route.request.parameters.route_context_id
         || path.path_id() != *path_id
-        || route.native_authorization.reservation_id() != path.reservation_id()
-        || route.native_authorization.route_context_id() != path.route_context_id()
+        || route
+            .native_authorization
+            .as_ref()
+            .is_none_or(|authorization| {
+                authorization.reservation_id() != path.reservation_id()
+                    || authorization.route_context_id() != path.route_context_id()
+            })
     {
         return Err(ProductionUdpRouteError::InvalidRoute);
     }
@@ -3866,10 +3973,242 @@ fn verified_mptcp_exit_session_signal(
         &signal,
         &route
             .native_authorization
+            .as_ref()
+            .ok_or(ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?
             .native_route_identity()
             .certificate_sha256,
     )
     .map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)
+}
+
+struct MpquicSessionStartDispatch {
+    relay: DirectRelayCapability,
+    request: DatapathRelayRequest,
+}
+
+/// Commit the complete selected Relay set concurrently and accept only one byte-identical native
+/// Exit readiness signal. Every copy carries the same Client-signed HPKE credential delivery; no
+/// request or native socket ever targets an Exit underlay address directly.
+async fn start_mpquic_exit_session(
+    route: &ProductionRoute,
+    discovery: &DiscoveryControlHandle,
+    now_ms: u64,
+) -> Result<ExitMpquicSessionSignal, ClientRouteConnectError> {
+    let dispatches = mpquic_session_start_dispatches(&route.established, now_ms)
+        .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let expected_responses = dispatches.len();
+    let mut tasks = tokio::task::JoinSet::new();
+    for dispatch in dispatches {
+        let discovery = discovery.clone();
+        tasks.spawn(async move {
+            let response = discovery
+                .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
+                .await;
+            (dispatch, response)
+        });
+    }
+
+    let mut canonical_signal = None;
+    let mut received = 0_usize;
+    while let Some(joined) = tasks.join_next().await {
+        let (dispatch, response) =
+            joined.map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let response =
+            response.map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let encoded = accepted_datapath_response(
+            &dispatch.request,
+            &response,
+            &dispatch.relay,
+            RouteSetupPhase::Committing,
+        )
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        if canonical_signal
+            .as_ref()
+            .is_some_and(|first: &Vec<u8>| first != &encoded)
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        canonical_signal.get_or_insert(encoded);
+        received = received.saturating_add(1);
+    }
+    if received != expected_responses {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    verified_mpquic_exit_session_signal(
+        canonical_signal
+            .as_deref()
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?,
+        &route.established,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-atomic exact-set proof and opaque-credential dispatch construction"
+)]
+fn mpquic_session_start_dispatches(
+    route: &EstablishedRoute<ReservationSession>,
+    now_ms: u64,
+) -> Result<Vec<MpquicSessionStartDispatch>, ()> {
+    let path_count = route.relay_grants.len();
+    if route.request.parameters.allowed_transports != [Transport::MultipathQuic]
+        || !(2..=usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)).contains(&path_count)
+        || route.relay_authorities.len() != path_count
+        || route.confirmations.len() != path_count
+        || route.commit_proof.leases.len() != path_count
+        || route.signed_exit_reservation.is_empty()
+        || route.active_path_ids.len() < 2
+    {
+        return Err(());
+    }
+
+    let authorization = route.native_authorization.as_ref().ok_or(())?;
+    if authorization.reservation_id() != &route.request.parameters.reservation_id
+        || authorization.route_context_id() != &route.request.parameters.route_context_id
+        || authorization.expires_at_ms() <= now_ms
+    {
+        return Err(());
+    }
+    let protocol = route
+        .owner
+        .as_ref()
+        .and_then(PreparedContextOwner::protocol)
+        .ok_or(())?;
+    let signed_credential_delivery = protocol
+        .coordinator
+        .sign_native_route_credential_delivery(authorization, now_ms)
+        .map_err(|_| ())?;
+
+    let mut selected_path_ids = route
+        .active_path_ids
+        .iter()
+        .chain(&route.warm_path_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    selected_path_ids.sort_unstable();
+    if selected_path_ids.len() != path_count
+        || selected_path_ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(());
+    }
+
+    let mut indexes = (0..path_count).collect::<Vec<_>>();
+    indexes.sort_unstable_by_key(|index| route.relay_grants[*index].path_id());
+    let grant_path_ids = indexes
+        .iter()
+        .map(|index| route.relay_grants[*index].path_id())
+        .collect::<Vec<_>>();
+    if grant_path_ids != selected_path_ids {
+        return Err(());
+    }
+
+    let exit_envelope = decode_canonical::<SignedEnvelope>(
+        &route.signed_exit_reservation,
+        MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .map_err(|_| ())?;
+    let mut proofs = Vec::with_capacity(path_count);
+    let mut wrappers = Vec::with_capacity(path_count);
+    let mut request_ids = BTreeSet::new();
+    for index in indexes {
+        let grant = &route.relay_grants[index];
+        let relay = &route.relay_authorities[index];
+        let confirmation = &route.confirmations[index];
+        if grant.relay_node_id() != &relay.node_id {
+            return Err(());
+        }
+        let confirmation_envelope = decode_canonical::<SignedEnvelope>(
+            &confirmation.signed_confirmation,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .map_err(|_| ())?;
+        let receipt_envelope = decode_canonical::<SignedEnvelope>(
+            &confirmation.signed_receipt,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .map_err(|_| ())?;
+        let request_id: [u8; ID_BYTES] = confirmation_envelope
+            .nonce
+            .get(..ID_BYTES)
+            .and_then(|value| value.try_into().ok())
+            .filter(|value: &[u8; ID_BYTES]| value.iter().any(|byte| *byte != 0))
+            .ok_or(())?;
+        if !request_ids.insert(request_id) {
+            return Err(());
+        }
+        let call_ms = u64::try_from(DATAPATH_RELAY_REQUEST_TIMEOUT.as_millis()).map_err(|_| ())?;
+        let deadline_unix_ms = now_ms
+            .checked_add(call_ms)
+            .ok_or(())?
+            .min(route.request.parameters.expires_at_ms)
+            .min(grant.expires_at_ms())
+            .min(exit_envelope.expires_at_ms)
+            .min(confirmation_envelope.expires_at_ms)
+            .min(receipt_envelope.expires_at_ms);
+        if deadline_unix_ms <= now_ms {
+            return Err(());
+        }
+        proofs.push(MpquicSessionPathProof::new(
+            grant.signed_relay_reservation().to_vec(),
+            confirmation.signed_confirmation.clone(),
+            confirmation.signed_receipt.clone(),
+        ));
+        wrappers.push((relay.clone(), request_id, deadline_unix_ms));
+    }
+
+    let start = MpquicSessionStartRequest::new(
+        route.signed_exit_reservation.clone(),
+        proofs,
+        signed_credential_delivery,
+    )
+    .map_err(|_| ())?;
+    let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE).map_err(|_| ())?;
+    wrappers
+        .into_iter()
+        .map(|(relay, request_id, deadline_unix_ms)| {
+            let request = DatapathRelayRequest::new(
+                request_id.to_vec(),
+                relay.node_id.to_vec(),
+                relay.peer_id.to_bytes(),
+                deadline_unix_ms,
+                DatapathRelayOperation::MpquicSessionStart,
+                encoded.clone(),
+                Vec::new(),
+            )
+            .map_err(|_| ())?;
+            Ok(MpquicSessionStartDispatch { relay, request })
+        })
+        .collect()
+}
+
+fn verified_mpquic_exit_session_signal(
+    encoded: &[u8],
+    route: &EstablishedRoute<ReservationSession>,
+) -> Result<ExitMpquicSessionSignal, ClientRouteConnectError> {
+    let signal = decode_canonical::<ExitMpquicSessionSignal>(encoded, MAX_CONTROL_MESSAGE_SIZE)
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let mut selected_path_ids = route
+        .relay_grants
+        .iter()
+        .map(VerifiedRelayGrant::path_id)
+        .collect::<Vec<_>>();
+    selected_path_ids.sort_unstable();
+    let authorization = route
+        .native_authorization
+        .as_ref()
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    if signal.validate().is_err()
+        || signal.reservation_id() != route.request.parameters.reservation_id
+        || signal.route_context_id() != route.request.parameters.route_context_id
+        || signal.exit_native_instance_id()
+            != authorization
+                .native_route_identity()
+                .exit_native_instance_id
+        || signal.selected_path_ids() != selected_path_ids
+    {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    Ok(signal)
 }
 
 impl<P, L> RouteSetupManager<P, L>
@@ -4743,7 +5082,7 @@ impl<P: ClientReservationProtocol> MeasuredRouteSetup<P> {
                 warm_path_ids: proof.warm_path_ids,
                 commit_proof: proof.commit,
                 signed_exit_reservation: proof.signed_exit_reservation,
-                native_authorization: proof.native_authorization,
+                native_authorization: Some(proof.native_authorization),
             }),
             Err(cause) => Err(transaction.rollback(cause).await),
         }
@@ -4776,7 +5115,7 @@ struct EstablishedRoute<P: ClientReservationProtocol> {
     warm_path_ids: Vec<u32>,
     commit_proof: CommittedLeaseBatch,
     signed_exit_reservation: Vec<u8>,
-    native_authorization: P::NativeAuthorization,
+    native_authorization: Option<P::NativeAuthorization>,
 }
 
 impl<P: ClientReservationProtocol> EstablishedRoute<P> {
@@ -9542,6 +9881,8 @@ mod tests {
         assert_eq!(
             established
                 .native_authorization
+                .as_ref()
+                .expect("retained native authorization")
                 .native_route_identity()
                 .tls_server_name,
             "route.exit.example"
