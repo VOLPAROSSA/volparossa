@@ -1529,7 +1529,9 @@ single clean-build A01--A15 run; the score is not a release claim.
 - [ ] At least two simultaneously active outer QUIC paths bind to distinct selected WireGuard interfaces/addresses and carry real data.
 - [ ] Paths can be added/removed dynamically; failover preserves the inner QUIC flow where protocol permits.
 - [ ] Per-path RTT, loss, congestion window, delivery rate, queued bytes, and bytes-in-flight are reported.
-- [ ] Swappable scheduler predicts delivery time from RTT, queue/rate, congestion, and loss and honours congestion control.
+- [x] The production native Multipath QUIC mode uses a dedicated swappable EDT callback over live
+  RTT, in-flight queue/rate, congestion window/headroom, sendability, and loss; its deterministic
+  native contract test proves both healthy paths can win while a later congested/lossy path loses.
 - [ ] No duplication, FEC, or false multipath reporting exists.
 - [ ] UDP/443 classification recognises valid QUIC Initial packets and policy-verifiable SNI.
 - [ ] Required-multipath mode defaults to at least two paths and fails closed without an unsafe downgrade.

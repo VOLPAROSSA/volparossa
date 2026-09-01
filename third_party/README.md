@@ -73,7 +73,7 @@ socket is not attestation or authentication against an explicitly untrusted agen
 Still unresolved are trusted helper-origin proof for client path descriptors,
 the unique delivered-payload metric, the operational exit listener plus
 helper/agent-to-native TLS-material and namespace-FD lifecycle,
-exact VOLPAROSSA EDT scheduler, real reverse-dataplane topology, end-to-end
+live relay-topology evidence for the exact EDT scheduler, real reverse-dataplane topology, end-to-end
 dynamic path removal/failover, and the full disposable namespace acceptance
 suite. No source lock, patch, binary, or unit-test result is itself
 evidence that the required VOLPAROSSA dataplane exists.

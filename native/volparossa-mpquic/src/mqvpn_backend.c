@@ -411,7 +411,11 @@ static vmp_transport_error_t configure_client(
                 : 0) == MQVPN_OK &&
         mqvpn_config_set_tun_mtu(config, 1420) == MQVPN_OK &&
         mqvpn_config_set_reconnect(config, 0, 5) == MQVPN_OK &&
-        mqvpn_config_set_scheduler(config, MQVPN_SCHED_WLB) == MQVPN_OK &&
+        mqvpn_config_set_scheduler(
+            config,
+            params->transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC
+                ? MQVPN_SCHED_VOLPAROSSA_EDT
+                : MQVPN_SCHED_MINRTT) == MQVPN_OK &&
         mqvpn_config_set_cc(config, MQVPN_CC_BBR2) == MQVPN_OK &&
         mqvpn_config_set_reinjection(config, MQVPN_REINJ_OFF) == MQVPN_OK &&
         mqvpn_config_set_reorder_enabled(config, MQVPN_REORDER_OFF) ==
@@ -1219,7 +1223,8 @@ static vmp_transport_error_t exit_backend_create(
         mqvpn_config_set_auth_key(config, auth) == MQVPN_OK &&
         mqvpn_config_set_max_clients(config, 1) == MQVPN_OK &&
         mqvpn_config_set_multipath(config, 1) == MQVPN_OK &&
-        mqvpn_config_set_scheduler(config, MQVPN_SCHED_WLB) == MQVPN_OK &&
+        mqvpn_config_set_scheduler(
+            config, MQVPN_SCHED_VOLPAROSSA_EDT) == MQVPN_OK &&
         mqvpn_config_set_cc(config, MQVPN_CC_BBR2) == MQVPN_OK &&
         mqvpn_config_set_reinjection(config, MQVPN_REINJ_OFF) == MQVPN_OK &&
         mqvpn_config_set_reorder_enabled(config, MQVPN_REORDER_OFF) ==

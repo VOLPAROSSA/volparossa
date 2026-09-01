@@ -13,7 +13,7 @@ fields derived from the exit-signed route scope without verifying that
 signature itself. The client adapter retains a strictly validated
 tunnel assignment, exposes it only after `ESTABLISHED`, and enforces packet
 address ownership.
-It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, exact scheduler, honest
+It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, honest
 unique-payload metric, trusted helper origin for path descriptors, and
 disposable namespace acceptance remain incomplete and fail closed where
 applicable.
@@ -402,9 +402,12 @@ The following gates remain hard blockers:
    belongs to the exact namespace, production caller, or disposable-topology
    packet evidence, so this client-side state must not be reported as an
    operational tunnel.
-6. **No exact VOLPAROSSA EDT scheduler.** mqvpn's WLB is congestion-aware but
-   is not the required replaceable delivery-time formula. FEC, XOR, and
-   reinjection remain disabled; that does not make WLB an EDT implementation.
+6. **EDT lacks live-topology acceptance.** Production multipath client and
+   exit sessions use the dedicated VOLPAROSSA xquic callback, which chooses
+   exactly one writable path from live RTT, bytes in flight, bandwidth, cwnd,
+   and recent loss. A deterministic native contract test covers both healthy
+   choices and a congested/lossy loser. No disposable topology has yet proved
+   the expected distribution or failover with real relay paths.
 7. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
    framing, correlation, overflow, and wiping, but no disposable topology has
    yet proved an exit-originated inner datagram reaches the Rust client.

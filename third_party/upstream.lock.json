@@ -122,6 +122,19 @@
       ]
     },
     {
+      "target": "xquic",
+      "applies_to_commit": "6957ccf9b9fcb9ab62c43672638876abe47162dc",
+      "applies_after": "patches/volparossa-xquic.patch",
+      "file": "patches/volparossa-xquic-edt.patch",
+      "sha256": "d5ea9f22609b43c59d5d61c38221c19e69fae99c82a54886ad0d3408d3e7722a",
+      "purpose": [
+        "select exactly one writable path by bounded estimated delivery time",
+        "use live RTT, in-flight queue, bandwidth, congestion window and recent loss",
+        "exclude congestion-blocked paths without reinjection, duplication or FEC",
+        "exercise both healthy choices and reject a later congested lossy path in one deterministic native contract test"
+      ]
+    },
+    {
       "target": "mqvpn",
       "applies_to_commit": "607c0df921e2c23bae8bea21cb3c6f2acb2db275",
       "file": "patches/volparossa-mqvpn.patch",
@@ -150,6 +163,17 @@
         "feed exact per-path local tuples into the xquic server",
         "route xquic server egress through caller-owned path descriptors"
       ]
+    },
+    {
+      "target": "mqvpn",
+      "applies_to_commit": "607c0df921e2c23bae8bea21cb3c6f2acb2db275",
+      "applies_after": "patches/volparossa-mqvpn-exit-paths.patch",
+      "file": "patches/volparossa-mqvpn-edt.patch",
+      "sha256": "eeea5b5d09e1225633e0a1fdd1f78c64384cc18bc676088b18bd5f1f41a1f00f",
+      "purpose": [
+        "expose the VOLPAROSSA EDT scheduler as an explicit mqvpn mode",
+        "wire the mode to the exact xquic scheduler callback for client and server settings"
+      ]
     }
   ],
   "audit_findings": {
@@ -163,7 +187,7 @@
     "public_per_path_remote_address_api": true,
     "public_client_delivery_rate_api": true,
     "public_unique_delivered_payload_api": false,
-    "volparossa_edt_scheduler_exact_match": false,
+    "volparossa_edt_scheduler_exact_match": true,
     "public_server_session_correlated_tun_output": true,
     "credential_material_zeroized_on_replace_retire_destroy": true,
     "public_server_bounded_tls_identity_pem_api": true,

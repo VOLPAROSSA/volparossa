@@ -191,5 +191,9 @@ verify_patch mqvpn-exit "$repo_root/patches/volparossa-mqvpn-exit-paths.patch" \
     da22508590dd066852344ac685cb1fc53dfdfaebaed16353ae53f8675f7e1427
 verify_patch xquic "$repo_root/patches/volparossa-xquic.patch" \
     acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b
+verify_patch mqvpn-edt "$repo_root/patches/volparossa-mqvpn-edt.patch" \
+    eeea5b5d09e1225633e0a1fdd1f78c64384cc18bc676088b18bd5f1f41a1f00f
+verify_patch xquic-edt "$repo_root/patches/volparossa-xquic-edt.patch" \
+    d5ea9f22609b43c59d5d61c38221c19e69fae99c82a54886ad0d3408d3e7722a
 
 echo "all upstream commits, trees, tags, gitlinks, origins, bundled files, licenses, and patches match the lock"

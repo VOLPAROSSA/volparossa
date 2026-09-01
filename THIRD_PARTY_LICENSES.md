@@ -333,7 +333,7 @@ The following required contracts and evidence remain unresolved:
    independent signed-reservation verification, preverified affine replay
    handoff, and cryptographic certificate/key/name/SPKI consistency over the
    in-message TLS material;
-5. the exact replaceable VOLPAROSSA estimated-delivery-time scheduler;
+5. disposable-topology proof of the patched EDT scheduler over real relay paths;
 6. disposable-topology proof that an exit-originated inner datagram traverses
    the native queue/poll boundary and reaches the Rust client;
 7. end-to-end dynamic path removal and failover across real relay paths; and

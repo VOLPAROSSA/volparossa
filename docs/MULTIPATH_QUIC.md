@@ -54,6 +54,11 @@ on blocked or unvalidated paths and chooses one eligible path for each datagram.
 congestion control remains authoritative. v1 has no duplication, retransmission outside QUIC, FEC,
 erasure coding, artificial equalization, or adaptive delay.
 
+The production mqvpn client and exit configurations select the dedicated patched xquic
+`volparossa_edt` callback only for Multipath QUIC. It uses current xquic RTT, bytes in flight,
+bandwidth estimate, congestion window/headroom, sendability, and recent loss. The single-path
+general-UDP mode remains on MinRTT and is not a fallback for required multipath.
+
 Path-set validation requires 2–8 paths, distinct path IDs, relays, and interface indexes, the same
 exit, and the configured maximum RTT spread. A path's `data_carrying` status becomes true only after
 unique payload delivery, not after handshake alone.
