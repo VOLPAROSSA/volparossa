@@ -163,6 +163,31 @@ impl ClientPreselectionParameters {
             requested_candidate_bound,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) const fn fields_for_test(
+        &self,
+    ) -> (
+        Transport,
+        ObservationAddressFamily,
+        Bandwidth,
+        Bandwidth,
+        Bandwidth,
+        usize,
+        usize,
+        usize,
+    ) {
+        (
+            self.transport,
+            self.address_family,
+            self.minimum_capacity,
+            self.local_profile_capacity,
+            self.conservative_capacity_ceiling,
+            self.minimum_other_relays,
+            self.maximum_other_relays,
+            self.requested_candidate_bound,
+        )
+    }
 }
 
 /// Detail-free terminal result at the production client-preselection handle.

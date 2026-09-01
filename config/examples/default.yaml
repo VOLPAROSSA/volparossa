@@ -40,6 +40,13 @@ routing:
   maximum_active_contexts: 64
   kill_switch: true
   direct_exit_debug: false
+  client_address_family: ipv4
+  client_minimum_upload_mbps: 10
+  client_minimum_download_mbps: 10
+  client_local_upload_mbps: 100
+  client_local_download_mbps: 100
+  client_capacity_ceiling_upload_mbps: 80
+  client_capacity_ceiling_download_mbps: 80
 
 tcp:
   enabled: true

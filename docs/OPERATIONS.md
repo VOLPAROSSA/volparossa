@@ -206,10 +206,12 @@ service role requires the explicit `network.operator_id` described above. `statu
 `paths`, and `sessions` distinguish configured, validated, active, and real data-carrying paths and
 separate user bytes from tunnel bytes. Output never contains private keys.
 
-At present, a production `connect` cannot complete: real two-leg probe production, helper
-`Prepare`, complete agent orchestration, and client ingress all return or remain
-`Unavailable`/blocked. Operators must not interpret successful configuration, v4 peer-codec tests, or
-service role state as an active route.
+At present, a production `connect` cannot complete. It now starts an operator-profile-bound A1
+preselection attempt and can dispatch the first endpoint-free native Permit only through the exact
+selected control Relay, but it returns `Unavailable` no later than the missing Relay-ready stage.
+Helper `Prepare`, complete native probe/result orchestration, route admission, and client ingress
+remain unavailable or blocked. Operators must not interpret a prepared Permit, successful
+configuration, v4 peer-codec tests, or service role state as an active route.
 
 ## Crash and cleanup
 

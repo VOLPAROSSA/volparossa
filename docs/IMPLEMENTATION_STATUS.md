@@ -1079,7 +1079,17 @@ single clean-build A01--A15 run; the score is not a release claim.
   endpoint, connection, dispatch capability or other reusable authority. The production discovery
   owner consumes these values through the exact-set `FreshEvidenceBatch` join and returns only an
   opaque `PreparedPreselectionEvidence` handoff. Its false native-address-usability result grants no
-  route readiness, and no downstream route-orchestrator consumes the handoff.
+  route readiness. Empty local `Connect` now derives one explicit operator-configured address
+  family and minimum/local/conservative capacity profile, chooses the first enabled transport
+  deterministically (UDP, then TCP, then browser QUIC), and invokes that actor-owned preselection
+  boundary. A private affine native continuation consumes the handoff, mints its independent
+  bounded candidate owner, wraps the first signed native Permit request with the exact selected
+  control-Relay and Exit lineage, and dispatches it through `request_exit_forward` only to that
+  control Relay. Exact wrapper/correlation/operation/Exit checks and protocol verification consume
+  a granted Permit; the remaining candidates, replay cache and verified Permit stay owned together
+  by the local route gate. Connect still returns `Unavailable` at Relay-ready, and disconnect drops
+  this pre-helper owner before helper cleanup. No Relay-ready client dispatcher, helper-prepared
+  native endpoint, native result, route admission or usable dataplane proof exists yet.
   The swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to
@@ -1172,9 +1182,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   upstream seams may consume its affine witness, and only the affine Relay wrapper may consume an
   upstream binding into the signed endpoint-free prefix. The actor invokes the exact join and Fresh
   mint, but the existing hard filter rejects their output until an actual helper-backed native-path
-  sampler proves dataplane address usability. A private callerless native attempt owner can consume
-  the exact Prepared handoff through its test seam while the five-second receipts remain live and
-  mint a separate at-most-30-second endpoint-separated client/wire/verifier/data-Relay affine
+  sampler proves dataplane address usability. A private production-owned native attempt owner now
+  consumes the exact Prepared handoff from local Connect while the five-second receipts remain live
+  and mints a separate at-most-30-second endpoint-separated client/wire/verifier/data-Relay affine
   contract. It does not extend the receipts or claim usability. A separate module-private,
   non-Clone Exit wire-phase owner can retain a Permit through one production-composed server-side
   caller. That caller validates the full forwarding scope, current exact control capability and locally
@@ -1190,13 +1200,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   projection from the `Copy` `ExitEndpointLease` proves no helper-resource custody,
   same-connection provenance or cleanup authority; its exact helper/datapath observation
   deliberately has no constructor. A
-  production client Permit dispatcher, Ready/Result caller, challenge delivery, the actual sampler,
-  helper/datapath authority or evidence, measured capacity/readiness, usability promotion and route
-  admission are absent. No
+  production Ready/Result caller, challenge delivery, the actual sampler, helper/datapath authority
+  or evidence, measured capacity/readiness, usability promotion and route admission are absent. No
   checkbox is closed. Production still publishes no usable relay/exit capability, route
   finalization still fails closed with
-  `ProbeEvidenceUnavailable`, and no downstream route orchestrator or disposable live-network proof
-  for that pipeline exists. This closes no scorecard row; the fixed alpha score remains
+  `ProbeEvidenceUnavailable`, and no disposable live-network proof for the post-Permit pipeline
+  exists. This closes no scorecard row; the fixed alpha score remains
   **11/100 (11%)**.
 - [ ] Bootstrap from peerstore, mDNS, multiple independent built-ins, peerlinks, and signed bootstrap files works.
 - [ ] No bootstrap node or DHT record becomes a unique authority or central node catalogue.
@@ -1223,9 +1232,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   advertisement payload hashes. The prefix, hashes and ceiling grant no measured capacity,
   reservation or dispatch authority. Explicit validity is bounded by freshness, attempt, policy,
   advertisement and actor capability expiry. The discovery actor invokes the bridge into an opaque
-  Prepared handoff. Its private callerless native owner can consume it only through a test seam and
-  mint endpoint-free cryptographic attempt states; no production client caller, helper-backed
-  sampler or helper/datapath evidence consumes or completes them. The mint
+  Prepared handoff. Its private native owner now consumes it from production Connect and mints
+  endpoint-free cryptographic attempt states plus the first control-Relay-forwarded Permit request;
+  no helper-backed sampler or helper/datapath evidence completes them. The mint
   deliberately sets dataplane address usability false, so the actor path remains at zero usable
   route candidates instead of substituting control-plane or stored evidence. A module-private,
   non-Clone Exit wire-phase owner can retain one Permit through the connection-bound,
@@ -1272,15 +1281,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   bind the projected advertisement, direct/forwarded capabilities, Fresh/authenticated/verified
   records and later capability re-resolution. The production discovery owner now exact-set joins
   A1a/A1c proofs, mints the existing private Fresh batch and exposes only an opaque Prepared
-  handoff. A private callerless native attempt owner consumes it in tests and retains affine
-  endpoint-separated contracts. A module-private, non-Clone Exit wire-phase owner can retain one
+  handoff. A private production-owned native attempt owner consumes it from Connect and retains
+  affine endpoint-separated contracts. A module-private, non-Clone Exit wire-phase owner can retain one
   Permit from a connection-bound, production-composed server caller in a bounded idempotency ledger,
   and the current local publisher now serves the exact Exit advertisement, but normal runtime
   issuance remains fail-closed because no production client Permit dispatcher consumes the affine
   client attempt. Its
   typed `ExitEndpointLease` projection provides no helper-resource custody or cleanup authority.
-  There is no production client Permit dispatcher, Ready/Result caller, same-helper prepared-lease
-  provider, post-baseline
+  There is no production Ready/Result caller, same-helper prepared-lease provider, post-baseline
   challenge evidence producer, helper provisioning, actual sampler, measured capacity/readiness,
   datapath evidence or route admission. Its output remains deliberately unusable for selection.
 - [ ] Relay selection measures and scores the complete client-relay-exit path. The second dormant

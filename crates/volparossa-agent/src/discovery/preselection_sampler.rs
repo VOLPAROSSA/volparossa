@@ -991,13 +991,12 @@ mod tests {
         }
         for document in [discovery, status, protocol] {
             assert!(document.contains("network_address_usable = false"));
-            assert!(document.contains("no downstream route"));
         }
         assert!(discovery.contains("opaque prepared-evidence handoff"));
         assert!(status.contains("opaque `PreparedPreselectionEvidence` handoff"));
-        assert!(discovery.contains("private callerless native-preselection child"));
-        assert!(status.contains("private callerless native attempt owner"));
-        assert!(protocol.contains("crate-private, callerless native-preselection child"));
+        assert!(discovery.contains("local `Connect` route gate now invokes"));
+        assert!(status.contains("Empty local `Connect` now derives"));
+        assert!(protocol.contains("local `Connect` route gate now invokes"));
         for document in [discovery, status, protocol] {
             assert!(document.contains("module-private, non-Clone Exit"));
         }

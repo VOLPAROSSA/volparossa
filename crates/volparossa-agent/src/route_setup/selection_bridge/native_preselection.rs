@@ -20,6 +20,9 @@ use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use volparossa_core::{Bandwidth, IpFamily, ServiceRole, Transport as SelectionTransport};
+use volparossa_discovery::{
+    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
+};
 use volparossa_protocol::{
     IssuedNativeProbeStart, MAX_NATIVE_PROBE_CANDIDATES, MAX_NATIVE_PROBE_LIFETIME_MS,
     MIN_NATIVE_PROBE_CANDIDATES, NativeProbeCandidateSet, NativeProbeEndpointBinding,
@@ -35,6 +38,7 @@ use super::{
     FreshEvidenceBatch, FreshPeerEvidence, PreparedPreselectionEvidence, RouteCandidateSnapshot,
     SelectionBridgeError, evidence_batch_matches_snapshot, protocol_transport,
 };
+use crate::discovery::{DiscoveryControlHandle, OutboundReservationError};
 
 const ID_BYTES: usize = 16;
 const KEY_BYTES: usize = 32;
@@ -42,7 +46,7 @@ const ENTROPY_ATTEMPTS: usize = 8;
 
 /// Failure to consume A1 evidence or advance one cryptographic native-probe phase.
 #[derive(Debug, Error)]
-pub(super) enum NativePreselectionError {
+pub(crate) enum NativePreselectionError {
     #[error("prepared A1 evidence is invalid or no longer fresh")]
     InvalidPreparedEvidence,
     #[error("native-preselection actor or exact candidate-set binding is invalid")]
@@ -53,6 +57,14 @@ pub(super) enum NativePreselectionError {
     EntropyUnavailable,
     #[error("native-preselection protocol rejected the transition: {0}")]
     Protocol(#[from] ProtocolError),
+    #[error("native Permit forwarding wrapper is invalid")]
+    InvalidPermitForwarding,
+    #[error("native Permit forwarding transport is unavailable")]
+    PermitTransportUnavailable,
+    #[error("the selected Exit rejected the native Permit")]
+    PermitRejected,
+    #[error("the selected Exit is unavailable for native Permit")]
+    PermitUnavailable,
 }
 
 /// Affine owner of one exact snapshot and every not-yet-dispatched path authority.
@@ -84,6 +96,14 @@ pub(super) struct AwaitingNativePermit {
     start_nonce: [u8; KEY_BYTES],
     candidate: NativeCandidateTemplate,
     deadline: NativeAttemptDeadline,
+}
+
+/// Affine client-hop dispatch through the exact selected control Relay.
+#[must_use = "a native Permit dispatch must be executed or dropped"]
+pub(super) struct NativePermitForwardDispatch {
+    awaiting: AwaitingNativePermit,
+    control_relay_peer: Libp2pPeerId,
+    request: ExitForwardRequest,
 }
 
 /// Verified Exit permit awaiting client-visible readiness from the exact data Relay.
@@ -140,7 +160,9 @@ struct NativeCandidateProjection {
 struct NativeCandidateTemplate {
     candidate_ordinal: u32,
     data_relay: PreselectionActorBinding,
+    control: PreselectionActorBinding,
     exit: PreselectionActorBinding,
+    forward_id: [u8; ID_BYTES],
     preselection_capacity_ceiling: Bandwidth,
 }
 
@@ -372,7 +394,14 @@ where
             candidate: NativeCandidateTemplate {
                 candidate_ordinal,
                 data_relay: relay.actor,
+                control: candidate_set
+                    .control
+                    .clone()
+                    .ok_or(NativePreselectionError::InvalidCandidateSet)?,
                 exit: exit.actor.clone(),
+                forward_id: request_nonce[..ID_BYTES]
+                    .try_into()
+                    .map_err(|_| NativePreselectionError::InvalidCandidateSet)?,
                 preselection_capacity_ceiling: relay
                     .preselection_capacity_ceiling
                     .component_min(exit.preselection_capacity_ceiling),
@@ -397,12 +426,28 @@ impl NativePreselectionAttemptOwner {
     pub(super) fn begin_next(
         &mut self,
     ) -> Result<Option<AwaitingNativePermit>, NativePreselectionError> {
-        self.deadline
-            .ensure_live(crate::unix_millis(), Instant::now())?;
+        self.begin_next_at(crate::unix_millis(), Instant::now())
+    }
+
+    fn begin_next_at(
+        &mut self,
+        trusted_now_ms: u64,
+        trusted_now: Instant,
+    ) -> Result<Option<AwaitingNativePermit>, NativePreselectionError> {
+        self.deadline.ensure_live(trusted_now_ms, trusted_now)?;
         Ok(self
             .pending
             .pop_front()
             .map(PendingNativeProbeAuthority::begin))
+    }
+
+    #[cfg(test)]
+    pub(super) fn begin_next_for_test(
+        &mut self,
+        trusted_now_ms: u64,
+        trusted_now: Instant,
+    ) -> Result<Option<AwaitingNativePermit>, NativePreselectionError> {
+        self.begin_next_at(trusted_now_ms, trusted_now)
     }
 
     #[cfg(test)]
@@ -462,6 +507,33 @@ impl AwaitingNativePermit {
         &self.signed_request
     }
 
+    /// Consume this exact request into a wrapper addressed only to its selected control Relay.
+    pub(super) fn into_forward_dispatch(
+        self,
+    ) -> Result<NativePermitForwardDispatch, NativePreselectionError> {
+        let control_relay_peer = Libp2pPeerId::from_bytes(&self.candidate.control.peer_id)
+            .map_err(|_| NativePreselectionError::InvalidPermitForwarding)?;
+        let exit_peer = Libp2pPeerId::from_bytes(&self.candidate.exit.peer_id)
+            .map_err(|_| NativePreselectionError::InvalidPermitForwarding)?;
+        let request = ExitForwardRequest::new(
+            self.candidate.forward_id.to_vec(),
+            self.candidate.control.node_id.clone(),
+            self.candidate.control.peer_id.clone(),
+            self.candidate.control.public_key.clone(),
+            exit_peer.to_bytes(),
+            self.candidate.exit.node_id.clone(),
+            self.deadline.expires_at_ms,
+            ExitForwardOperation::NativeProbePermit,
+            self.signed_request.clone(),
+        )
+        .map_err(|_| NativePreselectionError::InvalidPermitForwarding)?;
+        Ok(NativePermitForwardDispatch {
+            awaiting: self,
+            control_relay_peer,
+            request,
+        })
+    }
+
     /// Consume the request authority after verifying one exact Exit-signed permit.
     pub(super) fn accept_permit(
         self,
@@ -485,6 +557,68 @@ impl AwaitingNativePermit {
             deadline: self.deadline,
         })
     }
+}
+
+impl NativePermitForwardDispatch {
+    /// Dispatch once through discovery's authenticated control-Relay RPC and consume its response.
+    pub(super) async fn execute(
+        self,
+        discovery: &DiscoveryControlHandle,
+        replay: &mut ReplayCache,
+    ) -> Result<AwaitingNativeRelayReady, NativePreselectionError> {
+        let Self {
+            awaiting,
+            control_relay_peer,
+            request,
+        } = self;
+        let response = discovery
+            .request_exit_forward(control_relay_peer, request)
+            .await
+            .map_err(map_forward_transport)?;
+        accept_forwarded_permit(awaiting, &response, replay)
+    }
+
+    #[cfg(test)]
+    pub(super) fn request_for_test(&self) -> (&Libp2pPeerId, &ExitForwardRequest) {
+        (&self.control_relay_peer, &self.request)
+    }
+}
+
+fn accept_forwarded_permit(
+    awaiting: AwaitingNativePermit,
+    response: &ExitForwardResponse,
+    replay: &mut ReplayCache,
+) -> Result<AwaitingNativeRelayReady, NativePreselectionError> {
+    response
+        .validate()
+        .map_err(|_| NativePreselectionError::InvalidPermitForwarding)?;
+    if response.forward_id() != awaiting.candidate.forward_id
+        || response.validated_operation().ok() != Some(ExitForwardOperation::NativeProbePermit)
+        || response.exit_node_id() != awaiting.candidate.exit.node_id
+        || response.exit_peer_id() != awaiting.candidate.exit.peer_id
+    {
+        return Err(NativePreselectionError::InvalidPermitForwarding);
+    }
+    match response
+        .validated_status()
+        .map_err(|_| NativePreselectionError::InvalidPermitForwarding)?
+    {
+        ForwardStatus::Granted => {
+            let signed_permit = response
+                .signed_responses()
+                .first()
+                .cloned()
+                .ok_or(NativePreselectionError::InvalidPermitForwarding)?;
+            awaiting.accept_permit(signed_permit, replay)
+        }
+        ForwardStatus::Rejected => Err(NativePreselectionError::PermitRejected),
+        ForwardStatus::Unavailable => Err(NativePreselectionError::PermitUnavailable),
+        ForwardStatus::Unspecified => Err(NativePreselectionError::InvalidPermitForwarding),
+    }
+}
+
+fn map_forward_transport(_: OutboundReservationError) -> NativePreselectionError {
+    NativePreselectionError::PermitTransportUnavailable
 }
 
 impl AwaitingNativeRelayReady {
@@ -779,6 +913,7 @@ mod source_contract_tests {
             "pub(super) struct NativePreselectionAttemptOwner {",
             "pub(super) struct PendingNativeProbeAuthority {",
             "pub(super) struct AwaitingNativePermit {",
+            "pub(super) struct NativePermitForwardDispatch {",
             "pub(super) struct AwaitingNativeRelayReady {",
             "pub(super) struct ArmedNativeProbe {",
             "pub(super) struct AwaitingNativeResult {",

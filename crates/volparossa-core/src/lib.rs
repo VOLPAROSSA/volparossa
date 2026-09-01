@@ -15,7 +15,9 @@ pub use advertisement::{
     NetworkMetadata, NodeAdvertisement, NodeCapabilities, NodeQuality, NodeRoles,
     ObservedNetworkOrigin,
 };
-pub use capacity::{Bandwidth, CapacityError, CapacitySnapshot, ConservativeCapacity};
+pub use capacity::{
+    Bandwidth, CapacityError, CapacitySnapshot, ConservativeCapacity, MAX_BANDWIDTH_MBPS,
+};
 pub use id::{
     ClientEphemeralId, FlowId, IdentifierError, LocalProfileId, NodeId, OperatorId, OriginKey,
     PathId, PeerId, ReservationId, RouteContextId,

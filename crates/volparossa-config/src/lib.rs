@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use volparossa_core::OperatorId;
+use volparossa_core::{MAX_BANDWIDTH_MBPS, OperatorId};
 
 /// Wire protocol version implemented by this release.
 pub const PROTOCOL_VERSION: u16 = 4;
@@ -331,6 +331,20 @@ pub struct RoutingConfig {
     pub kill_switch: bool,
     /// Explicitly unsafe development-only client-to-exit bypass.
     pub direct_exit_debug: bool,
+    /// Address family used by the first client route attempt.
+    pub client_address_family: ClientAddressFamily,
+    /// Minimum client-route upload capacity in decimal Mbps.
+    pub client_minimum_upload_mbps: u32,
+    /// Minimum client-route download capacity in decimal Mbps.
+    pub client_minimum_download_mbps: u32,
+    /// Locally available upload capacity used to bound preselection in decimal Mbps.
+    pub client_local_upload_mbps: u32,
+    /// Locally available download capacity used to bound preselection in decimal Mbps.
+    pub client_local_download_mbps: u32,
+    /// Conservative upload ceiling for one preselection attempt in decimal Mbps.
+    pub client_capacity_ceiling_upload_mbps: u32,
+    /// Conservative download ceiling for one preselection attempt in decimal Mbps.
+    pub client_capacity_ceiling_download_mbps: u32,
 }
 
 impl Default for RoutingConfig {
@@ -340,8 +354,26 @@ impl Default for RoutingConfig {
             maximum_active_contexts: 64,
             kill_switch: true,
             direct_exit_debug: false,
+            client_address_family: ClientAddressFamily::Ipv4,
+            client_minimum_upload_mbps: 10,
+            client_minimum_download_mbps: 10,
+            client_local_upload_mbps: 100,
+            client_local_download_mbps: 100,
+            client_capacity_ceiling_upload_mbps: 80,
+            client_capacity_ceiling_download_mbps: 80,
         }
     }
+}
+
+/// Explicit address family for the first client route attempt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAddressFamily {
+    /// Use IPv4 advertisements and native path evidence.
+    #[default]
+    Ipv4,
+    /// Use IPv6 advertisements and native path evidence.
+    Ipv6,
 }
 
 /// Supported TCP tunnel type.
@@ -773,6 +805,50 @@ fn validate_routing(mode: RuntimeMode, routing: &RoutingConfig) -> Result<(), Co
             "direct client-exit connections are development-only and disclose the client address",
         ));
     }
+    for (field, value) in [
+        (
+            "routing.client_minimum_upload_mbps",
+            routing.client_minimum_upload_mbps,
+        ),
+        (
+            "routing.client_minimum_download_mbps",
+            routing.client_minimum_download_mbps,
+        ),
+        (
+            "routing.client_local_upload_mbps",
+            routing.client_local_upload_mbps,
+        ),
+        (
+            "routing.client_local_download_mbps",
+            routing.client_local_download_mbps,
+        ),
+        (
+            "routing.client_capacity_ceiling_upload_mbps",
+            routing.client_capacity_ceiling_upload_mbps,
+        ),
+        (
+            "routing.client_capacity_ceiling_download_mbps",
+            routing.client_capacity_ceiling_download_mbps,
+        ),
+    ] {
+        validate_range(field, value, 1, MAX_BANDWIDTH_MBPS)?;
+    }
+    if routing.client_capacity_ceiling_upload_mbps < routing.client_minimum_upload_mbps
+        || routing.client_capacity_ceiling_download_mbps < routing.client_minimum_download_mbps
+    {
+        return Err(validation(
+            "routing.client_capacity_ceiling_upload_mbps",
+            "client capacity ceiling must satisfy the minimum in both directions",
+        ));
+    }
+    if routing.client_local_upload_mbps < routing.client_capacity_ceiling_upload_mbps
+        || routing.client_local_download_mbps < routing.client_capacity_ceiling_download_mbps
+    {
+        return Err(validation(
+            "routing.client_local_upload_mbps",
+            "local client capacity must satisfy the conservative ceiling in both directions",
+        ));
+    }
     Ok(())
 }
 
@@ -889,6 +965,18 @@ mod tests {
         assert!(!config.roles.exit);
         assert!(config.routing.kill_switch);
         assert!(!config.routing.direct_exit_debug);
+        assert_eq!(
+            config.routing.client_address_family,
+            ClientAddressFamily::Ipv4
+        );
+        assert!(
+            config.routing.client_local_upload_mbps
+                >= config.routing.client_capacity_ceiling_upload_mbps
+        );
+        assert!(
+            config.routing.client_capacity_ceiling_upload_mbps
+                >= config.routing.client_minimum_upload_mbps
+        );
         assert!(config.quic.require_multipath);
         assert_eq!(config.quic.minimum_paths, 2);
         assert!(!config.quic.allow_degraded_single_path);
@@ -1007,6 +1095,31 @@ mod tests {
         config.routing.direct_exit_debug = false;
         config.privacy.persist_domain_logs = true;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn client_route_profile_is_positive_bounded_and_monotone() {
+        let mut config = Config::default();
+        config.routing.client_minimum_upload_mbps = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_capacity_ceiling_download_mbps =
+            config.routing.client_minimum_download_mbps - 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_local_upload_mbps =
+            config.routing.client_capacity_ceiling_upload_mbps - 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_local_download_mbps = MAX_BANDWIDTH_MBPS + 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_address_family = ClientAddressFamily::Ipv6;
+        config.validate().expect("IPv6 client profile validates");
     }
 
     #[test]

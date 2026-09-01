@@ -2,8 +2,9 @@
 //!
 //! Stored advertisements may nominate identities for selection, but they never authorize an RPC.
 //! Every control relay, forwarded exit, and prospective datapath relay is resolved again through
-//! the discovery actor immediately before setup. Production currently stops on the typed
-//! `ExecuteProbe` Unavailable response before helper preparation.
+//! the discovery actor immediately before setup. The local Connect boundary now owns one affine
+//! A1/native-preselection attempt through the first Exit Permit; production still stops before
+//! Relay readiness and helper preparation.
 
 #![allow(
     dead_code,
@@ -34,6 +35,7 @@ use tokio::{
     sync::{Mutex, oneshot, watch},
     time::{Instant, timeout},
 };
+use volparossa_config::{ClientAddressFamily, Config};
 use volparossa_core::{
     Bandwidth, IpFamily, NodeId, ObservedNetworkPrefix, OperatorId, ServiceRole,
     Transport as SelectionTransport, UnixTime,
@@ -68,8 +70,9 @@ use volparossa_wireguard::{HelperContextHandle, PublicWireGuardEndpoint};
 
 use crate::{
     discovery::{
-        AdvertisementPayloadHash, DirectRelayCapability, DiscoveryControlHandle,
-        ForwardedExitCapability, OutboundReservationError,
+        AdvertisementPayloadHash, ClientPreselectionError, ClientPreselectionParameters,
+        DirectRelayCapability, DiscoveryControlHandle, ForwardedExitCapability,
+        OutboundReservationError,
     },
     endpoint_leases::{LocalEndpointLeaseBatch, bind_prepared_endpoint_leases},
     helper::{
@@ -87,6 +90,162 @@ const MAXIMUM_PHASE_LIFETIME_MS: u64 = 30 * 1_000;
 const MAXIMUM_REPLAY_CAPACITY: usize = 65_536;
 const MAXIMUM_RETIREMENT_OWNERS: usize = 64;
 const ID_BYTES: usize = 16;
+
+/// Cloneable single-owner gate for the local Connect route bootstrap.
+#[derive(Clone, Default)]
+pub(crate) struct ClientRouteControl {
+    state: Arc<Mutex<ClientRouteControlState>>,
+}
+
+#[derive(Default)]
+enum ClientRouteControlState {
+    #[default]
+    Idle,
+    Connecting,
+    AwaitingRelayReady(Box<selection_bridge::ClientNativePreselection>),
+}
+
+/// Detail-free current production boundary reached by a successful bootstrap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientRouteProgress {
+    AwaitingRelayReady,
+}
+
+/// Stable local classification for a failed client-route bootstrap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientRouteConnectError {
+    Busy,
+    InvalidProfile,
+    PreselectionUnavailable,
+    NativePermitUnavailable,
+}
+
+impl ClientRouteControl {
+    /// Starts exactly one config-bound preselection and retains its affine continuation.
+    pub(crate) async fn connect(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        {
+            let mut state = self.state.lock().await;
+            if !matches!(*state, ClientRouteControlState::Idle) {
+                return Err(ClientRouteConnectError::Busy);
+            }
+            *state = ClientRouteControlState::Connecting;
+        }
+
+        let result = begin_client_route(config, discovery).await;
+        let mut state = self.state.lock().await;
+        match result {
+            Ok(attempt) => {
+                *state = ClientRouteControlState::AwaitingRelayReady(Box::new(attempt));
+                Ok(ClientRouteProgress::AwaitingRelayReady)
+            }
+            Err(error) => {
+                *state = ClientRouteControlState::Idle;
+                Err(error)
+            }
+        }
+    }
+
+    /// Cancels any pre-route affine ownership; helper cleanup remains a separate fail-closed step.
+    pub(crate) async fn disconnect(&self) {
+        *self.state.lock().await = ClientRouteControlState::Idle;
+    }
+}
+
+async fn begin_client_route(
+    config: &Config,
+    discovery: &DiscoveryControlHandle,
+) -> Result<selection_bridge::ClientNativePreselection, ClientRouteConnectError> {
+    let parameters = client_preselection_parameters(config)?;
+    let prepared = discovery
+        .prepare_client_preselection(parameters)
+        .await
+        .map_err(map_preselection_error)?;
+    selection_bridge::begin_client_native_preselection(prepared, discovery)
+        .await
+        .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)
+}
+
+fn client_preselection_parameters(
+    config: &Config,
+) -> Result<ClientPreselectionParameters, ClientRouteConnectError> {
+    let transport = if config.udp.enabled {
+        Transport::UdpSinglePath
+    } else if config.tcp.enabled {
+        Transport::TcpMptcp
+    } else if config.quic.enabled {
+        Transport::MultipathQuic
+    } else {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    };
+    let address_family = match config.routing.client_address_family {
+        ClientAddressFamily::Ipv4 => volparossa_protocol::ObservationAddressFamily::Ipv4,
+        ClientAddressFamily::Ipv6 => volparossa_protocol::ObservationAddressFamily::Ipv6,
+    };
+    let minimum_capacity = Bandwidth::new(
+        config.routing.client_minimum_upload_mbps,
+        config.routing.client_minimum_download_mbps,
+    )
+    .map_err(|_| ClientRouteConnectError::InvalidProfile)?;
+    let local_profile_capacity = Bandwidth::new(
+        config.routing.client_local_upload_mbps,
+        config.routing.client_local_download_mbps,
+    )
+    .map_err(|_| ClientRouteConnectError::InvalidProfile)?;
+    let conservative_capacity_ceiling = Bandwidth::new(
+        config.routing.client_capacity_ceiling_upload_mbps,
+        config.routing.client_capacity_ceiling_download_mbps,
+    )
+    .map_err(|_| ClientRouteConnectError::InvalidProfile)?;
+    if !conservative_capacity_ceiling.satisfies(minimum_capacity)
+        || !local_profile_capacity.satisfies(conservative_capacity_ceiling)
+    {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    }
+    let multipath = transport != Transport::UdpSinglePath;
+    let minimum_other_relays = if multipath {
+        usize::from(
+            config
+                .selection
+                .minimum_multipath_paths
+                .saturating_sub(1)
+                .max(1),
+        )
+    } else {
+        1
+    };
+    let maximum_other_relays = if multipath {
+        usize::from(
+            config
+                .selection
+                .maximum_multipath_paths
+                .saturating_sub(1)
+                .max(1),
+        )
+    } else {
+        1
+    };
+    Ok(ClientPreselectionParameters::new(
+        transport,
+        address_family,
+        minimum_capacity,
+        local_profile_capacity,
+        conservative_capacity_ceiling,
+        minimum_other_relays,
+        maximum_other_relays,
+        config
+            .network
+            .candidate_pool_size
+            .min(volparossa_selection::MAXIMUM_SELECTION_CANDIDATES),
+    ))
+}
+
+fn map_preselection_error(_: ClientPreselectionError) -> ClientRouteConnectError {
+    ClientRouteConnectError::PreselectionUnavailable
+}
 
 /// A complete actor snapshot projected into a selection-only identity.
 ///
@@ -3416,6 +3575,48 @@ mod tests {
     const NOW_MS: u64 = 1_700_000_000_000;
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
+
+    #[test]
+    fn default_connect_profile_selects_configured_udp_ipv4_capacity_exactly() {
+        let config = Config::default();
+        let parameters = client_preselection_parameters(&config).expect("default route profile");
+        let (transport, family, minimum, local, ceiling, minimum_other, maximum_other, bound) =
+            parameters.fields_for_test();
+        assert_eq!(transport, Transport::UdpSinglePath);
+        assert_eq!(family, volparossa_protocol::ObservationAddressFamily::Ipv4);
+        assert_eq!(minimum, Bandwidth::new(10, 10).expect("minimum"));
+        assert_eq!(local, Bandwidth::new(100, 100).expect("local"));
+        assert_eq!(ceiling, Bandwidth::new(80, 80).expect("ceiling"));
+        assert_eq!((minimum_other, maximum_other), (1, 1));
+        assert_eq!(
+            bound,
+            config
+                .network
+                .candidate_pool_size
+                .min(volparossa_selection::MAXIMUM_SELECTION_CANDIDATES)
+        );
+    }
+
+    #[test]
+    fn connect_profile_uses_ipv6_and_multipath_bounds_without_hidden_fallback() {
+        let mut config = Config::default();
+        config.udp.enabled = false;
+        config.routing.client_address_family = ClientAddressFamily::Ipv6;
+        let parameters = client_preselection_parameters(&config).expect("MPTCP route profile");
+        let (transport, family, _, _, _, minimum_other, maximum_other, _) =
+            parameters.fields_for_test();
+        assert_eq!(transport, Transport::TcpMptcp);
+        assert_eq!(family, volparossa_protocol::ObservationAddressFamily::Ipv6);
+        assert_eq!(minimum_other, 1);
+        assert_eq!(maximum_other, 7);
+
+        config.tcp.enabled = false;
+        config.quic.enabled = false;
+        assert_eq!(
+            client_preselection_parameters(&config).err(),
+            Some(ClientRouteConnectError::InvalidProfile)
+        );
+    }
 
     #[derive(Default)]
     #[allow(

@@ -46,6 +46,7 @@ use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResour
 use helper::HelperClient;
 use policy::load_active_policy;
 use roles::{RoleStore, ensure_private_state_directory};
+use route_setup::ClientRouteControl;
 use secret::read_identity_credential;
 use state::AgentState;
 
@@ -153,6 +154,7 @@ impl Agent {
             config: Arc::clone(&self.config),
             discovery: self.discovery_control.clone(),
             helper: self.helper.clone(),
+            routes: ClientRouteControl::default(),
         };
         let mut control_task = tokio::spawn(serve_control(
             listener,

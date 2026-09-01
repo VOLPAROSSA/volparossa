@@ -240,7 +240,8 @@ the endpoint-free subject/scope binding, opaque bound transcript tokens, process
 correlation, and attempt ceilings. It has no getter or decomposition surface and contains no local
 socket, connection ID, send/arrival event, prefix-derived direct origin, RTT, reachability,
 `FreshPeerEvidence`, route-session, reservation, or dispatch authority. The client-side attempt
-owner is production code, but no downstream route orchestrator invokes its crate-private handle.
+owner is production code. The local `Connect` route gate now invokes its crate-private handle from
+an explicit validated client route profile; this control step alone still grants no route.
 
 The completed A1a owner advances through one actor-owned affine A1c join. It accepts exactly one
 `BoundClientPreselectionTransport` in canonical request order for each retained transcript and
@@ -261,11 +262,11 @@ zero proximity and egress-quality scores, and `network_address_usable = false`. 
 `locally_blocked = false` means only that no local blocklist hit was supplied, not that policy was
 proved. The existing hard filter therefore rejects the batch until a separate native-path sampler
 adds dataplane evidence. The actor calls this join/mint and returns only opaque
-`PreparedPreselectionEvidence`. A crate-private, callerless native-preselection child can consume
-that value through its test seam while the five-second receipts are still live, but no production
-runtime invokes it. Neither the Prepared handoff nor the child grants admission, reservation,
-route, usability or datapath authority. The server-side responders and forwarding wrapper operate
-independently of this client value.
+`PreparedPreselectionEvidence`. A crate-private native-preselection child now consumes that value
+from the production `Connect` gate while the five-second receipts are still live. It mints an
+independent bounded owner and dispatches the first endpoint-free native Permit request only through
+the selected control Relay; neither the Prepared handoff nor this Permit stage grants admission,
+reservation, route, usability or datapath authority.
 
 ### Native-preselection contract and server-side Permit provider
 
@@ -297,14 +298,14 @@ and affine states, never by ordering wall clocks owned by different nodes; each 
 enforces its own bounded lifetime, expiry ceiling and the normal clock-skew policy. Replay failures
 and cross-binding substitutions roll back only the newly admitted entries and fail closed.
 
-The client-side native attempt, ExitReady and ExitResult remain callerless contract/test
-foundations. The Exit now composes one production server-side Permit handler on the existing
-forwarded control protocol. Relay and Exit runtimes now install their exact signed local service
-advertisement and bounded provider indexes from explicit configuration and current capacity. This
-opens the handler's local-advertisement gate, but the advertisement remains an untrusted claim and
-not usable datapath evidence. A separate discovery transport integration proves connection-bound
-response handoff; no production client Permit dispatcher or test yet completes the whole handler
-exchange end to end. The handler accepts
+The client-side native attempt now has one production Permit dispatcher; ExitReady and ExitResult
+remain callerless contract/test foundations. The Exit composes one production server-side Permit
+handler on the existing forwarded control protocol. Relay and Exit runtimes install their exact
+signed local service advertisement and bounded provider indexes from explicit configuration and
+current capacity. This opens the handler's local-advertisement gate, but the advertisement remains
+an untrusted claim and not usable datapath evidence. A separate discovery transport integration
+proves connection-bound response handoff; no test yet completes the whole handler exchange end to
+end. The handler accepts
 only the exact signed native Permit request received from an authenticated control Relay, rechecks
 the current full Relay capability and exact locally served Exit advertisement, and consumes a
 purpose-specific token for that exact libp2p `ConnectionId` when handing the response back.
@@ -319,8 +320,8 @@ The module-private, non-Clone Exit readiness/result owner
 still uses raw test-seam data-Relay identities. Its typed projection from the `Copy`
 `ExitEndpointLease` proves neither helper-resource custody nor same-connection helper-runtime
 provenance or cleanup authority, and the private helper/datapath observation has no constructor.
-There is no production client Permit dispatcher, Ready/Result caller, helper lifecycle/cleanup
-owner, challenge delivery, live WireGuard probe, measured readiness/capacity, terminal
+There is no production Ready/Result caller, helper lifecycle/cleanup owner, challenge delivery,
+live WireGuard probe, measured readiness/capacity, terminal
 helper-evidence producer, usability promotion or route admission. Permit, ExitReady and ExitResult
 each cap their own lifetime at the lower of the parent expiry and local production time plus 30
 seconds. Private phase owners retain the process-unique Exit boot incarnation and reject

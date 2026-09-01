@@ -25,6 +25,7 @@ use volparossa_local_control::{
 use crate::{
     discovery::{DiscoveryControlError, DiscoveryControlHandle, RoleApplyError},
     helper::HelperClient,
+    route_setup::{ClientRouteConnectError, ClientRouteControl, ClientRouteProgress},
     state::AgentState,
     unix_millis,
 };
@@ -43,6 +44,8 @@ pub struct ControlContext {
     pub discovery: DiscoveryControlHandle,
     /// Narrow helper client.
     pub helper: HelperClient,
+    /// Affine owner of the current client route bootstrap, if any.
+    pub routes: ClientRouteControl,
 }
 
 /// Listener plus an inode-bound cleanup guard.
@@ -249,31 +252,65 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
 }
 
 async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
-    let mut state = context.state.write().await;
-    if !state.policy_active(unix_millis()) {
-        state.record_policy_rejection();
-        state.log(LogLevel::Warn, "CONNECT_POLICY_UNAVAILABLE", unix_millis());
-        return response(
-            request_id,
-            ControlResult::Policy,
-            "POLICY_UNAVAILABLE",
-            control_response::Payload::Ack(Empty {}),
-        );
+    {
+        let mut state = context.state.write().await;
+        if !state.policy_active(unix_millis()) {
+            state.record_policy_rejection();
+            state.log(LogLevel::Warn, "CONNECT_POLICY_UNAVAILABLE", unix_millis());
+            return response(
+                request_id,
+                ControlResult::Policy,
+                "POLICY_UNAVAILABLE",
+                control_response::Payload::Ack(Empty {}),
+            );
+        }
     }
-    state.log(
-        LogLevel::Warn,
-        "CONNECT_DATAPLANE_UNAVAILABLE",
-        unix_millis(),
-    );
+    let (result, diagnostic, log_code) = match context
+        .routes
+        .connect(&context.config, &context.discovery)
+        .await
+    {
+        Ok(ClientRouteProgress::AwaitingRelayReady) => (
+            ControlResult::Unavailable,
+            "NATIVE_RELAY_READY_UNAVAILABLE",
+            "CONNECT_NATIVE_PERMIT_READY",
+        ),
+        Err(ClientRouteConnectError::Busy) => (
+            ControlResult::InvalidState,
+            "CONNECT_ALREADY_IN_PROGRESS",
+            "CONNECT_ALREADY_IN_PROGRESS",
+        ),
+        Err(ClientRouteConnectError::InvalidProfile) => (
+            ControlResult::InvalidRequest,
+            "CLIENT_ROUTE_PROFILE_INVALID",
+            "CONNECT_PROFILE_INVALID",
+        ),
+        Err(ClientRouteConnectError::PreselectionUnavailable) => (
+            ControlResult::Unavailable,
+            "PRESELECTION_UNAVAILABLE",
+            "CONNECT_PRESELECTION_UNAVAILABLE",
+        ),
+        Err(ClientRouteConnectError::NativePermitUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_PERMIT_UNAVAILABLE",
+            "CONNECT_NATIVE_PERMIT_UNAVAILABLE",
+        ),
+    };
+    context
+        .state
+        .write()
+        .await
+        .log(LogLevel::Warn, log_code, unix_millis());
     response(
         request_id,
-        ControlResult::Unavailable,
-        "DATAPLANE_UNAVAILABLE",
+        result,
+        diagnostic,
         control_response::Payload::Ack(Empty {}),
     )
 }
 
 async fn disconnect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
+    context.routes.disconnect().await;
     if context.helper.cleanup_owned().await.is_ok() {
         let mut state = context.state.write().await;
         if state.clear_after_helper_cleanup(&context.config).is_err() {

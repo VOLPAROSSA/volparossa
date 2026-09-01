@@ -13,8 +13,8 @@ use std::{collections::HashSet, time::Duration};
 use crate::discovery::{
     AdvertisementPayloadHash, BoundPreselectionFreshnessProofBatch,
     CompletedPreselectionFreshnessAttempt, CoolingPreselectionAttemptGate,
-    DirectRelayCandidateSnapshot, DirectRelayCapability, ForwardedExitCandidateSnapshot,
-    ForwardedExitCapability, PreselectionTranscriptFreshnessFacts,
+    DirectRelayCandidateSnapshot, DirectRelayCapability, DiscoveryControlHandle,
+    ForwardedExitCandidateSnapshot, ForwardedExitCapability, PreselectionTranscriptFreshnessFacts,
     PreselectionTransportFreshnessFacts, RouteCandidateAdvertisement, RouteCandidatePolicySnapshot,
     RouteCandidateSnapshot,
 };
@@ -834,6 +834,40 @@ struct JoinedPreselectionFreshEvidence {
 pub(crate) struct PreparedPreselectionEvidence {
     snapshot: RouteCandidateSnapshot,
     evidence_batch: FreshEvidenceBatch,
+}
+
+/// Affine production continuation after the first Exit Permit crossed its selected control Relay.
+///
+/// The remaining candidates, replay cache, and verified Permit stay together for the later
+/// Relay-ready/helper-backed stages; none is projected into the local control protocol.
+#[must_use = "native client preselection must remain owned by the route coordinator"]
+pub(crate) struct ClientNativePreselection {
+    _owner: native_preselection::NativePreselectionAttemptOwner,
+    _replay: volparossa_protocol::ReplayCache,
+    _awaiting_relay_ready: native_preselection::AwaitingNativeRelayReady,
+}
+
+/// Consume one actor-owned A1 handoff and dispatch its first native Permit only through the exact
+/// selected control Relay.
+pub(crate) async fn begin_client_native_preselection(
+    prepared: PreparedPreselectionEvidence,
+    discovery: &DiscoveryControlHandle,
+) -> Result<ClientNativePreselection, native_preselection::NativePreselectionError> {
+    let mut owner = native_preselection::begin_native_preselection(prepared)?;
+    let awaiting = owner
+        .begin_next()?
+        .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+    let dispatch = awaiting.into_forward_dispatch()?;
+    let replay_capacity = volparossa_protocol::MAX_NATIVE_PROBE_CANDIDATES
+        .checked_mul(3)
+        .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+    let mut replay = volparossa_protocol::ReplayCache::new(replay_capacity)?;
+    let awaiting_relay_ready = dispatch.execute(discovery, &mut replay).await?;
+    Ok(ClientNativePreselection {
+        _owner: owner,
+        _replay: replay,
+        _awaiting_relay_ready: awaiting_relay_ready,
+    })
 }
 
 /// Terminal proof-to-evidence rejection with cooldown ownership retained.
@@ -4678,6 +4712,41 @@ mod tests {
         )
     }
 
+    fn assert_first_native_permit_dispatch(
+        owner: &mut native_preselection::NativePreselectionAttemptOwner,
+        candidate_set: &volparossa_protocol::NativeProbeCandidateSet,
+        minted_at_ms: u64,
+        minted_at: Instant,
+        expected_expiry: u64,
+    ) {
+        let awaiting = owner
+            .begin_next_for_test(minted_at_ms + 1, minted_at + Duration::from_millis(1))
+            .expect("live first candidate")
+            .expect("first candidate exists");
+        let dispatch = awaiting
+            .into_forward_dispatch()
+            .expect("exact client-hop wrapper");
+        let (control_peer, request) = dispatch.request_for_test();
+        let control = candidate_set.control.as_ref().expect("control actor");
+        let exit = candidate_set.exit.as_ref().expect("Exit actor");
+        assert_eq!(control_peer.to_bytes(), control.peer_id);
+        assert_eq!(request.control_relay_node_id(), control.node_id);
+        assert_eq!(request.control_relay_peer_id(), control.peer_id);
+        assert_eq!(request.control_relay_public_key(), control.public_key);
+        assert_eq!(request.exit_node_id(), exit.node_id);
+        assert_eq!(request.exit_peer_id(), exit.peer_id);
+        assert_ne!(request.control_relay_peer_id(), request.exit_peer_id());
+        assert_eq!(
+            request.validated_operation().expect("native operation"),
+            volparossa_discovery::ExitForwardOperation::NativeProbePermit
+        );
+        assert_eq!(request.deadline_unix_ms(), expected_expiry);
+        let envelope: SignedEnvelope =
+            decode_canonical(request.canonical_request(), MAX_CONTROL_MESSAGE_SIZE)
+                .expect("signed native Permit request");
+        assert_eq!(request.forward_id(), &envelope.nonce[..ID_BYTES]);
+    }
+
     #[test]
     fn exact_preselection_proofs_mint_conservative_affine_fresh_batch() {
         let (snapshot, _) = snapshot_fixture();
@@ -4813,13 +4882,13 @@ mod tests {
         };
         let minted_at_ms = NOW_MS + 4_999;
         let minted_at = Instant::now();
-        let owner = native_preselection::begin_native_preselection_for_test(
+        let mut owner = native_preselection::begin_native_preselection_for_test(
             prepared,
             minted_at_ms,
             minted_at,
         )
         .expect("live handoff must mint native owner");
-        let candidate_set = owner.candidate_set_for_test();
+        let candidate_set = owner.candidate_set_for_test().clone();
         assert_eq!(candidate_set.preselection_batch_id, EVIDENCE_BATCH_BYTES);
         assert_eq!(candidate_set.data_relays.len(), 3);
         assert_eq!(
@@ -4868,6 +4937,14 @@ mod tests {
             assert!(probe_ids.insert(scope.probe_id));
             assert!(session_ids.insert(scope.client_session_id));
         }
+
+        assert_first_native_permit_dispatch(
+            &mut owner,
+            &candidate_set,
+            minted_at_ms,
+            minted_at,
+            expected_expiry,
+        );
 
         let (snapshot, _) = snapshot_fixture();
         let completed = preselection_freshness_attempt(

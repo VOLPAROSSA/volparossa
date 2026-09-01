@@ -207,9 +207,14 @@ production deliberately publishes no usable Relay/Exit capability before datapla
 proved, so no successful production response or readiness claim follows from this lifecycle
 connection yet. The control-signed prefix wrapper, actor-owned A1a attempt, exact A1a/A1c join and
 opaque prepared-evidence handoff are implemented and driven by the production discovery actor.
-A private callerless native-preselection child can consume that exact handoff through its test seam,
-but no production runtime or route orchestrator invokes it. The private Fresh batch deliberately
-lacks native dataplane-address usability and therefore grants no capacity or route authority.
+The local `Connect` route gate now invokes that handoff from an explicit validated client profile.
+Its affine native-preselection child mints the first endpoint-free Permit request and sends an
+exact forwarding wrapper only to the selected control Relay through the actor-owned client RPC.
+The wrapper binds the control Relay, Exit, request-nonce-derived forwarding ID and native deadline;
+a granted response is rebound to those exact fields and cryptographically consumed. Remaining
+candidates, replay state and the verified Permit stay affine for the later stage. The private Fresh
+batch still lacks native dataplane-address usability and therefore grants no capacity or route
+authority; Relay readiness, helper preparation and native result dispatch remain absent.
 
 The agent now contains an actor-owned A1a attempt lineage. Snapshot construction privately mints
 an endpoint-free, non-derived subject set from the exact freshly revalidated stored signed
@@ -424,8 +429,9 @@ and transcript proofs, but deliberately cannot prove native dataplane usability.
 batch is still subject to the existing observed-origin diversity hard filter before route planning.
 
 An actor-invoked private boundary consumes one non-cloneable `FreshEvidenceBatch` into opaque
-`PreparedPreselectionEvidence`. A separate crate-private native-preselection child can consume that
-prepared value only through its test seam; the downstream phase-A planner remains unconnected. The
+`PreparedPreselectionEvidence`. A separate crate-private native-preselection child now consumes
+that prepared value from the production `Connect` route gate; the older downstream phase-A planner
+remains unconnected. The
 private production mint requires the
 exact retained A1a candidate set and one purpose-consumed A1c transport plus cryptographic
 transcript for every request. It rejects count, order, request hash, actor, forwarded-control,
@@ -450,10 +456,10 @@ and egress-quality scores, and no native dataplane-address proof. `locally_block
 only that this proof input supplied no local blocklist hit; it is not affirmative policy evidence.
 Consequently the existing hard filter rejects every such batch until an actual helper-backed
 native-path sampler supplies the missing dataplane evidence. The discovery actor calls the bridge
-only through the opaque Prepared handoff; no downstream route-orchestrator consumes it, and it
-grants no reservation or route authority.
+only through the opaque Prepared handoff; the Connect route gate consumes it only into the native
+Permit stage, which grants no reservation or route authority.
 
-The callerless child consumes Prepared evidence while its signed five-second receipts remain live,
+The production-owned child consumes Prepared evidence while its signed five-second receipts remain live,
 then discards all control-plane reachability observations and mints an independently expiring
 native attempt of at most 30 seconds. It binds an endpoint-free set of two to nine candidates—the
 control Relay plus one to eight alternatives—and one affine authority per exact Relay-to-Exit path.
@@ -472,7 +478,7 @@ readiness state consumes a typed projection from the `Copy` `ExitEndpointLease`;
 proves neither helper-resource custody nor same-connection runtime provenance or cleanup authority.
 Its result consumes a private exact-runtime/context/commitment and challenge observation with no
 constructor. There is still no production local Exit-advertisement/capability producer which can
-open this responder gate, client Permit dispatcher, Ready/Result caller, helper
+open this responder gate, Ready/Result caller, helper
 provisioning/lifecycle/cleanup ownership, one-shot challenge delivery, live WireGuard probe,
 measured readiness/capacity, terminal helper-evidence producer, usability promotion or route
 admission. Generic wire values and the generic envelope signer are not production actor authority.
@@ -537,8 +543,9 @@ requires no helper, network-state or journal cleanup because reservation dispatc
 
 The older scalar complete-path second stage remains only as a clearly dormant test boundary; the
 new plan neither calls nor trusts it. C2c supplies the private ownership and actor-resolution link
-to the existing phase-B transaction, but no production route orchestrator consumes the new opaque
-Prepared handoff or drives the callerless native-probe contract with real helper/Exit providers.
+to the existing phase-B transaction, but production Connect currently consumes the Prepared
+handoff only through the first native Permit and does not drive Relay-ready, helper-backed native
+probing or phase-B with real providers.
 Consequently the real
 resolver/transport path is not invoked by phase A in production. C2c adds no new wire,
 provider or helper implementation, so it causes no production network/host mutation, and the
