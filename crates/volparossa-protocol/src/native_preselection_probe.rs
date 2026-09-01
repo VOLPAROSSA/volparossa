@@ -24,13 +24,10 @@ use crate::{
 const ID_LENGTH: usize = 16;
 const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 32;
-/// Minimum preselection pool: the control Relay plus one alternative data Relay.
-pub const MIN_NATIVE_PROBE_CANDIDATES: usize = 2;
-/// Maximum preselection pool: the control Relay plus eight alternatives.
-///
-/// This nine-candidate pool is not the admitted route's independent maximum of eight simultaneous
-/// paths.
-pub const MAX_NATIVE_PROBE_CANDIDATES: usize = 9;
+/// Minimum exact selected data-Relay set for one native attempt.
+pub const MIN_NATIVE_PROBE_CANDIDATES: usize = 1;
+/// Maximum exact selected data-Relay set for one native attempt.
+pub const MAX_NATIVE_PROBE_CANDIDATES: usize = 8;
 /// Maximum helper path identity admitted inside one shared native route context.
 pub const MAX_NATIVE_PROBE_PATHS: usize = 8;
 /// Hard wall-clock lifetime of one native-preselection attempt and every message within it.
@@ -733,14 +730,14 @@ impl NativeProbeCandidateSet {
         )?;
         if !(MIN_NATIVE_PROBE_CANDIDATES..=MAX_NATIVE_PROBE_CANDIDATES)
             .contains(&self.data_relays.len())
-            || self.data_relays.first() != Some(control)
             || same_actor(control, exit)
         {
             return Err(ProtocolError::InvalidField("native candidate set shape"));
         }
         for (index, relay) in self.data_relays.iter().enumerate() {
             relay.validate("native candidate data relay")?;
-            if same_actor(relay, exit)
+            if same_actor(relay, control)
+                || same_actor(relay, exit)
                 || self.data_relays[..index]
                     .iter()
                     .any(|earlier| same_actor(earlier, relay))
@@ -2246,12 +2243,13 @@ mod tests {
             let control_actor = actor(&control, 2);
             let relay_actor = actor(&relay, 3);
             let exit_actor = actor(&exit, 4);
+            let first_data_relay = actor(&SigningKey::from_bytes(&[5; 32]), 5);
             let set = NativeProbeCandidateSet {
                 protocol_version: PROTOCOL_VERSION,
                 preselection_batch_id: vec![9; 16],
                 control: Some(control_actor.clone()),
                 exit: Some(exit_actor.clone()),
-                data_relays: vec![control_actor.clone(), relay_actor.clone()],
+                data_relays: vec![first_data_relay, relay_actor.clone()],
                 transport: Transport::TcpMptcp as i32,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 policy_version: 7,
@@ -2524,7 +2522,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_set_is_canonical_endpoint_free_and_control_first() {
+    fn candidate_set_is_canonical_endpoint_free_and_control_separate() {
         let fixture = Fixture::new();
         let set = NativeProbeCandidateSet {
             protocol_version: PROTOCOL_VERSION,
@@ -2532,7 +2530,7 @@ mod tests {
             control: fixture.scope.control.clone(),
             exit: fixture.scope.exit.clone(),
             data_relays: vec![
-                fixture.scope.control.clone().expect("control"),
+                actor(&SigningKey::from_bytes(&[5; 32]), 5),
                 fixture.scope.data_relay.clone().expect("relay"),
             ],
             transport: fixture.scope.transport,
@@ -2548,16 +2546,23 @@ mod tests {
             set
         );
         assert!(set.validate().is_ok());
-        let mut wrong_first = set.clone();
-        wrong_first.data_relays.swap(0, 1);
-        assert!(wrong_first.validate().is_err());
+        let mut reordered = set.clone();
+        reordered.data_relays.swap(0, 1);
+        assert!(reordered.validate().is_ok());
+        assert_ne!(
+            native_probe_candidate_set_hash(&reordered).expect("reordered hash"),
+            native_probe_candidate_set_hash(&set).expect("original hash")
+        );
+        let mut control_as_data = set;
+        control_as_data.data_relays[0] = control_as_data.control.clone().expect("control");
+        assert!(control_as_data.validate().is_err());
     }
 
     #[test]
     fn nine_preselection_candidates_are_distinct_from_the_eight_path_route_bound() {
         let fixture = Fixture::new();
         let control = fixture.scope.control.clone().expect("control");
-        let mut candidates = vec![control.clone()];
+        let mut candidates = Vec::new();
         for seed in 10_u8..=17 {
             candidates.push(actor(&SigningKey::from_bytes(&[seed; 32]), seed));
         }
@@ -2574,12 +2579,12 @@ mod tests {
             policy_hash: fixture.scope.policy_hash.clone(),
             policy_expires_at_ms: fixture.scope.policy_expires_at_ms,
         };
-        assert!(set.validate().is_ok(), "control plus eight alternatives");
+        assert!(set.validate().is_ok(), "eight selected data Relays");
 
         let mut ninth_alternative = actor(&SigningKey::from_bytes(&[18; 32]), 18);
         ninth_alternative.advertisement_sequence = 18;
-        set.data_relays.push(ninth_alternative);
-        assert!(set.validate().is_err(), "ten candidates must fail closed");
+        set.data_relays.push(ninth_alternative.clone());
+        assert!(set.validate().is_err(), "nine data Relays must fail closed");
 
         let mut bounded_ordinal = fixture.scope.clone();
         bounded_ordinal.required_path_count = 8;
@@ -2587,7 +2592,7 @@ mod tests {
         bounded_ordinal.data_relay = Some(candidates[7].clone());
         assert!(bounded_ordinal.validate().is_ok());
         bounded_ordinal.candidate_ordinal = 9;
-        bounded_ordinal.data_relay = Some(candidates[8].clone());
+        bounded_ordinal.data_relay = Some(ninth_alternative);
         assert!(bounded_ordinal.validate().is_err());
     }
 

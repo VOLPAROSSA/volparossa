@@ -568,19 +568,9 @@ fn client_preselection_plan(
         return Err(ClientRouteConnectError::InvalidProfile);
     }
     let multipath = transport != Transport::UdpSinglePath;
-    let minimum_other_relays = if multipath {
-        required_native_paths.saturating_sub(1)
-    } else {
-        1
-    };
+    let minimum_other_relays = if multipath { required_native_paths } else { 1 };
     let maximum_other_relays = if multipath {
-        usize::from(
-            config
-                .selection
-                .maximum_multipath_paths
-                .saturating_sub(1)
-                .max(1),
-        )
+        usize::from(config.selection.maximum_multipath_paths.max(1))
     } else {
         1
     };

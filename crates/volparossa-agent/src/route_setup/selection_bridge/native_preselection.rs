@@ -217,6 +217,29 @@ struct NativeAttemptInputs {
     exit: NativeCandidateProjection,
 }
 
+/// Exact selected data-Relay identity and order supplied by route planning.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(super) struct NativeDataRelayIdentity {
+    node_id: [u8; KEY_BYTES],
+    peer_id: Vec<u8>,
+}
+
+impl NativeDataRelayIdentity {
+    /// Construct one selected identity from already authenticated plan material.
+    pub(super) fn new(
+        node_id: [u8; KEY_BYTES],
+        peer_id: Vec<u8>,
+    ) -> Result<Self, NativePreselectionError> {
+        if node_id == [0; KEY_BYTES]
+            || peer_id.is_empty()
+            || Libp2pPeerId::from_bytes(&peer_id).is_err()
+        {
+            return Err(NativePreselectionError::InvalidCandidateSet);
+        }
+        Ok(Self { node_id, peer_id })
+    }
+}
+
 #[derive(Clone, Copy)]
 struct NativeAttemptDeadline {
     created_at_ms: u64,
@@ -243,11 +266,11 @@ impl NativeAttemptDeadline {
 /// Consume one opaque A1 handoff and mint a fresh, independently expiring sampler owner.
 pub(super) fn begin_native_preselection(
     prepared: PreparedPreselectionEvidence,
-    required_path_count: usize,
+    selected_data_relays: &[NativeDataRelayIdentity],
 ) -> Result<NativePreselectionAttemptOwner, NativePreselectionError> {
     begin_native_preselection_at(
         prepared,
-        required_path_count,
+        selected_data_relays,
         crate::unix_millis(),
         Instant::now(),
         &mut OsRng,
@@ -256,7 +279,7 @@ pub(super) fn begin_native_preselection(
 
 fn begin_native_preselection_at<R>(
     prepared: PreparedPreselectionEvidence,
-    required_path_count: usize,
+    selected_data_relays: &[NativeDataRelayIdentity],
     trusted_now_ms: u64,
     trusted_now: Instant,
     rng: &mut R,
@@ -269,7 +292,8 @@ where
         candidate_set,
         relays,
         exit,
-    } = consume_prepared_handoff(prepared, trusted_now_ms)?;
+    } = consume_prepared_handoff(prepared, selected_data_relays, trusted_now_ms)?;
+    let required_path_count = selected_data_relays.len();
     if !(1..=MAX_NATIVE_PROBE_PATHS).contains(&required_path_count)
         || required_path_count > relays.len()
         || matches!(
@@ -305,6 +329,7 @@ where
 
 fn consume_prepared_handoff(
     prepared: PreparedPreselectionEvidence,
+    selected_data_relays: &[NativeDataRelayIdentity],
     trusted_now_ms: u64,
 ) -> Result<NativeAttemptInputs, NativePreselectionError> {
     let PreparedPreselectionEvidence {
@@ -331,7 +356,7 @@ fn consume_prepared_handoff(
         .ok_or(NativePreselectionError::InvalidCandidateSet)?;
     let control_index = unique_control_index(&entries, control_binding)?;
     let control = entries.remove(control_index);
-    if !(MIN_NATIVE_PROBE_CANDIDATES..=MAX_NATIVE_PROBE_CANDIDATES).contains(&(entries.len() + 1))
+    if !(MIN_NATIVE_PROBE_CANDIDATES..=MAX_NATIVE_PROBE_CANDIDATES).contains(&entries.len())
         || entries
             .iter()
             .any(|candidate| candidate.role != ServiceRole::Relay)
@@ -341,18 +366,33 @@ fn consume_prepared_handoff(
 
     let exit = project_candidate(exit)?;
     let control = project_candidate(control)?;
-    let mut relays = Vec::with_capacity(entries.len() + 1);
-    relays.push(control);
-    for candidate in entries {
-        relays.push(project_candidate(candidate)?);
+    let mut available_relays = entries
+        .into_iter()
+        .map(project_candidate)
+        .collect::<Result<Vec<_>, _>>()?;
+    if !(MIN_NATIVE_PROBE_CANDIDATES..=MAX_NATIVE_PROBE_CANDIDATES)
+        .contains(&selected_data_relays.len())
+        || selected_data_relays.iter().collect::<HashSet<_>>().len() != selected_data_relays.len()
+    {
+        return Err(NativePreselectionError::InvalidCandidateSet);
     }
-    validate_shared_scope(&snapshot, &relays, &exit)?;
+    let mut relays = Vec::with_capacity(selected_data_relays.len());
+    for selected in selected_data_relays {
+        let Some(index) = available_relays.iter().position(|candidate| {
+            candidate.actor.node_id.as_slice() == selected.node_id
+                && candidate.actor.peer_id == selected.peer_id
+        }) else {
+            return Err(NativePreselectionError::InvalidCandidateSet);
+        };
+        relays.push(available_relays.remove(index));
+    }
+    validate_shared_scope(&snapshot, &control, &relays, &exit)?;
 
     let policy = snapshot.policy();
     let candidate_set = NativeProbeCandidateSet {
         protocol_version: volparossa_protocol::PROTOCOL_VERSION,
         preselection_batch_id: batch_id.0.to_vec(),
-        control: Some(relays[0].actor.clone()),
+        control: Some(control.actor.clone()),
         exit: Some(exit.actor.clone()),
         data_relays: relays
             .iter()
@@ -504,13 +544,50 @@ pub(super) fn begin_native_preselection_for_test(
     trusted_now_ms: u64,
     trusted_now: Instant,
 ) -> Result<NativePreselectionAttemptOwner, NativePreselectionError> {
-    begin_native_preselection_at(
-        prepared,
-        required_path_count,
-        trusted_now_ms,
-        trusted_now,
-        &mut OsRng,
-    )
+    let selected = selected_data_relay_identities(&prepared, required_path_count)?;
+    begin_native_preselection_at(prepared, &selected, trusted_now_ms, trusted_now, &mut OsRng)
+}
+
+#[cfg(test)]
+/// Project a deterministic exact subset for native-preselection unit fixtures.
+pub(super) fn selected_data_relay_identities(
+    prepared: &PreparedPreselectionEvidence,
+    selected_count: usize,
+) -> Result<Vec<NativeDataRelayIdentity>, NativePreselectionError> {
+    if !(MIN_NATIVE_PROBE_CANDIDATES..=MAX_NATIVE_PROBE_CANDIDATES).contains(&selected_count) {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
+    let exit = prepared
+        .evidence_batch
+        .entries
+        .iter()
+        .find(|entry| entry.role == ServiceRole::Exit)
+        .ok_or(NativePreselectionError::InvalidCandidateSet)?;
+    let control = exit
+        .forwarded_control
+        .as_ref()
+        .ok_or(NativePreselectionError::InvalidCandidateSet)?;
+    let mut selected = Vec::with_capacity(selected_count);
+    for candidate in prepared.evidence_batch.entries.iter().filter(|entry| {
+        entry.role == ServiceRole::Relay
+            && (entry.node_id != control.node_id || entry.peer_id != control.peer_id)
+    }) {
+        let peer = Libp2pPeerId::from_str(candidate.peer_id.as_str())
+            .map_err(|_| NativePreselectionError::InvalidCandidateSet)?;
+        selected.push(NativeDataRelayIdentity::new(
+            node_id_from_public_key(&candidate.capability_public_key),
+            peer.to_bytes(),
+        )?);
+        if selected.len() == selected_count {
+            break;
+        }
+    }
+    if selected.len() != selected_count
+        || selected.iter().collect::<HashSet<_>>().len() != selected.len()
+    {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
+    Ok(selected)
 }
 
 impl NativePreselectionAttemptOwner {
@@ -1207,6 +1284,7 @@ fn project_candidate(
 
 fn validate_shared_scope(
     snapshot: &RouteCandidateSnapshot,
+    control: &NativeCandidateProjection,
     relays: &[NativeCandidateProjection],
     exit: &NativeCandidateProjection,
 ) -> Result<(), NativePreselectionError> {
@@ -1214,7 +1292,8 @@ fn validate_shared_scope(
         .first()
         .ok_or(NativePreselectionError::InvalidCandidateSet)?;
     let policy = snapshot.policy();
-    if first.role != ServiceRole::Relay
+    if control.role != ServiceRole::Relay
+        || first.role != ServiceRole::Relay
         || exit.role != ServiceRole::Exit
         || relays.iter().any(|candidate| {
             candidate.role != ServiceRole::Relay
@@ -1224,6 +1303,11 @@ fn validate_shared_scope(
                 || candidate.policy_hash != first.policy_hash
                 || candidate.policy_expires_at_ms != first.policy_expires_at_ms
         })
+        || control.transport != first.transport
+        || control.address_family != first.address_family
+        || control.policy_version != first.policy_version
+        || control.policy_hash != first.policy_hash
+        || control.policy_expires_at_ms != first.policy_expires_at_ms
         || exit.transport != first.transport
         || exit.address_family != first.address_family
         || exit.policy_version != first.policy_version

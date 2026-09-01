@@ -589,6 +589,8 @@ struct ExitNativeReadyAttempt {
     helper_owner: RuntimeBoundPreparedLeaseBatch,
     exit_leases: Vec<ExitEndpointLease>,
     ready_paths: HashSet<u32>,
+    pending_activations: HashMap<u32, LeaseActivation>,
+    activated: bool,
     candidate_set_hash: [u8; 32],
     expires_at_ms: u64,
 }
@@ -5330,6 +5332,9 @@ impl DiscoveryRuntime {
                 .is_ok()
             {
                 destroyed += 1;
+            } else {
+                let previous = self.exit_native_ready_attempts.insert(attempt_id, attempt);
+                debug_assert!(previous.is_none(), "expired Exit attempt was removed above");
             }
         }
         destroyed
@@ -5395,6 +5400,7 @@ impl DiscoveryRuntime {
                     connection_id,
                     &request,
                 )
+                .await
             {
                 self.send_prepared_native_probe_authorization_response(
                     PreparedNativeProbeAuthorizationResponse {
@@ -5660,7 +5666,7 @@ impl DiscoveryRuntime {
     /// upstream peer and its current direct advertisement capability. The selected Exit must be
     /// this process and its current local advertisement. Connection lineage is bound before the
     /// Exit service can retain capacity or sign.
-    fn prepare_native_probe_authorization_response(
+    async fn prepare_native_probe_authorization_response(
         &mut self,
         authenticated_data_relay: Libp2pPeerId,
         connection_id: ConnectionId,
@@ -5675,6 +5681,11 @@ impl DiscoveryRuntime {
             return None;
         }
         let scope = verified_native_probe_authorization_forward_scope(request, now_ms)?;
+        let verified_chain =
+            verify_native_probe_authorization_chain(request.canonical_request(), now_ms).ok()?;
+        if verified_chain.scope() != &scope {
+            return None;
+        }
         let data_relay = scope.data_relay.as_ref()?;
         let exit = scope.exit.as_ref()?;
         let data_relay_node_id = fixed_bytes::<32>(request.control_relay_node_id())?;
@@ -5732,12 +5743,81 @@ impl DiscoveryRuntime {
                 |message| identity.sign(message).ok(),
             )
             .ok()?;
+        let attempt_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id)?;
+        let path_id = scope.candidate_ordinal;
+        let relay_endpoint = verified_chain.relay_exit_endpoint().endpoint.as_ref()?;
+        let accepted_encoded = accepted.encoded().to_vec();
+        let activation = {
+            let attempt = self.exit_native_ready_attempts.get(&attempt_id)?;
+            if !attempt.ready_paths.contains(&path_id) {
+                return None;
+            }
+            let exit_lease = attempt
+                .exit_leases
+                .iter()
+                .find(|lease| lease.path_id() == path_id)?;
+            LeaseActivation {
+                lease_handle: exit_lease.lease_handle().as_bytes().to_vec(),
+                path_id,
+                role: WireguardRole::Exit as i32,
+                peer_public_key: relay_endpoint.public_key.clone(),
+                peer_endpoint: Some(PublicUdpEndpoint {
+                    address: relay_endpoint.underlay_ip.clone(),
+                    port: relay_endpoint.listen_port,
+                }),
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                signed_relay_reservation: accepted_encoded.clone(),
+                signed_client_relay_request: Vec::new(),
+            }
+        };
+        let activate_now = {
+            let attempt = self.exit_native_ready_attempts.get_mut(&attempt_id)?;
+            match attempt.pending_activations.entry(path_id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(activation);
+                }
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get() == &activation => {}
+                std::collections::hash_map::Entry::Occupied(_) => return None,
+            }
+            !attempt.activated && attempt.pending_activations.len() == attempt.exit_leases.len()
+        };
+        if activate_now {
+            let helper = self.helper.clone();
+            let activation_result = {
+                let attempt = self.exit_native_ready_attempts.get_mut(&attempt_id)?;
+                let mut leases = attempt
+                    .pending_activations
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                leases.sort_unstable_by_key(|lease| lease.path_id);
+                let activation = ActivateLeaseBatch {
+                    route_context_id: scope.attempt_id.clone(),
+                    context_handle: attempt.helper_owner.prepared().context_handle.clone(),
+                    leases,
+                };
+                helper
+                    .activate_lease_batch(&mut attempt.helper_owner, activation)
+                    .await
+            };
+            if activation_result.is_err() {
+                if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                    let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+                }
+                return None;
+            }
+            self.exit_native_ready_attempts
+                .get_mut(&attempt_id)?
+                .activated = true;
+        }
         let response = ExitForwardResponse::granted(
             request.forward_id().to_vec(),
             ExitForwardOperation::NativeProbeAuthorize,
             self.local_node_id.to_vec(),
             local_peer.to_bytes(),
-            vec![accepted.encoded().to_vec()],
+            vec![accepted_encoded],
         )
         .ok()?;
         Some((connection, authenticated_data_relay, response.into()))
@@ -5889,6 +5969,10 @@ impl DiscoveryRuntime {
                     ready_paths: HashSet::with_capacity(
                         usize::try_from(scope.required_path_count).unwrap_or(0),
                     ),
+                    pending_activations: HashMap::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
+                    activated: false,
                     candidate_set_hash,
                     expires_at_ms: scope.attempt_expires_at_ms,
                 },
@@ -10366,7 +10450,7 @@ mod tests {
 
         let exit_prepare = braced_item(
             production,
-            "fn prepare_native_probe_authorization_response(",
+            "async fn prepare_native_probe_authorization_response(",
         );
         let connection_bind = exit_prepare
             .find(".bind_native_probe_data_relay_connection(")
@@ -10376,7 +10460,8 @@ mod tests {
             .expect("standard Exit authorization issue");
         assert!(connection_bind < exit_issue);
         assert!(exit_prepare.contains("native_probe_data_relay_capability_matches("));
-        assert!(!exit_prepare.contains(".await"));
+        assert!(exit_prepare.contains(".activate_lease_batch("));
+        assert!(exit_prepare.contains(".await"));
 
         let relay_complete = braced_item(production, "async fn complete_relay_forward(");
         let relay_accept = relay_complete

@@ -1065,16 +1065,18 @@ pub(crate) async fn begin_client_native_preselection(
         &mut OsRng,
     )
     .map_err(|_| native_preselection::NativePreselectionError::InvalidCandidateSet)?;
-    // The current native sampler still includes the selected control Relay as its first
-    // candidate. The follow-up protocol change separates that control hop from the exact
-    // route-plan data Relays; until then the signed count must include that retained control hop.
-    let required_path_count = route_plan
+    let selected_data_relays = route_plan
         .prospective_relays
-        .len()
-        .checked_add(1)
-        .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+        .iter()
+        .map(|relay| {
+            native_preselection::NativeDataRelayIdentity::new(
+                relay.relay.identity.wire_node_id,
+                relay.relay.identity.peer_id.to_bytes(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     ClientNativeProbeBatchOwner {
-        owner: native_preselection::begin_native_preselection(prepared, required_path_count)?,
+        owner: native_preselection::begin_native_preselection(prepared, &selected_data_relays)?,
         route_plan: Some(route_plan),
         route_hard_lifetime: admission.hard_lifetime,
         replay: volparossa_protocol::ReplayCache::new(replay_capacity)?,
@@ -1578,12 +1580,10 @@ impl CompletedClientNativeProbe {
                 (relay.node_id.clone(), relay.peer_id.clone())
             })
             .collect::<HashSet<_>>();
-        let expected_relays = std::iter::once(&plan.forwarded_exit.control.identity)
-            .chain(
-                plan.prospective_relays
-                    .iter()
-                    .map(|relay| &relay.relay.identity),
-            )
+        let expected_relays = plan
+            .prospective_relays
+            .iter()
+            .map(|relay| &relay.relay.identity)
             .map(|identity| (identity.wire_node_id.to_vec(), identity.peer_id.to_bytes()))
             .collect::<HashSet<_>>();
         if proven_relays.len() != self.batch.proofs.len()
@@ -5670,10 +5670,12 @@ mod tests {
         .expect("live handoff must mint native owner");
         let candidate_set = owner.candidate_set_for_test().clone();
         assert_eq!(candidate_set.preselection_batch_id, EVIDENCE_BATCH_BYTES);
-        assert_eq!(candidate_set.data_relays.len(), 3);
-        assert_eq!(
-            candidate_set.data_relays.first(),
-            candidate_set.control.as_ref()
+        assert_eq!(candidate_set.data_relays.len(), 2);
+        assert!(
+            candidate_set
+                .data_relays
+                .iter()
+                .all(|relay| Some(relay) != candidate_set.control.as_ref())
         );
         assert_eq!(candidate_set.transport, ProtocolTransport::TcpMptcp as i32);
         assert_eq!(
@@ -5725,7 +5727,7 @@ mod tests {
             minted_at,
             expected_expiry,
         );
-        for expected_ordinal in 2_u32..=3 {
+        for expected_ordinal in 2_u32..=2 {
             let awaiting = owner
                 .begin_next_for_test(minted_at_ms + 1, minted_at + Duration::from_millis(1))
                 .expect("live next candidate")
