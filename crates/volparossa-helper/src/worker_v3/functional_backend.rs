@@ -1,7 +1,8 @@
 //! Process-owned functional-alpha lease backend.
 //!
-//! This adapter proves one live helper-runtime Client/Exit singleton or one atomic
-//! RelayClient+RelayExit pair. It uses the real authenticated worker, a real anonymous network
+//! This adapter proves a bounded set of live helper-runtime Client/Exit contexts or atomic
+//! RelayClient+RelayExit pairs. Every owner stays keyed to its exact immutable backend lineage.
+//! It uses the real authenticated worker, a real anonymous network
 //! namespace and kernel `WireGuard` UAPI. Activate verifies the signed role-specific local and peer
 //! authority, then installs and reads back the complete exact peer set plus its main-table IPv6
 //! `/128` link routes. A Relay worker starts behind a policy-drop baseline, enables forwarding only
@@ -11,7 +12,7 @@
 //! Relay forwarding; it does not yet claim a complete client-to-destination datapath or
 //! crash/restart recovery. Production Prepare now completes the durable journal plus systemd
 //! descriptor-store handoff before child/kernel mutation, and same-runtime clean teardown settles
-//! that exact custody. An exact committed Client or Exit singleton can additionally hand off one
+//! that exact custody. An exact committed Client or Exit context can additionally hand off one
 //! bound transport descriptor: unconnected QUIC UDP for either role, connected genuine MPTCP for
 //! Client, or a genuine MPTCP listener for Exit. Relay transport handoff and all route-manager
 //! datapath callers remain unavailable. Inherited-custody recovery after a helper restart remains
@@ -20,6 +21,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4},
+    ops::{Deref, DerefMut},
     os::fd::{AsRawFd as _, OwnedFd},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -97,7 +99,7 @@ use super::{
     WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
 };
 
-const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 1;
+const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 64;
 const MARKER_DOMAIN: &[u8] = b"VOLPAROSSA functional alpha WireGuard owner v1";
 const REQUEST_ID_DOMAIN: &[u8] = b"VOLPAROSSA functional alpha worker request v1";
 const STAGE_INITIALISE: u8 = 1;
@@ -131,7 +133,7 @@ pub(crate) fn functional_alpha_lease_backend(
             DEFAULT_MAX_TTL,
         )),
         relay_replay: Mutex::new(functional_alpha_replay_cache()),
-        state: Mutex::new(None),
+        state: Mutex::new(OpenLeaseState::default()),
         ingress_coordinator: WorkerCoordinator::new(WorkerRegistry::new(
             1,
             DEFAULT_MAX_CACHE_ENTRIES,
@@ -154,7 +156,7 @@ struct FunctionalAlphaLeaseBackend {
     coordinator: WorkerCoordinator,
     ingress_coordinator: WorkerCoordinator,
     relay_replay: Mutex<ReplayCache>,
-    state: Mutex<Option<OpenLeaseEntry>>,
+    state: Mutex<OpenLeaseState>,
     ingress_state: Mutex<Option<OpenIngressEntry>>,
     trusted_agent_uid: u32,
     /// Always present in production. `None` exists only for narrow unit fixtures which never
@@ -183,7 +185,7 @@ struct OpenIngressEntry {
     phase: OpenIngressPhase,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct OpenLineageKey {
     helper_runtime_id: [u8; 32],
     context_id: [u8; 16],
@@ -209,6 +211,66 @@ impl From<BackendLineage> for OpenLineageKey {
             setup_expires_at_boottime_ns: value.setup_expires_at_boottime_ns,
             hard_expires_at_boottime_ns: value.hard_expires_at_boottime_ns,
         }
+    }
+}
+
+/// Bounded process ownership indexed by the complete immutable backend lineage.
+///
+/// The engine issues the opaque context handle only after Prepare completes; its exact handle is
+/// validated by the engine before every subsequent backend dispatch. The backend therefore owns
+/// contexts by the stronger stable tuple available across the entire lifecycle: helper runtime,
+/// route context, backend generation, Prepare identity and both expiry clocks.
+#[derive(Default)]
+struct OpenLeaseState(BTreeMap<OpenLineageKey, OpenLeaseEntry>);
+
+impl Deref for OpenLeaseState {
+    type Target = BTreeMap<OpenLineageKey, OpenLeaseEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for OpenLeaseState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[cfg(test)]
+impl From<Option<OpenLeaseEntry>> for OpenLeaseState {
+    fn from(entry: Option<OpenLeaseEntry>) -> Self {
+        let mut state = Self::default();
+        if let Some(entry) = entry {
+            let key = entry.key;
+            state.insert(key, entry);
+        }
+        state
+    }
+}
+
+#[cfg(test)]
+impl OpenLeaseState {
+    /// Compatibility view for legacy single-context fixtures. New multi-context tests use exact
+    /// keyed lookup and production code never relies on this view.
+    fn as_ref(&self) -> Option<&OpenLeaseEntry> {
+        assert!(self.len() <= 1, "single-context fixture view");
+        self.values().next()
+    }
+
+    fn as_mut(&mut self) -> Option<&mut OpenLeaseEntry> {
+        assert!(self.len() <= 1, "single-context fixture view");
+        self.values_mut().next()
+    }
+
+    fn is_none(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn take(&mut self) -> Option<OpenLeaseEntry> {
+        assert!(self.len() <= 1, "single-context fixture view");
+        let key = self.keys().next().copied()?;
+        self.remove(&key)
     }
 }
 
@@ -510,10 +572,10 @@ impl FunctionalAlphaLeaseBackend {
                     std::process::abort();
                 }
                 let state = lock_state(&self.state);
-                let entry = state.as_ref().unwrap_or_else(|| {
+                let entry = exact_entry(&state, key).unwrap_or_else(|_| {
                     std::process::abort();
                 });
-                if entry.key != key || entry.durable_prepare_terminal != Some(selector) {
+                if entry.durable_prepare_terminal != Some(selector) {
                     std::process::abort();
                 }
                 return Err(BackendError::CleanupIncomplete);
@@ -625,30 +687,39 @@ impl FunctionalAlphaLeaseBackend {
         underlay: UnderlayCandidate,
     ) -> Result<(), BackendError> {
         let mut state = lock_state(&self.state);
-        if state.is_some() {
+        if state.contains_key(&key) {
+            return Err(BackendError::Invalid);
+        }
+        if state.len() >= MAX_FUNCTIONAL_ALPHA_CONTEXTS {
             return Err(BackendError::Capacity);
         }
-        *state = Some(OpenLeaseEntry {
+        let replaced = state.insert(
             key,
-            context_role,
-            worker: None,
-            recovery: None,
-            restart_custody: None,
-            durable: None,
-            durable_prepare_terminal: None,
-            wireguard: Vec::new(),
-            prepare: PrepareLeases {
-                route_context_id: key.context_id.to_vec(),
-                leases: Vec::new(),
+            OpenLeaseEntry {
+                key,
+                context_role,
+                worker: None,
+                recovery: None,
+                restart_custody: None,
+                durable: None,
+                durable_prepare_terminal: None,
+                wireguard: Vec::new(),
+                prepare: PrepareLeases {
+                    route_context_id: key.context_id.to_vec(),
+                    leases: Vec::new(),
+                },
+                underlay,
+                prepared: Vec::new(),
+                activated: Vec::new(),
+                phase: OpenLeasePhase::Reserved,
+                birth_may_exist: Vec::new(),
+                child_cleanup: None,
+                worker_cleanup: None,
             },
-            underlay,
-            prepared: Vec::new(),
-            activated: Vec::new(),
-            phase: OpenLeasePhase::Reserved,
-            birth_may_exist: Vec::new(),
-            child_cleanup: None,
-            worker_cleanup: None,
-        });
+        );
+        if replaced.is_some() {
+            std::process::abort();
+        }
         Ok(())
     }
 
@@ -701,7 +772,7 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<(), BackendError> {
         let recovery = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             let worker = entry
                 .worker
                 .as_ref()
@@ -723,7 +794,7 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<(), BackendError> {
         let (generation, context_role, prepare) = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             let generation = entry
                 .worker
                 .as_ref()
@@ -776,10 +847,10 @@ impl FunctionalAlphaLeaseBackend {
             BirthNamespaceKernel::connect(deadline).map_err(|_| BackendError::Kernel)?;
         let resource_count = {
             let state = lock_state(&self.state);
-            exact_entry(state.as_ref(), key)?.wireguard.len()
+            exact_entry(&state, key)?.wireguard.len()
         };
-        let valid_resource_count = match lock_state(&self.state)
-            .as_ref()
+        let valid_resource_count = match exact_entry(&lock_state(&self.state), key)
+            .ok()
             .map(|entry| entry.context_role)
         {
             Some(ContextRole::Client | ContextRole::Exit) => (1..=8).contains(&resource_count),
@@ -847,7 +918,7 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<PreparedWorkerLease>, BackendError> {
         let (generation, prepare) = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             let generation = entry
                 .worker
                 .as_ref()
@@ -883,7 +954,7 @@ impl FunctionalAlphaLeaseBackend {
         let now_ms = unix_milliseconds()?;
         let (prepared, plan) = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             if entry.phase != OpenLeasePhase::Prepared {
                 return Err(BackendError::Invalid);
             }
@@ -1000,7 +1071,7 @@ impl FunctionalAlphaLeaseBackend {
         };
         let activated = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             if entry.phase != OpenLeasePhase::Activated {
                 return Err(BackendError::Invalid);
             }
@@ -1095,7 +1166,7 @@ impl FunctionalAlphaLeaseBackend {
         let operation_deadline = worker_operation_deadline(deadline)?;
         let generation = {
             let state = lock_state(&self.state);
-            validate_acquire_entry(exact_entry(state.as_ref(), key)?, &value, &internal)?
+            validate_acquire_entry(exact_entry(&state, key)?, &value, &internal)?
         };
         let request = worker_request(
             worker_attempt_request_id(key, STAGE_ACQUIRE_TRANSPORT, binding),
@@ -1123,7 +1194,7 @@ impl FunctionalAlphaLeaseBackend {
 
         let still_exact = {
             let state = lock_state(&self.state);
-            exact_entry(state.as_ref(), key).is_ok_and(|entry| {
+            exact_entry(&state, key).is_ok_and(|entry| {
                 validate_acquire_entry(entry, &value, &internal) == Ok(generation)
             })
         };
@@ -1287,15 +1358,10 @@ impl FunctionalAlphaLeaseBackend {
     ) -> bool {
         let prepare_terminal = {
             let state = lock_state(&self.state);
-            state.as_ref().and_then(|entry| {
-                if entry.key == key
-                    && entry.phase == OpenLeasePhase::DurableHandoffPending
-                    && entry.worker.is_none()
-                {
-                    entry.durable_prepare_terminal
-                } else {
-                    None
-                }
+            state.get(&key).and_then(|entry| {
+                (entry.phase == OpenLeasePhase::DurableHandoffPending && entry.worker.is_none())
+                    .then_some(entry.durable_prepare_terminal)
+                    .flatten()
             })
         };
         if let Some(selector) = prepare_terminal {
@@ -1321,10 +1387,8 @@ impl FunctionalAlphaLeaseBackend {
                 }
             }
         }
-        if lock_state(&self.state).as_ref().is_some_and(|entry| {
-            entry.key == key
-                && entry.phase == OpenLeasePhase::DurableHandoffPending
-                && entry.worker.is_none()
+        if lock_state(&self.state).get(&key).is_some_and(|entry| {
+            entry.phase == OpenLeasePhase::DurableHandoffPending && entry.worker.is_none()
         }) {
             // The coordinator retains the exact failed handoff terminal. No local cleanup path may
             // erase the corresponding durable record or make shutdown appear complete.
@@ -1332,9 +1396,8 @@ impl FunctionalAlphaLeaseBackend {
         }
         let generation = entry_generation(&self.state, key).ok();
         let should_destroy = request_child_destroy
-            && lock_state(&self.state).as_ref().is_some_and(|entry| {
-                entry.key == key
-                    && entry.child_cleanup.is_none()
+            && lock_state(&self.state).get(&key).is_some_and(|entry| {
+                entry.child_cleanup.is_none()
                     && matches!(
                         entry.phase,
                         OpenLeasePhase::InitialiseCleanupPending
@@ -1366,12 +1429,10 @@ impl FunctionalAlphaLeaseBackend {
             }
         }
 
-        if lock_state(&self.state).as_ref().is_some_and(|entry| {
-            entry.key == key
-                && entry.durable.as_ref().is_some_and(|custody| {
-                    matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
-                })
-                && entry.child_cleanup.is_none()
+        if lock_state(&self.state).get(&key).is_some_and(|entry| {
+            entry.durable.as_ref().is_some_and(|custody| {
+                matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+            }) && entry.child_cleanup.is_none()
         }) {
             // Exact child cleanup did not complete. Keep the worker and all recovery authority
             // available for a later same-runtime Destroy retry; process death is not namespace
@@ -1464,15 +1525,12 @@ impl FunctionalAlphaLeaseBackend {
         if !parent_absent || deadline.ensure_remaining().is_err() {
             return false;
         }
-        let durable_cleanup_ready = lock_state(&self.state)
-            .as_ref()
-            .filter(|entry| entry.key == key)
-            .and_then(|entry| {
-                entry.durable.as_ref().map(|custody| {
-                    !matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
-                        || (entry.child_cleanup.is_some() && entry.worker_cleanup.is_some())
-                })
-            });
+        let durable_cleanup_ready = lock_state(&self.state).get(&key).and_then(|entry| {
+            entry.durable.as_ref().map(|custody| {
+                !matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+                    || (entry.child_cleanup.is_some() && entry.worker_cleanup.is_some())
+            })
+        });
         if let Some(cleanup_ready) = durable_cleanup_ready {
             if !cleanup_ready {
                 return false;
@@ -1809,10 +1867,7 @@ impl FunctionalAlphaLeaseBackend {
         let key = validate_destroy_binding(binding, value)?;
         let target_is_open = {
             let state = lock_state(&self.state);
-            match state.as_ref() {
-                Some(entry) if entry.key == key => true,
-                None | Some(_) => false,
-            }
+            state.contains_key(&key)
         };
         let deadline = HardDeadline::at(binding.call_deadline.into_std())
             .map_err(|_| BackendError::CleanupIncomplete)?;
@@ -2680,8 +2735,8 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
                 .map_err(|_| BackendError::Unavailable);
             let runtime_matches = binding.helper_runtime_id.iter().any(|byte| *byte != 0)
                 && lock_state(&self.state)
-                    .as_ref()
-                    .is_none_or(|entry| entry.key.helper_runtime_id == binding.helper_runtime_id);
+                    .values()
+                    .all(|entry| entry.key.helper_runtime_id == binding.helper_runtime_id);
             if binding.action != crate::engine::BackendRuntimeAction::QueryTransportSocket
                 || !runtime_matches
             {
@@ -2715,8 +2770,8 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
                             return request.complete(Err(BackendError::CleanupIncomplete));
                         }
                     }
-                    let key = lock_state(&self.state).as_ref().map(|entry| entry.key);
-                    if let Some(key) = key {
+                    let keys = lock_state(&self.state).keys().copied().collect::<Vec<_>>();
+                    for key in keys {
                         if !self.cleanup_exact(key, deadline, true).await {
                             return request.complete(Err(BackendError::CleanupIncomplete));
                         }
@@ -2730,7 +2785,7 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .is_none()
-                        && lock_state(&self.state).is_none()
+                        && lock_state(&self.state).is_empty()
                     {
                         Ok(())
                     } else {
@@ -3196,7 +3251,7 @@ fn validate_acquire_transport_binding(
 }
 
 fn validate_mptcp_endpoint_binding(
-    state: &Mutex<Option<OpenLeaseEntry>>,
+    state: &Mutex<OpenLeaseState>,
     binding: BackendBinding,
     route_context_id: &[u8],
     context_handle: &[u8],
@@ -3227,7 +3282,7 @@ fn validate_mptcp_endpoint_binding(
     }
     ensure_hard_is_live(key)?;
     let state = lock_state(state);
-    let entry = exact_entry(state.as_ref(), key)?;
+    let entry = exact_entry(&state, key)?;
     let generation = entry
         .worker
         .as_ref()
@@ -5301,11 +5356,11 @@ fn definite_worker_error(error: &WorkerV3Error) -> BackendError {
 }
 
 fn entry_generation(
-    state: &Mutex<Option<OpenLeaseEntry>>,
+    state: &Mutex<OpenLeaseState>,
     key: OpenLineageKey,
 ) -> Result<u64, BackendError> {
     let state = lock_state(state);
-    let worker = exact_entry(state.as_ref(), key)?
+    let worker = exact_entry(&state, key)?
         .worker
         .as_ref()
         .ok_or(BackendError::CleanupIncomplete)?;
@@ -5313,32 +5368,22 @@ fn entry_generation(
 }
 
 fn exact_entry(
-    state: Option<&OpenLeaseEntry>,
+    state: &OpenLeaseState,
     key: OpenLineageKey,
 ) -> Result<&OpenLeaseEntry, BackendError> {
-    state
-        .filter(|entry| entry.key == key)
-        .ok_or(BackendError::CleanupIncomplete)
+    state.get(&key).ok_or(BackendError::CleanupIncomplete)
 }
 
 fn exact_entry_mut(
-    state: &mut Option<OpenLeaseEntry>,
+    state: &mut OpenLeaseState,
     key: OpenLineageKey,
 ) -> Result<&mut OpenLeaseEntry, BackendError> {
-    state
-        .as_mut()
-        .filter(|entry| entry.key == key)
-        .ok_or(BackendError::CleanupIncomplete)
+    state.get_mut(&key).ok_or(BackendError::CleanupIncomplete)
 }
 
-fn remove_exact_entry(state: &Mutex<Option<OpenLeaseEntry>>, key: OpenLineageKey) -> bool {
+fn remove_exact_entry(state: &Mutex<OpenLeaseState>, key: OpenLineageKey) -> bool {
     let mut state = lock_state(state);
-    if state.as_ref().is_some_and(|entry| entry.key == key) {
-        *state = None;
-        true
-    } else {
-        false
-    }
+    state.remove(&key).is_some()
 }
 
 fn custody_context_id(custody: &DurableLeaseCustody) -> [u8; 16] {
@@ -5352,9 +5397,7 @@ fn custody_context_id(custody: &DurableLeaseCustody) -> [u8; 16] {
     }
 }
 
-fn lock_state(
-    state: &Mutex<Option<OpenLeaseEntry>>,
-) -> std::sync::MutexGuard<'_, Option<OpenLeaseEntry>> {
+fn lock_state(state: &Mutex<OpenLeaseState>) -> std::sync::MutexGuard<'_, OpenLeaseState> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5440,7 +5483,7 @@ mod tests {
             )),
             ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(state),
+            state: Mutex::new(state.into()),
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
@@ -5501,7 +5544,7 @@ mod tests {
                 coordinator,
                 ingress_coordinator: test_ingress_coordinator(),
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
-                state: Mutex::new(Some(entry)),
+                state: Mutex::new(Some(entry).into()),
                 ingress_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
@@ -5798,7 +5841,7 @@ mod tests {
                 coordinator,
                 ingress_coordinator: test_ingress_coordinator(),
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
-                state: Mutex::new(Some(entry)),
+                state: Mutex::new(Some(entry).into()),
                 ingress_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
@@ -7017,6 +7060,67 @@ mod tests {
         worker.join().expect("fake worker thread");
         assert!(!alive.load(Ordering::SeqCst));
         assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[test]
+    fn functional_context_owners_are_bounded_and_removed_by_exact_lineage() {
+        let backend = backend_with_state(None);
+        let keys = (0..MAX_FUNCTIONAL_ALPHA_CONTEXTS)
+            .map(|index| {
+                let discriminator = u8::try_from(index + 1).expect("bounded context index");
+                OpenLineageKey {
+                    context_id: [discriminator; 16],
+                    backend_generation: u64::try_from(index + 1)
+                        .expect("bounded context generation"),
+                    prepare_request_id: [discriminator; 16],
+                    prepare_operation_digest: [discriminator; 32],
+                    ..key()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for context in &keys {
+            assert_eq!(
+                backend.reserve_entry(*context, ContextRole::Client, fixture_underlay()),
+                Ok(())
+            );
+        }
+        {
+            let state = lock_state(&backend.state);
+            assert_eq!(state.len(), MAX_FUNCTIONAL_ALPHA_CONTEXTS);
+            for context in &keys {
+                assert_eq!(
+                    exact_entry(&state, *context).map(|entry| entry.key),
+                    Ok(*context)
+                );
+            }
+        }
+
+        assert_eq!(
+            backend.reserve_entry(keys[0], ContextRole::Client, fixture_underlay()),
+            Err(BackendError::Invalid)
+        );
+        let overflow = OpenLineageKey {
+            context_id: [0x7f; 16],
+            backend_generation: 0x7f,
+            prepare_request_id: [0x7f; 16],
+            prepare_operation_digest: [0x7f; 32],
+            ..key()
+        };
+        assert_eq!(
+            backend.reserve_entry(overflow, ContextRole::Client, fixture_underlay()),
+            Err(BackendError::Capacity)
+        );
+
+        assert!(remove_exact_entry(&backend.state, keys[0]));
+        assert!(exact_entry(&lock_state(&backend.state), keys[1]).is_ok());
+        assert_eq!(
+            backend.reserve_entry(overflow, ContextRole::Client, fixture_underlay()),
+            Ok(())
+        );
+        assert!(!remove_exact_entry(&backend.state, keys[0]));
+        assert!(remove_exact_entry(&backend.state, overflow));
+        assert!(exact_entry(&lock_state(&backend.state), keys[1]).is_ok());
     }
 
     #[test]
@@ -9866,7 +9970,7 @@ mod tests {
         retry.underlay = underlay;
         retry.prepared = vec![prepared];
         retry.phase = OpenLeasePhase::Prepared;
-        *lock_state(&backend.state) = Some(retry);
+        *lock_state(&backend.state) = Some(retry).into();
         let mut retry_binding = binding;
         retry_binding.operation_sequence += 1;
         retry_binding.request_id = [0xb3; 16];
@@ -9900,7 +10004,7 @@ mod tests {
         retry.underlay = underlay;
         retry.prepared = prepared.to_vec();
         retry.phase = OpenLeasePhase::Prepared;
-        *lock_state(&backend.state) = Some(retry);
+        *lock_state(&backend.state) = Some(retry).into();
         let mut retry_binding = binding;
         retry_binding.operation_sequence += 1;
         retry_binding.request_id = [0xd3; 16];
@@ -10166,7 +10270,7 @@ mod tests {
             coordinator,
             ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(Some(entry)),
+            state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
@@ -10220,7 +10324,7 @@ mod tests {
         let mut retry_entry = open_entry(key);
         retry_entry.prepared = vec![prepared];
         retry_entry.phase = OpenLeasePhase::Prepared;
-        *lock_state(&backend.state) = Some(retry_entry);
+        *lock_state(&backend.state) = Some(retry_entry).into();
 
         let mut exact_retry = binding;
         exact_retry.operation_sequence += 1;
@@ -10394,7 +10498,7 @@ mod tests {
             coordinator,
             ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(Some(entry)),
+            state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
@@ -10665,7 +10769,7 @@ mod tests {
             coordinator,
             ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(Some(entry)),
+            state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
@@ -10779,7 +10883,7 @@ mod tests {
             coordinator,
             ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(Some(entry)),
+            state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: Some(handle),
