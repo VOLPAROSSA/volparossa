@@ -71,7 +71,9 @@ use crate::{
         RemoveMptcpEndpoint as InternalRemoveMptcpEndpoint, internal_worker_request,
         internal_worker_response,
     },
-    kernel::{BirthLinkError, BirthNamespaceKernel, LiveWireguardLeaseOwner},
+    kernel::{
+        BirthLinkError, BirthNamespaceKernel, LiveClientIngressVeth, LiveWireguardLeaseOwner,
+    },
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
     ownership_journal::{
         DurableCleanupConfirmed, DurableCleanupOutcome, DurableIntentRegistration,
@@ -162,6 +164,7 @@ struct OpenIngressEntry {
     client_runtime_id: [u8; 16],
     backend_generation: u64,
     worker: Option<WorkerGenerationOwnership>,
+    ingress_link: Option<LiveClientIngressVeth>,
     worker_generation: u64,
     sockets: BTreeMap<(i32, i32), IngressSocketAddress>,
     acquired: BTreeSet<(i32, i32)>,
@@ -1861,6 +1864,93 @@ impl FunctionalAlphaLeaseBackend {
             }
         };
         let worker_generation = worker.coordinates.worker_generation.get();
+        let ingress_link = {
+            let target_namespace = match worker.duplicate_network_namespace_pin(deadline) {
+                Ok(namespace) => namespace,
+                Err(_) => {
+                    self.retain_failed_ingress(binding, worker);
+                    let _ = self
+                        .cleanup_ingress_exact(
+                            binding.client_runtime_id,
+                            binding.generation,
+                            deadline,
+                        )
+                        .await;
+                    return Err(BackendError::CleanupIncomplete);
+                }
+            };
+            let mut kernel = match BirthNamespaceKernel::connect(deadline) {
+                Ok(kernel) => kernel,
+                Err(_) => {
+                    drop(target_namespace);
+                    self.retain_failed_ingress(binding, worker);
+                    let _ = self
+                        .cleanup_ingress_exact(
+                            binding.client_runtime_id,
+                            binding.generation,
+                            deadline,
+                        )
+                        .await;
+                    return Err(BackendError::CleanupIncomplete);
+                }
+            };
+            let target_namespace_fd = match target_namespace.verified_descriptor() {
+                Ok(descriptor) => descriptor.as_raw_fd(),
+                Err(_) => {
+                    drop(target_namespace);
+                    self.retain_failed_ingress(binding, worker);
+                    let _ = self
+                        .cleanup_ingress_exact(
+                            binding.client_runtime_id,
+                            binding.generation,
+                            deadline,
+                        )
+                        .await;
+                    return Err(BackendError::CleanupIncomplete);
+                }
+            };
+            match kernel.create_client_ingress_veth(
+                binding.client_runtime_id,
+                target_namespace_fd,
+                deadline,
+            ) {
+                Ok(link) => link,
+                Err(_) => {
+                    drop(target_namespace);
+                    self.retain_failed_ingress(binding, worker);
+                    let _ = self
+                        .cleanup_ingress_exact(
+                            binding.client_runtime_id,
+                            binding.generation,
+                            deadline,
+                        )
+                        .await;
+                    return Err(BackendError::CleanupIncomplete);
+                }
+            }
+        };
+        {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.is_some() {
+                drop(state);
+                self.retain_failed_ingress(binding, worker);
+                return Err(BackendError::CleanupIncomplete);
+            }
+            *state = Some(OpenIngressEntry {
+                helper_runtime_id: binding.helper_runtime_id,
+                client_runtime_id: binding.client_runtime_id,
+                backend_generation: binding.generation,
+                worker: Some(worker),
+                ingress_link: Some(ingress_link),
+                worker_generation,
+                sockets: BTreeMap::new(),
+                acquired: BTreeSet::new(),
+                phase: OpenIngressPhase::Quarantined,
+            });
+        }
         let initialise = worker_request(
             ingress_worker_request_id(binding, STAGE_INITIALISE_INGRESS),
             internal_worker_request::Operation::InitialiseClientIngress(InitialiseClientIngress {
@@ -1888,7 +1978,6 @@ impl FunctionalAlphaLeaseBackend {
                     )
             });
         if !initialised {
-            self.retain_failed_ingress(binding, worker);
             let _ = self
                 .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
                 .await;
@@ -1926,7 +2015,6 @@ impl FunctionalAlphaLeaseBackend {
                 _ => None,
             }
         }) else {
-            self.retain_failed_ingress(binding, worker);
             let _ = self
                 .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
                 .await;
@@ -1945,21 +2033,11 @@ impl FunctionalAlphaLeaseBackend {
             .ingress_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.is_some() {
-            drop(state);
-            self.retain_failed_ingress(binding, worker);
+        let Ok(entry) = exact_ingress_entry_mut(&mut state, binding) else {
             return Err(BackendError::CleanupIncomplete);
-        }
-        *state = Some(OpenIngressEntry {
-            helper_runtime_id: binding.helper_runtime_id,
-            client_runtime_id: binding.client_runtime_id,
-            backend_generation: binding.generation,
-            worker: Some(worker),
-            worker_generation,
-            sockets: addresses,
-            acquired: BTreeSet::new(),
-            phase: OpenIngressPhase::Prepared,
-        });
+        };
+        entry.sockets = addresses;
+        entry.phase = OpenIngressPhase::Prepared;
         Ok(sockets)
     }
 
@@ -2152,6 +2230,7 @@ impl FunctionalAlphaLeaseBackend {
                 client_runtime_id: binding.client_runtime_id,
                 backend_generation: binding.generation,
                 worker: Some(worker),
+                ingress_link: None,
                 worker_generation,
                 sockets: BTreeMap::new(),
                 acquired: BTreeSet::new(),
@@ -2228,6 +2307,28 @@ impl FunctionalAlphaLeaseBackend {
                 }
             }
         }
+        let ingress_link = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.as_mut().and_then(|entry| entry.ingress_link.take())
+        };
+        if let Some(ingress_link) = ingress_link {
+            let removed = BirthNamespaceKernel::connect(deadline)
+                .and_then(|mut kernel| kernel.delete_client_ingress_veth(&ingress_link, deadline));
+            if removed.is_err() {
+                let mut state = self
+                    .ingress_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = state.as_mut() {
+                    entry.ingress_link = Some(ingress_link);
+                    entry.phase = OpenIngressPhase::Quarantined;
+                }
+                return false;
+            }
+        }
         let mut state = self
             .ingress_state
             .lock()
@@ -2236,6 +2337,7 @@ impl FunctionalAlphaLeaseBackend {
             entry.client_runtime_id == client_runtime_id
                 && entry.backend_generation == backend_generation
                 && entry.worker.is_none()
+                && entry.ingress_link.is_none()
         }) {
             *state = None;
             true

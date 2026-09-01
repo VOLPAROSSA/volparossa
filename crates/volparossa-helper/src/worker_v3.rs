@@ -107,6 +107,7 @@ use volparossa_routing::ContextRole as RoutingContextRole;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 use zeroize::Zeroizing;
 
+mod client_ingress_policy;
 mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
@@ -1818,10 +1819,17 @@ struct WorkerClientIngress {
     client_runtime_id: ContextId,
     hard_expires_at_unix: u64,
     _bootstrap: WorkerNetworkBootstrap,
-    _kernel: NamespaceKernel,
+    kernel: NamespaceKernel,
+    ingress_ifindex: u32,
     sockets:
         BTreeMap<(InternalIngressSocketKind, InternalIngressAddressFamily), WorkerIngressSocket>,
+    locals: BTreeMap<
+        (InternalIngressSocketKind, InternalIngressAddressFamily),
+        crate::internal_protocol::InternalSocketAddress,
+    >,
     acquired: BTreeSet<(InternalIngressSocketKind, InternalIngressAddressFamily)>,
+    routing: Option<crate::kernel::ClientIngressIpv4Routing>,
+    policy: Option<client_ingress_policy::ActiveClientIngressPolicy>,
     prepared: bool,
     active: bool,
 }
@@ -1848,20 +1856,34 @@ impl WorkerClientIngress {
         kernel
             .activate_loopback(deadline)
             .map_err(|_| InternalWorkerResult::Kernel)?;
+        let ingress_ifindex = kernel
+            .activate_client_ingress_link(runtime, deadline)
+            .map_err(|_| InternalWorkerResult::Kernel)?;
         Ok(Self {
             client_runtime_id: runtime,
             hard_expires_at_unix: value.hard_expires_at_unix,
             _bootstrap: bootstrap,
-            _kernel: kernel,
+            kernel,
+            ingress_ifindex,
             sockets: BTreeMap::new(),
+            locals: BTreeMap::new(),
             acquired: BTreeSet::new(),
+            routing: None,
+            policy: None,
             prepared: false,
             active: false,
         })
     }
 
     fn prepare(&mut self) -> Result<Vec<PreparedIngressSocket>, InternalWorkerResult> {
-        if self.prepared || self.active || !self.sockets.is_empty() || !self.acquired.is_empty() {
+        if self.prepared
+            || self.active
+            || !self.sockets.is_empty()
+            || !self.locals.is_empty()
+            || !self.acquired.is_empty()
+            || self.routing.is_some()
+            || self.policy.is_some()
+        {
             return Err(InternalWorkerResult::Conflict);
         }
         let mut sockets = BTreeMap::new();
@@ -1885,6 +1907,21 @@ impl WorkerClientIngress {
                 });
                 sockets.insert((kind, family), WorkerIngressSocket { descriptor, local });
             }
+        }
+        self.locals = prepared
+            .iter()
+            .filter_map(|socket| {
+                Some((
+                    (
+                        InternalIngressSocketKind::try_from(socket.descriptor_kind).ok()?,
+                        InternalIngressAddressFamily::try_from(socket.address_family).ok()?,
+                    ),
+                    socket.local.clone()?,
+                ))
+            })
+            .collect();
+        if self.locals.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS {
+            return Err(InternalWorkerResult::Kernel);
         }
         self.sockets = sockets;
         self.prepared = true;
@@ -1927,7 +1964,11 @@ impl WorkerClientIngress {
         Ok((socket.descriptor, ready))
     }
 
-    fn activate(&mut self, request: &ActivateClientIngress) -> Result<(), InternalWorkerResult> {
+    fn activate(
+        &mut self,
+        request: &ActivateClientIngress,
+        deadline: HardDeadline,
+    ) -> Result<(), InternalWorkerResult> {
         let runtime =
             context_id(&request.client_runtime_id).map_err(|_| InternalWorkerResult::Invalid)?;
         let identities = request
@@ -1947,12 +1988,72 @@ impl WorkerClientIngress {
             || !self.sockets.is_empty()
             || identities.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS
             || identities != self.acquired
+            || self.routing.is_some()
+            || self.policy.is_some()
             || current_unix_seconds().is_none_or(|now| now >= self.hard_expires_at_unix)
         {
             return Err(InternalWorkerResult::Conflict);
         }
+        let ports = client_ingress_policy::ClientIngressIpv4Ports {
+            transparent_tcp: self.ipv4_port(InternalIngressSocketKind::TransparentTcpListener)?,
+            transparent_udp: self.ipv4_port(InternalIngressSocketKind::TransparentUdp)?,
+            dns_tcp: self.ipv4_port(InternalIngressSocketKind::DnsTcpListener)?,
+            dns_udp: self.ipv4_port(InternalIngressSocketKind::DnsUdp)?,
+        };
+        let routing = self
+            .kernel
+            .install_client_ingress_ipv4_routing(deadline)
+            .map_err(|_| InternalWorkerResult::Kernel)?;
+        let policy = match client_ingress_policy::install(
+            self.client_runtime_id,
+            self.ingress_ifindex,
+            ports,
+            deadline,
+        ) {
+            Ok(policy) => policy,
+            Err(_) => {
+                let policy_absent =
+                    client_ingress_policy::cleanup_runtime(self.client_runtime_id, deadline)
+                        .is_ok();
+                let routing_absent = self
+                    .kernel
+                    .remove_client_ingress_ipv4_routing(routing, deadline)
+                    .is_ok();
+                return Err(if policy_absent && routing_absent {
+                    InternalWorkerResult::Kernel
+                } else {
+                    InternalWorkerResult::CleanupIncomplete
+                });
+            }
+        };
+        self.routing = Some(routing);
+        self.policy = Some(policy);
         self.active = true;
         Ok(())
+    }
+
+    fn ipv4_port(&self, kind: InternalIngressSocketKind) -> Result<u16, InternalWorkerResult> {
+        self.locals
+            .get(&(kind, InternalIngressAddressFamily::Ipv4))
+            .and_then(|local| u16::try_from(local.port).ok())
+            .filter(|port| *port != 0)
+            .ok_or(InternalWorkerResult::Kernel)
+    }
+
+    fn cleanup(&mut self, deadline: HardDeadline) -> InternalWorkerResult {
+        let policy_result = self.policy.take().map_or(Ok(()), |policy| {
+            client_ingress_policy::remove(policy, deadline)
+        });
+        let routing_result = self.routing.take().map_or(Ok(()), |routing| {
+            self.kernel
+                .remove_client_ingress_ipv4_routing(routing, deadline)
+        });
+        self.active = false;
+        if policy_result.is_ok() && routing_result.is_ok() {
+            InternalWorkerResult::Ok
+        } else {
+            InternalWorkerResult::CleanupIncomplete
+        }
     }
 }
 
@@ -3662,6 +3763,7 @@ fn activate_client_ingress_child(
     ingress: &mut Option<WorkerClientIngress>,
     request: &ActivateClientIngress,
     bound_context: ContextId,
+    deadline: HardDeadline,
 ) -> Result<ChildOperationOutcome, WorkerV3Error> {
     let runtime = context_id(&request.client_runtime_id)?;
     let Some(ingress) = ingress
@@ -3670,7 +3772,7 @@ fn activate_client_ingress_child(
     else {
         return Ok((InternalWorkerResult::NotFound, None, false));
     };
-    Ok(match ingress.activate(request) {
+    Ok(match ingress.activate(request, deadline) {
         Ok(()) => (
             InternalWorkerResult::Ok,
             Some(internal_worker_response::Outcome::ActivatedClientIngress(
@@ -3701,14 +3803,17 @@ fn destroy_client_ingress_child(
     {
         return Ok((InternalWorkerResult::Conflict, None, false));
     }
+    let result = ingress
+        .as_mut()
+        .map_or(InternalWorkerResult::Ok, |owner| owner.cleanup(deadline));
     *ingress = None;
     Ok((
-        InternalWorkerResult::Ok,
-        Some(internal_worker_response::Outcome::ClientIngressDestroyed(
-            ClientIngressDestroyed {
+        result,
+        (result == InternalWorkerResult::Ok).then_some(
+            internal_worker_response::Outcome::ClientIngressDestroyed(ClientIngressDestroyed {
                 client_runtime_id: runtime.to_vec(),
-            },
-        )),
+            }),
+        ),
         true,
     ))
 }
@@ -3811,8 +3916,12 @@ fn child_loop(
                 (result, outcome, false, descriptor)
             }
             internal_worker_request::Operation::ActivateClientIngress(operation) => {
-                let (result, outcome, exit) =
-                    activate_client_ingress_child(&mut ingress, operation, bound_context)?;
+                let (result, outcome, exit) = activate_client_ingress_child(
+                    &mut ingress,
+                    operation,
+                    bound_context,
+                    deadline,
+                )?;
                 (result, outcome, exit, None)
             }
             internal_worker_request::Operation::DestroyClientIngress(operation) => {
@@ -5075,6 +5184,26 @@ struct WorkerGenerationOwnership {
 }
 
 impl WorkerGenerationOwnership {
+    fn duplicate_network_namespace_pin(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<crate::worker_sandbox::PinnedWorkerNetworkNamespace, WorkerV3Error> {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = registry
+            .records
+            .get(&self.coordinates.context_id)
+            .filter(|record| record.generation == self.coordinates.worker_generation.get())
+            .ok_or(WorkerV3Error::Dead)?;
+        record
+            .process
+            .as_ref()
+            .ok_or(WorkerV3Error::Dead)?
+            .duplicate_network_namespace_pin(deadline)
+    }
+
     fn has_valid_dispatch_fence_shape(&self) -> bool {
         match (
             self.dispatch_registration,

@@ -242,6 +242,13 @@ pub(crate) struct PinnedWorkerNetworkNamespace {
 }
 
 impl PinnedWorkerNetworkNamespace {
+    pub(crate) fn verified_descriptor(&self) -> Result<BorrowedFd<'_>, WorkerSandboxError> {
+        if typed_network_namespace_identity(&self.descriptor)? != self.identity {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+        Ok(self.descriptor.as_fd())
+    }
+
     /// Compares another typed network-namespace descriptor with this still-live exact pin.
     ///
     /// Both descriptors are re-read on every comparison. The cached identity must still match this
