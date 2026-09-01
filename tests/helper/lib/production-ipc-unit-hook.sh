@@ -7080,20 +7080,10 @@ start_hook() {
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'final authenticated runtime bind failed'
 
-    if [ "$may_own_relay_mode" = yes ]; then
-        hook_may_own_wait=0
-        while ! private_file_is_safe "$may_own_debugger_armed_record"; do
-            hook_may_own_wait=$((hook_may_own_wait + 1))
-            [ "$hook_may_own_wait" -lt 600 ] \
-                || fail 'MayOwn debugger did not arm before the functional cycles'
-            sleep 0.05
-        done
-        [ "$(cat "$may_own_debugger_armed_record")" = \
-            'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DEBUGGER_ARMED_V1=pass' ] \
-            || fail 'MayOwn debugger marker is invalid'
-    elif [ "$may_own_relay_mode" != no ]; then
-        fail 'MayOwn mode is invalid'
-    fi
+    case $may_own_relay_mode in
+        yes|no) ;;
+        *) fail 'MayOwn mode is invalid' ;;
+    esac
 
     advance_start_failure_stage functional-underlay \
         || fail 'start failure stage transition is invalid'

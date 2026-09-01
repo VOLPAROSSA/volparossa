@@ -1586,6 +1586,65 @@ if may_own_launcher_mode_contract_is_exact "$may_own_launcher_mode_mutant"; then
     exit 1
 fi
 
+# The debugger publishes its armed record only after the third durable-custody publication. The
+# Client, Exit and Relay functional cycles must therefore start without waiting on that future
+# record; otherwise the observer and debugger form a circular handshake before Relay custody.
+start_hook_contract=$tmp/start-hook-contract.sh
+sed -n '/^start_hook() {$/,/^}$/p' "$hook" >"$start_hook_contract"
+may_own_functional_cycle_order_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    awk '
+        /run_probe bind-after bind-runtime/ {
+            bind_after = NR
+            bind_after_count++
+        }
+        /^    case \$may_own_relay_mode in$/ {
+            mode = NR
+            mode_count++
+        }
+        /^        yes\|no\) ;;$/ {
+            accepted = NR
+            accepted_count++
+        }
+        /\*\) fail '\''MayOwn mode is invalid'\'' ;;$/ {
+            rejected = NR
+            rejected_count++
+        }
+        /may_own_debugger_armed_record/ { armed_record_count++ }
+        /^    advance_start_failure_stage functional-underlay/ {
+            functional_stage = NR
+            functional_stage_count++
+        }
+        /^    run_functional_client_lease_probe/ {
+            functional_probe = NR
+            functional_probe_count++
+        }
+        END {
+            valid = bind_after_count == 1 && mode_count == 1
+            valid = valid && accepted_count == 1 && rejected_count == 1
+            valid = valid && armed_record_count == 0
+            valid = valid && functional_stage_count == 1
+            valid = valid && functional_probe_count == 1
+            valid = valid && bind_after < mode && mode < accepted
+            valid = valid && accepted < rejected && rejected < functional_stage
+            valid = valid && functional_stage < functional_probe
+            if (!valid) exit 1
+        }
+    ' "$1"
+}
+may_own_functional_cycle_order_is_exact "$start_hook_contract" || {
+    printf '%s\n' 'MayOwn functional cycles are not free of a future debugger-marker wait' >&2
+    exit 1
+}
+start_hook_armed_wait_mutant=$tmp/start-hook-armed-wait-mutant.sh
+sed 's/^    advance_start_failure_stage functional-underlay/    test -f "$may_own_debugger_armed_record"\
+&/' "$start_hook_contract" >"$start_hook_armed_wait_mutant"
+sh -n "$start_hook_armed_wait_mutant"
+if may_own_functional_cycle_order_is_exact "$start_hook_armed_wait_mutant"; then
+    printf '%s\n' 'MayOwn functional-cycle contract accepted a future-marker wait' >&2
+    exit 1
+fi
+
 observer_preexec_contract=$tmp/observer-preexec-contract
 sed -n '/^[[:space:]]*pre-exec-one|pre-exec-two|pre-exec-three)/,/^[[:space:]]*;;$/p' \
     "$observer" >"$observer_preexec_contract"
