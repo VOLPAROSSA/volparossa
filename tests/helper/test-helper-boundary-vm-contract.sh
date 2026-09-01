@@ -973,6 +973,8 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_blocked_category() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_may_own_launch_failure_category() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_may_own_launch_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_boundary_validator_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_boundary_validator_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_successor_debugger_category_is_safe() {$/,/^}$/p' "$runner"
@@ -995,7 +997,7 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 29
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 31
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -1482,6 +1484,52 @@ expect_status 1 report_non_retained_restart_launch_failure_category \
     "$branch_failure_diagnostic"
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
+while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
+    printf 'live worker-identity proof failed: %s\n' "$may_own_reason" \
+        >"$branch_failure_diagnostic"
+    printf 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=%s\n' "$may_own_phase" \
+        >>"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_may_own_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category"
+done <<'EOF'
+ExactPresent retirement was not confirmed before MayOwn proof|prerequisite|restart-retirement
+MayOwn singleton unit name is unsafe|unit-name|may-own-launch
+MayOwn singleton unit state could not be determined|unit-state-read|may-own-launch
+MayOwn singleton unit name is already loaded|unit-state-present|may-own-launch
+MayOwn debugger symbols could not be inspected|symbols-read|may-own-launch
+MayOwn debugger symbols are not exact and unique|symbols-shape|may-own-launch
+MayOwn ownership marker could not be derived|marker-derive|may-own-launch
+MayOwn ownership marker is non-canonical|marker-canonical|may-own-launch
+MayOwn ownership marker is unsafe|marker-shape|may-own-launch
+MayOwn debugger command path was not initially absent|debugger-path|may-own-launch
+MayOwn singleton unit could not be launched|launch-status|may-own-launch
+MayOwn singleton launch envelope is invalid|launch-envelope|may-own-launch
+MayOwn first MainPID did not appear|mainpid-appearance|may-own-launch
+MayOwn first MainPID birth token is unavailable|mainpid-starttime|may-own-launch
+MayOwn first private namespaces did not become stable|namespaces|may-own-launch
+MayOwn first pre-exec barrier is not manager-bound|preexec-barrier|may-own-launch
+MayOwn first external pre-exec observer did not arm|preexec-observer|may-own-launch
+MayOwn first freeze handshake path is unsafe|handshake-path|may-own-launch
+EOF
+
+printf '%s\n' \
+    'live worker-identity proof failed: private MayOwn launch detail' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn singleton unit name is unsafe' \
+    'live worker-identity proof failed: MayOwn singleton unit state could not be determined' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
 if ! awk '
     /^if \[ "\$guest_status" -ne 0 \]; then$/ { guest_failure = NR }
     /^        elif report_non_retained_boundary_validator_failure_category \\$/ {
@@ -1493,6 +1541,9 @@ if ! awk '
     /^                report_non_retained_restart_crash_record_diagnostic \\$/ {
         crash_call = NR; crash_call_count++
     }
+    /^        elif report_non_retained_may_own_launch_failure_category \\$/ {
+        may_own_call = NR; may_own_call_count++
+    }
     /non-retained helper-boundary PR smoke failure category: unclassified/ {
         unclassified = NR
     }
@@ -1500,8 +1551,9 @@ if ! awk '
         valid = validator_call_count == 1 && parser_call_count == 1
         valid = valid && guest_failure < validator_call
         valid = valid && validator_call < parser_call
-        valid = valid && crash_call_count == 1
-        valid = valid && parser_call < crash_call && crash_call < unclassified
+        valid = valid && crash_call_count == 1 && may_own_call_count == 1
+        valid = valid && parser_call < crash_call && crash_call < may_own_call
+        valid = valid && may_own_call < unclassified
         if (!valid) exit 1
     }
 ' "$runner"; then

@@ -458,6 +458,80 @@ report_non_retained_proof_failure_reason() {
         "$non_retained_failure_reason" >&2
 }
 
+non_retained_may_own_launch_failure_category() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        'ExactPresent retirement was not confirmed before MayOwn proof')
+            printf '%s\n' prerequisite ;;
+        'MayOwn singleton unit name is unsafe')
+            printf '%s\n' unit-name ;;
+        'MayOwn singleton unit state could not be determined')
+            printf '%s\n' unit-state-read ;;
+        'MayOwn singleton unit name is already loaded')
+            printf '%s\n' unit-state-present ;;
+        'MayOwn debugger symbols could not be inspected')
+            printf '%s\n' symbols-read ;;
+        'MayOwn debugger symbols are not exact and unique')
+            printf '%s\n' symbols-shape ;;
+        'MayOwn ownership marker could not be derived')
+            printf '%s\n' marker-derive ;;
+        'MayOwn ownership marker is non-canonical')
+            printf '%s\n' marker-canonical ;;
+        'MayOwn ownership marker is unsafe')
+            printf '%s\n' marker-shape ;;
+        'MayOwn debugger command path was not initially absent')
+            printf '%s\n' debugger-path ;;
+        'MayOwn singleton unit could not be launched')
+            printf '%s\n' launch-status ;;
+        'MayOwn singleton launch envelope is invalid')
+            printf '%s\n' launch-envelope ;;
+        'MayOwn first MainPID did not appear')
+            printf '%s\n' mainpid-appearance ;;
+        'MayOwn first MainPID birth token is unavailable')
+            printf '%s\n' mainpid-starttime ;;
+        'MayOwn first private namespaces did not become stable')
+            printf '%s\n' namespaces ;;
+        'MayOwn first pre-exec barrier is not manager-bound')
+            printf '%s\n' preexec-barrier ;;
+        'MayOwn first external pre-exec observer did not arm')
+            printf '%s\n' preexec-observer ;;
+        'MayOwn first freeze handshake path is unsafe')
+            printf '%s\n' handshake-path ;;
+        *) return 1 ;;
+    esac
+}
+
+report_non_retained_may_own_launch_failure_category() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_may_own_prefix='live worker-identity proof failed: '
+    [ "$(grep -Fc "$non_retained_may_own_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_may_own_line=$(grep -F \
+        "$non_retained_may_own_prefix" "$non_retained_diagnostic") \
+        || return 1
+    case $non_retained_may_own_line in
+        "$non_retained_may_own_prefix"*)
+            non_retained_may_own_reason=${non_retained_may_own_line#"$non_retained_may_own_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    non_retained_may_own_category=$( \
+        non_retained_may_own_launch_failure_category \
+            "$non_retained_may_own_reason" \
+    ) || return 1
+    printf 'non-retained helper-boundary PR smoke MayOwn launch category: %s\n' \
+        "$non_retained_may_own_category" >&2
+}
+
 non_retained_boundary_validator_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -2686,6 +2760,9 @@ if [ "$guest_status" -ne 0 ]; then
                 report_non_retained_restart_crash_record_diagnostic \
                     "$proof_stderr_log" || true
             fi
+        elif report_non_retained_may_own_launch_failure_category \
+            "$proof_stderr_log"; then
+            :
         else
             printf '%s\n' \
                 'non-retained helper-boundary PR smoke failure category: unclassified' >&2
