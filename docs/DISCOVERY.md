@@ -26,8 +26,9 @@ The current discovery crate composes:
   context/dispatch/bind/cancel seams; public event pumps expose no inbound response channel, the
   direct Relay and upstream Exit have one role-gated service-owned signer/responder pump, and the
   same private pump now owns one affine forwarded client request through the exact upstream Exit
-  response and control Relay-signed prefix wrapper. The client-side outbound attempt owner remains
-  absent;
+  response and control Relay-signed prefix wrapper. The discovery actor separately owns the
+  client-side snapshot, native-agnostic sampling, sequential request/bind, exact transport join,
+  and opaque prepared-evidence handoff;
 - refusal-test constants, but no registered behaviour or fallback, for advertisement v1/v2/v3 and the
   retired direct reservation v2 identifiers; and
 - a process-local MemoryTransport used by hermetic swarm integration tests, not as a network or
@@ -123,8 +124,9 @@ relay. Another proves the `ExecuteProbe` frame is valid while its production han
 bounds, role direction, identity contradictions, response shapes, and refusal of advertisement
 v1/v2/v3 and retired direct-reservation v2 identifiers.
 
-The unprivileged discovery actor also has a dormant, crate-private route-candidate snapshot
-command. It captures one lower-bound timestamp, purges expired actor entries, copies the exact
+The unprivileged discovery actor has a crate-private route-candidate snapshot command and also
+builds the same snapshot internally for client preselection. It captures one lower-bound timestamp,
+purges expired actor entries, copies the exact
 active policy metadata, and loads at most 200 records. Before projection it re-verifies each
 persisted canonical signed envelope in production code and joins its exact fingerprint, node and
 Peer IDs, sequence, signed millisecond timestamps, actor capability, and policy
@@ -144,9 +146,9 @@ dispatch authority: route execution still has to re-resolve and exactly compare 
 capabilities later.
 
 The protocol crate contains the A0 preselection-observation transcript primitives. Discovery now
-has production-compiled role-gated Relay/Exit responders and an affine Relay-to-Exit forwarding
-wrapper; the client-side outbound attempt owner remains absent. A direct relay can sign one exact
-short-lived challenge response. For a forwarded exit,
+has production-compiled role-gated Relay/Exit responders, an affine Relay-to-Exit forwarding
+wrapper, and a private single-owner client attempt in `DiscoveryRuntime`. A direct relay can sign
+one exact short-lived challenge response. For a forwarded exit,
 the exit signs the response and the exact prospective forwarding control named in the unsigned
 request countersigns the exact nested bytes plus a public IPv4 /24 or IPv6 /48 prefix claim. The
 control intentionally echoes the exit-subject challenge with its own signed-envelope nonce and
@@ -159,12 +161,14 @@ field directly into the shared normalized prefix type and checks its public rang
 constructs a representative host IP. That normalized value alone proves neither provenance nor
 origin truth.
 
-A0 still has no production client-side outbound attempt owner. A separate dormant affine sampler
-can narrow the actor-built snapshot, and a dormant affine join can consume the completed A1a owner
-together with one exact service-bound client transport per request, purpose-consume both proof
-kinds, and mint the route-selection child's existing private `FreshEvidenceBatch`. No actor calls
-either boundary, and the conservative batch deliberately leaves native dataplane-address usability
-false, so it cannot yet produce a selectable `CandidateEvidence` or route. Discovery composes
+A0 remains requester-anonymous, but the production discovery actor now owns the client-side
+attempt. It builds and affinely narrows its snapshot, derives each target and canonical request
+inside the private attempt, binds only the exact service-sealed response, exact-set joins one
+service-bound client transport per request, and purpose-consumes both proof kinds into the
+route-selection child's private evidence. The actor returns only an opaque
+`PreparedPreselectionEvidence` handoff and retains the cooldown owner. That conservative evidence
+deliberately has `network_address_usable = false`, so no downstream selector can admit it and no
+selectable candidate or route follows. Discovery composes
 request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
 dispatch one request, bind an opaque matching response arrival sealed and timestamped by the
 originating service's private pump to a current unique connection proof, or cancel that exact
@@ -201,12 +205,12 @@ uses the same actor-owned permanent identity, and a policy command cancels the p
 the replacement. A response still requires an exact currently served role advertisement;
 production deliberately publishes no usable Relay/Exit capability before dataplane readiness is
 proved, so no successful production response or readiness claim follows from this lifecycle
-connection yet. The control-signed prefix wrapper, dormant A1a owner and dormant exact A1a/A1c
-join are implemented, while the production outbound attempt owner remains absent. No runtime
-caller drives that chain. Its private Fresh batch deliberately lacks native dataplane-address
-usability and therefore grants no capacity or route authority.
+connection yet. The control-signed prefix wrapper, actor-owned A1a attempt, exact A1a/A1c join and
+opaque prepared-evidence handoff are implemented and driven by the production discovery actor.
+There is still no downstream route-orchestrator caller. The private Fresh batch deliberately lacks
+native dataplane-address usability and therefore grants no capacity or route authority.
 
-The agent now contains a dormant A1a ownership prerequisite. Snapshot construction privately mints
+The agent now contains an actor-owned A1a attempt lineage. Snapshot construction privately mints
 an endpoint-free, non-derived subject set from the exact freshly revalidated stored signed
 advertisements; legacy snapshot construction remains available when that hidden binding cannot be
 minted, while A1a begin rejects the unavailable marker. The subject set retains exact node and
@@ -232,8 +236,9 @@ requested family. The hints are inexpensive signed claims, not authenticated net
 they provide no Fresh, route, reservation or reachability authority. The later exact-set transport
 join may mint only direct connection-derived or control-attested native prefixes into its private
 Fresh evidence. The existing FreshEvidence/selection hard filter must then re-enforce actual
-network-origin diversity before route planning. The sampler is still dormant: it has no production
-attempt actor, network dispatch or Fresh-evidence caller.
+network-origin diversity before route planning. The production discovery actor invokes this
+native-dataplane-agnostic sampler before beginning the affine request lineage; the sampler itself
+chooses no endpoint and grants no dispatch or Fresh-evidence authority.
 
 Each discovery-private `pub(super)` affine `PreselectionAttemptGate` lineage admits at most one
 attempt at a time. It validates a batch-wide non-zero conservative local bandwidth ceiling and an
@@ -256,19 +261,18 @@ verified transcript against the exact canonical request bytes. Its final
 `BoundPreselectionTranscriptBatch` is opaque, non-cloneable, endpoint-free, and retains only
 sanitized subject/request bindings, process-local dispatch ID/request hash, opaque transcript
 tokens and attempt ceilings. It deliberately records no authenticated connection, local send or
-arrival event, socket origin, RTT, reachability, usable address, or Fresh-evidence validity. It
-has no production client root or runtime transport-join owner and creates no
-`RouteSessionAuthority` or `ReservationSession`. The dormant exact-set join can consume it into
-private phase-A evidence, but the production request-response responders and forwarding wrapper do
-not consume this A1a value. The completed
+arrival event, socket origin, RTT, reachability, usable address, or Fresh-evidence validity. The
+same production discovery owner joins it only to the exact service-bound transports and creates no
+`RouteSessionAuthority` or `ReservationSession`. The request-response responders and forwarding
+wrapper do not consume this A1a value. The completed
 affine A1a owner retains the original, non-cloned `RouteCandidateSnapshot` beside—not inside—the
 endpoint-free transcript batch. This preserves the exact candidate-union allocation for a later
 owner without exposing a getter or reconstructing candidate state. That sibling is the existing
 actor-private selection snapshot and can contain advertised control endpoints; those never enter
 the transcript batch or the opaque transport proof.
 
-The dormant A1c transport-provenance join exact-set joins that batch to the authenticated Peer ID,
-libp2p `ConnectionId`, local request ID and request hash, and local monotonic send/arrival events.
+The actor-owned A1c transport-provenance join exact-set joins that batch to the authenticated Peer
+ID, libp2p `ConnectionId`, local request ID and request hash, and local monotonic send/arrival events.
 For a direct relay, both RTT and the normalized public IPv4 /24 or IPv6 /48 must come from that same
 authenticated remote socket. For a forwarded exit, the control-attested upstream /24 or /48 stays
 native; it must never be widened into a fabricated full representative IP. An
@@ -293,8 +297,8 @@ affine witness can be minted only for exactly one total connection to that peer 
 native family, and binding consumes it while rechecking peer, connection, generation and prefix.
 There is deliberately no generic `DiscoveryService` registry, address, prefix, witness, or bound-
 observation accessor. The only consumers are the purpose-specific client and upstream transaction
-seams plus the dormant exact A1a/A1c join described below. No production owner invokes them, and
-native dataplane usability remains unproved.
+seams plus the actor-owned exact A1a/A1c join described below. The production discovery owner
+invokes that chain, while native dataplane usability remains unproved.
 
 A second A1c wire component consists of two strictly separate libp2p request-response
 behaviours and event variants. The client-facing protocol is outbound for Client and inbound for
@@ -334,16 +338,16 @@ binding rechecks the exact service instance, private request ID, authenticated p
 `ConnectionId`, deadline, uniqueness, generation and native prefix. The bound authority tokens
 themselves expose no address, peer, connection, ID/hash/time getter, equality oracle, clone or
 decomposition. Purpose-specific terminal consumers destroy those tokens and expose only the facts
-needed by the dormant private freshness join: the client transport yields an endpoint-free
+needed by the actor-owned private freshness join: the client transport yields an endpoint-free
 normalized public IPv4 `/24` or IPv6 `/48`, its sealed local wall-observation time and monotonic
 round trip; the
 upstream connection may yield only the normalized prefix for the Relay-signed wrapper; and verified
 direct or forwarded transcripts yield only their signed validity ceiling, or the earlier joint
 signed ceiling plus the control-signed normalized prefix. None exposes a request, identity,
-signature, nonce, full endpoint, connection, dispatch capability or other reusable authority. No
-production outbound client attempt actor/owner invokes this exact-set join. Its private
-`FreshEvidenceBatch` deliberately leaves native dataplane-address usability false, so the existing
-hard filter rejects it before route planning. The swarm pump drops a
+signature, nonce, full endpoint, connection, dispatch capability or other reusable authority. The
+production discovery actor purpose-consumes these projections through the exact-set join. Its
+private `FreshEvidenceBatch` deliberately leaves native dataplane-address usability false, so the
+existing hard filter rejects it before route planning. The swarm pump drops a
 still-current client-hop request unless it targets the local relay/control and its authenticated
 remote sender differs from both that local peer and the challenged actor. A0 deliberately contains
 no client identity, so this is not a claim that the sender is request-bound. Upstream, the pump
@@ -394,9 +398,9 @@ connected-peer state includes the Relay but not the Exit. It also exercises wron
 connection and all lifecycle cleanup paths above. The test `/24` is derived from explicitly
 injected public endpoint lineage and is not external-network evidence. Neither receipt nor wrapper
 claims origin, RTT, capacity, Fresh evidence, reservation, route, admission, readiness, or datapath
-authority. The production agent supplies the policy and permanent signer, but there is still no
-client-side outbound attempt owner. The dormant sampler, exact-set join and private Fresh-evidence
-mint described below therefore have no runtime caller.
+authority. The production agent supplies the policy and permanent signer, and its discovery actor
+now owns the client-side sampler, exact request/bind lineage, exact-set join and private
+Fresh-evidence mint. That chain still has no downstream route-orchestrator caller.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than
@@ -408,8 +412,9 @@ caller or usable production candidate. The A1a/A1c bridge now consumes the exact
 and transcript proofs, but deliberately cannot prove native dataplane usability. Its private Fresh
 batch is still subject to the existing observed-origin diversity hard filter before route planning.
 
-A dormant phase-A boundary consumes one non-cloneable `FreshEvidenceBatch` before it builds a
-`ProspectiveRoutePlan`. In addition to test fixtures, its private production mint now requires the
+An actor-invoked private boundary consumes one non-cloneable `FreshEvidenceBatch` into opaque
+`PreparedPreselectionEvidence`; the separate downstream phase-A planner can later consume that
+prepared value before it builds a `ProspectiveRoutePlan`. Its private production mint requires the
 exact retained A1a candidate set and one purpose-consumed A1c transport plus cryptographic
 transcript for every request. It rejects count, order, request hash, actor, forwarded-control,
 transport, family, wall-window and monotonic-window substitution before minting. The batch has a non-zero opaque ID, contains exactly the 1-200
@@ -432,8 +437,9 @@ The proof mint records one successful reachability sample, no measured p25, neut
 and egress-quality scores, and no native dataplane-address proof. `locally_blocked = false` means
 only that this proof input supplied no local blocklist hit; it is not affirmative policy evidence.
 Consequently the existing hard filter rejects every such batch until a separate native-path
-sampler supplies the missing dataplane evidence. The bridge grants no discovery dispatch,
-reservation or route authority and has no production caller.
+sampler supplies the missing dataplane evidence. The discovery actor calls the bridge only through
+the opaque Prepared handoff; no downstream route-orchestrator consumes it, and it grants no
+reservation or route authority.
 
 Phase A still selects the exclusively forwarded exit first. It then uses only hard-filtered local
 peer evidence and the existing randomized 70/20/10 score bands to choose a seed-dependent
@@ -493,9 +499,9 @@ requires no helper, network-state or journal cleanup because reservation dispatc
 
 The older scalar complete-path second stage remains only as a clearly dormant test boundary; the
 new plan neither calls nor trusts it. C2c supplies the private ownership and actor-resolution link
-to the existing phase-B transaction, but there is still no production owner feeding the dormant
-Fresh-evidence producer, real probe verifier/handler or production orchestration. Consequently the
-real resolver/transport path is not invoked by phase A in production. C2c adds no new wire,
+to the existing phase-B transaction, but no production route orchestrator consumes the new opaque
+Prepared handoff or drives the real probe verifier/handler. Consequently the real
+resolver/transport path is not invoked by phase A in production. C2c adds no new wire,
 provider or helper implementation, so it causes no production network/host mutation, and the
 reported usable route-candidate count deliberately remains zero.
 

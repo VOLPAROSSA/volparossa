@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-30
+Last updated: 2026-09-01
 
 ## Fixed alpha v1 scorecard
 
@@ -1013,9 +1013,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   cached or replied. A crate-private command can now produce a sorted, unique, at-most-200
   in-process snapshot only after production signature revalidation and exact persisted
   fingerprint/actor capability/policy joins. Expired, conflicted, self, pending-direct, unpaired,
-  direct-only exit, and multiply-control-paired exit records fail closed. The snapshot has no
-  production caller, serialization, or dispatch authority. A separate discovery-private affine
-  sampler now revalidates that exact snapshot and narrows it to one randomly selected forwarded
+  direct-only exit, and multiply-control-paired exit records fail closed. The discovery actor now
+  builds that snapshot internally for its client-preselection owner; the snapshot has no
+  serialization or dispatch authority. A separate discovery-private affine sampler then
+  revalidates that exact snapshot and narrows it to one randomly selected forwarded
   Exit, its exact control Relay, and one to eight other Relays in weighted 70/20/10 high,
   diverse-middle and exploration order. It rejects malformed or ambiguous pairings, unsupported
   role/transport/family, unavailable advertised capacity, active serious faults and insufficient
@@ -1024,12 +1025,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   hint diversity, but those signed hints are not authenticated origins. A later exact-set join may
   mint only connection-derived or control-attested prefixes into private Fresh evidence; the
   existing FreshEvidence/selection hard filter must re-enforce actual network-origin diversity
-  before route planning. It never creates a direct Exit candidate and has no production attempt
-  actor, dispatch or Fresh-evidence caller. Control-v4 tags 17 and 18 now
-  define a protocol precursor with no production/network caller for an actor-signed direct
+  before route planning. The production discovery actor invokes the sampler before its affine
+  request lineage; it never creates a direct Exit candidate, chooses no endpoint and grants no
+  dispatch or Fresh-evidence authority. Control-v4 tags 17 and 18 now
+  define the request/response transcript used by that control-plane owner for an actor-signed direct
   observation transcript or an exit-signed receipt nested in a control-signed public-prefix claim.
-  The dedicated verifiers are transactional and return opaque affine transcripts. A separate dormant
-  A1a owner now validates
+  The dedicated verifiers are transactional and return opaque affine transcripts. The actor-owned
+  A1a attempt validates
   an endpoint-free reduced snapshot and local conservative ceiling, internally mints a 16-byte
   batch ID plus two to nine unique 32-byte request/challenged-relay-or-exit challenges (the control
   shares the exit challenge), and retains one forwarded response plus one to eight direct-relay
@@ -1074,9 +1076,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   normalized prefix for the Relay-signed upstream wrapper; only signed validity for a direct
   transcript; or the earlier joint signed validity and control-signed normalized prefix for a
   forwarded transcript. No projection contains a request, identity, signature, nonce, full
-  endpoint, connection, dispatch capability or other reusable authority. The dormant exact-set
-  `FreshEvidenceBatch` join can consume these values, but no production outbound client attempt
-  actor/owner invokes it and its false native-address-usability result grants no route readiness.
+  endpoint, connection, dispatch capability or other reusable authority. The production discovery
+  owner consumes these values through the exact-set `FreshEvidenceBatch` join and returns only an
+  opaque `PreparedPreselectionEvidence` handoff. Its false native-address-usability result grants no
+  route readiness, and no downstream route-orchestrator consumes the handoff.
   The swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to
@@ -1142,8 +1145,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   record. This remains control-plane
   transcript production only and claims no Freshness, readiness, capacity, reservation, route or
   datapath.
-  There is still no outbound production client attempt owner. The dormant snapshot sampler and
-  affine join have no runtime caller. The join now
+  The production discovery actor now owns the snapshot, native-agnostic sampler, sequential affine
+  request/bind lineage, exact transport join and opaque Prepared handoff. The join
   consumes the completed A1a owner plus one exact `BoundClientPreselectionTransport` per canonical
   request and purpose-consumes both opaque proof types. It rejects count, order, duplicate or wrong
   request hash, actor/role/forwarded-control shape, transport, family, wall-window and independent
@@ -1167,12 +1170,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   witness/binding rechecks the exact Peer ID, `ConnectionId`, non-zero generation and native /24 or
   /48. It has no generic registry/address/prefix accessor; only the purpose-specific client and
   upstream seams may consume its affine witness, and only the affine Relay wrapper may consume an
-  upstream binding into the signed endpoint-free prefix. The exact join and Fresh mint have no
-  actor/runtime caller; the existing hard filter rejects their output until a separate native-path
-  sampler proves dataplane address usability. No checkbox is closed. Production still publishes no
-  usable relay/exit capability, route finalization still fails closed with
-  `ProbeEvidenceUnavailable`, and no production client transaction, native sampler, route
-  admission, orchestration or disposable live-network proof for that pipeline exists. This closes
+  upstream binding into the signed endpoint-free prefix. The actor invokes the exact join and Fresh
+  mint, but the existing hard filter rejects their output until a separate native-path sampler
+  proves dataplane address usability. No checkbox is closed. Production still publishes no usable
+  relay/exit capability, route finalization still fails closed with `ProbeEvidenceUnavailable`, and
+  no downstream route orchestrator, native sampler, route admission or disposable live-network
+  proof for that pipeline exists. This closes
   no scorecard row; the fixed alpha score remains **11/100 (11%)**.
 - [ ] Bootstrap from peerstore, mDNS, multiple independent built-ins, peerlinks, and signed bootstrap files works.
 - [ ] No bootstrap node or DHT record becomes a unique authority or central node catalogue.
@@ -1192,14 +1195,15 @@ single clean-build A01--A15 run; the score is not a release claim.
 - [x] Peerstore does not persist browsing domains or destination history.
 - [ ] A tested conservative capacity primitive takes the minimum of advertised free, fresh local
   p25 when present, and a conservative preselection capacity ceiling. Snapshot projection
-  deliberately omits stored endpoint/RTT/capacity history. The dormant exact A1 proof mint supplies
-  no measured p25 and treats its configured ceiling only as a bound, while test observations also
-  cover sparse exploration. Both paths bind one normalized public /24 or /48 and exact
+  deliberately omits stored endpoint/RTT/capacity history. The actor-owned exact A1 proof mint
+  supplies no measured p25 and treats its configured ceiling only as a bound, while test
+  observations also cover sparse exploration. Both paths bind one normalized public /24 or /48 and exact
   advertisement payload hashes. The prefix, hashes and ceiling grant no measured capacity,
   reservation or dispatch authority. Explicit validity is bounded by freshness, attempt, policy,
-  advertisement and actor capability expiry. The bridge has no runtime caller or native-path
-  sampler and deliberately sets dataplane address usability false, so the actor path remains at
-  zero usable route candidates instead of substituting control-plane or stored evidence.
+  advertisement and actor capability expiry. The discovery actor invokes the bridge into an opaque
+  Prepared handoff, but no downstream route orchestrator or native-path sampler consumes it. The
+  mint deliberately sets dataplane address usability false, so the actor path remains at zero
+  usable route candidates instead of substituting control-plane or stored evidence.
 - [ ] A bounded 70/20/10 exploration primitive and a peer-only prospective relay selector are
   tested. The latter canonically handles at most 200 candidates, returns at most eight, and applies
   strict control/exit/slate diversity without synthetic complete-path metrics. Its dormant
@@ -1237,9 +1241,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   preselection capacity ceiling and normalized prefix are only test scalars and establish no offer,
   hold, reservation, admission, provenance or dispatch authority. Exact advertisement payload hashes
   bind the projected advertisement, direct/forwarded capabilities, Fresh/authenticated/verified
-  records and later capability re-resolution. A dormant exact A1a/A1c proof join now mints the
-  existing private Fresh batch, but no production client owner or native-path sampler calls or
-  completes it; its output remains deliberately unusable for selection.
+  records and later capability re-resolution. The production discovery owner now exact-set joins
+  A1a/A1c proofs, mints the existing private Fresh batch and exposes only an opaque Prepared
+  handoff. No downstream route orchestrator or native-path sampler consumes it, and its output
+  remains deliberately unusable for selection.
 - [ ] Relay selection measures and scores the complete client-relay-exit path. The second dormant
   scalar preflight stage can require complete evidence bound to the selected exit and exact relay
   snapshot, but it remains a test-only boundary and is not called or trusted by the new phase-A
