@@ -50,11 +50,27 @@ jobs:
           sudo env DEBIAN_FRONTEND=noninteractive apt-get update
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
             --yes --no-install-recommends \
+            build-essential cmake git pkg-config \
             qemu-system-x86 qemu-utils cloud-image-utils openssh-client \
             curl jq util-linux
           qemu-system-x86_64 --version
           qemu-img --version
           ssh -V
+
+      - name: Build exact pinned mqvpn/xquic runtime
+        run: |
+          set -euo pipefail
+          native_binary="$(pwd -P)/native/volparossa-mpquic/build/volparossa-mpquic"
+          native/volparossa-mpquic/scripts/fetch-upstream.sh --yes
+          VMP_BUILD_JOBS=2 native/volparossa-mpquic/scripts/build-upstream.sh
+          test -f "$native_binary"
+          test -x "$native_binary"
+          test "$("$native_binary" --api-version)" = 6
+          native_size=$(stat -Lc '%s' "$native_binary")
+          test "$native_size" -gt 0
+          test "$native_size" -le 67108864
+          sha256sum "$native_binary"
+          printf 'VOLPAROSSA_ALPHA_MPQUIC=%s\n' "$native_binary" >>"$GITHUB_ENV"
 
       - name: Require KVM and create output directory
         run: |
@@ -108,6 +124,7 @@ jobs:
             "$(pwd -P)/tests/integration/run-alpha-topology-vm.sh" \
             --execute --yes \
             --image "$VOLPAROSSA_ALPHA_IMAGE" \
+            --mpquic "$VOLPAROSSA_ALPHA_MPQUIC" \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" \
             --expected-commit "$GITHUB_SHA"
           topology_status=$?
@@ -123,6 +140,7 @@ jobs:
             jq -r '
               "last phase: \(.last_phase)",
               "helpers ready: \(.production_helpers.ready)",
+              "native MPQUIC ready: \(.native_mpquic.ready)",
               "agents ready: \(.agents_ready)",
               "A02 transparent TCP succeeded: \(.a02_transparent_tcp.succeeded)",
               "Connect succeeded: \(.client_connect.succeeded)",

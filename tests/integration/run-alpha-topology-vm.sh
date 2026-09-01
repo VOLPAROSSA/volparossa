@@ -12,6 +12,7 @@ umask 077
 mode=preview
 approval=no
 image_path=
+mpquic_path=
 output_directory=
 expected_commit=
 
@@ -19,7 +20,8 @@ usage() {
     printf '%s\n' \
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
-        '         --image PATH --output DIRECTORY --expected-commit SHA'
+        '         --image PATH --mpquic PATH --output DIRECTORY' \
+        '         --expected-commit SHA'
 }
 
 print_plan() {
@@ -27,6 +29,7 @@ print_plan() {
         'VOLPAROSSA disposable alpha topology VM plan:' \
         '  verify the reviewed Debian 13 amd64 image by its pinned SHA-512;' \
         '  archive only the exact clean checked-out Git revision;' \
+        '  verify and copy the locally built pinned mqvpn/xquic daemon;' \
         '  boot one temporary KVM-only qcow2 overlay with QEMU user networking;' \
         '  install Debian build/runtime packages and build only required binaries;' \
         '  run the five-node production-helper topology as guest root;' \
@@ -43,6 +46,11 @@ while [ "$#" -gt 0 ]; do
         --image)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             image_path=$2
+            shift
+            ;;
+        --mpquic)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            mpquic_path=$2
             shift
             ;;
         --output)
@@ -68,7 +76,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$mode" = preview ]; then
-    if [ "$approval" != no ] || [ -n "$image_path$output_directory$expected_commit" ]; then
+    if [ "$approval" != no ] \
+        || [ -n "$image_path$mpquic_path$output_directory$expected_commit" ]; then
         usage >&2
         exit 64
     fi
@@ -77,12 +86,12 @@ if [ "$mode" = preview ]; then
     exit 0
 fi
 
-if [ "$approval" != yes ] || [ -z "$image_path" ] \
+if [ "$approval" != yes ] || [ -z "$image_path" ] || [ -z "$mpquic_path" ] \
     || [ -z "$output_directory" ] || [ -z "$expected_commit" ]; then
     usage >&2
     exit 64
 fi
-case $image_path:$output_directory in /*:/*) ;; *) exit 64 ;; esac
+case $image_path:$mpquic_path:$output_directory in /*:/*:/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
 case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'VM runner must remain unprivileged' >&2; exit 77; }
@@ -127,6 +136,13 @@ jq -e --arg filename "$IMAGE_FILENAME" --arg sha512 "$IMAGE_SHA512" \
 [ "${image_path##*/}" = "$IMAGE_FILENAME" ] || exit 64
 [ -f "$image_path" ] && [ ! -L "$image_path" ] || exit 64
 printf '%s  %s\n' "$IMAGE_SHA512" "$image_path" | sha512sum --check --strict -
+[ "$(readlink -f -- "$mpquic_path")" = "$mpquic_path" ] || exit 64
+[ -f "$mpquic_path" ] && [ -x "$mpquic_path" ] && [ ! -L "$mpquic_path" ] || exit 64
+MPQUIC_SIZE=$(stat -Lc '%s' "$mpquic_path")
+case $MPQUIC_SIZE in ''|0|*[!0-9]*) exit 64 ;; esac
+[ "$MPQUIC_SIZE" -le 67108864 ] || exit 64
+[ "$("$mpquic_path" --api-version)" = 6 ] || exit 64
+MPQUIC_SHA256=$(sha256sum "$mpquic_path" | awk '{ print $1 }')
 [ -d "$output_directory" ] && [ ! -L "$output_directory" ] || exit 64
 [ -z "$(find "$output_directory" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 64
 
@@ -229,13 +245,18 @@ export LC_ALL=C
 umask 077
 expected_commit=$1
 source_sha256=$2
+mpquic_sha256=$3
 cd /home/vpci
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
+printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
+[ "$(stat -Lc '%s' volparossa-mpquic)" -le 67108864 ]
+chmod 0555 volparossa-mpquic
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
+[ "$(./volparossa-mpquic --api-version)" = 6 ]
 test "$(. /etc/os-release; printf '%s:%s' "$ID" "$VERSION_ID")" = debian:13
 test "$(dpkg --print-architecture)" = amd64
 test "$(uname -m)" = x86_64
@@ -260,6 +281,7 @@ sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
     --execute --yes \
     --source /home/vpci/source \
     --bin /home/vpci/target/debug \
+    --mpquic /home/vpci/volparossa-mpquic \
     --output /home/vpci/alpha-output \
     --expected-commit "$expected_commit" \
     >/home/vpci/alpha-output/runner.stdout \
@@ -338,11 +360,13 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
+scp_to "$mpquic_path" /home/vpci/volparossa-mpquic
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
 ssh_base chmod 0700 /home/vpci/guest-driver.sh
 
 set +e
-ssh_base /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256"
+ssh_base /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+    "$MPQUIC_SHA256"
 GUEST_STATUS=$?
 set -e
 if ! scp_from /home/vpci/alpha-output.tar.gz "$RUN_DIRECTORY/alpha-output.tar.gz"; then

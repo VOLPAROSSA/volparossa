@@ -14,6 +14,7 @@ mode=preview
 approval=no
 source_directory=
 binary_directory=
+mpquic_binary=
 output_directory=
 expected_commit=
 
@@ -22,7 +23,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --expected-commit SHA'
+        '         --mpquic PATH --expected-commit SHA'
 }
 
 print_plan() {
@@ -33,6 +34,7 @@ print_plan() {
         '  give each product node one disposable public underlay and fail-closed default;' \
         '  create only Client-Relay, Relay-Exit and Exit-destination underlay links;' \
         '  launch four distinct transient production-helper service instances;' \
+        '  launch real pinned mqvpn/xquic processes for the Client and Exit;' \
         '  bind each helper and agent privately to its node-owned /run/volparossa;' \
         '  prove GetUnitByPID, MainPID, cgroup, network namespace and FD-store binding;' \
         '  launch four real agents and exact-policy TCP/UDP echo applications;' \
@@ -63,6 +65,11 @@ while [ "$#" -gt 0 ]; do
             binary_directory=$2
             shift
             ;;
+        --mpquic)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            mpquic_binary=$2
+            shift
+            ;;
         --output)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             output_directory=$2
@@ -87,7 +94,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$source_directory$binary_directory$output_directory$expected_commit" ]; then
+        || [ -n "$source_directory$binary_directory$mpquic_binary$output_directory$expected_commit" ]; then
         usage >&2
         exit 64
     fi
@@ -97,15 +104,16 @@ if [ "$mode" = preview ]; then
 fi
 
 if [ "$approval" != yes ] || [ -z "$source_directory" ] \
-    || [ -z "$binary_directory" ] || [ -z "$output_directory" ] \
+    || [ -z "$binary_directory" ] || [ -z "$mpquic_binary" ] \
+    || [ -z "$output_directory" ] \
     || [ -z "$expected_commit" ]; then
     usage >&2
     exit 64
 fi
 
-case $source_directory:$binary_directory:$output_directory in
-    /*:/*:/*) ;;
-    *) printf '%s\n' 'source, binary and output paths must be absolute' >&2; exit 64 ;;
+case $source_directory:$binary_directory:$mpquic_binary:$output_directory in
+    /*:/*:/*:/*) ;;
+    *) printf '%s\n' 'source, binary, MPQUIC and output paths must be absolute' >&2; exit 64 ;;
 esac
 case $expected_commit in
     ''|*[!0-9a-f]*) printf '%s\n' 'expected commit is not canonical' >&2; exit 64 ;;
@@ -135,6 +143,17 @@ for executable in volparossa volparossa-agent volparossa-helper; do
 done
 [ -x "$binary_directory/examples/acceptance-policy-fixture" ] \
     || { printf '%s\n' 'acceptance policy fixture unavailable' >&2; exit 69; }
+if [ ! -f "$mpquic_binary" ] || [ ! -x "$mpquic_binary" ] \
+    || [ -L "$mpquic_binary" ]; then
+    printf '%s\n' 'pinned native MPQUIC executable unavailable' >&2
+    exit 69
+fi
+MPQUIC_SIZE=$(stat -Lc '%s' "$mpquic_binary")
+case $MPQUIC_SIZE in ''|0|*[!0-9]*) exit 69 ;; esac
+[ "$MPQUIC_SIZE" -le 67108864 ] \
+    || { printf '%s\n' 'pinned native MPQUIC executable is oversized' >&2; exit 69; }
+[ "$("$mpquic_binary" --api-version)" = 6 ] \
+    || { printf '%s\n' 'pinned native MPQUIC API mismatch' >&2; exit 69; }
 [ -f "$source_directory/packaging/systemd/volparossa.sysusers" ] \
     || { printf '%s\n' 'production service identity declaration unavailable' >&2; exit 69; }
 if [ ! -d "$output_directory" ] || [ -L "$output_directory" ]; then
@@ -167,6 +186,7 @@ chmod 0700 "$WORK"
 PHASE=identity-setup
 TOPOLOGY_READY=false
 HELPERS_READY=false
+MPQUIC_READY=false
 AGENTS_READY=false
 DESTINATION_READY=false
 CONNECT_REQUESTED=false
@@ -184,6 +204,7 @@ CLIENT_EXIT_ROUTE_ABSENT=false
 REMAINING_NAMESPACES=-1
 REMAINING_UNITS=-1
 HELPER_UNITS=
+MPQUIC_UNITS=
 AGENT_UNITS=
 DESTINATION_PID=
 CLIENT_OBSERVER_PID=
@@ -197,6 +218,7 @@ copy_artifacts() {
         status-client.txt status-relay1.txt status-relay2.txt status-exit.txt \
         roles-client.txt roles-relay1.txt roles-relay2.txt roles-exit.txt \
         helper-client.log helper-relay1.log helper-relay2.log helper-exit.log \
+        mpquic-client.log mpquic-exit.log mpquic-units.json \
         agent-client.log agent-relay1.log agent-relay2.log agent-exit.log \
         destination.log destination-tcp-evidence.json destination-udp-evidence.json \
         helper-units.json a02-client.json a02-client.err a02-client-fallback-route.txt \
@@ -221,7 +243,7 @@ unit_load_state() {
 retire_unit() {
     retire_name=$1
     case $retire_name in
-        volparossa-alpha-helper@*.service|volparossa-alpha-agent@*.service) ;;
+        volparossa-alpha-helper@*.service|volparossa-alpha-mpquic@*.service|volparossa-alpha-agent@*.service) ;;
         *) return 1 ;;
     esac
     [ "$(unit_load_state "$retire_name")" = loaded ] || return 0
@@ -249,6 +271,10 @@ write_report() {
     if [ -f "$WORK/a02-evidence.json" ]; then
         a02_evidence=$(cat "$WORK/a02-evidence.json" 2>/dev/null || printf 'null')
     fi
+    mpquic_records='[]'
+    if [ -f "$WORK/mpquic-units.json" ]; then
+        mpquic_records=$(cat "$WORK/mpquic-units.json" 2>/dev/null || printf '[]')
+    fi
     a05_evidence=null
     if [ -f "$WORK/a05-evidence.json" ]; then
         a05_evidence=$(cat "$WORK/a05-evidence.json" 2>/dev/null || printf 'null')
@@ -261,6 +287,7 @@ write_report() {
         --argjson topology "$TOPOLOGY_READY" \
         --argjson client_exit_route_absent "$CLIENT_EXIT_ROUTE_ABSENT" \
         --argjson helpers "$HELPERS_READY" \
+        --argjson mpquic "$MPQUIC_READY" \
         --argjson agents "$AGENTS_READY" \
         --argjson destination "$DESTINATION_READY" \
         --argjson requested "$CONNECT_REQUESTED" \
@@ -278,6 +305,7 @@ write_report() {
         --argjson exit_status "$report_status" \
         --argjson helper_records "$helper_records" \
         --argjson a02_evidence "$a02_evidence" \
+        --argjson mpquic_records "$mpquic_records" \
         --argjson a05_evidence "$a05_evidence" \
         '{schema_version:1,report_kind:"volparossa-alpha-kvm-topology",
           source_revision:$commit,run_id:$run_id,last_phase:$phase,
@@ -285,6 +313,7 @@ write_report() {
             client_exit_route_absent:$client_exit_route_absent,
             roles:["client","relay1","relay2","exit","destination"]},
           production_helpers:{ready:$helpers,instances:$helper_records},
+          native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records},
           agents_ready:$agents,destination_ready:$destination,
           client_connect:{requested:$requested,succeeded:$connected,
             exit_status:$connect_status,observed_blocker:$blocker},
@@ -325,6 +354,7 @@ cleanup() {
         wait "$DESTINATION_PID" 2>/dev/null || true
     fi
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
+    for cleanup_unit in $MPQUIC_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_unit in $HELPER_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$CLIENT"; do
         ip netns del "$cleanup_ns" 2>/dev/null || true
@@ -333,7 +363,7 @@ cleanup() {
     REMAINING_NAMESPACES=$(ip netns list | awk -v prefix="$PREFIX-" \
         '$1 ~ ("^" prefix) { count++ } END { print count + 0 }')
     REMAINING_UNITS=0
-    for cleanup_unit in $AGENT_UNITS $HELPER_UNITS; do
+    for cleanup_unit in $AGENT_UNITS $MPQUIC_UNITS $HELPER_UNITS; do
         [ "$(unit_load_state "$cleanup_unit")" = not-found ] \
             || REMAINING_UNITS=$((REMAINING_UNITS + 1))
     done
@@ -379,11 +409,14 @@ for staged_executable in volparossa volparossa-agent volparossa-helper; do
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/$staged_executable" "$WORK/bin/$staged_executable"
 done
+install -o root -g "$AGENT_GID" -m 0555 \
+    "$mpquic_binary" "$WORK/bin/volparossa-mpquic"
 install -d -o root -g "$AGENT_GID" -m 0755 "$WORK/bin/examples"
 install -o root -g "$AGENT_GID" -m 0555 \
     "$binary_directory/examples/acceptance-policy-fixture" \
     "$WORK/bin/examples/acceptance-policy-fixture"
 binary_directory=$WORK/bin
+mpquic_binary=$WORK/bin/volparossa-mpquic
 
 PHASE=network-topology
 for namespace in "$CLIENT" "$R1" "$R2" "$EXIT_NODE" "$DEST"; do
@@ -673,6 +706,112 @@ verify_helper relay2 "$R2"
 verify_helper exit "$EXIT_NODE"
 jq -S -c -s . "$WORK"/helper-record-*.json >"$WORK/helper-units.json"
 HELPERS_READY=true
+
+PHASE=mpquic-launch
+launch_mpquic() {
+    node=$1; namespace=$2; native_mode=$3
+    mpquic_unit=volparossa-alpha-mpquic@$node.service
+    mpquic_log=$WORK/mpquic-$node.log
+    : >"$mpquic_log"
+    chown "$AGENT_UID:$AGENT_GID" "$mpquic_log"
+    chmod 0600 "$mpquic_log"
+    [ "$(unit_load_state "$mpquic_unit")" = not-found ] \
+        || fail MPQUIC_UNIT_COLLISION
+    MPQUIC_UNITS="$MPQUIC_UNITS $mpquic_unit"
+    systemd-run --no-block --unit="$mpquic_unit" --slice=system.slice \
+        --description="VOLPAROSSA disposable native MPQUIC $node" \
+        --service-type=exec \
+        --property=CollectMode=inactive-or-failed \
+        --property=Restart=no \
+        --property=User=volparossa \
+        --property=Group=volparossa \
+        --property=SupplementaryGroups= \
+        --property=UMask=0077 \
+        --property=LimitCORE=0 \
+        --property=LimitFSIZE=16777216 \
+        --property=NoNewPrivileges=yes \
+        --property=CapabilityBoundingSet= \
+        --property=AmbientCapabilities= \
+        --property="NetworkNamespacePath=/run/netns/$namespace" \
+        --property=PrivateMounts=yes \
+        --property=PrivateTmp=yes \
+        --property=PrivateDevices=yes \
+        --property=ProtectSystem=strict \
+        --property=ProtectHome=yes \
+        --property=ProtectControlGroups=yes \
+        --property=ProtectKernelModules=yes \
+        --property=ProtectKernelTunables=yes \
+        --property=ProtectKernelLogs=yes \
+        --property=ProtectClock=yes \
+        --property=ProtectHostname=yes \
+        --property=LockPersonality=yes \
+        --property=MemoryDenyWriteExecute=yes \
+        --property=RestrictRealtime=yes \
+        --property=RestrictSUIDSGID=yes \
+        --property=RestrictNamespaces=yes \
+        --property=SystemCallArchitectures=native \
+        --property='SystemCallFilter=@system-service @network-io' \
+        --property=SystemCallErrorNumber=EPERM \
+        --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
+        --property="BindPaths=$WORK/runtime-$node:/run/volparossa" \
+        --property='ReadWritePaths=/run/volparossa/native' \
+        --property=KillMode=control-group \
+        --property=SendSIGKILL=yes \
+        --property=TimeoutStartSec=30s \
+        --property=TimeoutStopSec=30s \
+        --property=TasksMax=128 \
+        --property=SetLoginEnvironment=no \
+        --property="StandardOutput=append:$mpquic_log" \
+        --property="StandardError=append:$mpquic_log" \
+        "$mpquic_binary" --mode "$native_mode" \
+        --socket /run/volparossa/native/mpquic.sock >/dev/null
+}
+
+verify_mpquic() {
+    node=$1; namespace=$2; native_mode=$3
+    mpquic_unit=volparossa-alpha-mpquic@$node.service
+    attempt=0
+    while [ "$attempt" -lt 300 ]; do
+        mpquic_state=$(systemctl show --property=ActiveState --value \
+            "$mpquic_unit" 2>/dev/null || true)
+        mpquic_substate=$(systemctl show --property=SubState --value \
+            "$mpquic_unit" 2>/dev/null || true)
+        [ "$mpquic_state:$mpquic_substate" = active:running ] \
+            && [ -S "$WORK/runtime-$node/native/mpquic.sock" ] && break
+        case $mpquic_state in failed|inactive) break ;; esac
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+    [ "$mpquic_state:$mpquic_substate" = active:running ] \
+        || fail "MPQUIC_SERVICE_UNAVAILABLE_$node"
+    [ -S "$WORK/runtime-$node/native/mpquic.sock" ] \
+        || fail "MPQUIC_SOCKET_UNAVAILABLE_$node"
+    mpquic_pid=$(systemctl show --property=MainPID --value "$mpquic_unit")
+    case $mpquic_pid in ''|0|*[!0-9]*) fail "MPQUIC_MAINPID_INVALID_$node" ;; esac
+    process_net=$(stat -Lc '%d:%i' "/proc/$mpquic_pid/ns/net")
+    expected_net=$(stat -Lc '%d:%i' "/run/netns/$namespace")
+    [ "$process_net" = "$expected_net" ] \
+        || fail "MPQUIC_NETWORK_NAMESPACE_MISMATCH_$node"
+    [ "$(readlink -f -- "/proc/$mpquic_pid/exe")" = "$mpquic_binary" ] \
+        || fail "MPQUIC_EXECUTABLE_MISMATCH_$node"
+    socket_meta=$(stat -Lc '%F:%u:%g:%a' \
+        "$WORK/runtime-$node/native/mpquic.sock")
+    [ "$socket_meta" = "socket:$AGENT_UID:$AGENT_GID:600" ] \
+        || fail "MPQUIC_SOCKET_METADATA_$node"
+    jq -S -c -n --arg node "$node" --arg unit "$mpquic_unit" \
+        --arg mode "$native_mode" --arg namespace "$namespace" \
+        --arg namespace_identity "$process_net" --argjson pid "$mpquic_pid" \
+        '{node:$node,unit:$unit,mode:$mode,main_pid:$pid,
+          network_namespace:$namespace,network_namespace_identity:$namespace_identity,
+          api_version:6,socket_verified:true}' >"$WORK/mpquic-record-$node.json"
+}
+
+launch_mpquic client "$CLIENT" client
+launch_mpquic exit "$EXIT_NODE" exit
+verify_mpquic client "$CLIENT" client
+verify_mpquic exit "$EXIT_NODE" exit
+jq -S -c -s . "$WORK"/mpquic-record-*.json >"$WORK/mpquic-units.json"
+MPQUIC_READY=true
 
 PHASE=agent-launch
 launch_agent() {

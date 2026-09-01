@@ -29,6 +29,12 @@ grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$W
     >/dev/null
 grep -F "github.head_ref == 'feature/alpha-vertical-runtime'" "$WORKFLOW" >/dev/null
 if grep -Eq '^  push:' "$WORKFLOW"; then exit 1; fi
+grep -F 'native/volparossa-mpquic/scripts/fetch-upstream.sh --yes' "$WORKFLOW" \
+    >/dev/null
+grep -F 'native/volparossa-mpquic/scripts/build-upstream.sh' "$WORKFLOW" >/dev/null
+grep -F -- '--mpquic "$VOLPAROSSA_ALPHA_MPQUIC"' "$WORKFLOW" >/dev/null
+grep -F 'scp_to "$mpquic_path" /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
+grep -F -- '--mpquic /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
 
 [ "$(grep -Fc 'launch_helper client "$CLIENT"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay1 "$R1"' "$GUEST")" -eq 1 ]
@@ -43,6 +49,12 @@ grep -F -- '--property=FileDescriptorStoreMax=128' "$GUEST" >/dev/null
 grep -F -- '--property=FileDescriptorStorePreserve=yes' "$GUEST" >/dev/null
 grep -F -- '--property="BindPaths=$WORK/runtime-$node:/run/volparossa"' "$GUEST" >/dev/null
 grep -F 'VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock' "$GUEST" >/dev/null
+grep -F 'launch_mpquic client "$CLIENT" client' "$GUEST" >/dev/null
+grep -F 'launch_mpquic exit "$EXIT_NODE" exit' "$GUEST" >/dev/null
+if grep -Eq 'launch_mpquic relay[12]' "$GUEST"; then exit 1; fi
+grep -F -- '--socket /run/volparossa/native/mpquic.sock' "$GUEST" >/dev/null
+grep -F 'native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records}' \
+    "$GUEST" >/dev/null
 grep -F 'DIRECT_CLIENT_EXIT_REACHABLE' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" link add underlay type dummy' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" route add default dev underlay scope global' "$GUEST" >/dev/null
