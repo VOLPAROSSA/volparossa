@@ -64,7 +64,7 @@ sh -n "$runner"
 sh -n "$live_gate"
 jq -e . "$manifest" >/dev/null
 
-if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 3 ] \
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 4 ] \
     || grep -F -- '--property=RestrictSUIDSGID=yes' "$live_gate" >/dev/null \
     || [ "$(grep -Fc -- \
         "capture_unit_property RestrictSUIDSGID \\" "$live_gate")" -ne 2 ]; then
@@ -74,8 +74,8 @@ if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 3 ] \
 fi
 if [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$live_gate")" -ne 1 ] \
     || [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=' "$live_gate")" -ne 1 ] \
-    || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|final-verification)$' \
-        "$live_gate")" -ne 11 ] \
+    || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|may-own-launch|may-own-first-crash|may-own-second-crash|may-own-recovery|may-own-retirement|final-verification)$' \
+        "$live_gate")" -ne 16 ] \
     || [ "$(grep -Ec '^[[:space:]]*final_checkpoint=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|restart-report-validation|publication-fence|stage-retirement)$' \
         "$live_gate")" -ne 12 ] \
     || [ "$(grep -Fc 'structured_failure_reported=yes' "$live_gate")" -ne 1 ] \
@@ -95,7 +95,7 @@ if [ "$(grep -Fxc '    identity_launch=' "$live_gate")" -ne 1 ] \
         'the VM payload does not preserve status-2-safe production observation and lock probing' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 3 ] \
+if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 4 ] \
     || [ "$(grep -Fc -- \
         'capture_unit_property ControlGroup "$temporary_stage/unit-control-group"' \
         "$live_gate")" -ne 1 ] \
@@ -406,7 +406,8 @@ for exact_runner_text in \
     'sudo -n -- ./tests/helper/require-live-worker-identity-proof.sh --execute --yes' \
     'cargo fetch --locked' \
     'cargo build --locked --offline' \
-    'run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
+    'run the fixed helper-boundary proof plus exact CleanupConfirmed and MayOwn Relay restart slices as guest root;' \
+    'shut down, rehash the base image, validate, and publish eleven bounded files;' \
     'proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"}' \
     'post_image_sha512=$(sha512sum "$image_path"' \
     '[ "$safe_to_remove" = yes ] && [ "$proof_mode" = retained-main ]' \
@@ -972,6 +973,10 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_blocked_category() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_may_own_launch_failure_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_may_own_preexec_barrier_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_may_own_driver_entry_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_may_own_launch_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_boundary_validator_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_boundary_validator_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_successor_debugger_category_is_safe() {$/,/^}$/p' "$runner"
@@ -994,7 +999,7 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 29
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 33
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -1481,6 +1486,268 @@ expect_status 1 report_non_retained_restart_launch_failure_category \
     "$branch_failure_diagnostic"
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
+while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
+    printf 'live worker-identity proof failed: %s\n' "$may_own_reason" \
+        >"$branch_failure_diagnostic"
+    if [ "$may_own_category" = preexec-barrier ] \
+        || [ "$may_own_category" = service-shape ]; then
+        printf '%s\n' \
+            'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=shape-cgroup-stat' \
+            >>"$branch_failure_diagnostic"
+    elif [ "$may_own_category" = identity-observer-exit ] \
+        || [ "$may_own_category" = service-observer-exit ]; then
+        printf '%s\n%s\n' \
+            'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+            'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+            >>"$branch_failure_diagnostic"
+    fi
+    printf 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=%s\n' "$may_own_phase" \
+        >>"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_may_own_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    if [ "$may_own_category" = preexec-barrier ] \
+        || [ "$may_own_category" = service-shape ]; then
+        test "$(cat "$last_stderr")" = \
+            "$(printf '%s\n%s' \
+                "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category" \
+                'non-retained helper-boundary PR smoke MayOwn preexec category: shape-cgroup-stat')"
+    elif [ "$may_own_category" = identity-observer-exit ] \
+        || [ "$may_own_category" = service-observer-exit ]; then
+        test "$(cat "$last_stderr")" = \
+            "$(printf '%s\n%s\n%s' \
+                "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category" \
+                'non-retained helper-boundary PR smoke MayOwn observer failure stage: preflight-runtime' \
+                'non-retained helper-boundary PR smoke MayOwn driver-entry failure stage: service-cgroup-members')"
+    else
+        test "$(cat "$last_stderr")" = \
+            "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category"
+    fi
+done <<'EOF'
+ExactPresent retirement was not confirmed before MayOwn proof|prerequisite|restart-retirement
+MayOwn singleton unit name is unsafe|unit-name|may-own-launch
+MayOwn singleton unit state could not be determined|unit-state-read|may-own-launch
+MayOwn singleton unit name is already loaded|unit-state-present|may-own-launch
+MayOwn debugger symbols could not be inspected|symbols-read|may-own-launch
+MayOwn debugger symbols are not exact and unique|symbols-shape|may-own-launch
+MayOwn ownership marker could not be derived|marker-derive|may-own-launch
+MayOwn ownership marker is non-canonical|marker-canonical|may-own-launch
+MayOwn ownership marker is unsafe|marker-shape|may-own-launch
+MayOwn debugger command path was not initially absent|debugger-path|may-own-launch
+MayOwn singleton unit could not be launched|launch-status|may-own-launch
+MayOwn singleton launch envelope is invalid|launch-envelope|may-own-launch
+MayOwn first MainPID did not appear|mainpid-appearance|may-own-launch
+MayOwn first MainPID birth token is unavailable|mainpid-starttime|may-own-launch
+MayOwn first private namespaces did not become stable|namespaces|may-own-launch
+MayOwn first pre-exec barrier is not manager-bound|preexec-barrier|may-own-launch
+MayOwn first external pre-exec observer did not arm|preexec-observer|may-own-launch
+MayOwn first freeze handshake path is unsafe|handshake-path|may-own-launch
+MayOwn first debugger commands could not be written|debugger-command-write|may-own-first-crash
+MayOwn first debugger identity is unavailable|debugger-identity|may-own-first-crash
+MayOwn first debugger exited before exec-catch readiness|exec-catch-exit|may-own-first-crash
+MayOwn first debugger did not arm its exec catch|exec-catch-timeout|may-own-first-crash
+MayOwn first debugger readiness record is invalid|exec-catch-marker|may-own-first-crash
+MayOwn first pre-exec barrier could not be released|preexec-release|may-own-first-crash
+MayOwn first debugger exited before helper exec|helper-exec-exit|may-own-first-crash
+MayOwn first helper exec was not observed|helper-exec-timeout|may-own-first-crash
+MayOwn first external pre-exec observer did not retire|preexec-observer-retire|may-own-first-crash
+MayOwn first mount keeper identity is unavailable|mount-keeper-identity|may-own-first-crash
+MayOwn first driver-side observer could not be started|driver-observer-start|may-own-first-crash
+MayOwn first driver-side observer exited before identity proof|identity-observer-exit|may-own-first-crash
+MayOwn first invocation identity did not appear|identity-timeout|may-own-first-crash
+MayOwn first invocation is not hook-bound|identity-binding|may-own-first-crash
+MayOwn first active-custody diagnostic is invalid|active-custody-diagnostic|may-own-first-crash
+MayOwn first active-custody boundary is unsafe|service-shape|may-own-first-crash
+MayOwn first driver-side observer exited before active custody|service-observer-exit|may-own-first-crash
+MayOwn first debugger exited before active custody|service-debugger-exit|may-own-first-crash
+MayOwn first invocation changed before active custody|service-invocation-drift|may-own-first-crash
+MayOwn first MainPID changed before active custody|service-mainpid-drift|may-own-first-crash
+MayOwn first active custody did not become observable|service-shape|may-own-first-crash
+MayOwn first active worker PID is unavailable|active-worker-pid|may-own-first-crash
+MayOwn first active worker birth token is unavailable|active-worker-starttime|may-own-first-crash
+MayOwn first service shape is not production-exact|service-shape|may-own-first-crash
+MayOwn cgroup freezer is unavailable|freezer-shape|may-own-first-crash
+MayOwn first debugger driver release could not be published|driver-release|may-own-first-crash
+MayOwn first debugger exited before the freeze fence|freeze-fence-exit|may-own-first-crash
+MayOwn first debugger did not reach the crash boundary|freeze-fence-timeout|may-own-first-crash
+MayOwn first kill-ready marker is invalid|kill-marker|may-own-first-crash
+MayOwn cgroup did not freeze before the first crash|cgroup-freeze|may-own-first-crash
+MayOwn first freeze release could not be published|freeze-release|may-own-first-crash
+MayOwn first forced-crash debugger did not complete|debugger-complete|may-own-first-crash
+MayOwn first crash did not settle|crash-settle|may-own-first-crash
+MayOwn first forced-crash fence is not exact|crash-fence|may-own-first-crash
+MayOwn first crash freezer was not retired before restart|cgroup-thaw|may-own-first-crash
+MayOwn first driver-side observer did not terminate at the forced crash|driver-observer-stop|may-own-first-crash
+MayOwn first crash time is unavailable|crash-time|may-own-first-crash
+MayOwn first crash did not preserve exact Relay custody|custody-preservation|may-own-first-crash
+EOF
+
+may_own_first_crash_segment=$temporary_directory/may-own-first-crash.segment
+sed -n '/^[[:space:]]*driver_phase=may-own-first-crash$/,/^[[:space:]]*driver_phase=may-own-second-crash$/p' \
+    "$live_gate" >"$may_own_first_crash_segment"
+may_own_first_crash_reasons=$temporary_directory/may-own-first-crash.reasons
+sed -n "s/.*failed '\([^']*\)'.*/\1/p" \
+    "$may_own_first_crash_segment" >"$may_own_first_crash_reasons"
+test "$(wc -l <"$may_own_first_crash_reasons")" -eq 40
+while IFS= read -r may_own_first_crash_reason; do
+    test "$(grep -Fc "'$may_own_first_crash_reason')" \
+        "$branch_failure_functions")" -eq 1
+done <"$may_own_first_crash_reasons"
+
+printf '%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+for rejected_may_own_driver_stage in private-detail unknown-stage; do
+    printf '%s\n%s=%s\n' \
+        'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+        'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1' \
+        "$rejected_may_own_driver_stage" >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_may_own_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=identity-socket' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=identity-publication' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+for rejected_may_own_driver_entry_stage in private-detail unknown-stage; do
+    printf '%s\n%s\n%s=%s\n' \
+        'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+        'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+        'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1' \
+        "$rejected_may_own_driver_entry_stage" >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_may_own_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+printf '%s\n%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=proc-records' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=identity-publication' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=service-cgroup-members' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first driver-side observer exited before identity proof' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=preflight-runtime' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    "$(printf '%s\n%s' \
+        'non-retained helper-boundary PR smoke MayOwn launch category: identity-observer-exit' \
+        'non-retained helper-boundary PR smoke MayOwn observer failure stage: preflight-runtime')"
+
+for may_own_preexec_category in \
+    arguments \
+    starttime \
+    publication-unsafe \
+    publication-timeout \
+    lineage-mainpid \
+    lineage-invocation \
+    lineage-starttime \
+    lineage-marker \
+    shape-mainpid-argument \
+    shape-invocation-argument \
+    shape-count-arguments \
+    shape-membership-mode \
+    shape-type \
+    shape-restart-usec \
+    shape-control-pid \
+    shape-main-pid \
+    shape-invocation \
+    shape-restarts \
+    shape-fdstore-count \
+    shape-fdstore-max \
+    shape-fdstore-preserve \
+    shape-exec-start-post \
+    shape-control-group \
+    shape-control-group-id \
+    shape-cgroup-path \
+    shape-cgroup-procs \
+    shape-active-boundary \
+    shape-worker-child \
+    shape-worker-starttime \
+    shape-worker-parent \
+    shape-worker-cgroup \
+    shape-cgroup-members \
+    shape-worker-stability \
+    shape-cgroup-type \
+    shape-cgroup-stat \
+    record-size \
+    expectation-create \
+    expectation-write \
+    record-content \
+    launcher-executable \
+    launcher-script-fd \
+    launcher-script-flags \
+    freezer
+do
+    expect_status 0 non_retained_may_own_preexec_barrier_stage_is_safe \
+        "$may_own_preexec_category"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+for unsafe_may_own_preexec_category in \
+    '' private-detail shape-private /tmp/value 'shape-type value'
+do
+    expect_status 1 non_retained_may_own_preexec_barrier_stage_is_safe \
+        "$unsafe_may_own_preexec_category"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first pre-exec barrier is not manager-bound' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=private-detail' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=may-own-launch' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first pre-exec barrier is not manager-bound' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=shape-type' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=freezer' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=may-own-launch' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'live worker-identity proof failed: private MayOwn launch detail' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn singleton unit name is unsafe' \
+    'live worker-identity proof failed: MayOwn singleton unit state could not be determined' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
 if ! awk '
     /^if \[ "\$guest_status" -ne 0 \]; then$/ { guest_failure = NR }
     /^        elif report_non_retained_boundary_validator_failure_category \\$/ {
@@ -1492,6 +1759,9 @@ if ! awk '
     /^                report_non_retained_restart_crash_record_diagnostic \\$/ {
         crash_call = NR; crash_call_count++
     }
+    /^        elif report_non_retained_may_own_launch_failure_category \\$/ {
+        may_own_call = NR; may_own_call_count++
+    }
     /non-retained helper-boundary PR smoke failure category: unclassified/ {
         unclassified = NR
     }
@@ -1499,8 +1769,9 @@ if ! awk '
         valid = validator_call_count == 1 && parser_call_count == 1
         valid = valid && guest_failure < validator_call
         valid = valid && validator_call < parser_call
-        valid = valid && crash_call_count == 1
-        valid = valid && parser_call < crash_call && crash_call < unclassified
+        valid = valid && crash_call_count == 1 && may_own_call_count == 1
+        valid = valid && parser_call < crash_call && crash_call < may_own_call
+        valid = valid && may_own_call < unclassified
         if (!valid) exit 1
     }
 ' "$runner"; then
@@ -1607,6 +1878,22 @@ for non_retained_production_stage in \
     functional-exit-worker-observation functional-exit-relay-fixture \
     functional-exit-relay-traffic functional-exit-relay-cleanup \
     functional-exit-release functional-exit-cleanup \
+    functional-exit-cleanup-retirement \
+    functional-exit-cleanup-process-pin \
+    functional-exit-cleanup-wireguard-absence \
+    functional-exit-cleanup-namespace-pin \
+    functional-exit-cleanup-process-close \
+    functional-exit-cleanup-namespace-close \
+    functional-exit-cleanup-fdstore-absence \
+    functional-exit-cleanup-parent-custody \
+    functional-exit-cleanup-parent-custody-pidfd \
+    functional-exit-cleanup-parent-custody-procfd \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-one \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-two \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-three-plus \
+    functional-exit-cleanup-parent-custody-foreign-netns-other \
+    functional-exit-cleanup-parent-custody-fd-scan \
+    functional-exit-cleanup-parent-custody-clear \
     functional-relay-pair-ready functional-relay-pair-worker-observation \
     functional-relay-pair-fixtures functional-relay-pair-traffic \
     functional-relay-pair-cleanup \
@@ -2500,8 +2787,8 @@ if grep -Eq 'pull_request_target:|pull_request:|push:|schedule:|secrets\.' "$wor
     exit 1
 fi
 uses_count=$(grep -c '^[[:space:]]*uses:' "$workflow")
-if [ "$uses_count" -ne 4 ]; then
-    printf 'expected exactly four pinned action uses, got %s\n' "$uses_count" >&2
+if [ "$uses_count" -ne 5 ]; then
+    printf 'expected exactly five pinned action uses, got %s\n' "$uses_count" >&2
     exit 1
 fi
 

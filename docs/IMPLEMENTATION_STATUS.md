@@ -544,8 +544,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   now hands it a non-empty set only when every record is already `CleanupConfirmed`, no inherited
   or manager custody exists, the journal revalidates, and a fresh manager barrier plus two new
   identical complete empty snapshots mint one-shot exact-target manager-absence evidence. The
-  installed restart cleanup executor still refuses every `MayOwnCustody` or `MayOwnPrepare` proof,
-  leaving those phases byte-identical and blocking Ready. A separate affine
+  installed general restart cleanup executor still refuses every `MayOwnCustody` or
+  `MayOwnPrepare` proof. One separate startup-only control now accepts an affine proof from the
+  fixed exact-singleton reaper described below and can CAS only that unchanged
+  `MayOwnCustody -> CleanupConfirmed` record while the actor remains `Starting` and lock-held.
+  `MayOwnPrepare` remains unconditionally refused. A separate affine
   same-runtime handle may echo only proofs already completed by the live functional backend;
   independently, the actor may settle never-dispatched `Intent` records. Admission is bounded to four
   operations plus shutdown.
@@ -573,10 +576,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   handle exposes exact registration, custody marking/arming and ordered same-runtime settlement, but
   no raw codec/revision, retirement, startup recovery or lifecycle authority. Production now has an
   inventory-attested pidfd/network-namespace publication caller and live clean-Destroy settlement;
-  no inherited-custody cleanup executor, restart reaper, supported on-disk migration, cross-runtime
-  tag-28 proof, or live-root production lifecycle proof exists.
-  One bounded startup case is now production-wired: a complete non-empty set consisting only of
-  already durable `CleanupConfirmed` targets. Already-absent members take the prior fresh-empty
+  no general inherited-custody adoption, `MayOwnPrepare` cleanup executor, supported on-disk
+  migration, cross-runtime tag-28 proof, or live-root forced-crash lifecycle proof exists.
+  Two bounded startup cases are now production-wired. The first is a complete non-empty set
+  consisting only of already durable `CleanupConfirmed` targets. Already-absent members take the prior fresh-empty
   path. Each exact-present member is prevalidated as a full set, removed once in canonical name
   order with no ancillary descriptors, and must yield two stable snapshots equal to the opaque
   predecessor minus exactly that pair. A distinct affine restart proof advances the successor; it
@@ -587,6 +590,47 @@ single clean-build A01--A15 run; the score is not a release claim.
   CAS progress is safely retryable from the remaining `CleanupConfirmed` targets. This retires
   confirmed journal custody, but does not reap a worker, destroy a namespace, clean kernel state or
   adopt inherited custody.
+  The second case is exactly one `ExactPresent + MayOwnCustody` record whose durable plan contains
+  exactly one path (Client one Client lease, Exit one Exit lease, or Relay the exact
+  RelayClient/RelayExit pair for the same path), whose boot ID equals the current boot and whose
+  recorded helper executable device/inode equals `/proc/self/exe`. The helper retains the startup
+  actor, spawn-admission guard, original pidfd and namespace owner; proves the old process pidfd
+  exited and the shared service cgroup is quiescent; then self-execs only
+  `/proc/self/exe --internal-restart-reaper-v1`. A bounded credential-authenticated
+  `SOCK_SEQPACKET` transcript transfers exactly one journal-bound `CLONE_NEWNET` FD. The
+  single-thread child joins it once, closes the FD, installs no-new-privileges plus the existing
+  fork/exec/unshare/setns-denying filter, drops to the pinned worker UID/GID with only
+  `CAP_NET_ADMIN`, and is independently sandbox-attested by the parent before cleanup starts.
+  Client/Exit require derived WireGuard names absent, loopback down, exact-empty nftables and IPv6
+  forwarding disabled. Relay requires the same derived-link/loopback baseline, IPv6 forwarding
+  `all` and `default` enabled before and after, and retires only the exact restricted DROP fence (or
+  accepts the exact-empty deletion-retry successor). It never deletes a WireGuard link or writes
+  forwarding. Active, foreign, partial or ambiguous policy fails closed. Only a challenge-bound
+  terminal proof followed by exact pidfd reap and a second shared-cgroup sample can mint the affine
+  actor evidence. The actor then performs the single phase CAS; the unchanged existing
+  `CleanupConfirmed` descriptor-store-removal/fresh-absence chain completes before socket bind.
+  Before spawning, the parent reserves one close-on-exec FD and requires waitable default
+  `SIGCHLD` plus default `SIGHUP`, `SIGINT` and `SIGTERM`; pidfd acquisition retries `EINTR` and may
+  release that reserve for one
+  `EMFILE`/`ENFILE` retry. If it still cannot pin the child, it sends no protocol record, closes the
+  channel and polls only the retained direct `Child` under a fixed hard deadline. Normal EOF exit is
+  reaped and returns an error. A stopped/stuck child, lost waitability, competing reap or timeout is
+  process-fatal: fixed `exit_group(70)` terminates the helper without a core or cleanup handlers,
+  publishes no socket, performs no journal CAS, and claims neither cleanup nor exact reap on that
+  branch. This fail-stop relies on the already-attested and packaged systemd `Type=simple`,
+  `RemainAfterExit=false`, `ExitType=main`, no additional success or forced-restart statuses,
+  `Restart=on-failure`, `RestartMode=normal`, exact three-second restart delay, status-only
+  `RestartPreventExitStatus={70,71}`, `KillMode=control-group`, `SendSIGKILL=yes`,
+  `FinalKillSignal=SIGKILL`, exact finite 45-second `TimeoutStopUSec`, and
+  `TimeoutStopFailureMode=terminate` contract for bounded whole-cgroup retirement; it never signals
+  a numeric PID. Focused injection tests cover `EINTR`, both descriptor-exhaustion errors, reserve
+  exhaustion and the bounded stopped-child fail-stop path in an isolated subprocess. The privileged
+  acceptance runner additionally has a fixed real-image transient-unit fault path: it stops the
+  exact pidfd of the real reaper before any handshake record, requires main status 70, terminal
+  `Result=exit-code`, zero restarts beyond the exact restart delay, an empty retired cgroup and
+  effective readback of the complete manager tuple.
+  `MayOwnPrepare`, `ExactNoStoredCustody`, multiple targets, multiple paths, wrong boot/image/FD,
+  failed credentials or incomplete baseline still refuse without opening the socket.
   The production non-empty restart-refusal path now owns the outer composition. It retains and
   revalidates the exact startup journal guard, holds the same opaque process-wide admission guard
   used by every worker spawn, drives the borrowing async sampler non-cancellably, and performs the
@@ -594,20 +638,29 @@ single clean-build A01--A15 run; the score is not a release claim.
   unique-name owner, unit object path, current `MainPID` and nonzero 16-byte `InvocationID`; fresh
   bookends additionally require zero `ControlPID`, canonical non-root `ControlGroup`, nonzero
   `ControlGroupId`, no delegation, `ProtectControlGroupsEx=strict`, `PrivatePIDs=no`,
-  `KillMode=control-group`, and `SendSIGKILL=true`. The packaged helper unit now configures that
+  `Type=simple`, `RemainAfterExit=false`, `ExitType=main`, no additional success or forced-restart
+  statuses, `Restart=on-failure`, `RestartMode=normal`, exact `RestartUSec=3s`, status-only
+  `RestartPreventExitStatus={70,71}`, `KillMode=control-group`,
+  `SendSIGKILL=true`, `FinalKillSignal=SIGKILL`, exact finite `TimeoutStopUSec=45s`, and
+  `TimeoutStopFailureMode=terminate`. The packaged helper unit now configures that
   contract, subtracts the broad `@mount` syscall set explicitly from its positive allowlist, and
   disables cgroup delegation and a private PID namespace. The pinned strict cgroup view must be
   `0::/`, cgroup2 and read-only. Its
   exact kernfs file-handle ID is obtained through a fixed audited Linux-UAPI wrapper and must equal
   systemd's `ControlGroupId`; it is not treated as an inode number. The sampler still binds exact
   pending counts, journal targets, descriptor inventories, cgroup/PID namespace identities,
-  pending-target cgroup inodes, zero live/dying descendants and canonical singleton-current-MainPID
-  membership across two initial, one post-manager and one synchronous-join projection. These remain
+  pending-target two-coordinate cgroup identities, zero live/dying descendants and canonical
+  singleton-current-MainPID membership across two initial, one post-manager and one synchronous-join
+  projection. Each target accepts either the identical inode plus kernel cgroup ID or a complete
+  PID-1-managed replacement after exact predecessor exit; a partial inode/ID match is drift or reuse
+  and fails closed. The current manager `ControlGroup` must end in the exact D-Bus service Unit ID,
+  while its nonzero `ControlGroupId` must equal the independently pinned kernel ID. These remain
   bounded non-atomic samples. The process-local spawn guard does not exclude PID 1 migration, and
   the strict mount observation does not prove absence of an inherited writable cgroup descriptor.
-  That refusal observer performs no namespace destruction, kernel cleanup, descriptor-store
-  removal, journal transition or socket readiness; it grants no authority to the narrow cleanup-
-  confirmed path above. AV1-10 therefore remains Open and the fixed alpha score remains 11/100.
+  Outside the exact singleton slice, that refusal observer performs no namespace destruction,
+  kernel cleanup, descriptor-store removal, journal transition or socket readiness. AV1-10 remains
+  Open because a retained exact-main live forced-crash/KVM PASS, `MayOwnPrepare`, no-store and
+  multi-target recovery are still absent; the fixed alpha score remains 11/100.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
   and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.
@@ -746,10 +799,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   removal are connected only through the functional backend. Startup separately performs a
   record-transition-free, lock-held exact-set
   classification of durable journal targets, affinely inherited custody and a barrier-ordered
-  stable manager inventory before any `Intent` mutation. There remains no inherited adoption,
-  restart reaper, or inherited namespace/kernel cleanup executor. Only an all-`CleanupConfirmed`
-  set can consume the bounded removal/fresh-absence proof described above; every other non-empty
-  classification continues to block startup. Its production refusal observer waits
+  stable manager inventory before any `Intent` mutation. There remains no general inherited
+  adoption or broad inherited namespace/kernel cleanup executor. Only an all-`CleanupConfirmed`
+  set or the exact single-path `ExactPresent + MayOwnCustody` reaper case above can proceed; every
+  other non-empty classification continues to block startup. Its production refusal observer waits
   for exact inherited process-pidfd `POLLIN` under one hard deadline, permits `POLLHUP` only with
   `POLLIN`, remeasures the exact descriptor binding before and after each wait, and remeasures the
   complete pending set once more before constructing evidence. Process/thread-group interpretation
@@ -763,9 +816,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   revalidate that exact startup guard across the wait or freshly rejoin journal and manager
   evidence. This proves one exact worker thread group's exit, not descendant exit, cgroup
   emptiness, namespace destruction, kernel cleanup, manager removal or journal settlement. The
-  durable settlement substrate therefore does not make crash cleanup
+  durable settlement substrate plus the exact singleton reaper still does not make crash cleanup
   production-complete: AV1-10 remains Open, the fixed alpha score remains **11/100 (11%)**, and this
-  slice adds no scorecard, datapath or acceptance points.
+  slice adds no scorecard, datapath or acceptance points without live forced-crash evidence.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
@@ -938,11 +991,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   exact-empty snapshots precede one-shot exact-target manager-absence evidence for the existing
   actor sweep. Full-set validation precedes both the first removal send and the first per-record
   CAS; a crash after partial exact progress leaves retryable present+no-store or
-  `Absent + CleanupConfirmed` state. Every `MayOwn`, wrong-phase, changed, missing, duplicate,
-  overlapping, deadline or observation-failure case still refuses startup before cleanup token or
-  socket publication. Dropping a refused set closes the exact process-local source
+  `Absent + CleanupConfirmed` state. The exact single-path, exact-present `MayOwnCustody` shape may
+  take the fixed attested reaper path described above; every other `MayOwn`, wrong-phase, changed,
+  missing, duplicate, overlapping, deadline or observation-failure case still refuses startup
+  before cleanup token or socket publication. Dropping a refused set closes the exact process-local source
   slots; source ownership and the read-only exact-set join are no longer positive-adoption
-  blockers, but a custody-capable production restart cleanup/reaper remains absent. The
+  blockers, but general custody-capable restart cleanup remains absent. The
   production durable-Prepare publisher sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
@@ -972,11 +1026,25 @@ single clean-build A01--A15 run; the score is not a release claim.
   supervisor. Publication observation, exact removal and correlated removal reconciliation are
   reached only by same-runtime exact Destroy of a retained post-custody terminal. The distinct
   complete startup observer and journal/inherited classifier are production-wired but grant no
-  mutation, adoption, arming or cleanup authority. The live composition has no recorded
-  transient-unit acceptance result. This is
-  fail-closed same-runtime custody and clean settlement plus a read-only `MayOwn` restart boundary
-  and narrow already-cleanup-confirmed tombstone retirement, not production adoption, restart
-  reaping, or crash cleanup. The child
+  general mutation, adoption, arming or cleanup authority. Source-bound transient KVM contracts now
+  cover the already-cleanup-confirmed singleton and one exact single-path Relay
+  `MayOwnCustody + ExactPresent` sequence across three argumentless systemd invocations. That Relay
+  sequence forces crashes at the post-publication terminal and exact reaper journal boundary,
+  retains one affine descriptor name and two-entry manager inventory across both crashes, and
+  observes startup removal before a new socket and recovered tombstone. Its transient service now
+  matches the production `Type=simple`/three-second restart contract without `ExecStartPost`;
+  private-namespace observers remain in the driver cgroup. One fixed no-argument launcher is the
+  unchanged `MainPID` for all three invocations and holds each at an InvocationID/PID-bound FIFO
+  before helper exec. Release requires the exact new invocation/restart count, `ControlPID=0`,
+  canonical `ControlGroup` plus nonzero `ControlGroupId`, expected fdstore count, singleton domain
+  cgroup shape, pending GDB breakpoint/exec catch and a live outside-cgroup observer. Both forced
+  crashes additionally use an affine kill-ready/freeze-release handshake and require the kernel
+  cgroup event `frozen 1` before GDB inferior `kill` plus `quit 0`. The old cgroup is thawed or already
+  removed before waiting for the FIFO-gated successor; the freezer is not a restart gate. Non-main mode
+  retains nothing, and there is no retained exact-main PASS for this new slice at this commit. This is exact
+  singleton production adoption/reaping evidence machinery, not general restart recovery,
+  `MayOwnPrepare`, no-store/multi-target cleanup, `CleanupOwned`, an installed-service proof or a
+  usable datapath. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists and the production-server phase of the committed disposable driver now exercises one normal
   functional worker lifetime. Staged-package validation remains outstanding. Exact-main Debian 13
@@ -985,8 +1053,9 @@ single clean-build A01--A15 run; the score is not a release claim.
 - [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
   and the disposable production-server gate covers normal exact Destroy, worker reap/purge and
-  namespace/link release. Forced helper crash/termination cleanup and restart recovery remain
-  without live evidence.
+  namespace/link release. The new exact singleton Relay forced-crash KVM contract has no retained
+  exact-main result yet and makes no general recovery claim; broader helper crash/termination
+  cleanup and restart recovery remain without live evidence.
 - [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v4 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. Acquire duplicates the already attested worker namespace pin affinely before this request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. The production functional backend now accepts only a complete live committed Client/Exit singleton lineage with exact role, path and worker-derived overlay address, invokes the existing unconnected QUIC UDP factory in the authenticated namespace child, and transfers one validated descriptor. Once backend validation and engine COMMIT succeed, each outer request is recorded descriptorlessly in a bounded same-helper-runtime context-generation request-ID/digest ledger before response/FD delivery can be known. A same-ID/digest retry calls no backend and returns descriptorless `TRANSPORT_SOCKET_ALREADY_ACQUIRED`, including after ambiguous delivery; digest substitution conflicts, and only confirmed Destroy purges the generation. A fresh request ID can acquire again for the same context/path/role, so a future caller must authorize and bound every association. Acquire-ledger saturation does not restrict Destroy, and the worker registry reserves its final tombstone slot for terminal Destroy before admitting nonterminal operations. Disposable user/network-namespace unit tests cover Client/Exit success, MPTCP/Relay refusal, binding/role/path/address/phase mismatch, worker error, rejected-descriptor closure, cancellation and channel ambiguity. Client/Exit MPTCP acquisition, an agent/runtime caller, live WireGuard-route adoption and datapath evidence remain absent; Relay application transport acquisition remains intentionally forbidden, so this row and the alpha score remain open.
 - [ ] Native MPQUIC API v6 preflights an exact role/process lifetime, targets every later operation to that instance, requires nonce plus canonical-request digest response correlation, and consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero otherwise. Start requests bind reservation/finalize IDs derived from the signed scope, bearer commitment, certificate digest, and both process instances; Rust and C share exact request/descriptor hash vectors and independently reject bearer/commitment mismatch. Native samples BOOTTIME before REALTIME, maintains a monotone wall floor, converts accepted wall expiry once to a BOOTTIME deadline, and fails closed on clock failure, regression, or overflow. A fixed 128-record process-local ledger has no live eviction, rejects exact pair replay and half-key scope reuse, permits only byte-identical live client retries, and tombstones stop, expiry, and valid exit attempts before the dormant backend boundary. Rust and two independent C boundaries enforce server `10.76.0.1/32`, client `10.76.0.2/32` through `10.76.0.254/32`, optional client `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`, and MTU 1280--1420. The native client deep-copies one assignment, permits only an identical active duplicate, exposes it only after `ESTABLISHED`, enforces outbound source and reverse-destination ownership, and wipes it on fatal transport failure. Focused tests cover these clock/replay/capacity and assignment-state rules, exact current-path projection with retired closed records only, typed terminal reverse-queue overflow, distinct framed exit nonces, stale-instance without hidden retry, response/assignment shape, socket tuple/flag checks, binding and ownership behavior, digest-failure FD cleanup, stream fragmentation with exactly-one ancillary transfer, incomplete/late/extra descriptors, timeout cleanup, and the dormant exit runtime closing its listener before `exit_listener_orchestration_unavailable`. The clean full-graph API-v6 ASan+UBSan gate passes. Peer-control v4 retains separate zeroizing, non-cloneable one-shot client/exit authorizations. Isolated native foundations now model one bounded, externally serialized exit session and validate the leaf identity in a bounded PEM certificate chain against its private key, a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics, trusted interval, canonical complete-leaf DER digest, and DER SPKI digest. They have no runtime caller and do not perform trust-chain validation. Native still does not verify the signed bundle, cache general request nonces, or retain ledger state across restart; production also lacks a preverified affine handoff through the agent, separate role service identities/sockets, exact helper-derived millisecond-to-trusted-interval conversion, a fixed independent Rust/C DER-SPKI vector, parser fuzzing, server-side pool allocation/uniqueness/lifetime binding plus exact-namespace assigned-address proof, disposable-topology evidence, trusted helper provenance, and the actual exit backend, so route setup and the launcher remain blocked.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.

@@ -58,6 +58,7 @@ for script_path in \
     tests/helper/lib/live-worker-proof-capture.sh \
     tests/helper/lib/production-ipc-unit-hook.sh \
     tests/helper/lib/restart-exact-present-observer.sh \
+    tests/helper/lib/restart-may-own-relay-observer.sh \
     tests/helper/require-live-worker-identity-proof.sh \
     tests/helper/run-helper-boundary-evidence-vm.sh \
     tests/helper/test-helper-boundary-evidence-v1.sh \
@@ -65,6 +66,8 @@ for script_path in \
     tests/helper/test-helper-boundary-vm-environment-v1.sh \
     tests/helper/test-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/test-helper-restart-kvm-contract.sh \
+    tests/helper/test-helper-restart-may-own-kvm-contract.sh \
+    tests/helper/test-helper-restart-service-shape-contract.sh \
     tests/helper/test-helper-restart-vm-environment-v1.sh \
     tests/helper/test-live-worker-identity-contract.sh \
     tests/helper/test-production-ipc-busctl-parser.sh \
@@ -72,6 +75,8 @@ for script_path in \
     tests/helper/validate-helper-boundary-evidence-v1.sh \
     tests/helper/validate-helper-boundary-vm-environment-v1.sh \
     tests/helper/validate-helper-restart-exact-present-evidence-v1.sh \
+    tests/helper/validate-helper-restart-may-own-custody-relay-evidence-v1.sh \
+    tests/helper/validate-helper-restart-may-own-custody-relay-vm-environment-v1.sh \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
     tests/integration/run.sh \
     tests/integration/validate-report.sh \
@@ -95,12 +100,16 @@ done
 jq -e . "$REPOSITORY_DIRECTORY/tests/integration/acceptance-report.schema.json" >/dev/null
 jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-boundary-evidence-v1.schema.json" >/dev/null
 jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-restart-exact-present-evidence-v1.schema.json" >/dev/null
+jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-restart-may-own-custody-relay-evidence-v1.schema.json" >/dev/null
+jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-restart-may-own-custody-relay-vm-environment-v1.schema.json" >/dev/null
 jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-restart-vm-environment-v1.schema.json" >/dev/null
 "$REPOSITORY_DIRECTORY/tests/helper/test-helper-boundary-evidence-v1.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-helper-boundary-vm-contract.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-helper-boundary-vm-environment-v1.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-helper-restart-exact-present-evidence-v1.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-helper-restart-kvm-contract.sh"
+"$REPOSITORY_DIRECTORY/tests/helper/test-helper-restart-may-own-kvm-contract.sh"
+"$REPOSITORY_DIRECTORY/tests/helper/test-helper-restart-service-shape-contract.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-helper-restart-vm-environment-v1.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-live-worker-identity-contract.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-production-ipc-busctl-parser.sh"

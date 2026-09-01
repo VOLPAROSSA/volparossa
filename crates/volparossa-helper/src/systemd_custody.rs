@@ -1,16 +1,17 @@
 //! Fail-closed systemd descriptor-store startup boundary.
 //!
-//! Debian 13 systemd may return descriptor-store entries to the service on restart. The current
+//! Debian 13 systemd may return descriptor-store entries to the service on restart. The general
 //! production recovery executor cannot consume `MayOwn` custody, so the executable bootstrap
 //! transfers one affine snapshot of the exact inherited descriptor range before any thread or
 //! worker can be created. This module consumes that snapshot, canonicalises each pair into typed
 //! pidfd/network-namespace ownership, validates identity separation and the exact bounded naming
 //! shape, and classifies it against one lock-held durable-journal projection plus a barrier-ordered
-//! stable manager inventory. A non-empty set may continue only when every target was already
-//! durably `CleanupConfirmed`. Exact-present pairs are removed canonically through distinct affine
-//! restart proofs; already-absent pairs are skipped. A final fresh barrier plus two stable
-//! exact-empty manager snapshots mint one-shot full-set evidence for the actor's existing
-//! manager-absence transition. Every other classification refuses socket publication.
+//! stable manager inventory. A non-empty set may continue when every target was already durably
+//! `CleanupConfirmed`, or through one fixed reaper for an exact-present, single-path,
+//! pre-dispatch `MayOwnCustody` singleton. Exact-present cleanup-confirmed pairs are removed
+//! canonically; already-absent pairs are skipped. A final fresh exact-empty manager proof drives
+//! the existing manager-absence transition. Every broader classification refuses socket
+//! publication.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,15 +35,18 @@ use volparossa_linux_uapi::{cgroup_v2_id, namespace_type};
 use crate::{
     deadline::{HardDeadline, wait_for_process_pidfd_exit},
     ownership_journal::{
-        DurableCustodyDescriptorBinding, ProductionOwnershipRuntime, ProductionOwnershipStartup,
-        StartupCustodyPhase, StartupCustodyTarget,
+        DurableCustodyDescriptorBinding, DurableServiceCgroupIdentity, ProductionOwnershipRuntime,
+        ProductionOwnershipStartup, StartupCustodyPhase, StartupCustodyTarget,
     },
     systemd_fdstore::{
         BorrowedCustodyPair, CustodyDescriptorBinding, CustodyFdName, ExactRestartRemovalProof,
         FdStoreError, RestartRemovalError, StableServiceCgroupIsolation, StableStartupInventory,
         observe_current_process_startup_inventory, remove_restart_custody,
     },
-    worker_v3::acquire_worker_spawn_admission_until,
+    worker_v3::{
+        ExactRestartReaperCleanupProof, acquire_worker_spawn_admission_until,
+        execute_single_restart_reaper,
+    },
 };
 
 const DESCRIPTORS_PER_CUSTODY_BUNDLE: usize = 2;
@@ -170,6 +174,48 @@ impl StartupCustodyClassification {
                     )
             })
     }
+
+    fn exact_single_may_own_restart(
+        &self,
+    ) -> Option<(
+        StartupCustodyTarget,
+        crate::ownership_journal::StartupRestartPlan,
+    )> {
+        let [entry] = self.classified.as_slice() else {
+            return None;
+        };
+        let plan = entry.target.restart_plan()?;
+        (self.custody.bundles.len() == 1
+            && entry.target.phase() == StartupCustodyPhase::MayOwnCustody
+            && entry.disposition == StartupCustodyDisposition::ExactPresent
+            && crate::ownership_journal::RestartNetworkPlan::from_authenticated_reaper(
+                plan.context_id(),
+                plan.context_role(),
+                plan.path_id(),
+            ) == Some(plan.network_plan()))
+        .then_some((entry.target, plan))
+    }
+
+    pub(crate) fn is_exact_single_may_own_restart(&self) -> bool {
+        self.exact_single_may_own_restart().is_some()
+    }
+
+    fn record_cleanup_confirmed_transition(
+        &mut self,
+        successor: StartupCustodyTarget,
+    ) -> Result<(), io::Error> {
+        let [entry] = self.classified.as_mut_slice() else {
+            return Err(restart_settlement_incomplete());
+        };
+        if entry.target.phase() != StartupCustodyPhase::MayOwnCustody
+            || successor.phase() != StartupCustodyPhase::CleanupConfirmed
+            || !entry.target.same_identity_except_phase(&successor)
+        {
+            return Err(restart_settlement_incomplete());
+        }
+        entry.target = successor;
+        Ok(())
+    }
 }
 
 /// One-shot exact-set manager-absence evidence for already durable `CleanupConfirmed` records.
@@ -258,6 +304,70 @@ impl fmt::Debug for StartupCustodyClassification {
                 &cleanup_confirmed_no_store,
             )
             .field("descriptor_bundle_count", &self.custody.bundles.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Affine, exact-target cleanup evidence minted only after the restart reaper returned a
+/// challenge-bound success and its exact pidfd was reaped.
+///
+/// The ownership actor can consume this value only for one unchanged `MayOwnCustody` record. It
+/// carries no manager-removal or server-start authority.
+#[must_use = "restart cleanup evidence must be consumed by the retained startup actor"]
+pub(crate) struct RestartMayOwnCleanupEvidence {
+    target: Option<StartupCustodyTarget>,
+    _proof: ExactRestartReaperCleanupProof,
+}
+
+impl RestartMayOwnCleanupEvidence {
+    fn after_exact_reaper(
+        target: StartupCustodyTarget,
+        plan: crate::ownership_journal::StartupRestartPlan,
+        proof: ExactRestartReaperCleanupProof,
+    ) -> Result<Self, io::Error> {
+        if target.phase() != StartupCustodyPhase::MayOwnCustody
+            || target.restart_plan() != Some(plan)
+            || !proof.matches_plan(plan)
+        {
+            return Err(restart_settlement_incomplete());
+        }
+        Ok(Self {
+            target: Some(target),
+            _proof: proof,
+        })
+    }
+
+    pub(crate) fn matches_exact_target_set(&self, targets: &[StartupCustodyTarget]) -> bool {
+        targets.len() == 1 && self.target.as_ref() == targets.first()
+    }
+
+    pub(crate) fn consume_exact_target(&mut self, target: &StartupCustodyTarget) -> bool {
+        if self.target.as_ref() != Some(target) {
+            return false;
+        }
+        self.target.take();
+        true
+    }
+
+    pub(crate) fn is_consumed(&self) -> bool {
+        self.target.is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_target_for_test(target: StartupCustodyTarget) -> Self {
+        let plan = target.restart_plan().expect("restart target plan");
+        Self {
+            target: Some(target),
+            _proof: ExactRestartReaperCleanupProof::for_test(plan),
+        }
+    }
+}
+
+impl fmt::Debug for RestartMayOwnCleanupEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RestartMayOwnCleanupEvidence")
+            .field("unconsumed", &self.target.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -1111,6 +1221,104 @@ fn join_shared_service_cgroup_quiescence(
     join_shared_service_cgroup_quiescence_with(exits, sampling, &mut source)
 }
 
+fn observe_exact_worker_exit_and_shared_cgroup(
+    runtime: &Runtime,
+    classification: StartupCustodyClassification,
+    deadline: HardDeadline,
+) -> Result<StartupCustodyClassification, io::Error> {
+    let mut pidfd_source = LinuxProcessPidfdExitObserver;
+    let observed_target_count =
+        observe_exact_inherited_worker_exits_with(&classification, deadline, &mut pidfd_source)
+            .map_err(|_| restart_settlement_incomplete())?;
+    let exits = ObservedExactInheritedWorkerExitSet {
+        classification,
+        observed_target_count,
+    };
+    let sampling = runtime.block_on(sample_shared_service_cgroup_quiescence(&exits, deadline));
+    let outcome = join_shared_service_cgroup_quiescence(exits, sampling);
+    match outcome.state {
+        SharedServiceCgroupObservationOutcomeState::Observed(observed) => {
+            Ok(observed.state.exits.classification)
+        }
+        SharedServiceCgroupObservationOutcomeState::Retained { .. } => {
+            Err(restart_settlement_incomplete())
+        }
+    }
+}
+
+/// Recover only one exact-present, pre-dispatch `MayOwnCustody` worker namespace.
+///
+/// Worker-spawn admission, the lock-held startup actor, the old process pidfd and the inherited
+/// namespace descriptor remain retained across both shared-cgroup observations, the fixed
+/// self-exec reaper, the journal CAS and the existing descriptor-store removal chain. Every
+/// no-store, `MayOwnPrepare`, multi-target or multi-path shape remains outside this function.
+pub(crate) fn settle_exact_single_may_own_restart_present(
+    runtime: &Runtime,
+    mut ownership_startup: ProductionOwnershipStartup,
+    classification: StartupCustodyClassification,
+    deadline: HardDeadline,
+) -> Result<ProductionOwnershipRuntime, io::Error> {
+    if !classification.is_exact_single_may_own_restart() {
+        return Err(restart_settlement_incomplete());
+    }
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+    let _spawn_admission = acquire_worker_spawn_admission_until(deadline)
+        .map_err(|_| restart_settlement_incomplete())?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+
+    let mut classification =
+        observe_exact_worker_exit_and_shared_cgroup(runtime, classification, deadline)?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+    let (target, plan) = classification
+        .exact_single_may_own_restart()
+        .ok_or_else(restart_settlement_incomplete)?;
+    let custody_name = CustodyFdName::from_durable_digest(target.custody_name_digest());
+    let bundle = classification
+        .custody
+        .bundles
+        .get(&custody_name)
+        .ok_or_else(restart_settlement_incomplete)?;
+    bundle.verify_exact_target(&target)?;
+    let proof = execute_single_restart_reaper(plan, bundle.network_namespace.as_fd(), deadline)
+        .map_err(|_| restart_settlement_incomplete())?;
+    if !proof.matches_plan(plan) {
+        return Err(restart_settlement_incomplete());
+    }
+
+    classification =
+        observe_exact_worker_exit_and_shared_cgroup(runtime, classification, deadline)?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+    let (revalidated_target, revalidated_plan) = classification
+        .exact_single_may_own_restart()
+        .ok_or_else(restart_settlement_incomplete)?;
+    if revalidated_target != target || revalidated_plan != plan {
+        return Err(restart_settlement_incomplete());
+    }
+    let evidence = RestartMayOwnCleanupEvidence::after_exact_reaper(
+        revalidated_target,
+        revalidated_plan,
+        proof,
+    )?;
+    let successor = {
+        let successors = ownership_startup
+            .confirm_single_restart_cleanup(evidence)
+            .map_err(|_| restart_settlement_incomplete())?;
+        let [successor] = successors else {
+            return Err(restart_settlement_incomplete());
+        };
+        *successor
+    };
+    classification.record_cleanup_confirmed_transition(successor)?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+
+    settle_cleanup_confirmed_restart_present_after_admission(
+        runtime,
+        ownership_startup,
+        classification,
+        deadline,
+    )
+}
+
 /// Run the complete bounded restart observation while retaining every refusal owner.
 ///
 /// The journal startup guard and process-wide worker-spawn admission remain live from before the
@@ -1310,17 +1518,22 @@ fn verify_exit_set_against_shared_cgroup(
     exits: &ObservedExactInheritedWorkerExitSet,
     pinned: &PinnedSharedServiceCgroup,
 ) -> Result<(), SharedServiceCgroupObservationError> {
-    let service_inode = NonZeroU64::new(pinned.service_identity.inode)
-        .ok_or(SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    let current_service_cgroup = DurableServiceCgroupIdentity {
+        inode: NonZeroU64::new(pinned.service_identity.inode)
+            .ok_or(SharedServiceCgroupObservationError::CgroupIdentityChanged)?,
+        kernel_id: pinned.kernel_cgroup_id,
+    };
     let mut pending_target_count = 0_usize;
+    let mut predecessor_service_cgroup = None;
     for entry in &exits.classification.classified {
         if !entry.target.has_valid_recovery_binding() {
             return Err(SharedServiceCgroupObservationError::AnchorMismatch);
         }
+        bind_exact_predecessor_service_cgroup(
+            &mut predecessor_service_cgroup,
+            entry.target.service_cgroup_identity(),
+        )?;
         if entry.target.phase() != StartupCustodyPhase::CleanupConfirmed {
-            if !entry.target.has_service_cgroup_inode(service_inode) {
-                return Err(SharedServiceCgroupObservationError::AnchorMismatch);
-            }
             if entry.disposition != StartupCustodyDisposition::ExactPresent {
                 return Err(SharedServiceCgroupObservationError::BindingChanged);
             }
@@ -1343,7 +1556,64 @@ fn verify_exit_set_against_shared_cgroup(
     if NonZeroUsize::new(pending_target_count) != Some(exits.observed_target_count) {
         return Err(SharedServiceCgroupObservationError::BindingChanged);
     }
+    classify_restart_service_cgroup_transition(
+        predecessor_service_cgroup.ok_or(SharedServiceCgroupObservationError::AnchorMismatch)?,
+        current_service_cgroup,
+    )?;
     Ok(())
+}
+
+/// One exact predecessor manager-cgroup identity shared by every classified journal target.
+///
+/// Different predecessor identities cannot be merged merely because they all differ from the
+/// successor. That would turn an arbitrary cross-cgroup journal set into apparent replacement
+/// continuity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExactPredecessorServiceCgroup(DurableServiceCgroupIdentity);
+
+fn bind_exact_predecessor_service_cgroup(
+    retained: &mut Option<ExactPredecessorServiceCgroup>,
+    candidate: DurableServiceCgroupIdentity,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    match retained {
+        None => *retained = Some(ExactPredecessorServiceCgroup(candidate)),
+        Some(exact) if exact.0 == candidate => {}
+        Some(_) => return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged),
+    }
+    Ok(())
+}
+
+/// Exact relationship between the predecessor anchor and the manager's current service cgroup.
+///
+/// A complete identity match retains the original pinned cgroup. A complete identity change is
+/// the only admissible replacement: by this point the exact predecessor process pidfd has
+/// reported exit, PID 1 still owns the same non-delegated strict service scope, and the freshly
+/// pinned same-name cgroup contains exactly the new `MainPID` and no descendants. Replacing that
+/// pathname therefore required PID 1 to remove the empty predecessor first. A partial match is
+/// identifier drift or reuse and is never continuity or replacement evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RestartServiceCgroupTransition {
+    SamePinnedManagerCgroup,
+    Pid1ManagedReplacementAfterEmptyPredecessor,
+}
+
+fn classify_restart_service_cgroup_transition(
+    predecessor: ExactPredecessorServiceCgroup,
+    current: DurableServiceCgroupIdentity,
+) -> Result<RestartServiceCgroupTransition, SharedServiceCgroupObservationError> {
+    let predecessor = predecessor.0;
+    match (
+        predecessor.inode == current.inode,
+        predecessor.kernel_id == current.kernel_id,
+    ) {
+        (true, true) => Ok(RestartServiceCgroupTransition::SamePinnedManagerCgroup),
+        (false, false) => {
+            Ok(RestartServiceCgroupTransition::Pid1ManagedReplacementAfterEmptyPredecessor)
+        }
+        (true, false) | (false, true) => {
+            Err(SharedServiceCgroupObservationError::CgroupIdentityChanged)
+        }
+    }
 }
 
 fn verify_manager_inventory_against_retained_custody(
@@ -2044,6 +2314,25 @@ pub(crate) fn settle_cleanup_confirmed_restart_present(
         .map_err(|_| restart_settlement_incomplete())?;
     verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
 
+    settle_cleanup_confirmed_restart_present_after_admission(
+        runtime,
+        ownership_startup,
+        classification,
+        deadline,
+    )
+}
+
+fn settle_cleanup_confirmed_restart_present_after_admission(
+    runtime: &Runtime,
+    mut ownership_startup: ProductionOwnershipStartup,
+    classification: StartupCustodyClassification,
+    deadline: HardDeadline,
+) -> Result<ProductionOwnershipRuntime, io::Error> {
+    if !classification.is_cleanup_confirmed_with_exact_present() {
+        return Err(restart_settlement_incomplete());
+    }
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+
     let mut manager = LinuxCleanupConfirmedRestartRemovalSource;
     let successor = runtime
         .block_on(remove_cleanup_confirmed_restart_present_with(
@@ -2684,7 +2973,7 @@ mod tests {
     use crate::ownership_journal::{
         DurableCustodyDescriptorIdentity, DurableCustodyDescriptorIdentityParts,
         DurableCustodyNameDigest, DurablePrepareAnchor, DurablePrepareAnchorParts,
-        durable_prepare_anchor_from_parts,
+        StartupRestartPlan, durable_prepare_anchor_from_parts,
     };
     use crate::systemd_fdstore::{
         stable_service_cgroup_isolation_for_test, stable_startup_inventory_for_test,
@@ -2813,6 +3102,45 @@ mod tests {
         )
     }
 
+    fn restart_plan_fixture(
+        seed: u8,
+        role: volparossa_routing::ContextRole,
+        path_id: u8,
+    ) -> StartupRestartPlan {
+        StartupRestartPlan::for_test(
+            [seed; 16],
+            role,
+            path_id,
+            [seed.wrapping_add(1); 16],
+            (
+                NonZeroU64::new(u64::from(seed) + 100).expect("namespace device"),
+                NonZeroU64::new(u64::from(seed) + 101).expect("namespace inode"),
+            ),
+            (
+                NonZeroU64::new(u64::from(seed) + 102).expect("executable device"),
+                NonZeroU64::new(u64::from(seed) + 103).expect("executable inode"),
+            ),
+        )
+    }
+
+    fn single_restart_classification(
+        seed: u8,
+        phase: StartupCustodyPhase,
+        role: volparossa_routing::ContextRole,
+        path_id: u8,
+    ) -> StartupCustodyClassification {
+        let custody = captured_custody(seed);
+        let (_, durable) = custody
+            .verify_retained_bindings()
+            .expect("restart fixture bindings");
+        let binding = *durable
+            .get(&typed_custody_name(seed))
+            .expect("restart fixture durable binding");
+        let target = startup_target(seed, phase, binding)
+            .with_restart_plan_for_test(restart_plan_fixture(seed, role, path_id));
+        startup_classification(custody, &[target])
+    }
+
     fn durable_anchor(seed: u8, network_device: u64, network_inode: u64) -> DurablePrepareAnchor {
         durable_prepare_anchor_from_parts(DurablePrepareAnchorParts {
             boot_id: [seed; 16],
@@ -2829,6 +3157,7 @@ mod tests {
                 .expect("nonzero executable inode"),
             service_cgroup_inode: NonZeroU64::new(u64::from(seed) + 40)
                 .expect("nonzero cgroup inode"),
+            service_cgroup_id: NonZeroU64::new(u64::from(seed) + 40).expect("nonzero cgroup ID"),
         })
         .expect("valid durable anchor")
     }
@@ -3509,6 +3838,124 @@ mod tests {
                 StartupCustodyDisposition::ExactPresent
             );
         }
+    }
+
+    #[test]
+    fn restart_reaper_gate_accepts_only_one_exact_present_single_path_may_own_custody() {
+        for (seed, role) in [
+            (71, volparossa_routing::ContextRole::Client),
+            (72, volparossa_routing::ContextRole::Relay),
+            (73, volparossa_routing::ContextRole::Exit),
+        ] {
+            let classification =
+                single_restart_classification(seed, StartupCustodyPhase::MayOwnCustody, role, 1);
+            assert!(classification.is_exact_single_may_own_restart());
+            let (target, plan) = classification
+                .exact_single_may_own_restart()
+                .expect("exact restart shape");
+            assert_eq!(target.phase(), StartupCustodyPhase::MayOwnCustody);
+            assert_eq!(plan.context_role(), role);
+            assert_eq!(plan.path_id(), 1);
+        }
+
+        for (seed, phase) in [
+            (74, StartupCustodyPhase::MayOwnPrepare),
+            (75, StartupCustodyPhase::CleanupConfirmed),
+        ] {
+            assert!(
+                !single_restart_classification(
+                    seed,
+                    phase,
+                    volparossa_routing::ContextRole::Client,
+                    1,
+                )
+                .is_exact_single_may_own_restart()
+            );
+        }
+        assert!(
+            !single_restart_classification(
+                76,
+                StartupCustodyPhase::MayOwnCustody,
+                volparossa_routing::ContextRole::Client,
+                0,
+            )
+            .is_exact_single_may_own_restart(),
+            "zero marks a multi-path durable plan"
+        );
+        assert!(
+            !single_restart_classification(
+                81,
+                StartupCustodyPhase::MayOwnCustody,
+                volparossa_routing::ContextRole::Unspecified,
+                1,
+            )
+            .is_exact_single_may_own_restart()
+        );
+        assert!(
+            !single_restart_classification(
+                82,
+                StartupCustodyPhase::MayOwnCustody,
+                volparossa_routing::ContextRole::Client,
+                9,
+            )
+            .is_exact_single_may_own_restart()
+        );
+
+        let mut multi = single_restart_classification(
+            77,
+            StartupCustodyPhase::MayOwnCustody,
+            volparossa_routing::ContextRole::Client,
+            1,
+        );
+        multi.classified.push(multi.classified[0]);
+        assert!(!multi.is_exact_single_may_own_restart());
+
+        let absent_target = synthetic_startup_target(78, StartupCustodyPhase::MayOwnCustody, 78)
+            .with_restart_plan_for_test(restart_plan_fixture(
+                78,
+                volparossa_routing::ContextRole::Client,
+                1,
+            ));
+        let absent = startup_classification(
+            InheritedCustody {
+                bundles: BTreeMap::new(),
+            },
+            &[absent_target],
+        );
+        assert_eq!(
+            absent.classified[0].disposition,
+            StartupCustodyDisposition::ExactNoStoredCustody
+        );
+        assert!(!absent.is_exact_single_may_own_restart());
+    }
+
+    #[test]
+    fn restart_reaper_success_changes_only_the_classified_durable_phase() {
+        let mut classification = single_restart_classification(
+            79,
+            StartupCustodyPhase::MayOwnCustody,
+            volparossa_routing::ContextRole::Relay,
+            1,
+        );
+        let original = classification.classified[0].target;
+        let successor = original.with_phase_for_test(StartupCustodyPhase::CleanupConfirmed);
+        classification
+            .record_cleanup_confirmed_transition(successor)
+            .expect("exact phase-only successor");
+        assert!(classification.is_cleanup_confirmed_with_exact_present());
+        assert!(original.same_identity_except_phase(&classification.classified[0].target));
+
+        let foreign = synthetic_startup_target(80, StartupCustodyPhase::CleanupConfirmed, 80)
+            .with_restart_plan_for_test(restart_plan_fixture(
+                80,
+                volparossa_routing::ContextRole::Relay,
+                1,
+            ));
+        assert!(
+            classification
+                .record_cleanup_confirmed_transition(foreign)
+                .is_err()
+        );
     }
 
     #[test]
@@ -4601,6 +5048,13 @@ mod tests {
     }
 
     fn fake_pinned_shared_service_cgroup(inode: u64) -> PinnedSharedServiceCgroup {
+        fake_pinned_shared_service_cgroup_with_id(inode, inode)
+    }
+
+    fn fake_pinned_shared_service_cgroup_with_id(
+        inode: u64,
+        kernel_cgroup_id: u64,
+    ) -> PinnedSharedServiceCgroup {
         PinnedSharedServiceCgroup {
             root: descriptor(),
             root_identity: PinnedFileIdentity {
@@ -4609,7 +5063,7 @@ mod tests {
             },
             service: descriptor(),
             service_identity: PinnedFileIdentity { device: 7, inode },
-            kernel_cgroup_id: NonZeroU64::new(inode).expect("nonzero fake cgroup ID"),
+            kernel_cgroup_id: NonZeroU64::new(kernel_cgroup_id).expect("nonzero fake cgroup ID"),
             pid_namespace: descriptor(),
             pid_namespace_identity: PinnedFileIdentity {
                 device: 9,
@@ -4673,14 +5127,22 @@ mod tests {
     fn observed_exit_with_cleanup_fixture(
         pending_seed: u8,
         cleanup_seed: u8,
+        cleanup_cgroup_seed: u8,
     ) -> ObservedExactInheritedWorkerExitSet {
         let custody = captured_custody(pending_seed);
         let pending =
             exact_target_for_custody(pending_seed, StartupCustodyPhase::MayOwnPrepare, &custody);
-        let cleanup = synthetic_startup_target(
+        let cleanup_binding_seed = u32::from(cleanup_seed);
+        let cleanup_binding = synthetic_durable_binding(cleanup_binding_seed);
+        let cleanup = startup_target_with_anchor(
             cleanup_seed,
             StartupCustodyPhase::CleanupConfirmed,
-            u32::from(cleanup_seed),
+            durable_anchor(
+                cleanup_cgroup_seed,
+                rustix::fs::makedev(cleanup_binding_seed, 2),
+                u64::from(cleanup_binding_seed) * 100 + 2,
+            ),
+            cleanup_binding,
         );
         let classification = startup_classification(custody, &[pending, cleanup]);
         let mut observer = FakeProcessPidfdExitObserver::default();
@@ -4982,12 +5444,137 @@ mod tests {
     #[test]
     fn cleanup_confirmed_target_does_not_claim_current_pending_cgroup_membership() {
         let pending_seed = 55_u8;
-        let exits = observed_exit_with_cleanup_fixture(pending_seed, 56);
+        let exits = observed_exit_with_cleanup_fixture(pending_seed, 56, pending_seed);
         let pinned = fake_pinned_shared_service_cgroup(u64::from(pending_seed) + 40);
         verify_exit_set_against_shared_cgroup(&exits, &pinned)
             .expect("only pending target requires current shared-cgroup anchor");
         assert_eq!(exits.classification.classified.len(), 2);
         assert_eq!(exits.observed_target_count.get(), 1);
+    }
+
+    #[test]
+    fn cleanup_confirmed_and_pending_targets_reject_mixed_predecessor_cgroups() {
+        let pending_seed = 55_u8;
+        let exits = observed_exit_with_cleanup_fixture(pending_seed, 56, 56);
+        let pinned = fake_pinned_shared_service_cgroup(u64::from(pending_seed) + 40);
+        assert_eq!(
+            verify_exit_set_against_shared_cgroup(&exits, &pinned)
+                .expect_err("mixed CleanupConfirmed and pending predecessor cgroups must fail"),
+            SharedServiceCgroupObservationError::CgroupIdentityChanged
+        );
+        assert_eq!(exits.classification.classified.len(), 2);
+        assert_eq!(exits.observed_target_count.get(), 1);
+    }
+
+    #[test]
+    fn restart_service_cgroup_transition_accepts_same_and_pid1_replacement() {
+        let predecessor = DurableServiceCgroupIdentity {
+            inode: NonZeroU64::new(41).expect("nonzero predecessor inode"),
+            kernel_id: NonZeroU64::new(51).expect("nonzero predecessor cgroup ID"),
+        };
+        let exact_predecessor = ExactPredecessorServiceCgroup(predecessor);
+        assert_eq!(
+            classify_restart_service_cgroup_transition(exact_predecessor, predecessor)
+                .expect("same pinned manager cgroup"),
+            RestartServiceCgroupTransition::SamePinnedManagerCgroup
+        );
+        assert_eq!(
+            classify_restart_service_cgroup_transition(
+                exact_predecessor,
+                DurableServiceCgroupIdentity {
+                    inode: NonZeroU64::new(42).expect("nonzero replacement inode"),
+                    kernel_id: NonZeroU64::new(52).expect("nonzero replacement cgroup ID"),
+                },
+            )
+            .expect("complete PID-1 replacement"),
+            RestartServiceCgroupTransition::Pid1ManagedReplacementAfterEmptyPredecessor
+        );
+    }
+
+    #[test]
+    fn restart_service_cgroup_transition_rejects_partial_drift_and_reuse() {
+        let predecessor = DurableServiceCgroupIdentity {
+            inode: NonZeroU64::new(61).expect("nonzero predecessor inode"),
+            kernel_id: NonZeroU64::new(71).expect("nonzero predecessor cgroup ID"),
+        };
+        let exact_predecessor = ExactPredecessorServiceCgroup(predecessor);
+        for current in [
+            DurableServiceCgroupIdentity {
+                inode: predecessor.inode,
+                kernel_id: NonZeroU64::new(72).expect("nonzero drifted cgroup ID"),
+            },
+            DurableServiceCgroupIdentity {
+                inode: NonZeroU64::new(62).expect("nonzero reused inode"),
+                kernel_id: predecessor.kernel_id,
+            },
+        ] {
+            assert_eq!(
+                classify_restart_service_cgroup_transition(exact_predecessor, current)
+                    .expect_err("partial cgroup identity match must fail closed"),
+                SharedServiceCgroupObservationError::CgroupIdentityChanged
+            );
+        }
+    }
+
+    #[test]
+    fn restart_service_cgroup_transition_is_total_over_both_identity_axes() {
+        for predecessor_inode in 1_u64..=16 {
+            for predecessor_id in 17_u64..=32 {
+                let predecessor = DurableServiceCgroupIdentity {
+                    inode: NonZeroU64::new(predecessor_inode).expect("nonzero inode"),
+                    kernel_id: NonZeroU64::new(predecessor_id).expect("nonzero cgroup ID"),
+                };
+                let exact_predecessor = ExactPredecessorServiceCgroup(predecessor);
+                for inode_matches in [false, true] {
+                    for id_matches in [false, true] {
+                        let current = DurableServiceCgroupIdentity {
+                            inode: if inode_matches {
+                                predecessor.inode
+                            } else {
+                                NonZeroU64::new(predecessor_inode + 64)
+                                    .expect("nonzero different inode")
+                            },
+                            kernel_id: if id_matches {
+                                predecessor.kernel_id
+                            } else {
+                                NonZeroU64::new(predecessor_id + 64)
+                                    .expect("nonzero different cgroup ID")
+                            },
+                        };
+                        let classified =
+                            classify_restart_service_cgroup_transition(exact_predecessor, current);
+                        assert_eq!(
+                            classified.is_ok(),
+                            inode_matches == id_matches,
+                            "only complete equality or complete replacement is admissible"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn predecessor_service_cgroup_set_rejects_cross_cgroup_journal_join() {
+        let first = DurableServiceCgroupIdentity {
+            inode: NonZeroU64::new(81).expect("nonzero first inode"),
+            kernel_id: NonZeroU64::new(91).expect("nonzero first cgroup ID"),
+        };
+        let different = DurableServiceCgroupIdentity {
+            inode: NonZeroU64::new(82).expect("nonzero second inode"),
+            kernel_id: NonZeroU64::new(92).expect("nonzero second cgroup ID"),
+        };
+        let mut retained = None;
+        bind_exact_predecessor_service_cgroup(&mut retained, first)
+            .expect("first exact predecessor");
+        bind_exact_predecessor_service_cgroup(&mut retained, first)
+            .expect("same predecessor is stable");
+        assert_eq!(retained, Some(ExactPredecessorServiceCgroup(first)));
+        assert_eq!(
+            bind_exact_predecessor_service_cgroup(&mut retained, different)
+                .expect_err("cross-cgroup journal join must fail closed"),
+            SharedServiceCgroupObservationError::CgroupIdentityChanged
+        );
     }
 
     #[tokio::test]
@@ -5162,7 +5749,8 @@ mod tests {
         let seed = 51_u8;
         let mut exits = observed_exit_fixture(seed);
         let exact = fake_pinned_shared_service_cgroup(u64::from(seed) + 40);
-        let wrong = fake_pinned_shared_service_cgroup(u64::from(seed) + 41);
+        let wrong =
+            fake_pinned_shared_service_cgroup_with_id(u64::from(seed) + 41, u64::from(seed) + 40);
         let pid = NonZeroU32::new(std::process::id()).expect("nonzero current PID");
         let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
         let mut source = FakeSharedServiceCgroupSource {
@@ -5196,8 +5784,8 @@ mod tests {
                 deadline,
                 &mut source,
             )
-            .expect_err("wrong anchor inode"),
-            SharedServiceCgroupObservationError::AnchorMismatch
+            .expect_err("partial anchor identity drift"),
+            SharedServiceCgroupObservationError::CgroupIdentityChanged
         );
         assert!(source.observe_deadlines.is_empty());
 
@@ -5355,7 +5943,7 @@ mod tests {
             .match_indices("verify_classification_against_locked_journal")
             .map(|(offset, _)| offset)
             .collect::<Vec<_>>();
-        assert_eq!(journals.len(), 4);
+        assert_eq!(journals.len(), 5);
         let admission = composition
             .find("acquire_worker_spawn_admission_until")
             .expect("retained worker-spawn admission");
@@ -5377,11 +5965,12 @@ mod tests {
         assert!(classification < journals[0]);
         assert!(journals[0] < admission);
         assert!(admission < journals[1]);
-        assert!(journals[1] < removals);
-        assert!(removals < journals[2]);
-        assert!(journals[2] < fresh_empty);
-        assert!(fresh_empty < journals[3]);
-        assert!(journals[3] < evidence);
+        assert!(journals[1] < journals[2]);
+        assert!(journals[2] < removals);
+        assert!(removals < journals[3]);
+        assert!(journals[3] < fresh_empty);
+        assert!(fresh_empty < journals[4]);
+        assert!(journals[4] < evidence);
         assert!(evidence < release);
         assert!(release < actor);
         assert!(composition.contains("BTreeMap::<CustodyFdName"));
@@ -5421,6 +6010,68 @@ mod tests {
         assert!(settlement < refusal);
         assert!(refusal < socket);
         assert!(!server.contains("remove_restart_custody"));
+    }
+
+    #[test]
+    fn exact_single_may_own_reaper_orders_two_quiescence_joins_cas_and_existing_removal() {
+        let source = include_str!("systemd_custody.rs");
+        let start = source
+            .find("pub(crate) fn settle_exact_single_may_own_restart_present")
+            .expect("exact singleton restart composition");
+        let end = source[start..]
+            .find("/// Run the complete bounded restart observation")
+            .map(|offset| start + offset)
+            .expect("exact singleton restart composition end");
+        let composition = &source[start..end];
+        let gate = composition
+            .find("is_exact_single_may_own_restart")
+            .expect("singleton gate");
+        let initial_journal = composition
+            .find("verify_classification_against_locked_journal")
+            .expect("initial journal proof");
+        let admission = composition
+            .find("acquire_worker_spawn_admission_until")
+            .expect("retained spawn admission");
+        let observations = composition
+            .match_indices("observe_exact_worker_exit_and_shared_cgroup")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        assert_eq!(observations.len(), 2);
+        let reaper = composition
+            .find("execute_single_restart_reaper")
+            .expect("fixed child execution");
+        let evidence = composition
+            .find("RestartMayOwnCleanupEvidence::after_exact_reaper")
+            .expect("affine exact child proof");
+        let cas = composition
+            .find("confirm_single_restart_cleanup")
+            .expect("startup-only journal CAS");
+        let phase_join = composition
+            .find("record_cleanup_confirmed_transition")
+            .expect("classification phase join");
+        let removal = composition
+            .find("settle_cleanup_confirmed_restart_present_after_admission")
+            .expect("existing removal chain");
+        assert!(gate < initial_journal);
+        assert!(initial_journal < admission);
+        assert!(admission < observations[0]);
+        assert!(observations[0] < reaper);
+        assert!(reaper < observations[1]);
+        assert!(observations[1] < evidence);
+        assert!(evidence < cas);
+        assert!(cas < phase_join);
+        assert!(phase_join < removal);
+        for forbidden in [
+            "bind_production_socket",
+            "run_server",
+            "continue_empty",
+            "MayOwnPrepare -> CleanupConfirmed",
+        ] {
+            assert!(
+                !composition.contains(forbidden),
+                "composition unexpectedly contains {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -5509,10 +6160,9 @@ mod tests {
             );
         }
         assert!(!include_str!("server.rs").contains("observe_exact_inherited_worker_exits"));
-        assert!(
-            include_str!("worker_sandbox.rs")
-                .contains("let pidfd = pidfd_open(pid, PidfdFlags::empty())")
-        );
+        let sandbox = include_str!("worker_sandbox.rs");
+        assert!(sandbox.contains("fn open_child_pidfd(child: &Child)"));
+        assert!(sandbox.contains("pidfd_open(Pid::from_child(child), PidfdFlags::empty())"));
         assert!(observer.contains("wait_for_process_pidfd_exit"));
         assert!(observer.contains("verify_exact_target"));
     }

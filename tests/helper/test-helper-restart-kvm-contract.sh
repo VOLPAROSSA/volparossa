@@ -59,11 +59,44 @@ for accepted_mode in 700 750 755; do
 done
 test "$(grep -Fc 'source_snapshot_is_exact' "$launcher_source_mode_contract")" -eq 3
 
-# The checked-in restart launcher is a fixed no-argument test seam. It executes
-# the real helper directly on the first invocation, and only a safe crash record
-# may select the exact invocation/PID-bound successor FIFO barrier.
+# The checked-in launcher is one fixed no-argument test seam. Restart mode keeps
+# its original crash-selected successor barrier. MayOwn mode instead holds every
+# invocation behind one invocation/PID-bound FIFO barrier before the same PID
+# execs the helper.
 if ! awk '
     /^\[ "\$#" -eq 0 \] \|\| exit 64$/ { argc = NR; argc_count++ }
+    /^case \$\{VOLPAROSSA_HELPER_PREEXEC_MODE:-restart\} in$/ { mode = NR; mode_count++ }
+    /^[[:space:]]*may-own\)$/ { may_own = NR; may_own_count++ }
+    $0 == "        if [ -e \"/proc/$$/fd/9\" ] || [ -L \"/proc/$$/fd/9\" ]; then" {
+        may_fd_absent = NR; may_fd_absent_count++
+    }
+    $0 == "        command exec 9<\"$0\" || exit 65" {
+        may_fd_open = NR; may_fd_open_count++
+    }
+    /may-own\.pre-exec\.\$may_own_invocation_id$/ { may_ready = NR; may_ready_count++ }
+    /VOLPAROSSA_HELPER_MAY_OWN_PRE_EXEC_BARRIER_V1=ready/ {
+        may_record = NR; may_record_count++
+    }
+    $0 == "        IFS= read -r may_own_release_value <\"$may_own_release_fifo\" || exit 65" {
+        may_read = NR; may_read_count++
+    }
+    $0 == "        [ \"$may_own_release_value\" = G ] || exit 65" {
+        may_gate = NR; may_gate_count++
+    }
+    /printf .*"\$may_own_release_value" >"\$may_own_release_capture"/ {
+        may_capture = NR; may_capture_count++
+    }
+    /^[[:space:]]*\[ "\$\(cat "\$may_own_release_capture"\)" = G \] \|\| exit 65$/ {
+        may_file_gate = NR; may_file_gate_count++
+    }
+    $0 == "        command exec 9<&- || exit 65" {
+        may_fd_close = NR; may_fd_close_count++
+    }
+    $0 == "        [ ! -e \"/proc/$$/fd/9\" ] && [ ! -L \"/proc/$$/fd/9\" ] || exit 65" {
+        may_fd_closed = NR; may_fd_closed_count++
+    }
+    /dd if="\$may_own_release_fifo"/ { invalid_may_own_child++ }
+    /^[[:space:]]*restart\)$/ { restart = NR; restart_count++ }
     /if \[ ! -e "\$crash_record" \] && \[ ! -L "\$crash_record" \]; then/ {
         absent = NR; absent_count++
     }
@@ -72,29 +105,49 @@ if ! awk '
         if (execs == 1) first_exec = NR
         if (execs == 2) successor_exec = NR
     }
-    /^invocation_id=\$\{INVOCATION_ID:-\}$/ { invocation = NR; invocation_count++ }
-    /regular file:0:600:1.*\] \|\| exit 65/ { private_files++ }
-    /= \047fifo:0:0:600:1\047 \] \|\| exit 65/ { fifo = NR; fifo_count++ }
+    /^[[:space:]]*invocation_id=\$\{INVOCATION_ID:-\}$/ { invocation = NR; invocation_count++ }
     /VOLPAROSSA_HELPER_RESTART_SUCCESSOR_BARRIER_V1=ready/ {
         ready = NR; ready_count++
     }
-    /^mv -T "\$ready_next" "\$ready_record"$/ { publish = NR; publish_count++ }
-    /^dd if="\$release_fifo" of="\$release_capture" iflag=fullblock/ {
+    /stat -Lc .*"\$release_fifo"/ { fifo = NR; fifo_count++ }
+    /^[[:space:]]*mv -T "\$ready_next" "\$ready_record"$/ { publish = NR; publish_count++ }
+    /^[[:space:]]*dd if="\$release_fifo" of="\$release_capture" iflag=fullblock/ {
         read = NR; read_count++
     }
     /bs=2 count=1 status=none/ { bound = NR; bound_count++ }
-    /regular file:0:0:600:1:1/ { exact = NR; exact_count++ }
-    /^\[ "\$\(cat "\$release_capture"\)" = G \] \|\| exit 65$/ {
+    /regular file:0:0:600:1:1/ {
+        exact_count++
+        if (exact_count == 1) may_exact = NR
+        if (exact_count == 2) exact = NR
+    }
+    /^[[:space:]]*\[ "\$\(cat "\$release_capture"\)" = G \] \|\| exit 65$/ {
         gate = NR; gate_count++
     }
     END {
-        valid = argc_count == 1 && absent_count == 1 && execs == 2
-        valid = valid && invocation_count == 1 && private_files >= 3
-        valid = valid && fifo_count == 1 && ready_count == 1
+        valid = argc_count == 1 && mode_count == 1 && may_own_count == 1
+        valid = valid && may_fd_absent_count == 1 && may_fd_open_count == 1
+        valid = valid && may_ready_count == 1 && may_record_count == 1
+        valid = valid && may_read_count == 1 && may_gate_count == 1
+        valid = valid && may_capture_count == 1 && invalid_may_own_child == 0
+        valid = valid && may_file_gate_count == 1 && may_fd_close_count == 1
+        valid = valid && may_fd_closed_count == 1
+        valid = valid && restart_count == 1
+        valid = valid && absent_count == 1 && execs == 2
+        valid = valid && invocation_count == 1 && ready_count == 1
+        valid = valid && fifo_count == 1
         valid = valid && publish_count == 1 && read_count == 1
         valid = valid && bound_count == 1
-        valid = valid && exact_count == 1 && gate_count == 1
-        valid = valid && argc < absent && absent < first_exec
+        valid = valid && exact_count == 2 && gate_count == 1
+        valid = valid && argc < mode && mode < may_own
+        valid = valid && may_own < may_fd_absent && may_fd_absent < may_fd_open
+        valid = valid && may_fd_open < may_ready && may_ready < may_record
+        valid = valid && may_record < may_read && may_read < may_gate
+        valid = valid && may_gate < may_capture && may_capture < may_exact
+        valid = valid && may_exact < may_file_gate
+        valid = valid && may_file_gate < may_fd_close
+        valid = valid && may_fd_close < may_fd_closed
+        valid = valid && may_fd_closed < restart
+        valid = valid && restart < absent && absent < first_exec
         valid = valid && first_exec < invocation && invocation < fifo
         valid = valid && fifo < ready && ready < publish && publish < read
         valid = valid && read < bound && bound < exact
@@ -102,7 +155,7 @@ if ! awk '
         if (!valid) exit 1
     }
 ' "$launcher"; then
-    printf '%s\n' 'restart launcher is not one exact affine successor barrier' >&2
+    printf '%s\n' 'restart launcher is not the exact restart and MayOwn affine barrier' >&2
     exit 1
 fi
 
@@ -158,11 +211,13 @@ grep -Eq '(^|[[:space:]])dd([[:space:]]|$)' "$command_preflight"
 
 # PID 1 is configured with the fixed launcher for restart evidence while the
 # running process image remains the real helper. Both identities are fenced:
-# ordinary production keeps its direct entrypoint, restart mode requires the
+# ordinary production keeps its direct entrypoint, launcher-identity mode requires the
 # launcher, and both typed systemd records receive that exact expectation.
 launch_entrypoint_contract=$tmp/restart-launch-entrypoint-contract
 sed -n '/^capture_systemd_launch_contract() {$/,/^}$/p' \
     "$hook" >"$launch_entrypoint_contract"
+grep -Fx '    case $restart_launcher_identity_mode in' \
+    "$launch_entrypoint_contract" >/dev/null
 grep -Fx '        no) hook_launch_entrypoint=$production_helper ;;' \
     "$launch_entrypoint_contract" >/dev/null
 grep -Fx '        yes) hook_launch_entrypoint=$restart_launcher ;;' \
@@ -170,6 +225,36 @@ grep -Fx '        yes) hook_launch_entrypoint=$restart_launcher ;;' \
 test "$(grep -Fc '"$hook_launch_entrypoint") || return 1' \
     "$launch_entrypoint_contract")" -eq 2
 grep -F 'capture_launch_image_identity "$production_helper"' "$hook" >/dev/null
+restart_start_hook_contract=$tmp/restart-start-hook-contract
+sed -n '/^restart_start_hook() {$/,/^}$/p' "$hook" \
+    >"$restart_start_hook_contract"
+if ! awk '
+    /if \[ ! -e "\$restart_crash_record" \]/ {
+        first = NR
+        first_count++
+    }
+    /^        restart_launcher_identity_mode=yes$/ {
+        launcher = NR
+        launcher_count++
+    }
+    /^        restart_exact_present_mode=yes$/ {
+        flow = NR
+        flow_count++
+    }
+    /^        start_hook "\$@"$/ {
+        start = NR
+        start_count++
+    }
+    END {
+        valid = first_count == 1 && launcher_count == 1
+        valid = valid && flow_count == 1 && start_count == 1
+        valid = valid && first < launcher && launcher < flow && flow < start
+        if (!valid) exit 1
+    }
+' "$restart_start_hook_contract"; then
+    printf '%s\n' 'restart launch identity and flow modes are not independently bound' >&2
+    exit 1
+fi
 
 # The pre-kill authorization is a single fixed private record published
 # before the functional release byte. Exercise its exact producer state and
@@ -3641,10 +3726,13 @@ if restart_successor_start_failure_category "$restart_failure_record" \
 fi
 rm -f -- "$restart_failure_record.next"
 
-# The failed empty-cgroup freezer assumption is completely absent. The fixed
-# FIFO release happens only after private GDB readiness and before waiting for
-# the exact debugger child to complete.
-if grep -E 'restart_cgroup|cgroup\.freeze|restart cgroup' "$gate" >/dev/null; then
+# The failed ExactPresent empty-cgroup freezer assumption is completely absent.
+# A later MayOwn proof may freeze its separately named, non-empty, shape-checked
+# service cgroup; it is not part of this ExactPresent handshake. The fixed FIFO
+# release happens only after private GDB readiness and before waiting for the
+# exact debugger child to complete.
+if grep -E '(^|[^[:alnum:]_])restart_cgroup([^[:alnum:]_]|$)|restart cgroup' \
+    "$gate" >/dev/null; then
     printf '%s\n' 'restart proof still depends on an empty unit cgroup freezer' >&2
     exit 1
 fi
@@ -3944,8 +4032,8 @@ if ! awk '
     exit 1
 fi
 
-[ "$(grep -Fc 'timeout --preserve-status --signal=TERM --kill-after=5s' "$gate")" -eq 2 ]
-[ "$(grep -Fc 'prlimit --core=0:0 --fsize=1048576:1048576 --' "$gate")" -eq 2 ]
+[ "$(grep -Fc 'timeout --preserve-status --signal=TERM --kill-after=5s' "$gate")" -eq 7 ]
+[ "$(grep -Fc 'prlimit --core=0:0 --fsize=1048576:1048576 --' "$gate")" -eq 7 ]
 grep -F '30s \' "$gate" >/dev/null
 grep -F '45s \' "$gate" >/dev/null
 [ "$(grep -Fc '"$restart_wait" -lt 2400' "$gate")" -eq 1 ]

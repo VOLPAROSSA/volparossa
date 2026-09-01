@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volparossa.invalid/schema/helper-restart-may-own-custody-relay-evidence-v1.schema.json",
+  "title": "VOLPAROSSA singleton MayOwnCustody Relay restart evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "checks", "enumerated_host_state", "environment", "finished_at", "generated_at",
+    "invocation_ids", "observed_artifact_hashes", "observed_source", "overall",
+    "report_kind", "restart", "retirement", "schema_version", "scope", "started_at"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "report_kind": {"const": "volparossa-helper-restart-may-own-custody-relay-evidence"},
+    "overall": {"const": "PASS"},
+    "started_at": {"$ref": "#/$defs/time"},
+    "finished_at": {"$ref": "#/$defs/time"},
+    "generated_at": {"$ref": "#/$defs/time"},
+    "observed_source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commit_sha", "worktree_clean"],
+      "properties": {
+        "commit_sha": {"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"},
+        "worktree_clean": {"const": true}
+      }
+    },
+    "observed_artifact_hashes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["debugger_sha256", "may_own_observer_sha256",
+        "production_ipc_probe_sha256", "production_ipc_unit_hook_sha256",
+        "volparossa_helper_sha256"],
+      "properties": {
+        "debugger_sha256": {"$ref": "#/$defs/sha256"},
+        "may_own_observer_sha256": {"$ref": "#/$defs/sha256"},
+        "production_ipc_probe_sha256": {"$ref": "#/$defs/sha256"},
+        "production_ipc_unit_hook_sha256": {"$ref": "#/$defs/sha256"},
+        "volparossa_helper_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["debian_version", "dpkg_architecture", "kernel_release", "machine",
+        "systemd_version", "virtualization"],
+      "properties": {
+        "debian_version": {"const": "13"},
+        "dpkg_architecture": {"const": "amd64"},
+        "kernel_release": {"type": "string", "minLength": 1, "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$"},
+        "machine": {"const": "x86_64"},
+        "systemd_version": {"const": 257},
+        "virtualization": {"const": "vm"}
+      }
+    },
+    "invocation_ids": {
+      "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+    },
+    "restart": {
+      "type": "object", "additionalProperties": false,
+      "required": ["crashes", "initial", "recovered"],
+      "properties": {
+        "initial": {
+          "type": "object", "additionalProperties": false,
+          "required": ["argumentless", "manager_fdstore_count", "publication_boundary",
+            "publication_observed_at", "target_count", "target_disposition", "target_phase",
+            "target_role"],
+          "properties": {
+            "argumentless": {"const": true},
+            "manager_fdstore_count": {"const": 2},
+            "publication_boundary": {"const": "worker_v3::DurableCustodyPublicationTerminalGuard::retain_published"},
+            "publication_observed_at": {"$ref": "#/$defs/time"},
+            "target_count": {"const": 1},
+            "target_disposition": {"const": "ExactPresent"},
+            "target_phase": {"const": "MayOwnCustody"},
+            "target_role": {"const": "Relay"}
+          }
+        },
+        "crashes": {
+          "type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [
+            {"$ref": "#/$defs/first_crash"}, {"$ref": "#/$defs/second_crash"}
+          ], "items": false
+        },
+        "recovered": {
+          "type": "object", "additionalProperties": false,
+          "required": ["argumentless", "cleanup_confirmed_before_removal",
+            "inherited_descriptor_count", "journal_absent_origin",
+            "journal_phase_after_settlement", "manager_fdstore_after_removal",
+            "new_socket_published_after_settlement", "new_socket_published_before_settlement",
+            "removal_boundary", "removal_observed_at", "settled_at", "target_count",
+            "target_role", "unit_load_state_after_retirement"],
+          "properties": {
+            "argumentless": {"const": true},
+            "cleanup_confirmed_before_removal": {"const": true},
+            "inherited_descriptor_count": {"const": 2},
+            "journal_absent_origin": {"const": "RecoveredMayOwn"},
+            "journal_phase_after_settlement": {"const": "Absent"},
+            "manager_fdstore_after_removal": {"const": 0},
+            "new_socket_published_after_settlement": {"const": true},
+            "new_socket_published_before_settlement": {"const": false},
+            "removal_boundary": {"const": "systemd_fdstore::remove_restart_custody"},
+            "removal_observed_at": {"$ref": "#/$defs/time"},
+            "settled_at": {"$ref": "#/$defs/time"},
+            "target_count": {"const": 1},
+            "target_role": {"const": "Relay"},
+            "unit_load_state_after_retirement": {"const": "not-found"}
+          }
+        }
+      }
+    },
+    "retirement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["journal_settled_absent", "lock_released", "socket_absent"],
+      "properties": {
+        "journal_settled_absent": {"const": true},
+        "lock_released": {"const": true},
+        "socket_absent": {"const": true}
+      }
+    },
+    "enumerated_host_state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["after_sha256", "before_sha256", "equal_at_fences", "records"],
+      "properties": {
+        "after_sha256": {"$ref": "#/$defs/sha256"},
+        "before_sha256": {"$ref": "#/$defs/sha256"},
+        "equal_at_fences": {"const": true},
+        "records": {"const": ["production_runtime_path", "accounts", "namespaces", "mounts",
+          "resolver", "sysctls", "links", "addresses", "routes", "rules", "nexthops",
+          "qdiscs", "nftables", "wireguard", "legacy_ipv4_firewall",
+          "legacy_ipv6_firewall"]}
+      }
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["acceptance_a01_a15", "cleanup_owned", "forced_helper_crash_count",
+        "general_restart_recovery", "helper_boundary_only", "installed_package",
+        "may_own_custody_exact_present_singleton_relay", "usable_datapath"],
+      "properties": {
+        "acceptance_a01_a15": {"const": false},
+        "cleanup_owned": {"const": false},
+        "forced_helper_crash_count": {"const": 2},
+        "general_restart_recovery": {"const": false},
+        "helper_boundary_only": {"const": true},
+        "installed_package": {"const": false},
+        "may_own_custody_exact_present_singleton_relay": {"const": true},
+        "usable_datapath": {"const": false}
+      }
+    },
+    "checks": {
+      "type": "array", "minItems": 25, "maxItems": 25,
+      "items": {"$ref": "#/$defs/pass_check"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "time": {"type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "pass_check": {
+      "type": "object", "additionalProperties": false, "required": ["id", "result"],
+      "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 96},
+        "result": {"const": "PASS"}}
+    },
+    "first_crash": {
+      "type": "object", "additionalProperties": false,
+      "required": ["boundary", "crashed_at", "exec_main_code", "exec_main_status",
+        "journal_phase_after_crash", "manager_fdstore_after_crash", "sequence", "signal",
+        "unit_result"],
+      "properties": {
+        "boundary": {"const": "worker_v3::DurableCustodyPublicationTerminalGuard::retain_published"},
+        "crashed_at": {"$ref": "#/$defs/time"}, "exec_main_code": {"const": 2},
+        "exec_main_status": {"const": 9}, "journal_phase_after_crash": {"const": "MayOwnCustody"},
+        "manager_fdstore_after_crash": {"const": 2}, "sequence": {"const": 1},
+        "signal": {"const": "SIGKILL"}, "unit_result": {"const": "signal"}
+      }
+    },
+    "second_crash": {
+      "type": "object", "additionalProperties": false,
+      "required": ["boundary", "boundary_observed_at", "crashed_at", "exec_main_code",
+        "exec_main_status", "journal_phase_after_crash", "manager_fdstore_after_crash",
+        "sequence", "signal", "unit_result"],
+      "properties": {
+        "boundary": {"const": "ownership_journal::actor::DurableOwnershipStartup::confirm_single_restart_cleanup"},
+        "boundary_observed_at": {"$ref": "#/$defs/time"},
+        "crashed_at": {"$ref": "#/$defs/time"}, "exec_main_code": {"const": 2},
+        "exec_main_status": {"const": 9}, "journal_phase_after_crash": {"const": "MayOwnCustody"},
+        "manager_fdstore_after_crash": {"const": 2}, "sequence": {"const": 2},
+        "signal": {"const": "SIGKILL"}, "unit_result": {"const": "signal"}
+      }
+    }
+  }
+}

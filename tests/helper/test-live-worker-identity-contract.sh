@@ -580,6 +580,22 @@ printf '%s\n' \
     functional-exit-relay-cleanup \
     functional-exit-release \
     functional-exit-cleanup \
+    functional-exit-cleanup-retirement \
+    functional-exit-cleanup-process-pin \
+    functional-exit-cleanup-wireguard-absence \
+    functional-exit-cleanup-namespace-pin \
+    functional-exit-cleanup-process-close \
+    functional-exit-cleanup-namespace-close \
+    functional-exit-cleanup-fdstore-absence \
+    functional-exit-cleanup-parent-custody \
+    functional-exit-cleanup-parent-custody-pidfd \
+    functional-exit-cleanup-parent-custody-procfd \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-one \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-two \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-three-plus \
+    functional-exit-cleanup-parent-custody-foreign-netns-other \
+    functional-exit-cleanup-parent-custody-fd-scan \
+    functional-exit-cleanup-parent-custody-clear \
     functional-relay-pair-ready \
     functional-relay-pair-worker-observation \
     functional-relay-pair-fixtures \
@@ -4471,13 +4487,13 @@ printf '%s\n' \
     '    restart observer/launcher, and debugger artifact hashes;' \
     '  copy the already-built real helper into one validated root-only temporary stage;' \
     '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
-    '  bind account files plus the system bus socket read-only in two sequential invocations;' \
+    '  bind account files plus the system bus socket read-only in four sequential transient services;' \
     '  let PID 1 resolve only host-present root/root unit credentials before those binds;' \
     '  use exact /usr/bin/setpriv to install the staged primary and singleton agent GID;' \
     '  bind the canonical systemd notify socket read-only inside both private /run trees;' \
     '  pin its D-Bus system address to that verified socket inside the private /run;' \
     '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
-    '  require the host /run/volparossa path absent before and after both private unit runs;' \
+    '  require the host /run/volparossa path absent before and after every private unit run;' \
     '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
     '    FileDescriptorStorePreserve=yes on that transient service;' \
     '  start its fixed credential trampoline as blocking Type=exec, then require helper exec;' \
@@ -4489,6 +4505,7 @@ printf '%s\n' \
     '    the proof process and every transient-unit file write at 1 MiB;' \
     '  cap the diagnostic worker runtime at 45 seconds;' \
     '  cap the production runtime at three minutes;' \
+    '  cap the two-crash MayOwn service runtime at six minutes;' \
     '  discard production runtime stdout and stderr through exact systemd null streams;' \
     '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
     '  invoke only --internal-worker-v3-live-proof and require its exact two success records;' \
@@ -4498,7 +4515,14 @@ printf '%s\n' \
     '  stop, clean only its fdstore, and collect that exact first invocation;' \
     '  only after the unit is not-found, reuse its random name with a new exact marker and ID;' \
     '  run the argumentless production helper and fixed IPC probe inside the confined unit;' \
-    '  use one fixed no-argument launcher only to hold the restart successor before helper exec;' \
+    '  use one fixed no-argument launcher and FIFO barriers to hold the ExactPresent successor' \
+    '    plus all three MayOwn invocations before same-MainPID helper exec;' \
+    '  release each MayOwn launcher only after exact PID, new InvocationID, NRestarts,' \
+    '    ControlPID, ControlGroup/ControlGroupId, fdstore, cgroup shape, GDB exec-catch,' \
+    '    pending breakpoint, and an outside-cgroup namespace observer are ready;' \
+    '  use GDB inferior kill plus quit 0 for exactly three SIGKILL crash boundaries;' \
+    '  freeze only each non-empty, exact single-MainPID MayOwn cgroup at its two crash frames,' \
+    '    then thaw or observe removal before PID 1 may launch the FIFO-gated successor;' \
     '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
     '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
     '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
@@ -4508,14 +4532,15 @@ printf '%s\n' \
     '  require byte-identical Commit retries, exact fixture cleanup, Destroy, and worker retirement;' \
     '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
     '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
-    '  collect that exact second invocation and remove the validated temporary stage;' \
+    '  retire each exact unit, stop all observers/keepers/debuggers, thaw any crash freezer,' \
+    '    collect the units, and remove the validated temporary stage;' \
     '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
     '    and network digests;' \
-    '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
+    '  validate exactly three bounded canonical evidence-v1 reports before publishing only those JSON values.' \
     'This stages the helper identity and production IPC boundary. It creates no host account,' \
     'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or production VPN datapath.' \
     'One dummy underlay and ephemeral Client, Exit, and simultaneous Relay-pair WireGuard leases exist only in private namespaces.' \
-    'It is not package-install, restart-recovery, CleanupOwned, production datapath, or A01-A15 evidence.' \
+    'It is not package-install, general restart recovery, CleanupOwned, production datapath, or A01-A15 evidence.' \
     'PREVIEW ONLY: no file, account, service, or network state was changed.' \
     >"$expected_preview"
 if ! cmp -s "$expected_preview" "$default_preview"; then
@@ -4581,6 +4606,7 @@ if ! awk '
         if (run_count == 1) first_run = NR
         if (run_count == 2) second_run = NR
         if (run_count == 3) third_run = NR
+        if (run_count == 4) fourth_run = NR
     }
     /^worker_unit_name=\$unit_name$/ { first_identity_saved = NR }
     /^        unit_name=\$worker_unit_name$/ { name_reused = NR }
@@ -4590,6 +4616,9 @@ if ! awk '
     }
     /VOLPAROSSA helper singleton ExactPresent restart marker v1/ {
         restart_marker = NR
+    }
+    /VOLPAROSSA helper singleton MayOwn Relay restart marker v1/ {
+        may_own_marker = NR
     }
     /^    production_retirement_confirmed=no$/ {
         production_retirement_init = NR
@@ -4625,7 +4654,7 @@ if ! awk '
         restart_not_found_required = NR
     }
     END {
-        valid = run_count == 3 && first_run < first_identity_saved
+        valid = run_count == 4 && first_run < first_identity_saved
         valid = valid && first_identity_saved < name_reused
         valid = valid && name_reused < not_found_required
         valid = valid && not_found_required < production_marker
@@ -4645,6 +4674,7 @@ if ! awk '
         valid = valid && restart_identity_prepared < restart_not_found_required
         valid = valid && restart_not_found_required < restart_marker
         valid = valid && restart_marker < third_run
+        valid = valid && third_run < may_own_marker && may_own_marker < fourth_run
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -5115,8 +5145,8 @@ if ! awk '
     printf '%s\n' 'validated report publication is not ordered after proof and stage removal' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 3 ]; then
-    printf '%s\n' 'all three transient helper invocations do not have the exact file-size limit' >&2
+if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 4 ]; then
+    printf '%s\n' 'all four transient helper invocations do not have the exact file-size limit' >&2
     exit 1
 fi
 if ! awk '
@@ -5159,7 +5189,12 @@ if ! awk '
         if ($0 ~ /^[[:space:]]*--no-block \\$/) exact_no_block[run_count]++
 
         if (index($0, "--service-type=") > 0) type_assignments[run_count]++
-        if ($0 ~ /^[[:space:]]*--service-type=exec \\$/) exact_types[run_count]++
+        if ($0 ~ /^[[:space:]]*--service-type=exec \\$/) {
+            exact_exec_types[run_count]++
+        }
+        if ($0 ~ /^[[:space:]]*--service-type=simple \\$/) {
+            exact_simple_types[run_count]++
+        }
         if (index($0, "Type=") > 0 \
             && index($0, "--service-type=") == 0) invalid++
 
@@ -5187,6 +5222,9 @@ if ! awk '
         if ($0 ~ /^[[:space:]]*--property=RuntimeMaxSec=240s \\$/) {
             exact_restart_runtime[run_count]++
         }
+        if ($0 ~ /^[[:space:]]*--property=RuntimeMaxSec=360s \\$/) {
+            exact_may_own_runtime[run_count]++
+        }
 
         if ($0 !~ /\\[[:space:]]*$/) {
             in_run = 0
@@ -5194,31 +5232,45 @@ if ! awk '
         }
     }
     END {
-        valid = !in_run && invalid == 0 && run_count == 3 && run_end_count == 3
-        for (run = 1; run <= 3; run++) {
-            valid = valid && type_assignments[run] == 1 && exact_types[run] == 1
+        valid = !in_run && invalid == 0 && run_count == 4 && run_end_count == 4
+        for (run = 1; run <= 4; run++) {
+            valid = valid && type_assignments[run] == 1
             valid = valid && collect_assignments[run] == 1
             valid = valid && exact_collect_modes[run] == 1
             valid = valid && runtime_assignments[run] == 1
         }
+        valid = valid && exact_exec_types[1] == 1 && exact_simple_types[1] == 0
+        valid = valid && exact_exec_types[2] == 1 && exact_simple_types[2] == 0
+        valid = valid && exact_exec_types[3] == 1 && exact_simple_types[3] == 0
+        valid = valid && exact_exec_types[4] == 0 && exact_simple_types[4] == 1
         valid = valid && remain_assignments[1] == 1 && exact_remain[1] == 1
         valid = valid && remain_assignments[2] == 0 && exact_remain[2] == 0
         valid = valid && remain_assignments[3] == 0 && exact_remain[3] == 0
+        valid = valid && remain_assignments[4] == 0 && exact_remain[4] == 0
         valid = valid && slice_assignments[1] == 1 && exact_worker_slice[1] == 1
         valid = valid && slice_assignments[2] == 1 && exact_worker_slice[2] == 1
         valid = valid && slice_assignments[3] == 1 && exact_worker_slice[3] == 1
+        valid = valid && slice_assignments[4] == 1 && exact_worker_slice[4] == 1
         valid = valid && no_block_assignments[1] == 0 && exact_no_block[1] == 0
         valid = valid && no_block_assignments[2] == 0 && exact_no_block[2] == 0
         valid = valid && no_block_assignments[3] == 1 && exact_no_block[3] == 1
+        valid = valid && no_block_assignments[4] == 1 && exact_no_block[4] == 1
         valid = valid && exact_worker_runtime[1] == 1
         valid = valid && exact_worker_runtime[2] == 0
         valid = valid && exact_worker_runtime[3] == 0
+        valid = valid && exact_worker_runtime[4] == 0
         valid = valid && exact_production_runtime[1] == 0
         valid = valid && exact_production_runtime[2] == 1
         valid = valid && exact_production_runtime[3] == 0
+        valid = valid && exact_production_runtime[4] == 0
         valid = valid && exact_restart_runtime[1] == 0
         valid = valid && exact_restart_runtime[2] == 0
         valid = valid && exact_restart_runtime[3] == 1
+        valid = valid && exact_restart_runtime[4] == 0
+        valid = valid && exact_may_own_runtime[1] == 0
+        valid = valid && exact_may_own_runtime[2] == 0
+        valid = valid && exact_may_own_runtime[3] == 0
+        valid = valid && exact_may_own_runtime[4] == 1
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -5292,8 +5344,8 @@ for exact_cgroup_property in \
     "--property='SystemCallFilter=@system-service @network-io seccomp'" \
     "--property='SystemCallFilter=~@mount'"
 do
-    if [ "$(grep -Fc -- "$exact_cgroup_property" "$gate")" -ne 3 ]; then
-        printf 'all three transient helper invocations lack exact cgroup isolation: %s\n' \
+    if [ "$(grep -Fc -- "$exact_cgroup_property" "$gate")" -ne 4 ]; then
+        printf 'all four transient helper invocations lack exact cgroup isolation: %s\n' \
             "$exact_cgroup_property" >&2
         exit 1
     fi
@@ -5308,6 +5360,7 @@ transient_slice_contract_is_exact() {
             if (slice_assignment == 1) worker_slice_assignment_line = NR
             if (slice_assignment == 2) production_slice_assignment_line = NR
             if (slice_assignment == 3) restart_slice_assignment_line = NR
+            if (slice_assignment == 4) may_own_slice_assignment_line = NR
         }
         /^if capture_unit_property ActiveState "\$temporary_stage\/unit-active-state"; then$/ {
             terminal_read++
@@ -5350,7 +5403,7 @@ transient_slice_contract_is_exact() {
             retirement_line = NR
         }
         END {
-            valid = slice_assignment == 3 && terminal_read == 1
+            valid = slice_assignment == 4 && terminal_read == 1
             valid = valid && worker_slice_read == 1 && worker_slice_requirement == 1
             valid = valid && terminal_control_group_read == 1
             valid = valid && terminal_control_group_empty == 1 && cgroup_derivation == 1
@@ -5369,6 +5422,7 @@ transient_slice_contract_is_exact() {
             valid = valid && production_slice_read_line < production_slice_requirement_line
             valid = valid && production_slice_requirement_line < production_control_group_read_line
             valid = valid && production_control_group_read_line < restart_slice_assignment_line
+            valid = valid && restart_slice_assignment_line < may_own_slice_assignment_line
             if (!valid) exit 1
         }
     ' "$worker_slice_source"
@@ -5428,7 +5482,7 @@ do
         exit 1
     fi
 done
-if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$gate")" -ne 3 ] \
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$gate")" -ne 4 ] \
     || grep -F -- '--property=RestrictSUIDSGID=yes' "$gate" >/dev/null \
     || [ "$(grep -Fc -- \
         "capture_unit_property RestrictSUIDSGID \\" "$gate")" -ne 2 ] \
@@ -5441,8 +5495,8 @@ if grep -F -- 'ProtectControlGroups=' "$gate" >/dev/null; then
     printf '%s\n' 'a transient helper still assigns the boolean-only legacy cgroup property' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" "$gate")" -ne 3 ]; then
-    printf '%s\n' 'all three transient helper invocations lack the exact fixed executable search path' >&2
+if [ "$(grep -Fc -- "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" "$gate")" -ne 4 ]; then
+    printf '%s\n' 'all four transient helper invocations lack the exact fixed executable search path' >&2
     exit 1
 fi
 # These are literal gate-source contracts; expansion here would defeat the checks.
@@ -5455,8 +5509,8 @@ if [ "$(grep -Fc 'notify_socket=/run/systemd/notify' "$gate")" -ne 1 ] \
     || [ "$(grep -Fc "!= 'socket:0:0:777:1' ]; then" "$gate")" -ne 1 ] \
     || [ "$(grep -Fc 'notify_socket_bind="$notify_socket:$notify_socket:norbind"' \
         "$gate")" -ne 1 ] \
-    || [ "$(grep -Fc '$notify_socket_bind' "$gate")" -ne 3 ]; then
-    printf '%s\n' 'the exact canonical systemd notify-socket preflight and three binds are not pinned' >&2
+    || [ "$(grep -Fc '$notify_socket_bind' "$gate")" -ne 4 ]; then
+    printf '%s\n' 'the exact canonical systemd notify-socket preflight and four binds are not pinned' >&2
     exit 1
 fi
 # These are literal source assignments; expansion here would defeat the check.
@@ -5480,7 +5534,7 @@ if [ "$(grep -Fc \
         "$gate")" -ne 1 ] \
     || [ "$(grep -Fc \
         '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-restart-launcher \' \
-        "$gate")" -ne 1 ]; then
+        "$gate")" -ne 2 ]; then
     printf '%s\n' 'transient helper credential trampolines are not exact' >&2
     exit 1
 fi
@@ -5508,9 +5562,9 @@ unit_credential_source_contract_is_exact() {
             }
         }
         END {
-            valid = user == 3 && exact_user == 3
-            valid = valid && group == 3 && exact_group == 3
-            valid = valid && supplementary == 3 && exact_supplementary == 3
+            valid = user == 4 && exact_user == 4
+            valid = valid && group == 4 && exact_group == 4
+            valid = valid && supplementary == 4 && exact_supplementary == 4
             if (!valid) exit 1
         }
     ' "$credential_contract_source"
@@ -5573,10 +5627,10 @@ if [ "$(grep -Fc 'busctl_path=/usr/bin/busctl' "$gate")" -ne 1 ] \
     exit 1
 fi
 for cgroup_assignment_contract in \
-    'ProtectControlGroupsEx=:3' \
-    'Delegate=:3' \
-    'PrivatePIDs=:3' \
-    'SystemCallFilter=:6'
+    'ProtectControlGroupsEx=:4' \
+    'Delegate=:4' \
+    'PrivatePIDs=:4' \
+    'SystemCallFilter=:8'
 do
     assignment_key=${cgroup_assignment_contract%:*}
     expected_count=${cgroup_assignment_contract##*:}
@@ -5595,11 +5649,11 @@ done
 # shellcheck disable=SC2016
 if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
         "$ipc_hook")" -ne 1 ] \
-    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 7 ] \
-    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 7 ] \
+    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 8 ] \
+    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 8 ] \
     || [ "$(grep -Fc 'GetUnit s "$1" 2>/dev/null)' "$ipc_hook")" -ne 1 ] \
     || [ "$(grep -Fc 'DumpFileDescriptorStore 2>/dev/null)' \
-        "$ipc_hook")" -ne 2 ] \
+        "$ipc_hook")" -ne 3 ] \
     || grep -F -- 'SYSTEMCTL_FORCE_BUS' "$ipc_hook" >/dev/null \
     || grep -F -- 'systemctl ' "$ipc_hook" >/dev/null \
     || grep -F -- '/run/systemd/private' "$gate" >/dev/null \
@@ -5610,8 +5664,8 @@ if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
 fi
 # These patterns are also literal hook-source contracts; shell expansion would weaken the check.
 # shellcheck disable=SC2016
-if [ "$(grep -Fc 'capture_fdstore_descriptor_identity' "$ipc_hook")" -ne 7 ] \
-    || [ "$(grep -Fc 'unit_fdstore_exact_active_custody' "$ipc_hook")" -ne 5 ] \
+if [ "$(grep -Fc 'capture_fdstore_descriptor_identity' "$ipc_hook")" -ne 9 ] \
+    || [ "$(grep -Fc 'unit_fdstore_exact_active_custody' "$ipc_hook")" -ne 6 ] \
     || [ "$(grep -Fc 'unit_fdstore_prior_custody_is_absent' "$ipc_hook")" -ne 4 ] \
     || [ "$(grep -Fc 'fdstore_dump_exact_custody_name' "$ipc_hook")" -ne 2 ] \
     || [ "$(grep -Fc 'prove-settled-journal' "$ipc_hook")" -ne 2 ] \
@@ -6178,6 +6232,10 @@ cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
 }
 start_failure_stage=
 hook_stage_index=0
+expected_production_monotone_start_stages=$temporary_directory/expected-production-monotone-start-stages
+grep -Ev '^functional-exit-cleanup-parent-custody-(pidfd|procfd|foreign-netns-exit-worker-one|foreign-netns-exit-worker-two|foreign-netns-exit-worker-three-plus|foreign-netns-other|fd-scan|clear)$' \
+    "$expected_production_start_stages" \
+    >"$expected_production_monotone_start_stages"
 while IFS= read -r hook_start_stage; do
     hook_stage_index=$((hook_stage_index + 1))
     if [ "$hook_stage_index" -eq 1 ]; then
@@ -6190,11 +6248,32 @@ while IFS= read -r hook_start_stage; do
             exit 1
         }
     fi
-done <"$expected_production_start_stages"
+done <"$expected_production_monotone_start_stages"
 [ "$start_failure_stage" = publication ] || {
     printf '%s\n' 'production hook start stage did not reach publication' >&2
     exit 1
 }
+for hook_custody_failure_stage in \
+    pidfd procfd foreign-netns-exit-worker-one \
+    foreign-netns-exit-worker-two foreign-netns-exit-worker-three-plus \
+    foreign-netns-other fd-scan clear; do
+    start_failure_stage=functional-exit-cleanup-parent-custody
+    advance_start_failure_stage \
+        "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" \
+        || {
+            printf 'production hook rejected custody diagnostic stage: %s\n' \
+                "$hook_custody_failure_stage" >&2
+            exit 1
+        }
+    [ "$start_failure_stage" = \
+        "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" ] \
+        || exit 1
+    if advance_start_failure_stage functional-relay-pair-ready; then
+        printf 'production hook advanced past custody diagnostic stage: %s\n' \
+            "$hook_custody_failure_stage" >&2
+        exit 1
+    fi
+done
 if advance_start_failure_stage identity-socket \
     || { start_failure_stage=preflight-runtime; advance_start_failure_stage active-lock; }; then
     printf '%s\n' 'production hook start stage accepted a skipped or regressed transition' >&2
@@ -6283,7 +6362,7 @@ done
 if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
     "$ipc_hook" >/dev/null \
     || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
-        "$ipc_hook")" -ne 21 ] \
+        "$ipc_hook")" -ne 23 ] \
     || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
         "$ipc_hook")" -ne 1 ]; then
     printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2
@@ -7254,9 +7333,9 @@ if [ "$(grep -Fc -- '--property=RuntimeMaxSec=180s' "$gate")" -ne 1 ]; then
     printf '%s\n' 'production IPC invocation does not have one exact runtime limit' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--property=StandardOutput=null' "$gate")" -ne 2 ] \
-    || [ "$(grep -Fc -- '--property=StandardError=null' "$gate")" -ne 2 ]; then
-    printf '%s\n' 'production IPC and restart invocations do not have exact null output streams' >&2
+if [ "$(grep -Fc -- '--property=StandardOutput=null' "$gate")" -ne 3 ] \
+    || [ "$(grep -Fc -- '--property=StandardError=null' "$gate")" -ne 3 ]; then
+    printf '%s\n' 'production IPC and both restart invocations do not have exact null output streams' >&2
     exit 1
 fi
 # These are literal source paths; expansion here would defeat the check.
@@ -7403,6 +7482,8 @@ for required_hook_contract in \
     'process_contract_filter_count() {' \
     'fd_number_is_safe() {' \
     'worker_status_from_process_fd_is_exact() {' \
+    'capture_traced_process_starttime_from_fd() {' \
+    'traced_worker_identity_from_process_fd() {' \
     'worker_identity_from_process_fd() {' \
     'capture_process_starttime_from_fd() {' \
     'hook_worker_expected_filters=$((hook_worker_parent_filters + 1))' \
@@ -7467,7 +7548,9 @@ for required_hook_contract in \
     'functional_probe_output_is_exact "$hook_functional_stdout"' \
     'helper_has_no_children "$hook_functional_main_pid"' \
     'worker_process_fd_is_retired 8' \
-    'helper_holds_no_worker_custody "$hook_functional_main_pid"' \
+    'helper_holds_no_worker_custody() {' \
+    'wait_for_helper_no_worker_custody() {' \
+    'wait_for_helper_no_worker_custody "$hook_functional_main_pid"' \
     'worker_wireguard_is_absent 7 "$hook_functional_peer_address"' \
     'command exec 8>&-' \
     'command exec 7>&-' \
@@ -7554,7 +7637,7 @@ do
     }
 done
 for worker_kernel_anchor in \
-    'let pidfd = pidfd_open(pid, PidfdFlags::empty())' \
+    'pidfd_open(Pid::from_child(child), PidfdFlags::empty())' \
     'process_directory = open(' \
     'pin_network_namespace_before_identity_drop('
 do
@@ -8201,6 +8284,337 @@ if ! awk '
     printf '%s\n' 'production IPC probes or hook-owned records are not in exact order' >&2
     exit 1
 fi
+
+no_custody_wait_contract=$temporary_directory/no-custody-wait-contract.sh
+sed -n '/^wait_for_helper_no_worker_custody() {$/,/^}$/p' \
+    "$ipc_hook" >"$no_custody_wait_contract"
+# These are literal hook-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+no_custody_wait_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'helper_holds_no_worker_custody' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_wait_attempt=0' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'hook_custody_wait_attempt=$((hook_custody_wait_attempt + 1))' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Ec \
+            '^[[:space:]]*\[ "\$hook_custody_wait_attempt" -lt 100 \] \|\| return 1$' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'sleep 0.05' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '|| true' "$1")" -eq 0 ]
+}
+no_custody_wait_source_is_exact "$no_custody_wait_contract" || {
+    printf '%s\n' 'worker-custody retirement wait is not exact and bounded' >&2
+    exit 1
+}
+sh -n "$no_custody_wait_contract"
+# shellcheck disable=SC1090,SC2030,SC2317
+exercise_no_custody_wait_contract() (
+    . "$no_custody_wait_contract"
+    number_is_safe() { [ "$#" -eq 1 ] && [ "$1" = 4242 ]; }
+    sleep() { [ "$#" -eq 1 ] && [ "$1" = 0.05 ]; }
+    custody_observations=0
+    helper_holds_no_worker_custody() {
+        custody_observations=$((custody_observations + 1))
+        if [ "$custody_observations" -eq 3 ]; then
+            hook_custody_failure_stage=none
+            return 0
+        fi
+        hook_custody_failure_stage=pidfd
+        return 1
+    }
+    wait_for_helper_no_worker_custody 4242
+    [ "$custody_observations" -eq 3 ]
+    [ "$hook_custody_failure_stage" = none ]
+    custody_observations=0
+    helper_holds_no_worker_custody() {
+        custody_observations=$((custody_observations + 1))
+        hook_custody_failure_stage=procfd
+        return 1
+    }
+    if wait_for_helper_no_worker_custody 4242; then
+        exit 1
+    fi
+    [ "$custody_observations" -eq 100 ]
+    [ "$hook_custody_failure_stage" = procfd ]
+)
+exercise_no_custody_wait_contract || {
+    printf '%s\n' 'worker-custody retirement wait does not converge or fail closed' >&2
+    exit 1
+}
+no_custody_wait_bound_mutant=$temporary_directory/no-custody-wait-bound-mutant.sh
+sed 's/-lt 100/-lt 1000/' \
+    "$no_custody_wait_contract" >"$no_custody_wait_bound_mutant"
+no_custody_wait_predicate_mutant=$temporary_directory/no-custody-wait-predicate-mutant.sh
+sed 's/helper_holds_no_worker_custody/true/' \
+    "$no_custody_wait_contract" >"$no_custody_wait_predicate_mutant"
+for no_custody_wait_mutant in \
+    "$no_custody_wait_bound_mutant" "$no_custody_wait_predicate_mutant"
+do
+    sh -n "$no_custody_wait_mutant"
+    if no_custody_wait_source_is_exact "$no_custody_wait_mutant"; then
+        printf 'worker-custody retirement wait accepted mutant: %s\n' \
+            "${no_custody_wait_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+no_custody_predicate_contract=$temporary_directory/no-custody-predicate-contract.sh
+sed -n '/^helper_holds_no_worker_custody() {$/,/^}$/p' \
+    "$ipc_hook" >"$no_custody_predicate_contract"
+# These are literal hook-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+no_custody_predicate_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'hook_custody_failure_stage=fd-scan' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=pidfd' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=procfd' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=foreign-netns' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=none' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc "'anon_inode:[pidfd]'" "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '/proc/[1-9][0-9]*)' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'net:\[[1-9][0-9]*\])' "$1")" -eq 1 ] \
+        && [ "$(grep -Ec '(^|[[:space:]])(echo|logger|printf)([[:space:]]|$)' \
+            "$1")" -eq 0 ]
+}
+no_custody_predicate_source_is_exact "$no_custody_predicate_contract" || {
+    printf '%s\n' 'worker-custody predicate diagnostics are not fixed and value-free' >&2
+    exit 1
+}
+sh -n "$no_custody_predicate_contract"
+no_custody_predicate_target_mutant=$temporary_directory/no-custody-predicate-target-mutant.sh
+sed "s/'anon_inode:\[pidfd\]'/'anon_inode:[worker-pidfd]'/" \
+    "$no_custody_predicate_contract" >"$no_custody_predicate_target_mutant"
+no_custody_predicate_stage_mutant=$temporary_directory/no-custody-predicate-stage-mutant.sh
+sed 's/hook_custody_failure_stage=foreign-netns/hook_custody_failure_stage=none/' \
+    "$no_custody_predicate_contract" >"$no_custody_predicate_stage_mutant"
+for no_custody_predicate_mutant in \
+    "$no_custody_predicate_target_mutant" "$no_custody_predicate_stage_mutant"
+do
+    sh -n "$no_custody_predicate_mutant"
+    if no_custody_predicate_source_is_exact "$no_custody_predicate_mutant"; then
+        printf 'worker-custody predicate accepted diagnostic mutant: %s\n' \
+            "${no_custody_predicate_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+parent_custody_diagnostic_contract=$temporary_directory/parent-custody-diagnostic-contract.sh
+sed -n '/^count_parent_namespace_identity_fds() {$/,/^}$/p' \
+    "$ipc_hook" >"$parent_custody_diagnostic_contract"
+sed -n '/^refine_parent_custody_failure_stage() {$/,/^}$/p' \
+    "$ipc_hook" >>"$parent_custody_diagnostic_contract"
+sed -n '/^advance_parent_custody_failure_diagnostic() {$/,/^}$/p' \
+    "$ipc_hook" >>"$parent_custody_diagnostic_contract"
+# These are literal hook-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+parent_custody_diagnostic_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'functional-exit-cleanup-parent-custody ] || return 1' \
+        "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '[ "$hook_custody_current_parent_pid" = ' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"$hook_custody_expected_parent_pid" ]; then' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'helper_holds_no_worker_custody' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=clear' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'kernel_object_identity_is_safe "$hook_custody_observed_identity"' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"${hook_functional_exit_worker_namespace:-}"' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '[ "$hook_custody_observed_identity" = ' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"$hook_functional_exit_worker_namespace" ]; then' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'count_parent_namespace_identity_fds' "$1")" -eq 2 ] \
+        && [ "$(grep -Fc \
+            'hook_custody_failure_stage=foreign-netns-exit-worker-one' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'hook_custody_failure_stage=foreign-netns-exit-worker-two' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'hook_custody_failure_stage=foreign-netns-exit-worker-three-plus' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'hook_custody_failure_stage=foreign-netns-other' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"$hook_custody_expected_parent_pid" || return 1' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'foreign-netns-exit-worker-two|foreign-netns-exit-worker-three-plus' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'foreign-netns-other|fd-scan|clear) ;;' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"functional-exit-cleanup-parent-custody-$hook_custody_failure_stage"' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '|| true' "$1")" -eq 0 ] \
+        && [ "$(grep -Ec '(^|[[:space:]])(echo|logger|printf)([[:space:]]|$)' \
+            "$1")" -eq 0 ]
+}
+parent_custody_diagnostic_source_is_exact \
+    "$parent_custody_diagnostic_contract" || {
+        printf '%s\n' \
+            'parent-custody failure diagnostic is not bound and value-free' >&2
+        exit 1
+    }
+sh -n "$parent_custody_diagnostic_contract"
+parent_custody_binding_mutant=$temporary_directory/parent-custody-binding-mutant.sh
+# This is a literal hook-source mutation; expansion here would defeat it.
+# shellcheck disable=SC2016
+sed 's/"$hook_custody_current_parent_pid" =/"$hook_custody_current_parent_pid" !=/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_binding_mutant"
+parent_custody_predicate_mutant=$temporary_directory/parent-custody-predicate-mutant.sh
+sed 's/helper_holds_no_worker_custody/true/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_predicate_mutant"
+parent_custody_identity_mutant=$temporary_directory/parent-custody-identity-mutant.sh
+# This is a literal hook-source mutation; expansion here would defeat it.
+# shellcheck disable=SC2016
+sed 's/"$hook_custody_observed_identity" =/"$hook_custody_observed_identity" !=/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_identity_mutant"
+parent_custody_count_mutant=$temporary_directory/parent-custody-count-mutant.sh
+sed 's/2) hook_custody_failure_stage=foreign-netns-exit-worker-two/2) hook_custody_failure_stage=foreign-netns-exit-worker-one/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_count_mutant"
+parent_custody_category_mutant=$temporary_directory/parent-custody-category-mutant.sh
+sed 's/foreign-netns-other|fd-scan/foreign-netns-other|private-value|fd-scan/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_category_mutant"
+parent_custody_stage_mutant=$temporary_directory/parent-custody-stage-mutant.sh
+# This is a literal hook-source mutation; expansion here would defeat it.
+# shellcheck disable=SC2016
+sed 's/parent-custody-\$hook_custody_failure_stage/parent-custody-fd-scan/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_stage_mutant"
+for parent_custody_diagnostic_mutant in \
+    "$parent_custody_binding_mutant" "$parent_custody_predicate_mutant" \
+    "$parent_custody_identity_mutant" "$parent_custody_count_mutant" \
+    "$parent_custody_category_mutant" \
+    "$parent_custody_stage_mutant"
+do
+    sh -n "$parent_custody_diagnostic_mutant"
+    if parent_custody_diagnostic_source_is_exact \
+        "$parent_custody_diagnostic_mutant"; then
+        printf 'parent-custody diagnostic accepted mutant: %s\n' \
+            "${parent_custody_diagnostic_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+parent_custody_runtime_contract=$temporary_directory/parent-custody-runtime-contract.sh
+for parent_custody_runtime_function in \
+    number_is_safe fd_number_is_safe kernel_object_number_is_safe \
+    kernel_object_identity_is_safe namespace_number_from_target \
+    capture_parent_namespace_fd_identity helper_holds_no_worker_custody \
+    wait_for_helper_no_worker_custody count_parent_namespace_identity_fds \
+    refine_parent_custody_failure_stage \
+    advance_start_failure_stage \
+    advance_parent_custody_failure_diagnostic
+do
+    sed -n \
+        "/^$parent_custody_runtime_function() {\$/,/^}\$/p" \
+        "$ipc_hook" >>"$parent_custody_runtime_contract"
+done
+sh -n "$parent_custody_runtime_contract"
+# This subshell uses the hook's real functions and a real process-held /proc
+# descriptor. No predicate, wait, sleep, stage advance, or PID binding is stubbed.
+# shellcheck disable=SC1090,SC2031
+exercise_parent_custody_runtime_contract() (
+    . "$parent_custody_runtime_contract"
+    hook_custody_runtime_namespace=$(stat -Lc '%d:%i' \
+        /proc/self/ns/net 2>/dev/null)
+    kernel_object_identity_is_safe "$hook_custody_runtime_namespace"
+    command exec 7</proc/self/ns/net
+    command exec 8</proc/self/ns/net
+    hook_custody_failure_stage=foreign-netns
+    # The extracted hook function reads these globals at runtime.
+    # shellcheck disable=SC2034
+    hook_custody_observed_identity=$hook_custody_runtime_namespace
+    # shellcheck disable=SC2034
+    hook_functional_exit_worker_namespace=$hook_custody_runtime_namespace
+    refine_parent_custody_failure_stage "$$"
+    [ "$hook_custody_failure_stage" = foreign-netns-exit-worker-two ]
+    command exec 8>&-
+    command exec 7>&-
+    hook_custody_failure_stage=foreign-netns
+    # shellcheck disable=SC2034
+    hook_custody_observed_identity=1:3
+    refine_parent_custody_failure_stage "$$"
+    [ "$hook_custody_failure_stage" = foreign-netns-other ]
+    custody_runtime_child=
+    cleanup_custody_runtime_child() {
+        if [ -n "$custody_runtime_child" ]; then
+            kill "$custody_runtime_child" 2>/dev/null || :
+            wait "$custody_runtime_child" 2>/dev/null || :
+        fi
+    }
+    trap cleanup_custody_runtime_child EXIT HUP INT TERM
+    /bin/sh -c 'exec 9</proc/self/status; sleep 15' \
+        </dev/null >/dev/null 2>&1 &
+    custody_runtime_child=$!
+    number_is_safe "$custody_runtime_child"
+    custody_runtime_ready_attempt=0
+    while [ "$(readlink "/proc/$custody_runtime_child/fd/9" \
+        2>/dev/null || true)" != "/proc/$custody_runtime_child/status" ]; do
+        custody_runtime_ready_attempt=$((custody_runtime_ready_attempt + 1))
+        [ "$custody_runtime_ready_attempt" -lt 100 ] || exit 1
+        sleep 0.01
+    done
+    start_failure_stage=functional-exit-cleanup-parent-custody
+    if wait_for_helper_no_worker_custody "$custody_runtime_child"; then
+        exit 1
+    fi
+    [ "$hook_custody_failure_stage" = procfd ]
+    advance_parent_custody_failure_diagnostic \
+        "$custody_runtime_child" "$custody_runtime_child"
+    [ "$start_failure_stage" = \
+        functional-exit-cleanup-parent-custody-procfd ]
+    start_failure_stage=identity-socket
+    if advance_parent_custody_failure_diagnostic \
+        "$custody_runtime_child" "$custody_runtime_child"; then
+        exit 1
+    fi
+    start_failure_stage=functional-exit-cleanup-parent-custody
+    advance_parent_custody_failure_diagnostic "$custody_runtime_child" 1
+    [ "$start_failure_stage" = \
+        functional-exit-cleanup-parent-custody-fd-scan ]
+    cleanup_custody_runtime_child
+    custody_runtime_child=
+    trap - EXIT HUP INT TERM
+)
+exercise_parent_custody_runtime_contract || {
+    printf '%s\n' \
+        'real worker-custody wait did not propagate to the bound failure stage' >&2
+    exit 1
+}
+
+start_failure_exit_contract=$temporary_directory/start-failure-exit-contract.sh
+sed -n '/^start_failure_exit() {$/,/^}$/p' "$ipc_hook" \
+    >"$start_failure_exit_contract"
+if ! awk '
+    /functional-exit-cleanup-parent-custody ]; then/ {
+        custody_guard = NR
+    }
+    /hook_functional_current_main_pid=.*unit_main_pid/ { main_binding = NR }
+    /advance_parent_custody_failure_diagnostic/ { custody_diagnostic = NR }
+    /restart_initial_cleanup_succeeded=yes/ { cleanup = NR }
+    /publish_start_failure/ { publication = NR }
+    END {
+        valid = custody_guard && main_binding && custody_diagnostic
+        valid = valid && cleanup && publication
+        valid = valid && custody_guard < main_binding
+        valid = valid && main_binding < custody_diagnostic
+        valid = valid && custody_diagnostic < cleanup
+        valid = valid && cleanup < publication
+        if (!valid) exit 1
+    }
+' "$start_failure_exit_contract"; then
+    printf '%s\n' \
+        'parent-custody trap diagnostic is not before cleanup and publication' >&2
+    exit 1
+fi
+
 if ! awk '
     /^run_functional_client_lease_probe\(\) \{$/ { in_functional = 1; next }
     /^restart_record_line\(\) \{$/ { in_functional = 0 }
@@ -8329,8 +8743,41 @@ if ! awk '
     in_functional && /advance_start_failure_stage functional-exit-release/ {
         exit_release_stage = NR
     }
-    in_functional && /advance_start_failure_stage functional-exit-cleanup/ {
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup \|\|/ {
         exit_cleanup_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-retirement/ {
+        exit_cleanup_retirement_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-process-pin/ {
+        exit_cleanup_process_pin_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-wireguard-absence/ {
+        exit_cleanup_wireguard_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-namespace-pin/ {
+        exit_cleanup_namespace_pin_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-process-close/ {
+        exit_cleanup_process_close_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-namespace-close/ {
+        exit_cleanup_namespace_close_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-fdstore-absence/ {
+        exit_cleanup_fdstore_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-parent-custody/ {
+        exit_cleanup_parent_stage = NR
     }
     in_functional && /advance_start_failure_stage functional-relay-pair-ready/ {
         pair_ready_stage = NR
@@ -8384,7 +8831,12 @@ if ! awk '
         if (retired_count == 3) exit_retired = NR
         if (retired_count == 4) pair_retired = NR
     }
-    in_functional && /helper_holds_no_worker_custody/ { custody_absent = NR }
+    in_functional && /wait_for_helper_no_worker_custody/ {
+        custody_wait_count++
+        if (custody_wait_count == 1) client_custody_absent = NR
+        if (custody_wait_count == 2) exit_custody_absent = NR
+        if (custody_wait_count == 3) pair_custody_absent = NR
+    }
     in_functional && /worker_wireguard_is_absent/ {
         wireguard_absent_count++
         if (wireguard_absent_count == 1) exact_client_wireguard_absent = NR
@@ -8404,6 +8856,7 @@ if ! awk '
         valid = valid && release_count == 5 && retired_count == 4
         valid = valid && wireguard_absent_count == 5
         valid = valid && process_release_count == 3 && namespace_release_count == 3
+        valid = valid && custody_wait_count == 3
         valid = valid && pristine_before < underlay && underlay < fifo
         valid = valid && fifo < fifo_open && fifo_open < probe && probe < client_ready
         valid = valid && client_ready < client_child
@@ -8426,7 +8879,8 @@ if ! awk '
         valid = valid && client_settled_wait < client_cleanup_stage
         valid = valid && client_cleanup_stage < client_retired
         valid = valid && client_retired < client_wireguard_absent
-        valid = valid && client_wireguard_absent < client_settlement_release
+        valid = valid && client_wireguard_absent < client_custody_absent
+        valid = valid && client_custody_absent < client_settlement_release
         valid = valid && client_settlement_release < exit_ready_wait
         valid = valid && exit_ready_wait < exit_ready_stage
         valid = valid && exit_ready_stage < exit_worker_stage
@@ -8444,9 +8898,18 @@ if ! awk '
         valid = valid && exit_release_stage < exit_release
         valid = valid && exit_release < exit_settled_wait
         valid = valid && exit_settled_wait < exit_cleanup_stage
-        valid = valid && exit_cleanup_stage < exit_retired
-        valid = valid && exit_retired < exit_wireguard_absent
-        valid = valid && exit_wireguard_absent < exit_settlement_release
+        valid = valid && exit_cleanup_stage < exit_cleanup_retirement_stage
+        valid = valid && exit_cleanup_retirement_stage < exit_retired
+        valid = valid && exit_retired < exit_cleanup_process_pin_stage
+        valid = valid && exit_cleanup_process_pin_stage < exit_cleanup_wireguard_stage
+        valid = valid && exit_cleanup_wireguard_stage < exit_wireguard_absent
+        valid = valid && exit_wireguard_absent < exit_cleanup_namespace_pin_stage
+        valid = valid && exit_cleanup_namespace_pin_stage < exit_cleanup_process_close_stage
+        valid = valid && exit_cleanup_process_close_stage < exit_cleanup_namespace_close_stage
+        valid = valid && exit_cleanup_namespace_close_stage < exit_cleanup_fdstore_stage
+        valid = valid && exit_cleanup_fdstore_stage < exit_cleanup_parent_stage
+        valid = valid && exit_cleanup_parent_stage < exit_custody_absent
+        valid = valid && exit_custody_absent < exit_settlement_release
         valid = valid && exit_settlement_release < pair_ready_wait
         valid = valid && pair_ready_wait < pair_ready_stage
         valid = valid && pair_ready_stage < pair_worker_stage
@@ -8467,8 +8930,8 @@ if ! awk '
         valid = valid && pair_release < release_close && release_close < waited
         valid = valid && waited < final_output && final_output < cleanup_stage
         valid = valid && cleanup_stage < no_children && no_children < pair_retired
-        valid = valid && pair_retired < custody_absent
-        valid = valid && custody_absent < pair_client_wireguard_absent
+        valid = valid && pair_retired < pair_custody_absent
+        valid = valid && pair_custody_absent < pair_client_wireguard_absent
         valid = valid && pair_client_wireguard_absent < pair_exit_wireguard_absent
         valid = valid && pair_exit_wireguard_absent < underlay_remove
         valid = valid && underlay_remove < pristine_after

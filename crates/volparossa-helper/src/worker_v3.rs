@@ -21,7 +21,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr as InternetSocketAddr},
     num::{NonZeroU32, NonZeroU64},
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Condvar, Mutex, OnceLock,
@@ -102,6 +102,7 @@ mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
 mod relay_fence;
+mod restart_reaper;
 pub(crate) use functional_backend::{
     ExactSameRuntimeCleanupProof, ExactSameRuntimeManagerAbsenceProof,
     functional_alpha_lease_backend,
@@ -109,6 +110,11 @@ pub(crate) use functional_backend::{
 #[cfg(test)]
 pub(crate) use functional_backend::{
     exact_same_runtime_cleanup_proof_for_test, exact_same_runtime_manager_absence_proof_for_test,
+};
+pub(crate) use restart_reaper::{
+    ExactRestartReaperCleanupProof, INTERNAL_RESTART_REAPER_ARGUMENT,
+    INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT, execute_single_restart_reaper,
+    run_internal_restart_reaper_entry, run_internal_restart_reaper_fail_stop_live_proof,
 };
 
 #[cfg(test)]
@@ -4551,6 +4557,7 @@ fn durable_prepare_anchor_from_worker_parts(
             executable_device: parts.executable_device,
             executable_inode: parts.executable_inode,
             service_cgroup_inode: parts.service_cgroup_inode,
+            service_cgroup_id: parts.service_cgroup_id,
         },
     )
     .ok_or(WorkerV3Error::Authentication)
@@ -5418,6 +5425,54 @@ impl std::fmt::Debug for DurableCustodyPublicationStartOutcome {
 #[must_use = "confirmed absence is the only result which may release durable worker ownership"]
 struct ConfirmedWorkerGenerationAbsent {
     coordinates: WorkerGenerationCoordinates,
+}
+
+/// The sole worker namespace capability still needed after exact generation reap.
+///
+/// The complete authenticated recovery source is consumed to construct this value. That
+/// transition closes the independently duplicated recovery namespace immediately; only the
+/// smaller restart pair remains until exact descriptor-store removal is proven.
+#[must_use = "post-reap restart custody must be removed exactly or retained for cleanup retry"]
+struct ReapedWorkerRestartCustody {
+    coordinates: WorkerGenerationCoordinates,
+    restart: crate::worker_sandbox::PinnedWorkerRestartCustody,
+}
+
+impl WorkerRecoveryIdentitySource {
+    fn into_reaped_restart_custody(
+        self,
+        reaped: &ConfirmedWorkerGenerationAbsent,
+    ) -> ReapedWorkerRestartCustody {
+        if self.pending.coordinates != reaped.coordinates {
+            std::process::abort();
+        }
+        let Self {
+            pending,
+            durable_prepare_anchor: _,
+            restart_custody,
+        } = self;
+        // Reap proof has replaced every live-process identity use. Close the authenticated
+        // recovery duplicate now instead of retaining it through parent and manager cleanup.
+        drop(pending);
+        ReapedWorkerRestartCustody {
+            coordinates: reaped.coordinates,
+            restart: restart_custody,
+        }
+    }
+}
+
+impl ReapedWorkerRestartCustody {
+    fn context_id(&self) -> ContextId {
+        self.coordinates.context_id
+    }
+
+    fn borrowed_pidfd(&self) -> BorrowedFd<'_> {
+        self.restart.borrowed_pidfd()
+    }
+
+    fn borrowed_network_namespace(&self) -> BorrowedFd<'_> {
+        self.restart.borrowed_network_namespace()
+    }
 }
 
 impl std::fmt::Debug for ConfirmedWorkerGenerationAbsent {
@@ -15663,6 +15718,7 @@ mod tests {
             executable_device: NonZeroU64::new(6).expect("executable device"),
             executable_inode: NonZeroU64::new(7).expect("executable inode"),
             service_cgroup_inode: NonZeroU64::new(8).expect("cgroup inode"),
+            service_cgroup_id: NonZeroU64::new(9).expect("cgroup id"),
         };
         let actual = durable_prepare_anchor_from_worker_parts(parts).expect("mapped anchor");
         let expected = crate::ownership_journal::durable_prepare_anchor_from_parts(
@@ -15675,6 +15731,7 @@ mod tests {
                 executable_device: NonZeroU64::new(6).expect("executable device"),
                 executable_inode: NonZeroU64::new(7).expect("executable inode"),
                 service_cgroup_inode: NonZeroU64::new(8).expect("cgroup inode"),
+                service_cgroup_id: NonZeroU64::new(9).expect("cgroup id"),
             },
         )
         .expect("expected anchor");

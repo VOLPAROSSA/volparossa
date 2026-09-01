@@ -52,7 +52,9 @@ print_plan() {
             '  provision and fetch locked dependencies in a first disposable KVM boot;' \
             '  restart with QEMU user-network egress denied and prove that denial;' \
             '  build fully offline as the unprivileged guest user in the restricted boot;' \
-            '  run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
+            '  run the fixed helper-boundary proof plus exact CleanupConfirmed and MayOwn Relay restart slices as guest root;' \
+            '  require three canonical reports, fixed FIFO pre-exec barriers, exact GDB SIGKILL/quit-0 boundaries,' \
+            '    non-empty shape-checked crash-only freezer use, and complete observer/unit teardown;' \
             '  shut down, rehash the base image, validate, and discard all proof files;' \
             '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
             'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
@@ -68,8 +70,10 @@ print_plan() {
         '  provision and fetch locked dependencies in a first disposable KVM boot;' \
         '  restart with QEMU user-network egress denied and prove that denial;' \
         '  build fully offline as the unprivileged guest user in the restricted boot;' \
-        '  run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
-        '  shut down, rehash the base image, validate, and publish five bounded files;' \
+        '  run the fixed helper-boundary proof plus exact CleanupConfirmed and MayOwn Relay restart slices as guest root;' \
+        '  require exactly three canonical reports, fixed FIFO pre-exec barriers, exact GDB SIGKILL/quit-0 boundaries,' \
+        '    non-empty shape-checked crash-only freezer use, and complete observer/unit teardown;' \
+        '  shut down, rehash the base image, validate, and publish eleven bounded files;' \
         '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
         'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
 }
@@ -395,6 +399,11 @@ non_retained_driver_phase_is_safe() {
         restart-launch|\
         restart-observation|\
         restart-retirement|\
+        may-own-launch|\
+        may-own-first-crash|\
+        may-own-second-crash|\
+        may-own-recovery|\
+        may-own-retirement|\
         final-verification)
             return 0
             ;;
@@ -447,6 +456,316 @@ report_non_retained_proof_failure_reason() {
         || return 1
     printf 'non-retained helper-boundary PR smoke failure category: %s\n' \
         "$non_retained_failure_reason" >&2
+}
+
+non_retained_may_own_launch_failure_category() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        'ExactPresent retirement was not confirmed before MayOwn proof')
+            printf '%s\n' prerequisite ;;
+        'MayOwn singleton unit name is unsafe')
+            printf '%s\n' unit-name ;;
+        'MayOwn singleton unit state could not be determined')
+            printf '%s\n' unit-state-read ;;
+        'MayOwn singleton unit name is already loaded')
+            printf '%s\n' unit-state-present ;;
+        'MayOwn debugger symbols could not be inspected')
+            printf '%s\n' symbols-read ;;
+        'MayOwn debugger symbols are not exact and unique')
+            printf '%s\n' symbols-shape ;;
+        'MayOwn ownership marker could not be derived')
+            printf '%s\n' marker-derive ;;
+        'MayOwn ownership marker is non-canonical')
+            printf '%s\n' marker-canonical ;;
+        'MayOwn ownership marker is unsafe')
+            printf '%s\n' marker-shape ;;
+        'MayOwn debugger command path was not initially absent')
+            printf '%s\n' debugger-path ;;
+        'MayOwn singleton unit could not be launched')
+            printf '%s\n' launch-status ;;
+        'MayOwn singleton launch envelope is invalid')
+            printf '%s\n' launch-envelope ;;
+        'MayOwn first MainPID did not appear')
+            printf '%s\n' mainpid-appearance ;;
+        'MayOwn first MainPID birth token is unavailable')
+            printf '%s\n' mainpid-starttime ;;
+        'MayOwn first private namespaces did not become stable')
+            printf '%s\n' namespaces ;;
+        'MayOwn first pre-exec barrier is not manager-bound')
+            printf '%s\n' preexec-barrier ;;
+        'MayOwn first external pre-exec observer did not arm')
+            printf '%s\n' preexec-observer ;;
+        'MayOwn first freeze handshake path is unsafe')
+            printf '%s\n' handshake-path ;;
+        'MayOwn first debugger commands could not be written')
+            printf '%s\n' debugger-command-write ;;
+        'MayOwn first debugger identity is unavailable')
+            printf '%s\n' debugger-identity ;;
+        'MayOwn first debugger exited before exec-catch readiness')
+            printf '%s\n' exec-catch-exit ;;
+        'MayOwn first debugger did not arm its exec catch')
+            printf '%s\n' exec-catch-timeout ;;
+        'MayOwn first debugger readiness record is invalid')
+            printf '%s\n' exec-catch-marker ;;
+        'MayOwn first pre-exec barrier could not be released')
+            printf '%s\n' preexec-release ;;
+        'MayOwn first debugger exited before helper exec')
+            printf '%s\n' helper-exec-exit ;;
+        'MayOwn first helper exec was not observed')
+            printf '%s\n' helper-exec-timeout ;;
+        'MayOwn first external pre-exec observer did not retire')
+            printf '%s\n' preexec-observer-retire ;;
+        'MayOwn first mount keeper identity is unavailable')
+            printf '%s\n' mount-keeper-identity ;;
+        'MayOwn first driver-side observer could not be started')
+            printf '%s\n' driver-observer-start ;;
+        'MayOwn first driver-side observer exited before identity proof')
+            printf '%s\n' identity-observer-exit ;;
+        'MayOwn first invocation identity did not appear')
+            printf '%s\n' identity-timeout ;;
+        'MayOwn first invocation is not hook-bound')
+            printf '%s\n' identity-binding ;;
+        'MayOwn first service shape is not production-exact')
+            printf '%s\n' service-shape ;;
+        'MayOwn first active-custody diagnostic is invalid')
+            printf '%s\n' active-custody-diagnostic ;;
+        'MayOwn first active-custody boundary is unsafe')
+            printf '%s\n' service-shape ;;
+        'MayOwn first driver-side observer exited before active custody')
+            printf '%s\n' service-observer-exit ;;
+        'MayOwn first debugger exited before active custody')
+            printf '%s\n' service-debugger-exit ;;
+        'MayOwn first invocation changed before active custody')
+            printf '%s\n' service-invocation-drift ;;
+        'MayOwn first MainPID changed before active custody')
+            printf '%s\n' service-mainpid-drift ;;
+        'MayOwn first active custody did not become observable')
+            printf '%s\n' service-shape ;;
+        'MayOwn first active worker PID is unavailable')
+            printf '%s\n' active-worker-pid ;;
+        'MayOwn first active worker birth token is unavailable')
+            printf '%s\n' active-worker-starttime ;;
+        'MayOwn cgroup freezer is unavailable')
+            printf '%s\n' freezer-shape ;;
+        'MayOwn first debugger driver release could not be published')
+            printf '%s\n' driver-release ;;
+        'MayOwn first debugger exited before the freeze fence')
+            printf '%s\n' freeze-fence-exit ;;
+        'MayOwn first debugger did not reach the crash boundary')
+            printf '%s\n' freeze-fence-timeout ;;
+        'MayOwn first kill-ready marker is invalid')
+            printf '%s\n' kill-marker ;;
+        'MayOwn cgroup did not freeze before the first crash')
+            printf '%s\n' cgroup-freeze ;;
+        'MayOwn first freeze release could not be published')
+            printf '%s\n' freeze-release ;;
+        'MayOwn first forced-crash debugger did not complete')
+            printf '%s\n' debugger-complete ;;
+        'MayOwn first crash did not settle')
+            printf '%s\n' crash-settle ;;
+        'MayOwn first forced-crash fence is not exact')
+            printf '%s\n' crash-fence ;;
+        'MayOwn first crash freezer was not retired before restart')
+            printf '%s\n' cgroup-thaw ;;
+        'MayOwn first driver-side observer did not terminate at the forced crash')
+            printf '%s\n' driver-observer-stop ;;
+        'MayOwn first crash time is unavailable')
+            printf '%s\n' crash-time ;;
+        'MayOwn first crash did not preserve exact Relay custody')
+            printf '%s\n' custody-preservation ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_may_own_preexec_barrier_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        arguments|\
+        starttime|\
+        publication-unsafe|\
+        publication-timeout|\
+        lineage-mainpid|\
+        lineage-invocation|\
+        lineage-starttime|\
+        lineage-marker|\
+        shape-mainpid-argument|\
+        shape-invocation-argument|\
+        shape-count-arguments|\
+        shape-membership-mode|\
+        shape-type|\
+        shape-restart-usec|\
+        shape-control-pid|\
+        shape-main-pid|\
+        shape-invocation|\
+        shape-restarts|\
+        shape-fdstore-count|\
+        shape-fdstore-max|\
+        shape-fdstore-preserve|\
+        shape-exec-start-post|\
+        shape-control-group|\
+        shape-control-group-id|\
+        shape-cgroup-path|\
+        shape-cgroup-procs|\
+        shape-active-boundary|\
+        shape-worker-child|\
+        shape-worker-starttime|\
+        shape-worker-parent|\
+        shape-worker-cgroup|\
+        shape-cgroup-members|\
+        shape-worker-stability|\
+        shape-cgroup-type|\
+        shape-cgroup-stat|\
+        record-size|\
+        expectation-create|\
+        expectation-write|\
+        record-content|\
+        launcher-executable|\
+        launcher-script-fd|\
+        launcher-script-flags|\
+        freezer)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_may_own_driver_entry_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        arguments|\
+        unit-name|\
+        gid|\
+        main-pid|\
+        service-cgroup-argument|\
+        observer-pid|\
+        proc-records|\
+        process-credentials|\
+        observer-cgroup-record|\
+        observer-cgroup-length|\
+        observer-cgroup-boundary|\
+        manager-main-pid|\
+        network-namespace|\
+        control-pid|\
+        service-cgroup-root|\
+        service-cgroup-filesystem|\
+        service-cgroup-type|\
+        service-cgroup-stat|\
+        service-cgroup-procs|\
+        service-cgroup-members|\
+        service-cgroup-stability)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_non_retained_may_own_launch_failure_category() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_may_own_prefix='live worker-identity proof failed: '
+    [ "$(grep -Fc "$non_retained_may_own_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_may_own_line=$(grep -F \
+        "$non_retained_may_own_prefix" "$non_retained_diagnostic") \
+        || return 1
+    case $non_retained_may_own_line in
+        "$non_retained_may_own_prefix"*)
+            non_retained_may_own_reason=${non_retained_may_own_line#"$non_retained_may_own_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    non_retained_may_own_category=$( \
+        non_retained_may_own_launch_failure_category \
+            "$non_retained_may_own_reason" \
+    ) || return 1
+    non_retained_may_own_preexec_category=
+    if [ "$non_retained_may_own_category" = preexec-barrier ] \
+        || [ "$non_retained_may_own_category" = service-shape ]; then
+        non_retained_may_own_preexec_prefix='VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1='
+        [ "$(grep -Fc "$non_retained_may_own_preexec_prefix" \
+            "$non_retained_diagnostic")" -eq 1 ] || return 1
+        non_retained_may_own_preexec_line=$(grep -F \
+            "$non_retained_may_own_preexec_prefix" \
+            "$non_retained_diagnostic") || return 1
+        case $non_retained_may_own_preexec_line in
+            "$non_retained_may_own_preexec_prefix"*)
+                non_retained_may_own_preexec_category=${non_retained_may_own_preexec_line#"$non_retained_may_own_preexec_prefix"}
+                ;;
+            *) return 1 ;;
+        esac
+        non_retained_may_own_preexec_barrier_stage_is_safe \
+            "$non_retained_may_own_preexec_category" || return 1
+    fi
+    non_retained_may_own_driver_start_stage=
+    non_retained_may_own_driver_start_prefix=VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_START_FAILURE_V1=
+    non_retained_may_own_driver_start_count=$(grep -Fc \
+        "$non_retained_may_own_driver_start_prefix" \
+        "$non_retained_diagnostic") || :
+    case $non_retained_may_own_category:$non_retained_may_own_driver_start_count in
+        identity-observer-exit:1|service-observer-exit:1)
+            non_retained_may_own_driver_start_line=$(grep -F \
+                "$non_retained_may_own_driver_start_prefix" \
+                "$non_retained_diagnostic") || return 1
+            case $non_retained_may_own_driver_start_line in
+                "$non_retained_may_own_driver_start_prefix"*)
+                    non_retained_may_own_driver_start_stage=${non_retained_may_own_driver_start_line#"$non_retained_may_own_driver_start_prefix"}
+                    ;;
+                *) return 1 ;;
+            esac
+            non_retained_production_launch_stage_is_safe \
+                "$non_retained_may_own_driver_start_stage" || return 1
+            ;;
+        identity-observer-exit:*|service-observer-exit:*) return 1 ;;
+        *:0) ;;
+        *) return 1 ;;
+    esac
+    non_retained_may_own_driver_entry_stage=
+    non_retained_may_own_driver_entry_prefix=VOLPAROSSA_HELPER_LIVE_MAY_OWN_DRIVER_ENTRY_FAILURE_V1=
+    non_retained_may_own_driver_entry_count=$(grep -Fc \
+        "$non_retained_may_own_driver_entry_prefix" \
+        "$non_retained_diagnostic") || :
+    case $non_retained_may_own_category:$non_retained_may_own_driver_start_stage:$non_retained_may_own_driver_entry_count in
+        identity-observer-exit:preflight-runtime:1|\
+        service-observer-exit:preflight-runtime:1)
+            non_retained_may_own_driver_entry_line=$(grep -F \
+                "$non_retained_may_own_driver_entry_prefix" \
+                "$non_retained_diagnostic") || return 1
+            case $non_retained_may_own_driver_entry_line in
+                "$non_retained_may_own_driver_entry_prefix"*)
+                    non_retained_may_own_driver_entry_stage=${non_retained_may_own_driver_entry_line#"$non_retained_may_own_driver_entry_prefix"}
+                    ;;
+                *) return 1 ;;
+            esac
+            non_retained_may_own_driver_entry_stage_is_safe \
+                "$non_retained_may_own_driver_entry_stage" || return 1
+            ;;
+        identity-observer-exit:preflight-runtime:0|\
+        service-observer-exit:preflight-runtime:0) ;;
+        *:*:0) ;;
+        *) return 1 ;;
+    esac
+    printf 'non-retained helper-boundary PR smoke MayOwn launch category: %s\n' \
+        "$non_retained_may_own_category" >&2
+    if [ -n "$non_retained_may_own_preexec_category" ]; then
+        printf 'non-retained helper-boundary PR smoke MayOwn preexec category: %s\n' \
+            "$non_retained_may_own_preexec_category" >&2
+    fi
+    if [ -n "$non_retained_may_own_driver_start_stage" ]; then
+        printf 'non-retained helper-boundary PR smoke MayOwn observer failure stage: %s\n' \
+            "$non_retained_may_own_driver_start_stage" >&2
+    fi
+    if [ -n "$non_retained_may_own_driver_entry_stage" ]; then
+        printf 'non-retained helper-boundary PR smoke MayOwn driver-entry failure stage: %s\n' \
+            "$non_retained_may_own_driver_entry_stage" >&2
+    fi
 }
 
 non_retained_boundary_validator_stage_is_safe() {
@@ -1073,7 +1392,7 @@ report_non_retained_driver_phase() {
     non_retained_driver_phase_prefix=VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=
     [ "$(grep -Ec "^$non_retained_driver_phase_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_driver_phase_pattern='^VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|final-verification)$'
+    non_retained_driver_phase_pattern='^VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|may-own-launch|may-own-first-crash|may-own-second-crash|may-own-recovery|may-own-retirement|final-verification)$'
     [ "$(grep -Ec "$non_retained_driver_phase_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_mixed_diagnostic_pattern='^(live worker-identity proof failed: predicate rejected: |VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=)'
@@ -1220,6 +1539,22 @@ non_retained_production_launch_stage_is_safe() {
         functional-exit-relay-cleanup|\
         functional-exit-release|\
         functional-exit-cleanup|\
+        functional-exit-cleanup-retirement|\
+        functional-exit-cleanup-process-pin|\
+        functional-exit-cleanup-wireguard-absence|\
+        functional-exit-cleanup-namespace-pin|\
+        functional-exit-cleanup-process-close|\
+        functional-exit-cleanup-namespace-close|\
+        functional-exit-cleanup-fdstore-absence|\
+        functional-exit-cleanup-parent-custody|\
+        functional-exit-cleanup-parent-custody-pidfd|\
+        functional-exit-cleanup-parent-custody-procfd|\
+        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-one|\
+        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-two|\
+        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-three-plus|\
+        functional-exit-cleanup-parent-custody-foreign-netns-other|\
+        functional-exit-cleanup-parent-custody-fd-scan|\
+        functional-exit-cleanup-parent-custody-clear|\
         functional-relay-pair-ready|\
         functional-relay-pair-worker-observation|\
         functional-relay-pair-fixtures|\
@@ -1286,7 +1621,7 @@ report_non_retained_production_launch_diagnostic() {
     non_retained_production_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
     [ "$(grep -Ec "^$non_retained_production_diagnostic_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-client-release|functional-client-cleanup|functional-exit-ready|functional-exit-worker-observation|functional-exit-relay-fixture|functional-exit-relay-traffic|functional-exit-relay-cleanup|functional-exit-release|functional-exit-cleanup|functional-relay-pair-ready|functional-relay-pair-worker-observation|functional-relay-pair-fixtures|functional-relay-pair-traffic|functional-relay-pair-cleanup|functional-probe-finish|functional-cleanup|publication)$'
+    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-client-release|functional-client-cleanup|functional-exit-ready|functional-exit-worker-observation|functional-exit-relay-fixture|functional-exit-relay-traffic|functional-exit-relay-cleanup|functional-exit-release|functional-exit-cleanup|functional-exit-cleanup-retirement|functional-exit-cleanup-process-pin|functional-exit-cleanup-wireguard-absence|functional-exit-cleanup-namespace-pin|functional-exit-cleanup-process-close|functional-exit-cleanup-namespace-close|functional-exit-cleanup-fdstore-absence|functional-exit-cleanup-parent-custody|functional-exit-cleanup-parent-custody-pidfd|functional-exit-cleanup-parent-custody-procfd|functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-one|functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-two|functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-three-plus|functional-exit-cleanup-parent-custody-foreign-netns-other|functional-exit-cleanup-parent-custody-fd-scan|functional-exit-cleanup-parent-custody-clear|functional-relay-pair-ready|functional-relay-pair-worker-observation|functional-relay-pair-fixtures|functional-relay-pair-traffic|functional-relay-pair-cleanup|functional-probe-finish|functional-cleanup|publication)$'
     [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_functional_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=
@@ -1406,8 +1741,10 @@ repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd -P)
 manifest=$script_directory/debian13-amd64-image-v1.json
 report_validator=$script_directory/validate-helper-boundary-evidence-v1.sh
 restart_report_validator=$script_directory/validate-helper-restart-exact-present-evidence-v1.sh
+may_own_report_validator=$script_directory/validate-helper-restart-may-own-custody-relay-evidence-v1.sh
 environment_validator=$script_directory/validate-helper-boundary-vm-environment-v1.sh
 restart_environment_validator=$script_directory/validate-helper-restart-vm-environment-v1.sh
+may_own_environment_validator=$script_directory/validate-helper-restart-may-own-custody-relay-vm-environment-v1.sh
 qemu_supervisor=$script_directory/qemu-pidfd-supervisor.py
 manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
 image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
@@ -1443,7 +1780,9 @@ jq -e \
 jq -S -c . "$manifest" | cmp -s - "$manifest" \
     || blocked 'the Debian image manifest serialization is not canonical'
 for fixed_tool in "$report_validator" "$restart_report_validator" \
-    "$environment_validator" "$restart_environment_validator" "$qemu_supervisor"; do
+    "$may_own_report_validator" "$environment_validator" \
+    "$restart_environment_validator" "$may_own_environment_validator" \
+    "$qemu_supervisor"; do
     if [ ! -f "$fixed_tool" ] || [ -L "$fixed_tool" ] \
         || [ "$(stat -Lc '%h' "$fixed_tool" 2>/dev/null || true)" != 1 ]; then
         blocked "a fixed evidence tool is unavailable: ${fixed_tool##*/}"
@@ -2047,7 +2386,13 @@ scrub_sensitive_run_state() {
         helper-restart-exact-present-evidence-v1.json.sha256 \
         helper-restart-vm-environment-v1.json restart-validator.stdout \
         restart-validator.stderr restart-environment-validator.stdout \
-        restart-environment-validator.stderr vm-environment-v1.json \
+        restart-environment-validator.stderr \
+        helper-restart-may-own-custody-relay-evidence-v1.json \
+        helper-restart-may-own-custody-relay-evidence-v1.json.sha256 \
+        helper-restart-may-own-custody-relay-vm-environment-v1.json \
+        may-own-validator.stdout may-own-validator.stderr \
+        may-own-environment-validator.stdout may-own-environment-validator.stderr \
+        vm-environment-v1.json \
         validator.stdout validator.stderr \
         environment-validator.stdout environment-validator.stderr vm-console.log \
         console.fifo console.done
@@ -2191,6 +2536,7 @@ guest_setup=$run_directory/guest-setup.sh
 guest_proof=$run_directory/guest-proof.sh
 retrieved_report=$run_directory/helper-boundary-evidence-v1.json
 retrieved_restart_report=$run_directory/helper-restart-exact-present-evidence-v1.json
+retrieved_may_own_report=$run_directory/helper-restart-may-own-custody-relay-evidence-v1.json
 retrieved_stderr=$run_directory/helper-boundary-proof.stderr.log
 
 qemu-img create -q -f qcow2 -F qcow2 -b "$image_path" "$overlay" 12G \
@@ -2333,18 +2679,23 @@ test "$(stat -c '%s' /home/volparossa/helper-boundary-proof.stderr.log)" -le 104
 if test "$proof_status" -ne 0; then
     exit "$proof_status"
 fi
-test "$(wc -l </home/volparossa/helper-proof-reports.jsonl)" -eq 2
+test "$(wc -l </home/volparossa/helper-proof-reports.jsonl)" -eq 3
 sed -n '1p' /home/volparossa/helper-proof-reports.jsonl \
     >/home/volparossa/helper-boundary-evidence-v1.json
 sed -n '2p' /home/volparossa/helper-proof-reports.jsonl \
     >/home/volparossa/helper-restart-exact-present-evidence-v1.json
+sed -n '3p' /home/volparossa/helper-proof-reports.jsonl \
+    >/home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json
 rm -f -- /home/volparossa/helper-proof-reports.jsonl
 chmod 0600 /home/volparossa/helper-boundary-evidence-v1.json \
-    /home/volparossa/helper-restart-exact-present-evidence-v1.json
+    /home/volparossa/helper-restart-exact-present-evidence-v1.json \
+    /home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json
 test "$(stat -c '%s' /home/volparossa/helper-boundary-evidence-v1.json)" -ge 1
 test "$(stat -c '%s' /home/volparossa/helper-boundary-evidence-v1.json)" -le 32768
 test "$(stat -c '%s' /home/volparossa/helper-restart-exact-present-evidence-v1.json)" -ge 1
 test "$(stat -c '%s' /home/volparossa/helper-restart-exact-present-evidence-v1.json)" -le 32768
+test "$(stat -c '%s' /home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json)" -ge 1
+test "$(stat -c '%s' /home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json)" -le 32768
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 GUEST_PROOF
 chmod 0700 "$guest_proof"
@@ -2661,6 +3012,9 @@ if [ "$guest_status" -ne 0 ]; then
                 report_non_retained_restart_crash_record_diagnostic \
                     "$proof_stderr_log" || true
             fi
+        elif report_non_retained_may_own_launch_failure_category \
+            "$proof_stderr_log"; then
+            :
         else
             printf '%s\n' \
                 'non-retained helper-boundary PR smoke failure category: unclassified' >&2
@@ -2677,6 +3031,10 @@ bounded_run retrieve-restart-report 2 guest_scp_from_raw \
     /home/volparossa/helper-restart-exact-present-evidence-v1.json \
     "$retrieved_restart_report" \
     || failed 'the canonical restart report could not be retrieved'
+bounded_run retrieve-may-own-report 2 guest_scp_from_raw \
+    /home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json \
+    "$retrieved_may_own_report" \
+    || failed 'the canonical MayOwn Relay report could not be retrieved'
 
 guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
 reap_qemu yes || failed 'the restricted proof VM did not power off cleanly'
@@ -2727,6 +3085,22 @@ jq -e --arg commit "$expected_commit" \
     '.overall == "PASS" and .observed_source.commit_sha == $commit' \
     "$retrieved_restart_report" >/dev/null \
     || failed 'the restart report is not a PASS for the expected commit'
+may_own_validator_stdout=$run_directory/may-own-validator.stdout
+may_own_validator_stderr=$run_directory/may-own-validator.stderr
+set +e
+"$may_own_report_validator" "$retrieved_may_own_report" \
+    >"$may_own_validator_stdout" 2>"$may_own_validator_stderr"
+may_own_validator_status=$?
+set -e
+[ "$may_own_validator_status" -eq 0 ] \
+    || failed 'the retrieved MayOwn Relay report failed local validation'
+if [ -s "$may_own_validator_stdout" ] || [ -s "$may_own_validator_stderr" ]; then
+    failed 'the local MayOwn Relay report validator was not silent'
+fi
+jq -e --arg commit "$expected_commit" \
+    '.overall == "PASS" and .observed_source.commit_sha == $commit' \
+    "$retrieved_may_own_report" >/dev/null \
+    || failed 'the MayOwn Relay report is not a PASS for the expected commit'
 
 late_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}') \
     || failed 'the late source HEAD fence failed'
@@ -2750,6 +3124,11 @@ restart_report_hash=$(sha256sum "$retrieved_restart_report" | awk '{print $1}') 
 restart_report_hash_file=$run_directory/helper-restart-exact-present-evidence-v1.json.sha256
 printf '%s  helper-restart-exact-present-evidence-v1.json\n' \
     "$restart_report_hash" >"$restart_report_hash_file"
+may_own_report_hash=$(sha256sum "$retrieved_may_own_report" | awk '{print $1}') \
+    || failed 'the retained MayOwn Relay report hash could not be calculated'
+may_own_report_hash_file=$run_directory/helper-restart-may-own-custody-relay-evidence-v1.json.sha256
+printf '%s  helper-restart-may-own-custody-relay-evidence-v1.json\n' \
+    "$may_own_report_hash" >"$may_own_report_hash_file"
 successful_environment=$run_directory/vm-environment-v1.json
 jq -S -c -n \
     --arg commit "$expected_commit" \
@@ -2784,6 +3163,23 @@ jq -S -c -n \
       report_sha256: $report_sha256,
       schema_version: 1,
       status: "PASS"}' >"$successful_restart_environment"
+successful_may_own_environment=$run_directory/helper-restart-may-own-custody-relay-vm-environment-v1.json
+jq -S -c -n \
+    --arg commit "$expected_commit" \
+    --arg image_sha512 "$image_sha512" \
+    --arg report_sha256 "$may_own_report_hash" \
+    --arg release_build 20260826-2582 \
+    '{expected_commit: $commit,
+      guest: {architecture: "amd64", cargo_version: "1.85.0",
+        debian_version: "13", rustc_version: "1.85.0", systemd_version: 257,
+        virtualization: "kvm"},
+      image_release_build: $release_build,
+      image_sha512: $image_sha512,
+      proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"},
+      report_kind: "volparossa-helper-restart-may-own-custody-relay-vm-environment",
+      report_sha256: $report_sha256,
+      schema_version: 1,
+      status: "PASS"}' >"$successful_may_own_environment"
 
 environment_validator_stdout=$run_directory/environment-validator.stdout
 environment_validator_stderr=$run_directory/environment-validator.stderr
@@ -2813,6 +3209,21 @@ if [ -s "$restart_environment_validator_stdout" ] \
     || [ -s "$restart_environment_validator_stderr" ]; then
     failed 'the restart VM-environment validator was not silent'
 fi
+may_own_environment_validator_stdout=$run_directory/may-own-environment-validator.stdout
+may_own_environment_validator_stderr=$run_directory/may-own-environment-validator.stderr
+set +e
+"$may_own_environment_validator" "$successful_may_own_environment" \
+    "$retrieved_may_own_report" "$expected_commit" "$image_sha512" \
+    >"$may_own_environment_validator_stdout" \
+    2>"$may_own_environment_validator_stderr"
+may_own_environment_validator_status=$?
+set -e
+[ "$may_own_environment_validator_status" -eq 0 ] \
+    || failed 'the MayOwn Relay VM-environment record failed local validation'
+if [ -s "$may_own_environment_validator_stdout" ] \
+    || [ -s "$may_own_environment_validator_stderr" ]; then
+    failed 'the MayOwn Relay VM-environment validator was not silent'
+fi
 
 if [ "$proof_mode" = retained-main ]; then
     install -m 0600 -- "$retrieved_report" \
@@ -2826,6 +3237,12 @@ if [ "$proof_mode" = retained-main ]; then
         "$output_directory/helper-restart-exact-present-evidence-v1.json.sha256"
     install -m 0600 -- "$successful_restart_environment" \
         "$output_directory/helper-restart-vm-environment-v1.json"
+    install -m 0600 -- "$retrieved_may_own_report" \
+        "$output_directory/helper-restart-may-own-custody-relay-evidence-v1.json"
+    install -m 0600 -- "$may_own_report_hash_file" \
+        "$output_directory/helper-restart-may-own-custody-relay-evidence-v1.json.sha256"
+    install -m 0600 -- "$successful_may_own_environment" \
+        "$output_directory/helper-restart-may-own-custody-relay-vm-environment-v1.json"
     printf '%s\n' \
         'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
 else
