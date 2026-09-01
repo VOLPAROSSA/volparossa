@@ -3662,59 +3662,130 @@ recover_successful_may_own_manager_binding() {
     may_own_invocation_one=$unit_invocation_id
 }
 
+may_own_preexec_barrier_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        arguments|\
+        starttime|\
+        publication-unsafe|\
+        publication-timeout|\
+        lineage-mainpid|\
+        lineage-invocation|\
+        lineage-starttime|\
+        lineage-marker|\
+        shape-mainpid-argument|\
+        shape-invocation-argument|\
+        shape-count-arguments|\
+        shape-type|\
+        shape-restart-usec|\
+        shape-control-pid|\
+        shape-main-pid|\
+        shape-invocation|\
+        shape-restarts|\
+        shape-fdstore-count|\
+        shape-fdstore-max|\
+        shape-fdstore-preserve|\
+        shape-exec-start-post|\
+        shape-control-group|\
+        shape-control-group-id|\
+        shape-cgroup-path|\
+        shape-cgroup-procs|\
+        shape-cgroup-members|\
+        shape-cgroup-type|\
+        shape-cgroup-stat|\
+        record-size|\
+        expectation-create|\
+        expectation-write|\
+        record-content|\
+        launcher-executable|\
+        freezer)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_may_own_preexec_barrier_failure_stage() {
+    may_own_preexec_barrier_failure_stage_is_safe \
+        "$may_own_preexec_barrier_failure_stage" || return 1
+    printf 'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=%s\n' \
+        "$may_own_preexec_barrier_failure_stage" >&2
+}
+
 may_own_service_shape_is_exact() {
+    may_own_preexec_barrier_failure_stage=arguments
     [ "$#" -eq 4 ] || return 1
     may_own_shape_main_pid=$1
     may_own_shape_invocation=$2
     may_own_shape_restarts=$3
     may_own_shape_fdstore=$4
+    may_own_preexec_barrier_failure_stage=shape-mainpid-argument
     case $may_own_shape_main_pid in
         ''|0|0*|*[!0-9]*) return 1 ;;
     esac
+    may_own_preexec_barrier_failure_stage=shape-invocation-argument
     unit_invocation_id_is_safe "$may_own_shape_invocation" || return 1
+    may_own_preexec_barrier_failure_stage=shape-count-arguments
     case $may_own_shape_restarts:$may_own_shape_fdstore in
         *[!0-9:]*|:*|*:) return 1 ;;
     esac
+    may_own_preexec_barrier_failure_stage=shape-type
     [ "$(systemctl show --property=Type --value "$unit_name")" = simple ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-restart-usec
     [ "$(systemctl show --property=RestartUSec --value "$unit_name")" = 3s ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-control-pid
     [ "$(systemctl show --property=ControlPID --value "$unit_name")" = 0 ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-main-pid
     [ "$(systemctl show --property=MainPID --value "$unit_name")" = \
         "$may_own_shape_main_pid" ] || return 1
+    may_own_preexec_barrier_failure_stage=shape-invocation
     [ "$(unit_current_invocation_id)" = "$may_own_shape_invocation" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-restarts
     [ "$(systemctl show --property=NRestarts --value "$unit_name")" = \
         "$may_own_shape_restarts" ] || return 1
+    may_own_preexec_barrier_failure_stage=shape-fdstore-count
     [ "$(systemctl show --property=NFileDescriptorStore --value "$unit_name")" = \
         "$may_own_shape_fdstore" ] || return 1
+    may_own_preexec_barrier_failure_stage=shape-fdstore-max
     [ "$(systemctl show --property=FileDescriptorStoreMax --value "$unit_name")" = 128 ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-fdstore-preserve
     [ "$(systemctl show --property=FileDescriptorStorePreserve --value "$unit_name")" = yes ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-exec-start-post
     [ -z "$(systemctl show --property=ExecStartPost --value "$unit_name")" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-control-group
     may_own_shape_control_group=$(systemctl show --property=ControlGroup \
         --value "$unit_name") || return 1
     [ "$may_own_shape_control_group" = "/system.slice/$unit_name" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-control-group-id
     may_own_shape_control_group_id=$(systemctl show --property=ControlGroupId \
         --value "$unit_name") || return 1
     case $may_own_shape_control_group_id in
         ''|0|0*|*[!0-9]*) return 1 ;;
     esac
+    may_own_preexec_barrier_failure_stage=shape-cgroup-path
     may_own_shape_cgroup=/sys/fs/cgroup/system.slice/$unit_name
     [ -d "$may_own_shape_cgroup" ] && [ ! -L "$may_own_shape_cgroup" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-cgroup-procs
     may_own_shape_procs=$may_own_shape_cgroup/cgroup.procs
     [ -f "$may_own_shape_procs" ] && [ ! -L "$may_own_shape_procs" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=shape-cgroup-members
     /usr/bin/awk -v expected_pid="$may_own_shape_main_pid" '
         NR > 32 || $0 != expected_pid { invalid = 1 }
         END { if (invalid || NR < 1) exit 1 }
     ' "$may_own_shape_procs" || return 1
+    may_own_preexec_barrier_failure_stage=shape-cgroup-type
     [ "$(cat "$may_own_shape_cgroup/cgroup.type")" = domain ] || return 1
+    may_own_preexec_barrier_failure_stage=shape-cgroup-stat
     /usr/bin/awk '
         NR > 256 { invalid = 1 }
         $1 == "nr_descendants" {
@@ -3728,64 +3799,86 @@ may_own_service_shape_is_exact() {
         END {
             if (invalid || !seen_descendants || !seen_dying) exit 1
         }
-    ' "$may_own_shape_cgroup/cgroup.stat"
+    ' "$may_own_shape_cgroup/cgroup.stat" || return 1
+    may_own_preexec_barrier_failure_stage=
 }
 
 may_own_preexec_barrier_is_exact() {
+    may_own_preexec_barrier_failure_stage=arguments
     [ "$#" -eq 4 ] || return 1
     may_own_barrier_main_pid=$1
     may_own_barrier_invocation=$2
     may_own_barrier_restarts=$3
     may_own_barrier_fdstore=$4
     may_own_barrier_record=$temporary_stage/may-own-output/may-own.pre-exec.$may_own_barrier_invocation
+    may_own_preexec_barrier_failure_stage=starttime
     may_own_barrier_starttime=$(capture_process_starttime \
         "$may_own_barrier_main_pid") || return 1
     may_own_barrier_wait=0
     while ! vp_capture_file_is_safe "$may_own_barrier_record"; do
         if [ -e "$may_own_barrier_record" ] \
             || [ -L "$may_own_barrier_record" ]; then
+            may_own_preexec_barrier_failure_stage=publication-unsafe
             vp_capture_file_is_safe "$may_own_barrier_record" || return 1
             break
         fi
+        may_own_preexec_barrier_failure_stage=lineage-mainpid
         [ "$(systemctl show --property=MainPID --value "$unit_name" \
             2>/dev/null || true)" = "$may_own_barrier_main_pid" ] \
             || return 1
+        may_own_preexec_barrier_failure_stage=lineage-invocation
         [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
             "$may_own_barrier_invocation" ] || return 1
+        may_own_preexec_barrier_failure_stage=lineage-starttime
         [ "$(capture_process_starttime "$may_own_barrier_main_pid" \
             2>/dev/null || true)" = "$may_own_barrier_starttime" ] \
             || return 1
+        may_own_preexec_barrier_failure_stage=lineage-marker
         unit_description_matches_marker || return 1
         may_own_barrier_wait=$((may_own_barrier_wait + 1))
+        may_own_preexec_barrier_failure_stage=publication-timeout
         [ "$may_own_barrier_wait" -lt 600 ] || return 1
         sleep 0.05
     done
+    may_own_preexec_barrier_failure_stage=lineage-mainpid
     [ "$(systemctl show --property=MainPID --value "$unit_name" \
         2>/dev/null || true)" = "$may_own_barrier_main_pid" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=lineage-invocation
     [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
         "$may_own_barrier_invocation" ] || return 1
+    may_own_preexec_barrier_failure_stage=lineage-starttime
     [ "$(capture_process_starttime "$may_own_barrier_main_pid" \
         2>/dev/null || true)" = "$may_own_barrier_starttime" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=lineage-marker
     unit_description_matches_marker || return 1
     may_own_service_shape_is_exact "$may_own_barrier_main_pid" \
         "$may_own_barrier_invocation" "$may_own_barrier_restarts" \
         "$may_own_barrier_fdstore" || return 1
+    # shellcheck disable=SC2100
+    may_own_preexec_barrier_failure_stage=record-size
     [ "$(stat -Lc '%s' "$may_own_barrier_record")" -le 256 ] || return 1
     may_own_barrier_expected=$temporary_stage/may-own-pre-exec.$may_own_barrier_invocation.expected
+    may_own_preexec_barrier_failure_stage=expectation-create
     install -o root -g root -m 0600 /dev/null "$may_own_barrier_expected" \
         || return 1
+    may_own_preexec_barrier_failure_stage=expectation-write
     printf '%s\n%s\n%s\n' \
         'VOLPAROSSA_HELPER_MAY_OWN_PRE_EXEC_BARRIER_V1=ready' \
         "$may_own_barrier_invocation" "$may_own_barrier_main_pid" \
         >"$may_own_barrier_expected" || return 1
+    # shellcheck disable=SC2100
+    may_own_preexec_barrier_failure_stage=record-content
     cmp -s "$may_own_barrier_expected" "$may_own_barrier_record" || return 1
+    may_own_preexec_barrier_failure_stage=launcher-executable
     [ "$(stat -Lc '%d:%i' "/proc/$may_own_barrier_main_pid/exe")" = \
         "$(stat -Lc '%d:%i' "$temporary_stage/restart-launcher")" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=freezer
     [ "$(cat "/sys/fs/cgroup/system.slice/$unit_name/cgroup.freeze")" = 0 ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=
 }
 
 release_may_own_preexec_barrier() {
@@ -6982,9 +7075,12 @@ if [ "$proof_ok" = yes ]; then
         "$may_own_invocation_one" "$may_own_pid_one_starttime" \
         || failed 'MayOwn first private namespaces did not become stable'
     may_own_cgroup=/sys/fs/cgroup/system.slice/$unit_name
-    may_own_preexec_barrier_is_exact "$may_own_pid_one" \
-        "$may_own_invocation_one" 0 0 \
-        || failed 'MayOwn first pre-exec barrier is not manager-bound'
+    if ! may_own_preexec_barrier_is_exact "$may_own_pid_one" \
+        "$may_own_invocation_one" 0 0; then
+        report_may_own_preexec_barrier_failure_stage \
+            || failed 'MayOwn first pre-exec barrier diagnostic is invalid'
+        failed 'MayOwn first pre-exec barrier is not manager-bound'
+    fi
     start_may_own_preexec_observer one "$may_own_pid_one" \
         "$may_own_invocation_one" \
         || failed 'MayOwn first external pre-exec observer did not arm'
@@ -7173,9 +7269,12 @@ if [ "$proof_ok" = yes ]; then
         || [ "$(systemctl show --property=NRestarts --value "$unit_name")" != 1 ]; then
         failed 'MayOwn second invocation lineage is invalid'
     fi
-    may_own_preexec_barrier_is_exact "$may_own_pid_two" \
-        "$may_own_invocation_two" 1 2 \
-        || failed 'MayOwn second pre-exec barrier is not manager-bound'
+    if ! may_own_preexec_barrier_is_exact "$may_own_pid_two" \
+        "$may_own_invocation_two" 1 2; then
+        report_may_own_preexec_barrier_failure_stage \
+            || failed 'MayOwn second pre-exec barrier diagnostic is invalid'
+        failed 'MayOwn second pre-exec barrier is not manager-bound'
+    fi
     start_may_own_preexec_observer two "$may_own_pid_two" \
         "$may_own_invocation_two" \
         || failed 'MayOwn second external pre-exec observer did not arm'
@@ -7364,9 +7463,12 @@ if [ "$proof_ok" = yes ]; then
         || [ "$(systemctl show --property=NRestarts --value "$unit_name")" != 2 ]; then
         failed 'MayOwn third invocation lineage is invalid'
     fi
-    may_own_preexec_barrier_is_exact "$may_own_pid_three" \
-        "$may_own_invocation_three" 2 2 \
-        || failed 'MayOwn third pre-exec barrier is not manager-bound'
+    if ! may_own_preexec_barrier_is_exact "$may_own_pid_three" \
+        "$may_own_invocation_three" 2 2; then
+        report_may_own_preexec_barrier_failure_stage \
+            || failed 'MayOwn third pre-exec barrier diagnostic is invalid'
+        failed 'MayOwn third pre-exec barrier is not manager-bound'
+    fi
     start_may_own_preexec_observer three "$may_own_pid_three" \
         "$may_own_invocation_three" \
         || failed 'MayOwn third external pre-exec observer did not arm'

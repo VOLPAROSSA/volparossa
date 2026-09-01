@@ -481,6 +481,53 @@ do
         exit 1
     fi
 done
+
+preexec_diagnostic_functions=$tmp/preexec-diagnostic-functions
+{
+    sed -n '/^may_own_preexec_barrier_failure_stage_is_safe() {$/,/^}$/p' \
+        "$gate"
+    sed -n '/^report_may_own_preexec_barrier_failure_stage() {$/,/^}$/p' \
+        "$gate"
+} >"$preexec_diagnostic_functions"
+sh -n "$preexec_diagnostic_functions"
+# shellcheck disable=SC1090
+. "$preexec_diagnostic_functions"
+preexec_diagnostic_stdout=$tmp/preexec-diagnostic.stdout
+preexec_diagnostic_stderr=$tmp/preexec-diagnostic.stderr
+preexec_diagnostic_categories='arguments starttime publication-unsafe publication-timeout lineage-mainpid lineage-invocation lineage-starttime lineage-marker shape-mainpid-argument shape-invocation-argument shape-count-arguments shape-type shape-restart-usec shape-control-pid shape-main-pid shape-invocation shape-restarts shape-fdstore-count shape-fdstore-max shape-fdstore-preserve shape-exec-start-post shape-control-group shape-control-group-id shape-cgroup-path shape-cgroup-procs shape-cgroup-members shape-cgroup-type shape-cgroup-stat record-size expectation-create expectation-write record-content launcher-executable freezer'
+for preexec_diagnostic_category in $preexec_diagnostic_categories; do
+    may_own_preexec_barrier_failure_stage_is_safe \
+        "$preexec_diagnostic_category" || exit 1
+    # The sourced reporter consumes this reviewed global directly.
+    # shellcheck disable=SC2034
+    may_own_preexec_barrier_failure_stage=$preexec_diagnostic_category
+    report_may_own_preexec_barrier_failure_stage \
+        >"$preexec_diagnostic_stdout" 2>"$preexec_diagnostic_stderr"
+    [ ! -s "$preexec_diagnostic_stdout" ]
+    [ "$(cat "$preexec_diagnostic_stderr")" = \
+        "VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=$preexec_diagnostic_category" ]
+    grep -F "may_own_preexec_barrier_failure_stage=$preexec_diagnostic_category" \
+        "$gate" >/dev/null
+done
+for unsafe_preexec_diagnostic_category in \
+    '' private-detail shape-private /tmp/value 'shape-type value'
+do
+    if may_own_preexec_barrier_failure_stage_is_safe \
+        "$unsafe_preexec_diagnostic_category"; then
+        printf 'MayOwn pre-exec diagnostic accepted unsafe category: %s\n' \
+            "$unsafe_preexec_diagnostic_category" >&2
+        exit 1
+    fi
+done
+[ "$(grep -Fc 'report_may_own_preexec_barrier_failure_stage \' "$gate")" -eq 3 ]
+preexec_assigned_categories=$tmp/preexec-assigned-categories
+sed -n 's/^[[:space:]]*may_own_preexec_barrier_failure_stage=\([a-z][a-z0-9-]*\)$/\1/p' \
+    "$gate" >"$preexec_assigned_categories"
+while IFS= read -r assigned_preexec_diagnostic_category; do
+    may_own_preexec_barrier_failure_stage_is_safe \
+        "$assigned_preexec_diagnostic_category" || exit 1
+done <"$preexec_assigned_categories"
+
 observer_preexec_contract=$tmp/observer-preexec-contract
 sed -n '/^[[:space:]]*pre-exec-one|pre-exec-two|pre-exec-three)/,/^[[:space:]]*;;$/p' \
     "$observer" >"$observer_preexec_contract"

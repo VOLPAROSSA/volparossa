@@ -501,6 +501,49 @@ non_retained_may_own_launch_failure_category() {
     esac
 }
 
+non_retained_may_own_preexec_barrier_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        arguments|\
+        starttime|\
+        publication-unsafe|\
+        publication-timeout|\
+        lineage-mainpid|\
+        lineage-invocation|\
+        lineage-starttime|\
+        lineage-marker|\
+        shape-mainpid-argument|\
+        shape-invocation-argument|\
+        shape-count-arguments|\
+        shape-type|\
+        shape-restart-usec|\
+        shape-control-pid|\
+        shape-main-pid|\
+        shape-invocation|\
+        shape-restarts|\
+        shape-fdstore-count|\
+        shape-fdstore-max|\
+        shape-fdstore-preserve|\
+        shape-exec-start-post|\
+        shape-control-group|\
+        shape-control-group-id|\
+        shape-cgroup-path|\
+        shape-cgroup-procs|\
+        shape-cgroup-members|\
+        shape-cgroup-type|\
+        shape-cgroup-stat|\
+        record-size|\
+        expectation-create|\
+        expectation-write|\
+        record-content|\
+        launcher-executable|\
+        freezer)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 report_non_retained_may_own_launch_failure_category() {
     [ "$#" -eq 1 ] || return 1
     non_retained_diagnostic=$1
@@ -528,8 +571,29 @@ report_non_retained_may_own_launch_failure_category() {
         non_retained_may_own_launch_failure_category \
             "$non_retained_may_own_reason" \
     ) || return 1
+    non_retained_may_own_preexec_category=
+    if [ "$non_retained_may_own_category" = preexec-barrier ]; then
+        non_retained_may_own_preexec_prefix='VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1='
+        [ "$(grep -Fc "$non_retained_may_own_preexec_prefix" \
+            "$non_retained_diagnostic")" -eq 1 ] || return 1
+        non_retained_may_own_preexec_line=$(grep -F \
+            "$non_retained_may_own_preexec_prefix" \
+            "$non_retained_diagnostic") || return 1
+        case $non_retained_may_own_preexec_line in
+            "$non_retained_may_own_preexec_prefix"*)
+                non_retained_may_own_preexec_category=${non_retained_may_own_preexec_line#"$non_retained_may_own_preexec_prefix"}
+                ;;
+            *) return 1 ;;
+        esac
+        non_retained_may_own_preexec_barrier_stage_is_safe \
+            "$non_retained_may_own_preexec_category" || return 1
+    fi
     printf 'non-retained helper-boundary PR smoke MayOwn launch category: %s\n' \
         "$non_retained_may_own_category" >&2
+    if [ -n "$non_retained_may_own_preexec_category" ]; then
+        printf 'non-retained helper-boundary PR smoke MayOwn preexec category: %s\n' \
+            "$non_retained_may_own_preexec_category" >&2
+    fi
 }
 
 non_retained_boundary_validator_stage_is_safe() {

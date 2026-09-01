@@ -974,6 +974,7 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^report_non_retained_blocked_category() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_may_own_launch_failure_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_may_own_preexec_barrier_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_may_own_launch_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_boundary_validator_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_boundary_validator_failure_category() {$/,/^}$/p' "$runner"
@@ -997,7 +998,7 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 31
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 32
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -1487,13 +1488,25 @@ test ! -s "$last_stdout" && test ! -s "$last_stderr"
 while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
     printf 'live worker-identity proof failed: %s\n' "$may_own_reason" \
         >"$branch_failure_diagnostic"
+    if [ "$may_own_category" = preexec-barrier ]; then
+        printf '%s\n' \
+            'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=shape-cgroup-stat' \
+            >>"$branch_failure_diagnostic"
+    fi
     printf 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=%s\n' "$may_own_phase" \
         >>"$branch_failure_diagnostic"
     expect_status 0 report_non_retained_may_own_launch_failure_category \
         "$branch_failure_diagnostic"
     test ! -s "$last_stdout"
-    test "$(cat "$last_stderr")" = \
-        "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category"
+    if [ "$may_own_category" = preexec-barrier ]; then
+        test "$(cat "$last_stderr")" = \
+            "$(printf '%s\n%s' \
+                'non-retained helper-boundary PR smoke MayOwn launch category: preexec-barrier' \
+                'non-retained helper-boundary PR smoke MayOwn preexec category: shape-cgroup-stat')"
+    else
+        test "$(cat "$last_stderr")" = \
+            "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category"
+    fi
 done <<'EOF'
 ExactPresent retirement was not confirmed before MayOwn proof|prerequisite|restart-retirement
 MayOwn singleton unit name is unsafe|unit-name|may-own-launch
@@ -1514,6 +1527,73 @@ MayOwn first pre-exec barrier is not manager-bound|preexec-barrier|may-own-launc
 MayOwn first external pre-exec observer did not arm|preexec-observer|may-own-launch
 MayOwn first freeze handshake path is unsafe|handshake-path|may-own-launch
 EOF
+
+for may_own_preexec_category in \
+    arguments \
+    starttime \
+    publication-unsafe \
+    publication-timeout \
+    lineage-mainpid \
+    lineage-invocation \
+    lineage-starttime \
+    lineage-marker \
+    shape-mainpid-argument \
+    shape-invocation-argument \
+    shape-count-arguments \
+    shape-type \
+    shape-restart-usec \
+    shape-control-pid \
+    shape-main-pid \
+    shape-invocation \
+    shape-restarts \
+    shape-fdstore-count \
+    shape-fdstore-max \
+    shape-fdstore-preserve \
+    shape-exec-start-post \
+    shape-control-group \
+    shape-control-group-id \
+    shape-cgroup-path \
+    shape-cgroup-procs \
+    shape-cgroup-members \
+    shape-cgroup-type \
+    shape-cgroup-stat \
+    record-size \
+    expectation-create \
+    expectation-write \
+    record-content \
+    launcher-executable \
+    freezer
+do
+    expect_status 0 non_retained_may_own_preexec_barrier_stage_is_safe \
+        "$may_own_preexec_category"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+for unsafe_may_own_preexec_category in \
+    '' private-detail shape-private /tmp/value 'shape-type value'
+do
+    expect_status 1 non_retained_may_own_preexec_barrier_stage_is_safe \
+        "$unsafe_may_own_preexec_category"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first pre-exec barrier is not manager-bound' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=private-detail' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=may-own-launch' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n%s\n' \
+    'live worker-identity proof failed: MayOwn first pre-exec barrier is not manager-bound' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=shape-type' \
+    'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=freezer' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=may-own-launch' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_may_own_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
 printf '%s\n' \
     'live worker-identity proof failed: private MayOwn launch detail' \
