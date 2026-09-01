@@ -1,18 +1,23 @@
 //! Callable ownership seam for the native multipath QUIC client process.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     future::Future,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
     os::fd::OwnedFd,
     time::Duration,
 };
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::time::{Instant, sleep_until};
+use tokio::{
+    net::UdpSocket,
+    time::{Instant, MissedTickBehavior, interval, sleep_until},
+};
 use volparossa_discovery::ExitMpquicSessionSignal;
 use volparossa_exit::{ExitNativeRouteAuthorization, ExitNativeRouteCredentialAuthorization};
+use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_quic::{
     AddPath, NativeClient, NativeClientError, NativeProcessRole, NativeResultCode, ReceiveDatagram,
     ReceivedDatagram, SendDatagram, StartExitSession, StartSession, StopSession, TransportMode,
@@ -36,6 +41,13 @@ const MINIMUM_MULTIPATH_PATHS_U32: u32 = 2;
 const MAXIMUM_MULTIPATH_PATHS: usize = 8;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAXIMUM_READY_WAIT: Duration = Duration::from_secs(10);
+const EXIT_DATAGRAM_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const MAXIMUM_EXIT_UDP_FLOWS: usize = 256;
+const MAXIMUM_EXIT_DATAGRAMS_PER_TICK: usize = 64;
+const MAXIMUM_EXIT_FLOW_IDLE: Duration = Duration::from_secs(10 * 60);
+const MINIMUM_MPQUIC_TUNNEL_MTU: usize = 1_280;
+const MAXIMUM_EXIT_UDP_PAYLOAD_BYTES: usize = MINIMUM_MPQUIC_TUNNEL_MTU - 20 - 8;
+const MPQUIC_TUNNEL_IPV4_PREFIX: [u8; 3] = [10, 76, 0];
 /// Fixed protected-overlay listener port for every path of one MPQUIC Exit association.
 pub const MPQUIC_EXIT_LISTENER_PORT: u16 = 44_443;
 const MPQUIC_CLIENT_PORT_BASE: u16 = 40_000;
@@ -223,14 +235,138 @@ pub(crate) struct ActiveProductionMpquicExitRoute {
     helper: HelperClient,
     owner: RuntimeBoundPreparedLeaseBatch,
     route_context_id: [u8; 16],
+    masque_context_id: u64,
     expires_at_ms: u64,
+    policy: VerifiedManifest,
+    flow_idle_timeout: Duration,
 }
 
 impl ActiveProductionMpquicExitRoute {
-    pub(crate) async fn run(self, now_ms: u64) {
-        let wait = Duration::from_millis(self.expires_at_ms.saturating_sub(now_ms));
-        tokio::time::sleep(wait).await;
-        let _ = self.shutdown().await;
+    /// Bridge policy-authorized inner IPv4/UDP datagrams until route or policy expiry.
+    ///
+    /// Every destination gets one connected, route-local UDP socket. Its reverse traffic is
+    /// reconstructed only toward the exact tunnel-assigned Client address and application port.
+    pub(crate) async fn run(mut self, now_ms: u64) -> Result<(), ProductionMpquicError> {
+        let forwarding = self.forward_datagrams(now_ms).await;
+        let cleanup = self.shutdown().await;
+        match (forwarding, cleanup) {
+            (Err(error), _) => Err(error),
+            (Ok(()), result) => result,
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded fail-closed MPQUIC Exit forwarding loop"
+    )]
+    async fn forward_datagrams(&mut self, now_ms: u64) -> Result<(), ProductionMpquicError> {
+        self.policy
+            .ensure_active_at(now_ms)
+            .map_err(|_| ProductionMpquicError::Invalid("active MPQUIC Exit policy"))?;
+        if now_ms >= self.expires_at_ms {
+            return Ok(());
+        }
+        let mut assigned_client_ipv4 = None;
+        let mut flows = HashMap::<ExitUdpFlowKey, ExitUdpFlow>::new();
+        let mut packet_id = 0_u16;
+        let mut response_buffer = vec![0_u8; MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1];
+        let mut poll = interval(EXIT_DATAGRAM_POLL_INTERVAL);
+        poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            poll.tick().await;
+            let current_ms = crate::unix_millis();
+            if current_ms >= self.expires_at_ms || self.policy.ensure_active_at(current_ms).is_err()
+            {
+                return Ok(());
+            }
+            let now = Instant::now();
+            flows.retain(|_, flow| now.duration_since(flow.last_activity) < self.flow_idle_timeout);
+
+            for _ in 0..MAXIMUM_EXIT_DATAGRAMS_PER_TICK {
+                let Some(packet) =
+                    receive_inner_ip(&self.client, self.route_context_id, self.masque_context_id)
+                        .await?
+                else {
+                    break;
+                };
+                let datagram = authorize_exit_ipv4_udp(
+                    &self.policy,
+                    current_ms,
+                    &packet,
+                    assigned_client_ipv4,
+                )?;
+                assigned_client_ipv4 = Some(*datagram.client.ip());
+                let key = ExitUdpFlowKey {
+                    client: datagram.client,
+                    destination: datagram.destination,
+                };
+                if !flows.contains_key(&key) {
+                    if flows.len() >= MAXIMUM_EXIT_UDP_FLOWS {
+                        return Err(ProductionMpquicError::Invalid("MPQUIC Exit UDP flow bound"));
+                    }
+                    flows.insert(key, ExitUdpFlow::connect(key.destination).await?);
+                }
+                let flow = flows
+                    .get_mut(&key)
+                    .ok_or(ProductionMpquicError::Invalid("MPQUIC Exit UDP flow"))?;
+                let sent = flow.socket.send(datagram.payload).await?;
+                if sent != datagram.payload.len() {
+                    return Err(ProductionMpquicError::Invalid(
+                        "complete MPQUIC Exit UDP payload",
+                    ));
+                }
+                flow.last_activity = now;
+            }
+
+            let mut reverse_packets = Vec::new();
+            'flows: for (key, flow) in &mut flows {
+                loop {
+                    match flow.socket.try_recv(&mut response_buffer) {
+                        Ok(length) => {
+                            if length > MAXIMUM_EXIT_UDP_PAYLOAD_BYTES {
+                                return Err(ProductionMpquicError::Invalid(
+                                    "MPQUIC Exit UDP response payload bound",
+                                ));
+                            }
+                            self.policy
+                                .authorize_ip(
+                                    current_ms,
+                                    IpAddr::V4(*key.destination.ip()),
+                                    TransportProtocol::Udp,
+                                    key.destination.port(),
+                                )
+                                .map_err(|_| {
+                                    ProductionMpquicError::Invalid(
+                                        "active MPQUIC Exit UDP response policy",
+                                    )
+                                })?;
+                            packet_id = packet_id.wrapping_add(1);
+                            reverse_packets.push(build_reverse_ipv4_udp(
+                                *key,
+                                &response_buffer[..length],
+                                packet_id,
+                            )?);
+                            flow.last_activity = Instant::now();
+                            if reverse_packets.len() >= MAXIMUM_EXIT_DATAGRAMS_PER_TICK {
+                                break 'flows;
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            for packet in reverse_packets {
+                send_inner_ip(
+                    &self.client,
+                    self.route_context_id,
+                    self.masque_context_id,
+                    packet,
+                )
+                .await?;
+            }
+        }
     }
 
     async fn shutdown(self) -> Result<(), ProductionMpquicError> {
@@ -247,6 +383,172 @@ impl ActiveProductionMpquicExitRoute {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ExitUdpFlowKey {
+    client: SocketAddrV4,
+    destination: SocketAddrV4,
+}
+
+struct ExitUdpFlow {
+    socket: UdpSocket,
+    last_activity: Instant,
+}
+
+impl ExitUdpFlow {
+    async fn connect(destination: SocketAddrV4) -> Result<Self, ProductionMpquicError> {
+        let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).await?;
+        socket.connect(destination).await?;
+        Ok(Self {
+            socket,
+            last_activity: Instant::now(),
+        })
+    }
+}
+
+struct ParsedExitIpv4Udp<'a> {
+    client: SocketAddrV4,
+    destination: SocketAddrV4,
+    payload: &'a [u8],
+}
+
+fn authorize_exit_ipv4_udp<'a>(
+    policy: &VerifiedManifest,
+    now_ms: u64,
+    packet: &'a [u8],
+    assigned_client_ipv4: Option<Ipv4Addr>,
+) -> Result<ParsedExitIpv4Udp<'a>, ProductionMpquicError> {
+    let datagram = parse_exit_ipv4_udp(packet, assigned_client_ipv4)?;
+    policy
+        .authorize_ip(
+            now_ms,
+            IpAddr::V4(*datagram.destination.ip()),
+            TransportProtocol::Udp,
+            datagram.destination.port(),
+        )
+        .map_err(|_| {
+            ProductionMpquicError::Invalid("policy-authorized MPQUIC Exit UDP destination")
+        })?;
+    Ok(datagram)
+}
+
+fn parse_exit_ipv4_udp(
+    packet: &[u8],
+    assigned_client_ipv4: Option<Ipv4Addr>,
+) -> Result<ParsedExitIpv4Udp<'_>, ProductionMpquicError> {
+    if packet.len() < 28
+        || packet.len() > MINIMUM_MPQUIC_TUNNEL_MTU
+        || packet[0] != 0x45
+        || usize::from(u16::from_be_bytes([packet[2], packet[3]])) != packet.len()
+        || u16::from_be_bytes([packet[6], packet[7]]) & 0x3fff != 0
+        || packet[8] == 0
+        || packet[9] != 17
+        || internet_checksum(&packet[..20]) != 0
+    {
+        return Err(ProductionMpquicError::Invalid(
+            "complete MPQUIC Exit IPv4/UDP packet",
+        ));
+    }
+    let source_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+    let destination_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+    let source_octets = source_ip.octets();
+    if source_octets[..3] != MPQUIC_TUNNEL_IPV4_PREFIX
+        || !(2..=254).contains(&source_octets[3])
+        || assigned_client_ipv4.is_some_and(|assigned| assigned != source_ip)
+    {
+        return Err(ProductionMpquicError::Invalid(
+            "MPQUIC Exit tunnel assignment",
+        ));
+    }
+    let udp = &packet[20..];
+    let source_port = u16::from_be_bytes([udp[0], udp[1]]);
+    let destination_port = u16::from_be_bytes([udp[2], udp[3]]);
+    let udp_length = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
+    if source_port == 0
+        || destination_port == 0
+        || udp_length != udp.len()
+        || udp_length < 8
+        || udp_length - 8 > MAXIMUM_EXIT_UDP_PAYLOAD_BYTES
+        || udp[6..8] == [0, 0]
+        || udp_ipv4_checksum(source_ip, destination_ip, udp) != 0
+    {
+        return Err(ProductionMpquicError::Invalid(
+            "complete MPQUIC Exit UDP datagram",
+        ));
+    }
+    Ok(ParsedExitIpv4Udp {
+        client: SocketAddrV4::new(source_ip, source_port),
+        destination: SocketAddrV4::new(destination_ip, destination_port),
+        payload: &udp[8..],
+    })
+}
+
+fn build_reverse_ipv4_udp(
+    flow: ExitUdpFlowKey,
+    payload: &[u8],
+    packet_id: u16,
+) -> Result<Vec<u8>, ProductionMpquicError> {
+    if payload.len() > MAXIMUM_EXIT_UDP_PAYLOAD_BYTES {
+        return Err(ProductionMpquicError::Invalid(
+            "MPQUIC Exit UDP response payload",
+        ));
+    }
+    let udp_length = 8_usize
+        .checked_add(payload.len())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or(ProductionMpquicError::Invalid(
+            "MPQUIC Exit UDP response length",
+        ))?;
+    let total_length = 20_u16
+        .checked_add(udp_length)
+        .ok_or(ProductionMpquicError::Invalid(
+            "MPQUIC Exit IPv4 response length",
+        ))?;
+    let mut packet = vec![0_u8; usize::from(total_length)];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&total_length.to_be_bytes());
+    packet[4..6].copy_from_slice(&packet_id.to_be_bytes());
+    packet[6..8].copy_from_slice(&0x4000_u16.to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&flow.destination.ip().octets());
+    packet[16..20].copy_from_slice(&flow.client.ip().octets());
+    let header_checksum = internet_checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+
+    packet[20..22].copy_from_slice(&flow.destination.port().to_be_bytes());
+    packet[22..24].copy_from_slice(&flow.client.port().to_be_bytes());
+    packet[24..26].copy_from_slice(&udp_length.to_be_bytes());
+    packet[28..].copy_from_slice(payload);
+    let checksum = udp_ipv4_checksum(*flow.destination.ip(), *flow.client.ip(), &packet[20..]);
+    packet[26..28]
+        .copy_from_slice(&(if checksum == 0 { u16::MAX } else { checksum }).to_be_bytes());
+    Ok(packet)
+}
+
+fn udp_ipv4_checksum(source: Ipv4Addr, destination: Ipv4Addr, udp: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(12 + udp.len());
+    pseudo.extend_from_slice(&source.octets());
+    pseudo.extend_from_slice(&destination.octets());
+    pseudo.push(0);
+    pseudo.push(17);
+    pseudo.extend_from_slice(&u16::try_from(udp.len()).unwrap_or(u16::MAX).to_be_bytes());
+    pseudo.extend_from_slice(udp);
+    internet_checksum(&pseudo)
+}
+
+fn internet_checksum(bytes: &[u8]) -> u16 {
+    let mut sum = bytes.chunks_exact(2).fold(0_u32, |sum, word| {
+        sum + u32::from(u16::from_be_bytes([word[0], word[1]]))
+    });
+    if let Some(byte) = bytes.chunks_exact(2).remainder().first() {
+        sum += u32::from(*byte) << 8;
+    }
+    while sum > u32::from(u16::MAX) {
+        sum = (sum & u32::from(u16::MAX)) + (sum >> 16);
+    }
+    !u16::try_from(sum).unwrap_or(u16::MAX)
+}
+
 /// Start one exact native Exit listener per committed Relay path and return only after the final
 /// listener makes the native hard-multipath set ready.
 #[allow(
@@ -261,6 +563,9 @@ pub(crate) async fn start_production_mpquic_exit(
     commit: CommitLeaseBatch,
     credential: ExitNativeRouteCredentialAuthorization,
     paths: Vec<ExitMpquicPathAuthorization>,
+    policy: VerifiedManifest,
+    signed_policy_hash: [u8; 32],
+    flow_idle_timeout: Duration,
     now_ms: u64,
 ) -> Result<(ActiveProductionMpquicExitRoute, ExitMpquicSessionSignal), ProductionMpquicError> {
     let authorization = match NativeExitAuthorizationParts::from_credential(credential) {
@@ -294,6 +599,10 @@ pub(crate) async fn start_production_mpquic_exit(
                 lease.path_id == *path_id && lease.role == WireguardRole::Exit as i32
             });
     if authorization.expires_at_ms <= now_ms
+        || policy.ensure_active_at(now_ms).is_err()
+        || policy.policy_hash() != &signed_policy_hash
+        || flow_idle_timeout.is_zero()
+        || flow_idle_timeout > MAXIMUM_EXIT_FLOW_IDLE
         || preflight.native_instance_id != authorization.exit_native_instance_id
         || ContextRole::try_from(owner.prepare().role).ok() != Some(ContextRole::Exit)
         || owner.prepare().route_context_id != route_context_id
@@ -391,7 +700,10 @@ pub(crate) async fn start_production_mpquic_exit(
             helper,
             owner,
             route_context_id,
+            masque_context_id: authorization.masque_context_id,
             expires_at_ms: authorization.expires_at_ms,
+            policy,
+            flow_idle_timeout,
         },
         signal,
     ))
@@ -1324,6 +1636,9 @@ pub enum ProductionMpquicError {
     /// The signed exact-destination UDP authorization expired or was otherwise unusable.
     #[error("native MPQUIC browser flow authorization failed: {0}")]
     Flow(#[from] UdpError),
+    /// The route-local connected Exit UDP socket could not be created or used.
+    #[error("native MPQUIC Exit UDP egress failed: {0}")]
+    ExitUdp(#[from] io::Error),
 }
 
 #[cfg(test)]
@@ -1343,10 +1658,12 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::{UnixListener, UnixStream},
     };
+    use volparossa_policy::{DestinationRule, ProtocolPort};
     use volparossa_quic::{
         NATIVE_API_VERSION, NativeProcessIdentity, NativeRequest, NativeResponse, Preflight,
         encode_response, native_request, read_request, request_sha256,
     };
+    use volparossa_test_support::verified_development_manifest;
 
     use super::*;
 
@@ -1469,6 +1786,100 @@ mod tests {
 
     fn socket() -> OwnedFd {
         UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().into()
+    }
+
+    fn outbound_ipv4_udp(
+        client: SocketAddrV4,
+        destination: SocketAddrV4,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        build_reverse_ipv4_udp(
+            ExitUdpFlowKey {
+                client: destination,
+                destination: client,
+            },
+            payload,
+            7,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn exit_udp_packet_is_policy_assignment_and_checksum_bound() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        let client = SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 7), 51_234);
+        let destination = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 44_443);
+        let permission = ProtocolPort::new(TransportProtocol::Udp, destination.port()).unwrap();
+        let rule = DestinationRule::exact_ip(IpAddr::V4(*destination.ip()), [permission]).unwrap();
+        let policy = verified_development_manifest(NOW_MS, vec![rule]).unwrap();
+        let packet = outbound_ipv4_udp(client, destination, b"browser-quic");
+
+        let authorized = authorize_exit_ipv4_udp(&policy, NOW_MS, &packet, None).unwrap();
+        assert_eq!(authorized.client, client);
+        assert_eq!(authorized.destination, destination);
+        assert_eq!(authorized.payload, b"browser-quic");
+        assert!(
+            authorize_exit_ipv4_udp(&policy, NOW_MS, &packet, Some(Ipv4Addr::new(10, 76, 0, 8)),)
+                .is_err()
+        );
+
+        let denied = outbound_ipv4_udp(
+            client,
+            SocketAddrV4::new(*destination.ip(), destination.port() + 1),
+            b"browser-quic",
+        );
+        assert!(authorize_exit_ipv4_udp(&policy, NOW_MS, &denied, None).is_err());
+        let mut unchecked_udp = packet.clone();
+        unchecked_udp[26..28].fill(0);
+        assert!(authorize_exit_ipv4_udp(&policy, NOW_MS, &unchecked_udp, None).is_err());
+        let mut corrupt = packet;
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(authorize_exit_ipv4_udp(&policy, NOW_MS, &corrupt, None).is_err());
+    }
+
+    #[test]
+    fn reverse_udp_packet_targets_exact_assigned_client_tuple() {
+        let flow = ExitUdpFlowKey {
+            client: SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 23), 53_001),
+            destination: SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 443),
+        };
+        let packet = build_reverse_ipv4_udp(flow, b"reply", 19).unwrap();
+        assert_eq!(
+            udp_packet_tuple(&packet).unwrap(),
+            (
+                SocketAddr::V4(flow.destination),
+                SocketAddr::V4(flow.client)
+            )
+        );
+        assert_eq!(internet_checksum(&packet[..20]), 0);
+        assert_eq!(
+            udp_ipv4_checksum(*flow.destination.ip(), *flow.client.ip(), &packet[20..]),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_flow_reuses_one_connected_udp_socket_for_return_traffic() {
+        let destination = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let SocketAddr::V4(destination_address) = destination.local_addr().unwrap() else {
+            panic!("IPv4 test destination");
+        };
+        let flow = ExitUdpFlow::connect(destination_address).await.unwrap();
+        let local = flow.socket.local_addr().unwrap();
+        flow.socket.send(b"one").await.unwrap();
+        let mut request = [0_u8; 16];
+        let (length, peer) = destination.recv_from(&mut request).await.unwrap();
+        assert_eq!(&request[..length], b"one");
+        destination.send_to(b"return", peer).await.unwrap();
+        let mut response = [0_u8; 16];
+        let length = flow.socket.recv(&mut response).await.unwrap();
+        assert_eq!(&response[..length], b"return");
+        flow.socket.send(b"two").await.unwrap();
+        let (_, second_peer) = destination.recv_from(&mut request).await.unwrap();
+        assert_eq!(peer, second_peer);
+        assert_eq!(flow.socket.local_addr().unwrap(), local);
     }
 
     #[tokio::test]

@@ -8657,7 +8657,7 @@ impl DiscoveryRuntime {
             .remove(&route_context_id)
             .expect("complete MPQUIC Exit session");
         let signal = self
-            .start_production_mpquic_exit_session(&pending.canonical_start, now_ms)
+            .start_production_mpquic_exit_session(&pending.canonical_start, now_ms, state)
             .await;
         if let Some(encoded_signal) = signal {
             self.send_pending_mpquic_exit_granted(pending, &encoded_signal);
@@ -8681,6 +8681,7 @@ impl DiscoveryRuntime {
         &mut self,
         encoded_start: &[u8],
         now_ms: u64,
+        state: &Arc<RwLock<AgentState>>,
     ) -> Option<Vec<u8>> {
         let scope = verified_mpquic_session_start_scope(encoded_start, now_ms)?;
         let start = decode_canonical::<MpquicSessionStartRequest>(
@@ -8689,6 +8690,11 @@ impl DiscoveryRuntime {
         )
         .ok()?;
         let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)?;
+        let signed_policy_hash = fixed_bytes::<32>(&scope.exit.policy_hash)?;
+        let policy = state.read().await.active_policy(now_ms)?;
+        if policy.policy_hash() != &signed_policy_hash {
+            return None;
+        }
         let route = self
             .prepared_production_exit_routes
             .get(&route_context_id)?;
@@ -8744,6 +8750,9 @@ impl DiscoveryRuntime {
             route.commit.take()?,
             credential,
             paths,
+            policy,
+            signed_policy_hash,
+            Duration::from_secs(self.config.udp.idle_timeout_seconds),
             now_ms,
         )
         .await;
@@ -8759,7 +8768,9 @@ impl DiscoveryRuntime {
             usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
         )
         .ok()?;
-        tokio::spawn(active.run(now_ms));
+        tokio::spawn(async move {
+            let _ = active.run(now_ms).await;
+        });
         Some(encoded)
     }
 
