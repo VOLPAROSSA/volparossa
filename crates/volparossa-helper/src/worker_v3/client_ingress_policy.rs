@@ -1044,6 +1044,7 @@ mod tests {
     const SMOKE_OUTER: &str = "VOLPAROSSA_TEST_INGRESS_OUTPUT_NETNS";
     const SMOKE_WORKER: &str = "VOLPAROSSA_TEST_INGRESS_WORKER_NETNS";
     const SMOKE_TEST: &str = "worker_v3::client_ingress_policy::tests::parent_output_steering_delivers_udp_over_real_veth";
+    const SMOKE_PAYLOAD: &[u8] = b"volparossa-real-ingress-udp";
 
     #[test]
     fn ipv4_policy_is_one_atomic_bounded_batch() {
@@ -1196,9 +1197,8 @@ mod tests {
         )
         .expect("install parent output steering");
 
-        const PAYLOAD: &[u8] = b"volparossa-real-ingress-udp";
         let app = UdpSocket::bind("192.0.2.2:0").expect("bind app underlay address");
-        app.send_to(PAYLOAD, "198.18.0.42:4242")
+        app.send_to(SMOKE_PAYLOAD, "198.18.0.42:4242")
             .expect("send app packet");
         let receiver = UdpSocket::from(transparent_udp);
         receiver
@@ -1207,11 +1207,11 @@ mod tests {
         receiver
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("bounded receive");
-        let mut received = [0_u8; 128];
+        let mut datagram = [0_u8; 128];
         let (length, _) = receiver
-            .recv_from(&mut received)
+            .recv_from(&mut datagram)
             .expect("packet reached transferred transparent socket");
-        assert_eq!(&received[..length], PAYLOAD);
+        assert_eq!(&datagram[..length], SMOKE_PAYLOAD);
 
         remove_parent(&parent_policy, deadline).expect("remove exact parent nft table");
         parent_kernel
@@ -1236,6 +1236,7 @@ mod tests {
         assert!(child.wait().expect("wait worker smoke child").success());
     }
 
+    #[allow(clippy::too_many_lines)] // One disposable process owns setup, proof, and teardown.
     fn run_worker_smoke_child() {
         println!("VPI_READY");
         io::stdout().flush().expect("flush readiness");

@@ -2125,6 +2125,7 @@ impl FunctionalAlphaLeaseBackend {
             .ok_or(BackendError::CleanupIncomplete)
     }
 
+    #[allow(clippy::too_many_lines, clippy::single_match_else)] // Parent and worker policy activation share one exact rollback transaction.
     async fn activate_ingress_one(
         &self,
         binding: IngressBackendBinding,
