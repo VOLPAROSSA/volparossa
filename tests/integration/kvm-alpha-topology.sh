@@ -777,7 +777,10 @@ if [ "$AGENT_UID" -eq 0 ] || [ "$AGENT_GID" -eq 0 ] \
     fail IDENTITY_INVALID
 fi
 chown "root:$AGENT_GID" "$WORK"
-chmod 0750 "$WORK"
+# The disposable application processes run as the distinct volparossa-worker
+# identity and must be able to traverse to root-owned, read-only fixtures.
+# Credential, state and destination directories below retain their narrower modes.
+chmod 0755 "$WORK"
 install -d -o root -g "$AGENT_GID" -m 0755 "$WORK/bin"
 for staged_executable in volparossa volparossa-agent volparossa-helper; do
     install -o root -g "$AGENT_GID" -m 0555 \
@@ -3399,14 +3402,18 @@ start_privacy_observers || fail PRIVACY_CAPTURE_UNAVAILABLE
 start_http3_observers a06 - || fail A06_CAPTURE_UNAVAILABLE
 set +e
 timeout --signal=TERM --kill-after=5s 200s \
-    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+    ip netns exec "$CLIENT" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/http3-acceptance-fixture" client a06 \
     43.159.1.1:0 47.163.4.2:443 "$WORK/destination/http3-cert.der" \
-    "$RUN_ID" "$WORK/a06-client.json" 2>"$WORK/a06-client.err"
+    "$RUN_ID" "$WORK/destination/client-a06.json" 2>"$WORK/a06-client.err"
 A06_STATUS=$?
 set -e
+if [ -s "$WORK/destination/client-a06.json" ]; then
+    install -o root -g root -m 0600 "$WORK/destination/client-a06.json" \
+        "$WORK/a06-client.json"
+fi
 destination_attempt=0
 while [ "$A06_STATUS" -eq 0 ] && [ "$destination_attempt" -lt 100 ] \
     && [ ! -s "$WORK/destination/server-a06.json" ]; do
@@ -3499,12 +3506,12 @@ A07_STATUS=1
 start_http3_observers a07 "$WORK/a07-relay-removal.marker" \
     || fail A07_CAPTURE_UNAVAILABLE
 timeout --signal=TERM --kill-after=5s 200s \
-    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+    ip netns exec "$CLIENT" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/http3-acceptance-fixture" client a07 \
     43.159.1.1:0 47.163.4.2:443 "$WORK/destination/http3-cert.der" \
-    "$RUN_ID" "$WORK/a07-client.json" 2>"$WORK/a07-client.err" &
+    "$RUN_ID" "$WORK/destination/client-a07.json" 2>"$WORK/a07-client.err" &
 HTTP3_CLIENT_PID=$!
 attempt=0
 while [ "$attempt" -lt 1800 ]; do
@@ -3536,6 +3543,10 @@ wait "$HTTP3_CLIENT_PID"
 A07_STATUS=$?
 set -e
 HTTP3_CLIENT_PID=
+if [ -s "$WORK/destination/client-a07.json" ]; then
+    install -o root -g root -m 0600 "$WORK/destination/client-a07.json" \
+        "$WORK/a07-client.json"
+fi
 destination_attempt=0
 while [ "$A07_STATUS" -eq 0 ] && [ "$destination_attempt" -lt 100 ] \
     && [ ! -s "$WORK/destination/server-a07.json" ]; do

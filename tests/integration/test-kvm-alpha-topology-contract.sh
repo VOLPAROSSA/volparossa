@@ -144,7 +144,8 @@ grep -F 'active contexts: 0' "$GUEST" >/dev/null
 grep -F 'destination == "47.163.4.2" and destination_port == 443' "$GUEST" \
     >/dev/null
 grep -F 'capture_native_mpquic_paths()' "$GUEST" >/dev/null
-grep -F 'agent local-control native MPQUIC counters' "$GUEST" >/dev/null
+grep -F 'native daemon exposes an ACK/accounting counter' "$GUEST" >/dev/null
+grep -F '"native_acked_bytes": int(user_bytes)' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A06",success:$success' "$GUEST" >/dev/null
 grep -F 'a06_http3_mpquic:{requested:$a06_requested,succeeded:$a06_succeeded' "$GUEST" \
     >/dev/null
