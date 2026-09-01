@@ -332,12 +332,17 @@ may_own_preexec_wait_contract_is_exact() {
         /while ! vp_capture_file_is_safe "\$may_own_barrier_record"; do/ {
             wait_loop = NR; wait_loop_count++
         }
-        /\[ ! -e "\$may_own_barrier_record"/ {
+        /if \[ -e "\$may_own_barrier_record" \]/ {
             unsafe_exists = NR; unsafe_exists_count++
         }
-        /&& \[ ! -L "\$may_own_barrier_record" \]/ {
+        /\|\| \[ -L "\$may_own_barrier_record" \]; then/ {
             unsafe_symlink = NR; unsafe_symlink_count++
         }
+        /^            vp_capture_file_is_safe "\$may_own_barrier_record" \|\| return 1$/ {
+            publication_recheck = NR; publication_recheck_count++
+        }
+        /^            break$/ { publication_break = NR; publication_break_count++ }
+        /^        fi$/ { publication_fi = NR; publication_fi_count++ }
         /systemctl show --property=MainPID --value "\$unit_name"/ {
             main_pid[++main_pid_count] = NR
         }
@@ -374,6 +379,9 @@ may_own_preexec_wait_contract_is_exact() {
         END {
             valid = wait_loop_count == 1 && unsafe_exists_count == 1
             valid = valid && unsafe_symlink_count == 1
+            valid = valid && publication_recheck_count == 1
+            valid = valid && publication_break_count == 1
+            valid = valid && publication_fi_count == 1
             valid = valid && main_pid_count == 2 && invocation_count == 2
             valid = valid && starttime_count == 1
             valid = valid && process_starttime_count == 2 && marker_count == 2
@@ -385,7 +393,10 @@ may_own_preexec_wait_contract_is_exact() {
             valid = valid && starttime[1] < wait_loop
             valid = valid && wait_loop < unsafe_exists
             valid = valid && unsafe_exists < unsafe_symlink
-            valid = valid && unsafe_symlink < main_pid[1]
+            valid = valid && unsafe_symlink < publication_recheck
+            valid = valid && publication_recheck < publication_break
+            valid = valid && publication_break < publication_fi
+            valid = valid && publication_fi < main_pid[1]
             valid = valid && main_pid[1] < invocation[1]
             valid = valid && invocation[1] < process_starttime[1]
             valid = valid && process_starttime[1] < marker[1]
@@ -424,6 +435,9 @@ sed \
 preexec_main_pid_mutant=$tmp/preexec-main-pid-mutant
 sed '0,/--property=MainPID/s//--property=MainPID_REMOVED/' \
     "$preexec_contract" >"$preexec_main_pid_mutant"
+preexec_publication_recheck_mutant=$tmp/preexec-publication-recheck-mutant
+sed '/^            vp_capture_file_is_safe /s/vp_capture_file_is_safe/false/' \
+    "$preexec_contract" >"$preexec_publication_recheck_mutant"
 preexec_invocation_mutant=$tmp/preexec-invocation-mutant
 sed '0,/unit_current_invocation_id/s//unit_current_invocation_id_removed/' \
     "$preexec_contract" >"$preexec_invocation_mutant"
@@ -455,7 +469,8 @@ awk '
     }
 ' "$preexec_contract" >"$preexec_shape_order_mutant"
 for preexec_mutant in \
-    "$preexec_single_shot_mutant" "$preexec_main_pid_mutant" \
+    "$preexec_single_shot_mutant" "$preexec_publication_recheck_mutant" \
+    "$preexec_main_pid_mutant" \
     "$preexec_invocation_mutant" "$preexec_starttime_mutant" \
     "$preexec_bound_mutant" "$preexec_shape_order_mutant"
 do

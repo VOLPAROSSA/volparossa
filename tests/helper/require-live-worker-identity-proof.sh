@@ -3742,8 +3742,11 @@ may_own_preexec_barrier_is_exact() {
         "$may_own_barrier_main_pid") || return 1
     may_own_barrier_wait=0
     while ! vp_capture_file_is_safe "$may_own_barrier_record"; do
-        [ ! -e "$may_own_barrier_record" ] \
-            && [ ! -L "$may_own_barrier_record" ] || return 1
+        if [ -e "$may_own_barrier_record" ] \
+            || [ -L "$may_own_barrier_record" ]; then
+            vp_capture_file_is_safe "$may_own_barrier_record" || return 1
+            break
+        fi
         [ "$(systemctl show --property=MainPID --value "$unit_name" \
             2>/dev/null || true)" = "$may_own_barrier_main_pid" ] \
             || return 1
