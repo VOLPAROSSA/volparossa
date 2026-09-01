@@ -70,6 +70,7 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 const INGRESS_POLICY_BACKOFF: Duration = Duration::from_millis(50);
 const BROWSER_QUIC_REVERSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAXIMUM_BROWSER_QUIC_RESPONSES_PER_TICK: usize = 64;
 
 /// Fully loaded unprivileged service.
 pub struct Agent {
@@ -518,6 +519,8 @@ async fn run_client_udp_ingress(
         return;
     };
     let mut browser_gate = BrowserQuicIngressGate::new();
+    let mut browser_reverse_poll = tokio::time::interval(BROWSER_QUIC_REVERSE_POLL_INTERVAL);
+    browser_reverse_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let browser_flow_active = routes.browser_quic_flow_active().await;
         if !browser_flow_active {
@@ -530,38 +533,41 @@ async fn run_client_udp_ingress(
                 }
                 continue;
             }
-            () = tokio::time::sleep(BROWSER_QUIC_REVERSE_POLL_INTERVAL), if browser_flow_active => {
+            _ = browser_reverse_poll.tick(), if browser_flow_active => {
                 let now_ms = unix_millis();
                 let Some(policy) = state.read().await.active_policy(now_ms) else {
                     routes.disconnect().await;
                     continue;
                 };
-                match routes.receive_browser_quic_response(&policy, now_ms).await {
-                    Ok(Some(response)) => {
-                        if runtime
-                            .send_ipv4_udp_response(
-                                response.application(),
-                                response.remote(),
-                                response.payload(),
-                            )
-                            .await
-                            .is_err()
-                        {
+                for _ in 0..MAXIMUM_BROWSER_QUIC_RESPONSES_PER_TICK {
+                    match routes.receive_browser_quic_response(&policy, now_ms).await {
+                        Ok(Some(response)) => {
+                            if runtime
+                                .send_ipv4_udp_response(
+                                    response.application(),
+                                    response.remote(),
+                                    response.payload(),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                state.write().await.log(
+                                    LogLevel::Warn,
+                                    "INGRESS_MPQUIC_REPLY_FAILED",
+                                    unix_millis(),
+                                );
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            routes.disconnect().await;
                             state.write().await.log(
                                 LogLevel::Warn,
-                                "INGRESS_MPQUIC_REPLY_FAILED",
+                                "INGRESS_MPQUIC_RESPONSE_UNAVAILABLE",
                                 unix_millis(),
                             );
+                            break;
                         }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        routes.disconnect().await;
-                        state.write().await.log(
-                            LogLevel::Warn,
-                            "INGRESS_MPQUIC_RESPONSE_UNAVAILABLE",
-                            unix_millis(),
-                        );
                     }
                 }
                 continue;

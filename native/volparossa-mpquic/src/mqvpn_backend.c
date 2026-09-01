@@ -33,6 +33,7 @@ typedef struct mqvpn_backend_path {
 typedef struct mqvpn_backend {
     mqvpn_client_t *client;
     mqvpn_backend_path_t paths[VMP_MAX_PATHS];
+    size_t next_read_path;
     uint64_t masque_context_id;
     vmp_transport_mode_t transport_mode;
     uint64_t netns_cookie;
@@ -55,6 +56,7 @@ typedef struct mqvpn_exit_path {
 typedef struct mqvpn_exit_backend {
     mqvpn_server_t *server;
     mqvpn_exit_path_t paths[VMP_MAX_PATHS];
+    size_t next_read_path;
     uint64_t masque_context_id;
     uint64_t netns_cookie;
     bool have_netns_cookie;
@@ -730,10 +732,21 @@ static vmp_transport_error_t backend_pump(void *session)
     uint8_t packet[VMP_OUTER_PACKET_CAPACITY];
     unsigned int budget = VMP_MAX_OUTER_READS_PER_PUMP;
     bool received_any = false;
-    for (size_t index = 0; index < VMP_MAX_PATHS && budget > 0U; ++index) {
+    const size_t read_start = backend->next_read_path;
+    for (size_t offset = 0; offset < VMP_MAX_PATHS && budget > 0U; ++offset) {
+        const size_t index = (read_start + offset) % VMP_MAX_PATHS;
         mqvpn_backend_path_t *path = &backend->paths[index];
         if (!path->used || path->fd < 0) continue;
         while (budget > 0U) {
+            /* Leave already-decoded inner datagrams queued until the Rust
+             * owner drains them. Reading beyond this bound would make an
+             * ordinary burst terminal at packet nine before ReceiveDatagram
+             * gets a chance to apply backpressure. */
+            if (backend->lifecycle.reverse_count >=
+                VMP_MQVPN_REVERSE_MAX_PACKETS) {
+                budget = 0U;
+                break;
+            }
             --budget;
             struct sockaddr_storage peer;
             socklen_t peer_len = (socklen_t)sizeof(peer);
@@ -764,6 +777,7 @@ static vmp_transport_error_t backend_pump(void *session)
             terminal = backend_terminal_error(backend);
             if (terminal != VMP_TRANSPORT_OK) return terminal;
             received_any = true;
+            backend->next_read_path = (index + 1U) % VMP_MAX_PATHS;
         }
     }
     if (received_any) {
@@ -1351,11 +1365,20 @@ static vmp_transport_error_t exit_backend_pump(void *session)
         return VMP_TRANSPORT_INVALID;
     }
     uint8_t packet[VMP_OUTER_PACKET_CAPACITY];
-    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+    size_t budget = VMP_MAX_OUTER_READS_PER_PUMP;
+    const size_t read_start = backend->next_read_path;
+    for (size_t offset = 0U;
+         offset < VMP_MAX_PATHS && budget > 0U; ++offset) {
+        const size_t index = (read_start + offset) % VMP_MAX_PATHS;
         mqvpn_exit_path_t *path = &backend->paths[index];
         if (!path->used) continue;
-        for (size_t read_index = 0U;
-             read_index < VMP_MAX_OUTER_READS_PER_PUMP; ++read_index) {
+        while (budget > 0U) {
+            if (backend->lifecycle.queue_count >=
+                VMP_MQVPN_EXIT_MAX_PACKETS) {
+                budget = 0U;
+                break;
+            }
+            --budget;
             struct sockaddr_storage peer;
             socklen_t peer_len = (socklen_t)sizeof(peer);
             const ssize_t length = recvfrom(
@@ -1377,6 +1400,7 @@ static vmp_transport_error_t exit_backend_pump(void *session)
                     VMP_MQVPN_EXIT_TERMINAL_ENGINE);
                 return VMP_TRANSPORT_ENGINE;
             }
+            backend->next_read_path = (index + 1U) % VMP_MAX_PATHS;
         }
     }
     return mqvpn_server_tick(backend->server) == MQVPN_OK
