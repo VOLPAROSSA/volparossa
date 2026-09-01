@@ -1,19 +1,19 @@
 //! Proof-carrying, in-memory selection input for route setup.
 //!
-//! This boundary deliberately has no runtime caller yet. Peerstore evidence can authenticate a
-//! short-lived advertisement, but it cannot supply current per-transport reachability, a
-//! conservative preselection capacity observation, or a complete client-relay-exit path. A future
-//! measurement producer must supply the typed, short-lived observations below before this module
-//! can be wired into production. Missing evidence fails closed; this module never substitutes
-//! neutral scores or advertised capacity for local observations.
+//! This boundary deliberately has no runtime caller yet. It can purpose-consume exact A1a/A1c
+//! proofs into the existing private freshness batch, but that control-plane proof cannot establish
+//! native dataplane-address usability or measured capacity. A later native-path sampler must add
+//! that independent evidence before selection can advance. Missing evidence fails closed; this
+//! module never substitutes neutral scores or advertised capacity for local observations.
 
 use std::{collections::HashSet, time::Duration};
 
-#[cfg(test)]
-use crate::discovery::RouteCandidatePolicySnapshot;
 use crate::discovery::{
-    AdvertisementPayloadHash, DirectRelayCandidateSnapshot, DirectRelayCapability,
-    ForwardedExitCandidateSnapshot, ForwardedExitCapability, RouteCandidateAdvertisement,
+    AdvertisementPayloadHash, BoundPreselectionFreshnessProofBatch,
+    CompletedPreselectionFreshnessAttempt, CoolingPreselectionAttemptGate,
+    DirectRelayCandidateSnapshot, DirectRelayCapability, ForwardedExitCandidateSnapshot,
+    ForwardedExitCapability, PreselectionTranscriptFreshnessFacts,
+    PreselectionTransportFreshnessFacts, RouteCandidateAdvertisement, RouteCandidatePolicySnapshot,
     RouteCandidateSnapshot,
 };
 use rand_core::{OsRng, RngCore};
@@ -26,7 +26,8 @@ use volparossa_core::{
 #[cfg(test)]
 use volparossa_peerstore::StoredPeer;
 use volparossa_protocol::{
-    ProbeAddressFamily, Transport as ProtocolTransport, node_id_from_public_key,
+    ObservationAddressFamily, PreselectionObservationRole, ProbeAddressFamily,
+    Transport as ProtocolTransport, node_id_from_public_key,
 };
 use volparossa_reservation::RelayPathIntent;
 use volparossa_selection::{
@@ -411,9 +412,11 @@ impl std::fmt::Debug for ForwardedControlBinding {
 /// Fresh local observation explicitly bound to one authenticated advertisement.
 ///
 /// It is intentionally not serializable and contains no destination, browsing or application
-/// origin, hostname or flow identity. Its conservative preselection capacity ceiling is neither
-/// an offer, hold, reservation nor admission authority. Construction is test-only until a real
-/// measurement producer exists.
+/// origin, hostname or flow identity. Its conservative configured preselection ceiling is neither
+/// a measurement, offer, hold, reservation nor admission authority. The production A1 proof join
+/// below leaves dataplane-address usability false until a separate native-path sampler proves it.
+/// A false `locally_blocked` value means only that this input carries no local blocklist hit; it is
+/// not affirmative policy-compliance evidence.
 #[derive(Clone)]
 struct FreshPeerEvidence {
     batch_id: EvidenceBatchId,
@@ -461,7 +464,7 @@ impl std::fmt::Debug for FreshPeerEvidence {
     }
 }
 
-/// Validated, bounded evidence owned by exactly one fake measurement batch.
+/// Validated, bounded evidence owned by exactly one affine local-observation batch.
 struct FreshEvidenceBatch {
     batch_id: EvidenceBatchId,
     entries: Vec<FreshPeerEvidence>,
@@ -805,6 +808,467 @@ enum SelectionBridgeError {
 impl From<SelectionError> for SelectionBridgeError {
     fn from(error: SelectionError) -> Self {
         Self::Selection(error)
+    }
+}
+
+/// Original snapshot, exact A1 freshness batch, and the retained cooldown owner.
+///
+/// This value grants no discovery dispatch or route authority. The private evidence deliberately
+/// remains unusable for dataplane selection until a later native-path sampler proves that the
+/// advertised dataplane address can carry the requested transport.
+struct JoinedPreselectionFreshEvidence {
+    snapshot: RouteCandidateSnapshot,
+    evidence_batch: FreshEvidenceBatch,
+    gate: CoolingPreselectionAttemptGate,
+}
+
+/// Terminal proof-to-evidence rejection with cooldown ownership retained.
+struct PreselectionEvidenceJoinFailure {
+    gate: CoolingPreselectionAttemptGate,
+    error: SelectionBridgeError,
+}
+
+struct ActorFreshnessProjection {
+    observed_network_prefix: ObservedNetworkPrefix,
+    observed_at_ms: u64,
+    round_trip: Duration,
+    signed_valid_until_ms: u64,
+}
+
+/// Consume one exact proof batch into the private selection evidence representation.
+#[allow(
+    clippy::result_large_err,
+    reason = "the terminal error must retain the non-cloneable cooldown owner affinely"
+)]
+fn join_preselection_fresh_evidence(
+    completed: CompletedPreselectionFreshnessAttempt,
+) -> Result<JoinedPreselectionFreshEvidence, PreselectionEvidenceJoinFailure> {
+    join_preselection_fresh_evidence_at(completed, crate::unix_millis())
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "the terminal error must retain the non-cloneable cooldown owner affinely"
+)]
+fn join_preselection_fresh_evidence_at(
+    completed: CompletedPreselectionFreshnessAttempt,
+    trusted_now_ms: u64,
+) -> Result<JoinedPreselectionFreshEvidence, PreselectionEvidenceJoinFailure> {
+    let (snapshot, proof_batch, gate) = completed.into_parts();
+    match fresh_evidence_batch_from_preselection(&snapshot, proof_batch, trusted_now_ms) {
+        Ok(evidence_batch) => Ok(JoinedPreselectionFreshEvidence {
+            snapshot,
+            evidence_batch,
+            gate,
+        }),
+        Err(error) => Err(PreselectionEvidenceJoinFailure { gate, error }),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one auditable affine mint validates the complete exact-set before producing private evidence"
+)]
+fn fresh_evidence_batch_from_preselection(
+    snapshot: &RouteCandidateSnapshot,
+    proof_batch: BoundPreselectionFreshnessProofBatch,
+    trusted_now_ms: u64,
+) -> Result<FreshEvidenceBatch, SelectionBridgeError> {
+    let (
+        protocol_transport,
+        protocol_family,
+        batch_bytes,
+        attempt_started_at_ms,
+        attempt_deadline_ms,
+        minimum_capacity,
+        preselection_capacity_ceiling,
+        records,
+    ) = proof_batch.into_parts();
+    let transport = selection_transport(protocol_transport)?;
+    let family = selection_family(protocol_family)?;
+    let direct_count = snapshot.direct_relays().len();
+    if batch_bytes == [0; ID_BYTES]
+        || snapshot.forwarded_exits().len() != 1
+        || !(2..=9).contains(&direct_count)
+        || records.len() != direct_count
+        || attempt_started_at_ms == 0
+        || attempt_started_at_ms > trusted_now_ms
+        || trusted_now_ms >= attempt_deadline_ms
+        || minimum_capacity.validate().is_err()
+        || minimum_capacity.up_mbps == 0
+        || minimum_capacity.down_mbps == 0
+        || preselection_capacity_ceiling.validate().is_err()
+        || !preselection_capacity_ceiling.satisfies(minimum_capacity)
+    {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+    let forwarded = &snapshot.forwarded_exits()[0];
+    let control_index = exact_control_candidate_index(snapshot, forwarded)?;
+    let exit_subject = direct_count;
+    let mut relay_projections = (0..direct_count).map(|_| None).collect::<Vec<_>>();
+    let mut exit_projection = None;
+    for record in records {
+        let (subject, forwarded_control, role, transport_facts, transcript_facts) =
+            record.into_parts();
+        let local_projection = actor_projection(
+            &transport_facts,
+            transcript_facts.valid_until_ms(),
+            family,
+            attempt_started_at_ms,
+            attempt_deadline_ms,
+            trusted_now_ms,
+        )?;
+        match (role, forwarded_control, transcript_facts) {
+            (
+                PreselectionObservationRole::Exit,
+                Some(control),
+                PreselectionTranscriptFreshnessFacts::Forwarded {
+                    valid_until_ms,
+                    upstream_network_prefix,
+                },
+            ) if subject == exit_subject
+                && control == control_index
+                && relay_projections[control].is_none()
+                && exit_projection.is_none() =>
+            {
+                validate_projection_prefix(upstream_network_prefix, family)?;
+                let control_projection = local_projection;
+                // The client observed one complete client-control-exit-control-client exchange.
+                // It is a conservative forwarded-path RTT, never a direct client-to-exit sample.
+                exit_projection = Some(ActorFreshnessProjection {
+                    observed_network_prefix: upstream_network_prefix,
+                    observed_at_ms: control_projection.observed_at_ms,
+                    round_trip: control_projection.round_trip,
+                    signed_valid_until_ms: valid_until_ms,
+                });
+                relay_projections[control] = Some(control_projection);
+            }
+            (
+                PreselectionObservationRole::Relay,
+                None,
+                PreselectionTranscriptFreshnessFacts::Direct { .. },
+            ) if subject < direct_count
+                && subject != control_index
+                && relay_projections[subject].is_none() =>
+            {
+                relay_projections[subject] = Some(local_projection);
+            }
+            _ => return Err(SelectionBridgeError::EvidenceBinding),
+        }
+    }
+    let exit_projection = exit_projection.ok_or(SelectionBridgeError::EvidenceBinding)?;
+    if relay_projections.iter().any(Option::is_none) {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+
+    let batch_id = EvidenceBatchId(batch_bytes);
+    let policy = snapshot.policy();
+    let mut entries = Vec::with_capacity(direct_count.saturating_add(1));
+    for (candidate, projection) in snapshot
+        .direct_relays()
+        .iter()
+        .zip(relay_projections.into_iter())
+    {
+        entries.push(fresh_direct_preselection_evidence(
+            candidate,
+            &projection.ok_or(SelectionBridgeError::EvidenceBinding)?,
+            batch_id,
+            transport,
+            family,
+            policy,
+            preselection_capacity_ceiling,
+            attempt_deadline_ms,
+            trusted_now_ms,
+        )?);
+    }
+    let control = entries
+        .get(control_index)
+        .ok_or(SelectionBridgeError::EvidenceBinding)?;
+    entries.push(fresh_forwarded_preselection_evidence(
+        forwarded,
+        control,
+        &exit_projection,
+        batch_id,
+        transport,
+        family,
+        policy,
+        preselection_capacity_ceiling,
+        attempt_deadline_ms,
+        trusted_now_ms,
+    )?);
+    if validate_fresh_evidence_batch(&entries, trusted_now_ms)? != batch_id
+        || !evidence_batch_matches_snapshot(snapshot, &entries)
+    {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+    Ok(FreshEvidenceBatch { batch_id, entries })
+}
+
+fn exact_control_candidate_index(
+    snapshot: &RouteCandidateSnapshot,
+    forwarded: &ForwardedExitCandidateSnapshot,
+) -> Result<usize, SelectionBridgeError> {
+    let expected = forwarded.control().capability();
+    let mut matches = snapshot
+        .direct_relays()
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.capability() == expected);
+    let (index, _) = matches
+        .next()
+        .ok_or(SelectionBridgeError::EvidenceBinding)?;
+    if matches.next().is_some() {
+        return Err(SelectionBridgeError::DuplicateIdentity);
+    }
+    Ok(index)
+}
+
+fn actor_projection(
+    transport: &PreselectionTransportFreshnessFacts,
+    signed_valid_until_ms: u64,
+    family: IpFamily,
+    attempt_started_at_ms: u64,
+    attempt_deadline_ms: u64,
+    trusted_now_ms: u64,
+) -> Result<ActorFreshnessProjection, SelectionBridgeError> {
+    let prefix = transport.observed_network_prefix();
+    validate_projection_prefix(prefix, family)?;
+    let observed_at_ms = transport.observed_at_ms();
+    let round_trip = transport.round_trip();
+    if observed_at_ms < attempt_started_at_ms
+        || observed_at_ms > trusted_now_ms
+        || observed_at_ms >= attempt_deadline_ms
+        || signed_valid_until_ms <= trusted_now_ms
+        || round_trip.is_zero()
+        || round_trip > MAXIMUM_SETUP_DURATION
+    {
+        return Err(SelectionBridgeError::StaleEvidence);
+    }
+    Ok(ActorFreshnessProjection {
+        observed_network_prefix: prefix,
+        observed_at_ms,
+        round_trip,
+        signed_valid_until_ms,
+    })
+}
+
+fn validate_projection_prefix(
+    prefix: ObservedNetworkPrefix,
+    family: IpFamily,
+) -> Result<(), SelectionBridgeError> {
+    if prefix.family() != family || !prefix.is_public_routable() {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one private mint visibly binds every candidate, scope, proof, and lifetime field"
+)]
+fn fresh_direct_preselection_evidence(
+    candidate: &DirectRelayCandidateSnapshot,
+    projection: &ActorFreshnessProjection,
+    batch_id: EvidenceBatchId,
+    transport: SelectionTransport,
+    family: IpFamily,
+    policy: RouteCandidatePolicySnapshot,
+    preselection_capacity_ceiling: Bandwidth,
+    attempt_deadline_ms: u64,
+    trusted_now_ms: u64,
+) -> Result<FreshPeerEvidence, SelectionBridgeError> {
+    let advertisement = candidate.advertisement().advertisement();
+    let capability = candidate.capability();
+    let valid_until_ms = fresh_valid_until(
+        projection,
+        attempt_deadline_ms,
+        capability.advertisement_expires_at_ms,
+        capability.expires_at_ms,
+        policy.expires_at_ms(),
+        trusted_now_ms,
+    )?;
+    conservative_preselection_evidence(
+        batch_id,
+        advertisement.node_id.clone(),
+        advertisement.peer_id.clone(),
+        capability.public_key,
+        capability.advertisement_sequence,
+        capability.advertisement_expires_at_ms,
+        candidate.advertisement().advertisement_payload_hash(),
+        capability.expires_at_ms,
+        ServiceRole::Relay,
+        transport,
+        policy,
+        family,
+        projection,
+        valid_until_ms,
+        None,
+        preselection_capacity_ceiling,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one private mint visibly binds forwarded Exit and exact control evidence"
+)]
+fn fresh_forwarded_preselection_evidence(
+    candidate: &ForwardedExitCandidateSnapshot,
+    control: &FreshPeerEvidence,
+    projection: &ActorFreshnessProjection,
+    batch_id: EvidenceBatchId,
+    transport: SelectionTransport,
+    family: IpFamily,
+    policy: RouteCandidatePolicySnapshot,
+    preselection_capacity_ceiling: Bandwidth,
+    attempt_deadline_ms: u64,
+    trusted_now_ms: u64,
+) -> Result<FreshPeerEvidence, SelectionBridgeError> {
+    let advertisement = candidate.advertisement().advertisement();
+    let capability = candidate.capability();
+    let valid_until_ms = fresh_valid_until(
+        projection,
+        attempt_deadline_ms,
+        capability.exit_advertisement_expires_at_ms,
+        capability.expires_at_ms,
+        policy.expires_at_ms(),
+        trusted_now_ms,
+    )?;
+    let forwarded_control = ForwardedControlBinding {
+        node_id: control.node_id.clone(),
+        peer_id: control.peer_id.clone(),
+        public_key: control.capability_public_key,
+        advertisement_sequence: control.advertisement_sequence,
+        advertisement_expires_at_ms: control.advertisement_expires_at_ms,
+        advertisement_payload_hash: control.advertisement_payload_hash,
+        capability_expires_at_ms: control.capability_expires_at_ms,
+    };
+    conservative_preselection_evidence(
+        batch_id,
+        advertisement.node_id.clone(),
+        advertisement.peer_id.clone(),
+        capability.exit_public_key,
+        capability.exit_advertisement_sequence,
+        capability.exit_advertisement_expires_at_ms,
+        candidate.advertisement().advertisement_payload_hash(),
+        capability.expires_at_ms,
+        ServiceRole::Exit,
+        transport,
+        policy,
+        family,
+        projection,
+        valid_until_ms,
+        Some(forwarded_control),
+        preselection_capacity_ceiling,
+    )
+}
+
+fn fresh_valid_until(
+    projection: &ActorFreshnessProjection,
+    attempt_deadline_ms: u64,
+    advertisement_expires_at_ms: u64,
+    capability_expires_at_ms: u64,
+    policy_expires_at_ms: u64,
+    trusted_now_ms: u64,
+) -> Result<u64, SelectionBridgeError> {
+    let freshness_ceiling = projection
+        .observed_at_ms
+        .checked_add(MAXIMUM_EVIDENCE_AGE_MS)
+        .ok_or(SelectionBridgeError::StaleEvidence)?;
+    let valid_until_ms = projection
+        .signed_valid_until_ms
+        .min(freshness_ceiling)
+        .min(attempt_deadline_ms)
+        .min(advertisement_expires_at_ms)
+        .min(capability_expires_at_ms)
+        .min(policy_expires_at_ms);
+    if valid_until_ms <= trusted_now_ms {
+        return Err(SelectionBridgeError::StaleEvidence);
+    }
+    Ok(valid_until_ms)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the sole production evidence mint makes every non-authoritative field explicit"
+)]
+fn conservative_preselection_evidence(
+    batch_id: EvidenceBatchId,
+    node_id: NodeId,
+    peer_id: PeerId,
+    capability_public_key: [u8; 32],
+    advertisement_sequence: u64,
+    advertisement_expires_at_ms: u64,
+    advertisement_payload_hash: AdvertisementPayloadHash,
+    capability_expires_at_ms: u64,
+    role: ServiceRole,
+    transport: SelectionTransport,
+    policy: RouteCandidatePolicySnapshot,
+    family: IpFamily,
+    projection: &ActorFreshnessProjection,
+    valid_until_ms: u64,
+    forwarded_control: Option<ForwardedControlBinding>,
+    preselection_capacity_ceiling: Bandwidth,
+) -> Result<FreshPeerEvidence, SelectionBridgeError> {
+    let rtt_ms = projection.round_trip.as_secs_f64() * 1_000.0;
+    if !rtt_ms.is_finite() || rtt_ms <= 0.0 || rtt_ms > 120_000.0 {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+    Ok(FreshPeerEvidence {
+        batch_id,
+        node_id,
+        peer_id,
+        capability_public_key,
+        advertisement_sequence,
+        advertisement_expires_at_ms,
+        advertisement_payload_hash,
+        capability_expires_at_ms,
+        role,
+        transport,
+        policy_version: policy.version(),
+        policy_hash: PolicyHash::from_bytes(policy.hash()),
+        policy_expires_at_ms: policy.expires_at_ms(),
+        address_family: Some(family),
+        observed_at_ms: projection.observed_at_ms,
+        valid_until_ms,
+        forwarded_control,
+        locally_measured_p25: None,
+        // Exactly one current control-plane transaction succeeded. This ratio describes only
+        // that one-sample window; it is not durable or historical uptime evidence.
+        measurement_count: 1,
+        preselection_capacity_ceiling,
+        uptime_score: 1.0,
+        proximity_score: 0.0,
+        recent_egress_quality: 0.0,
+        rtt_ms: Some(rtt_ms),
+        // Reachability is limited to the exact signed control exchange above. It does not prove
+        // that the advertised native dataplane address is usable for this transport.
+        reachable: true,
+        network_address_usable: false,
+        observed_network_prefix: Some(projection.observed_network_prefix),
+        // The exact proof batch supplied no local blocklist hit. This is absence of a positive
+        // local hit, not a proof that policy permits the peer or eventual destination.
+        locally_blocked: false,
+    })
+}
+
+const fn selection_transport(
+    transport: ProtocolTransport,
+) -> Result<SelectionTransport, SelectionBridgeError> {
+    match transport {
+        ProtocolTransport::TcpMptcp => Ok(SelectionTransport::TcpMptcp),
+        ProtocolTransport::UdpSinglePath => Ok(SelectionTransport::UdpSinglePath),
+        ProtocolTransport::MultipathQuic => Ok(SelectionTransport::MultipathQuic),
+        ProtocolTransport::Unspecified => Err(SelectionBridgeError::EvidenceBinding),
+    }
+}
+
+const fn selection_family(
+    family: ObservationAddressFamily,
+) -> Result<IpFamily, SelectionBridgeError> {
+    match family {
+        ObservationAddressFamily::Ipv4 => Ok(IpFamily::Ipv4),
+        ObservationAddressFamily::Ipv6 => Ok(IpFamily::Ipv6),
+        ObservationAddressFamily::Unspecified => Err(SelectionBridgeError::EvidenceBinding),
     }
 }
 
@@ -3878,13 +4342,13 @@ mod tests {
         }
         assert_eq!(
             product.matches("FreshPeerEvidence {").count(),
-            2,
-            "only the declaration and redacted Debug impl may open this type"
+            3,
+            "only declaration, redacted Debug and the sole production mint may open this type"
         );
         assert_eq!(
             product.matches("FreshEvidenceBatch {").count(),
-            3,
-            "only the declaration, impl and one consuming destructure may open this type"
+            4,
+            "only declaration, impl, exact production mint and one consuming destructure may open this type"
         );
         assert!(!observation.contains("\n    pub "));
     }
@@ -3949,7 +4413,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_a_observation_surface_is_private_dormant_and_non_authoritative() {
+    fn phase_a_observation_surface_is_private_affine_and_non_authoritative() {
         let product = phase_a_product_source();
         let observation = phase_a_observation_source(product);
         assert_phase_a_observation_fields_and_tokens(product, observation);
@@ -4071,6 +4535,231 @@ mod tests {
             FreshEvidenceBatch::for_test(wrong_family, NOW_MS),
             Err(SelectionBridgeError::EvidenceBinding)
         ));
+    }
+
+    type TestPreselectionFreshnessRecord = (
+        usize,
+        Option<usize>,
+        PreselectionObservationRole,
+        ObservedNetworkPrefix,
+        u64,
+        Duration,
+        PreselectionTranscriptFreshnessFacts,
+    );
+
+    fn exact_preselection_freshness_records() -> Vec<TestPreselectionFreshnessRecord> {
+        vec![
+            (
+                3,
+                Some(0),
+                PreselectionObservationRole::Exit,
+                ObservedNetworkPrefix::ipv4_24([44, 1, 1]),
+                NOW_MS + 100,
+                Duration::from_millis(12),
+                PreselectionTranscriptFreshnessFacts::Forwarded {
+                    valid_until_ms: NOW_MS + 5_000,
+                    upstream_network_prefix: ObservedNetworkPrefix::ipv4_24([45, 1, 1]),
+                },
+            ),
+            (
+                1,
+                None,
+                PreselectionObservationRole::Relay,
+                ObservedNetworkPrefix::ipv4_24([46, 1, 1]),
+                NOW_MS + 200,
+                Duration::from_millis(8),
+                PreselectionTranscriptFreshnessFacts::Direct {
+                    valid_until_ms: NOW_MS + 6_000,
+                },
+            ),
+            (
+                2,
+                None,
+                PreselectionObservationRole::Relay,
+                ObservedNetworkPrefix::ipv4_24([47, 2, 2]),
+                NOW_MS + 300,
+                Duration::from_millis(9),
+                PreselectionTranscriptFreshnessFacts::Direct {
+                    valid_until_ms: NOW_MS + 7_000,
+                },
+            ),
+        ]
+    }
+
+    fn preselection_freshness_attempt(
+        snapshot: RouteCandidateSnapshot,
+        records: Vec<TestPreselectionFreshnessRecord>,
+        transport: ProtocolTransport,
+        family: ObservationAddressFamily,
+        batch_id: [u8; ID_BYTES],
+        ceiling: Bandwidth,
+    ) -> CompletedPreselectionFreshnessAttempt {
+        CompletedPreselectionFreshnessAttempt::for_test(
+            snapshot,
+            transport,
+            family,
+            batch_id,
+            NOW_MS,
+            NOW_MS + 30_000,
+            Bandwidth::new(10, 10).expect("minimum capacity"),
+            ceiling,
+            records,
+        )
+    }
+
+    #[test]
+    fn exact_preselection_proofs_mint_conservative_affine_fresh_batch() {
+        let (snapshot, _) = snapshot_fixture();
+        let completed = preselection_freshness_attempt(
+            snapshot,
+            exact_preselection_freshness_records(),
+            ProtocolTransport::TcpMptcp,
+            ObservationAddressFamily::Ipv4,
+            EVIDENCE_BATCH_BYTES,
+            Bandwidth::new(80, 80).expect("configured ceiling"),
+        );
+        let Ok(JoinedPreselectionFreshEvidence {
+            snapshot,
+            evidence_batch,
+            gate,
+        }) = join_preselection_fresh_evidence_at(completed, NOW_MS + 500)
+        else {
+            panic!("exact A1 proofs must mint fresh evidence");
+        };
+        assert_ne!(size_of_val(&gate), 0);
+        assert_eq!(
+            evidence_batch.batch_id,
+            EvidenceBatchId::for_test(EVIDENCE_BATCH_BYTES)
+        );
+        assert_eq!(evidence_batch.entries.len(), 4);
+        for evidence in &evidence_batch.entries {
+            assert_eq!(evidence.transport, SelectionTransport::TcpMptcp);
+            assert_eq!(evidence.address_family, Some(IpFamily::Ipv4));
+            assert_eq!(evidence.locally_measured_p25, None);
+            assert_eq!(evidence.measurement_count, 1);
+            assert_eq!(evidence.uptime_score.to_bits(), 1.0_f64.to_bits());
+            assert_eq!(evidence.proximity_score.to_bits(), 0.0_f64.to_bits());
+            assert_eq!(evidence.recent_egress_quality.to_bits(), 0.0_f64.to_bits());
+            assert!(evidence.reachable);
+            assert!(evidence.rtt_ms.is_some_and(|rtt| rtt > 0.0));
+            assert!(!evidence.network_address_usable);
+            assert!(!evidence.locally_blocked);
+        }
+        assert!(
+            evidence_batch.entries[0].observed_network_prefix
+                == Some(ObservedNetworkPrefix::ipv4_24([44, 1, 1]))
+        );
+        assert_eq!(
+            evidence_batch.entries[0].rtt_ms.map(f64::to_bits),
+            Some(12.0_f64.to_bits())
+        );
+        assert_eq!(evidence_batch.entries[0].valid_until_ms, NOW_MS + 5_000);
+        assert!(
+            evidence_batch.entries[1].observed_network_prefix
+                == Some(ObservedNetworkPrefix::ipv4_24([46, 1, 1]))
+        );
+        assert_eq!(
+            evidence_batch.entries[1].rtt_ms.map(f64::to_bits),
+            Some(8.0_f64.to_bits())
+        );
+        assert_eq!(evidence_batch.entries[1].valid_until_ms, NOW_MS + 6_000);
+        assert!(
+            evidence_batch.entries[2].observed_network_prefix
+                == Some(ObservedNetworkPrefix::ipv4_24([47, 2, 2]))
+        );
+        assert_eq!(
+            evidence_batch.entries[2].rtt_ms.map(f64::to_bits),
+            Some(9.0_f64.to_bits())
+        );
+        assert_eq!(evidence_batch.entries[2].valid_until_ms, NOW_MS + 7_000);
+        let exit = &evidence_batch.entries[3];
+        assert_eq!(exit.role, ServiceRole::Exit);
+        assert!(exit.observed_network_prefix == Some(ObservedNetworkPrefix::ipv4_24([45, 1, 1])));
+        assert_eq!(exit.rtt_ms.map(f64::to_bits), Some(12.0_f64.to_bits()));
+        assert_eq!(exit.valid_until_ms, NOW_MS + 5_000);
+        let control = exit.forwarded_control.as_ref().expect("exact control");
+        assert_eq!(control.node_id, evidence_batch.entries[0].node_id);
+        assert_eq!(control.peer_id, evidence_batch.entries[0].peer_id);
+        assert_eq!(
+            control.advertisement_payload_hash,
+            evidence_batch.entries[0].advertisement_payload_hash
+        );
+
+        assert!(matches!(
+            snapshot_route_plan_at(
+                &snapshot,
+                snapshot_parameters(),
+                evidence_batch,
+                NOW_MS + 500,
+                &mut OsRng,
+            ),
+            Err(SelectionBridgeError::Selection(SelectionError::HardFilter(
+                HardFilterReason::UnusableNetworkAddress
+            )))
+        ));
+    }
+
+    #[test]
+    fn preselection_fresh_join_rejects_every_shape_family_time_and_capacity_substitution() {
+        for case in 0_u8..14 {
+            let (snapshot, _) = snapshot_fixture();
+            let mut records = exact_preselection_freshness_records();
+            let mut transport = ProtocolTransport::TcpMptcp;
+            let mut family = ObservationAddressFamily::Ipv4;
+            let mut batch_id = EVIDENCE_BATCH_BYTES;
+            let mut ceiling = Bandwidth::new(80, 80).expect("configured ceiling");
+            let mut trusted_now_ms = NOW_MS + 500;
+            match case {
+                0 => {
+                    records.pop();
+                }
+                1 => records[1].0 = 2,
+                2 => records[0].1 = Some(1),
+                3 => records[1].2 = PreselectionObservationRole::Exit,
+                4 => {
+                    records[1].6 = PreselectionTranscriptFreshnessFacts::Forwarded {
+                        valid_until_ms: NOW_MS + 6_000,
+                        upstream_network_prefix: ObservedNetworkPrefix::ipv4_24([46, 1, 1]),
+                    };
+                }
+                5 => records[1].3 = ObservedNetworkPrefix::ipv6_48([0x26, 6, 7, 8, 9, 10]),
+                6 => {
+                    records[0].6 = PreselectionTranscriptFreshnessFacts::Forwarded {
+                        valid_until_ms: NOW_MS + 5_000,
+                        upstream_network_prefix: ObservedNetworkPrefix::ipv6_48([
+                            0x26, 6, 7, 8, 9, 10,
+                        ]),
+                    };
+                }
+                7 => records[1].4 = NOW_MS - 1,
+                8 => records[1].4 = NOW_MS + 30_000,
+                9 => records[1].5 = Duration::ZERO,
+                10 => {
+                    records[1].6 = PreselectionTranscriptFreshnessFacts::Direct {
+                        valid_until_ms: trusted_now_ms,
+                    };
+                }
+                11 => transport = ProtocolTransport::Unspecified,
+                12 => family = ObservationAddressFamily::Unspecified,
+                _ => {
+                    batch_id = [0; ID_BYTES];
+                    ceiling = Bandwidth::new(5, 5).expect("insufficient ceiling");
+                    trusted_now_ms = NOW_MS + 30_000;
+                }
+            }
+            let completed = preselection_freshness_attempt(
+                snapshot, records, transport, family, batch_id, ceiling,
+            );
+            let failure = match join_preselection_fresh_evidence_at(completed, trusted_now_ms) {
+                Ok(_) => panic!("substitution case {case} minted fresh evidence"),
+                Err(failure) => failure,
+            };
+            assert_ne!(size_of_val(&failure.gate), 0);
+            assert!(matches!(
+                failure.error,
+                SelectionBridgeError::EvidenceBinding | SelectionBridgeError::StaleEvidence
+            ));
+        }
     }
 
     fn bounded_fake_evidence(count: usize) -> Vec<FreshPeerEvidence> {

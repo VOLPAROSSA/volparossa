@@ -1,20 +1,28 @@
-//! Callerless affine ownership for one bounded A1a transcript attempt.
+//! Callerless affine ownership and exact A1a/A1c freshness join for one bounded attempt.
 //!
-//! This child stops before transport provenance and local observation. It owns
-//! challenge generation, replay state, exact snapshot/request binding, and the
-//! opaque A0 transcript tokens, but it cannot mint reachability, origin, RTT,
-//! freshness, capacity authority, or route/session authority.
+//! This child owns challenge generation, replay state, exact snapshot/request binding, opaque A0
+//! transcript tokens, and the one-way join with service-bound client transport proofs. The join
+//! emits only endpoint-free prefixes, local arrival time/RTT, and signed validity ceilings; only
+//! the route-selection child can mint its existing private evidence batch. Neither child can mint
+//! measured capacity, dataplane-address usability, or route/session authority.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use rand_core::{OsRng, RngCore};
 use tokio::time::Instant;
-use volparossa_core::Bandwidth;
+use volparossa_core::{Bandwidth, IpFamily, ObservedNetworkPrefix};
+use volparossa_discovery::{
+    BoundClientPreselectionTransport, ClientPreselectionTransportFreshnessProof,
+    consume_bound_client_preselection_transport_for_freshness,
+};
 use volparossa_protocol::{
     BoundDirectPreselectionTranscript, BoundForwardedPreselectionTranscript,
+    DirectPreselectionFreshnessProof, ForwardedPreselectionFreshnessProof,
     ObservationAddressFamily, PreselectionActorBinding, PreselectionObservationRequest,
     PreselectionObservationRole, PreselectionObservationScope, ReplayCache, TimePolicy, Transport,
+    consume_bound_direct_preselection_transcript_for_freshness,
+    consume_bound_forwarded_preselection_transcript_for_freshness,
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
     encode_canonical, preselection_observation_request_hash, verify_direct_preselection_transcript,
     verify_forwarded_preselection_transcript,
@@ -428,7 +436,7 @@ pub(super) struct PreselectionAttemptGate {
         reason = "callerless A1a prerequisite; no production caller"
     )
 )]
-pub(super) struct CoolingPreselectionAttemptGate {
+pub(crate) struct CoolingPreselectionAttemptGate {
     gate: PreselectionAttemptGate,
     ready_at_ms: u64,
     ready_at: Instant,
@@ -621,10 +629,261 @@ pub(super) struct BoundPreselectionTranscriptBatch {
         reason = "callerless A1a prerequisite; no production caller"
     )
 )]
-pub(super) struct CompletedPreselectionAttempt {
+pub(crate) struct CompletedPreselectionAttempt {
     snapshot: RouteCandidateSnapshot,
     batch: BoundPreselectionTranscriptBatch,
     gate: CoolingPreselectionAttemptGate,
+}
+
+/// Endpoint-free local facts purpose-consumed from one exact client-hop transport proof.
+///
+/// This value has no constructor or clone surface. It is produced only while the affine A1a
+/// owner still holds the matching request hash, native family, and monotonic attempt window.
+pub(crate) struct PreselectionTransportFreshnessFacts {
+    observed_network_prefix: ObservedNetworkPrefix,
+    observed_at_ms: u64,
+    round_trip: Duration,
+}
+
+impl PreselectionTransportFreshnessFacts {
+    pub(crate) const fn observed_network_prefix(&self) -> ObservedNetworkPrefix {
+        self.observed_network_prefix
+    }
+
+    pub(crate) const fn observed_at_ms(&self) -> u64 {
+        self.observed_at_ms
+    }
+
+    pub(crate) const fn round_trip(&self) -> Duration {
+        self.round_trip
+    }
+}
+
+/// Actor-purpose cryptographic facts consumed from one exact verified transcript.
+///
+/// The direct form proves only its signed lifetime. The forwarded form additionally carries the
+/// normalized endpoint-free Exit prefix signed by the exact control Relay. Neither form contains
+/// reusable dispatch, signature, request, endpoint, or reservation authority.
+pub(crate) enum PreselectionTranscriptFreshnessFacts {
+    Direct {
+        valid_until_ms: u64,
+    },
+    Forwarded {
+        valid_until_ms: u64,
+        upstream_network_prefix: ObservedNetworkPrefix,
+    },
+}
+
+impl PreselectionTranscriptFreshnessFacts {
+    pub(crate) const fn valid_until_ms(&self) -> u64 {
+        match self {
+            Self::Direct { valid_until_ms } | Self::Forwarded { valid_until_ms, .. } => {
+                *valid_until_ms
+            }
+        }
+    }
+
+    pub(crate) const fn upstream_network_prefix(&self) -> Option<ObservedNetworkPrefix> {
+        match self {
+            Self::Direct { .. } => None,
+            Self::Forwarded {
+                upstream_network_prefix,
+                ..
+            } => Some(*upstream_network_prefix),
+        }
+    }
+}
+
+/// One exact A1a actor/request record joined affinely to its A1c transport proof.
+///
+/// Subject indexes are meaningful only beside the retained snapshot in the enclosing completed
+/// attempt. Fields stay private, and the sole production mint consumes both opaque proof kinds.
+pub(crate) struct PreselectionFreshnessProofRecord {
+    subject: usize,
+    forwarded_control: Option<usize>,
+    role: PreselectionObservationRole,
+    transport: PreselectionTransportFreshnessFacts,
+    transcript: PreselectionTranscriptFreshnessFacts,
+}
+
+impl PreselectionFreshnessProofRecord {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        usize,
+        Option<usize>,
+        PreselectionObservationRole,
+        PreselectionTransportFreshnessFacts,
+        PreselectionTranscriptFreshnessFacts,
+    ) {
+        (
+            self.subject,
+            self.forwarded_control,
+            self.role,
+            self.transport,
+            self.transcript,
+        )
+    }
+}
+
+/// Exact bounded proof batch after every request has both transport and actor proof.
+pub(crate) struct BoundPreselectionFreshnessProofBatch {
+    transport: Transport,
+    address_family: ObservationAddressFamily,
+    batch_id: [u8; BATCH_ID_LENGTH],
+    attempt_started_at_ms: u64,
+    attempt_deadline_ms: u64,
+    minimum_capacity: Bandwidth,
+    preselection_capacity_ceiling: Bandwidth,
+    records: Vec<PreselectionFreshnessProofRecord>,
+}
+
+impl BoundPreselectionFreshnessProofBatch {
+    #[allow(
+        clippy::type_complexity,
+        reason = "one affine destructure has no reusable authority"
+    )]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Transport,
+        ObservationAddressFamily,
+        [u8; BATCH_ID_LENGTH],
+        u64,
+        u64,
+        Bandwidth,
+        Bandwidth,
+        Vec<PreselectionFreshnessProofRecord>,
+    ) {
+        (
+            self.transport,
+            self.address_family,
+            self.batch_id,
+            self.attempt_started_at_ms,
+            self.attempt_deadline_ms,
+            self.minimum_capacity,
+            self.preselection_capacity_ceiling,
+            self.records,
+        )
+    }
+}
+
+/// Original actor snapshot plus the exact purpose-consumed proof batch and cooldown owner.
+pub(crate) struct CompletedPreselectionFreshnessAttempt {
+    snapshot: RouteCandidateSnapshot,
+    batch: BoundPreselectionFreshnessProofBatch,
+    gate: CoolingPreselectionAttemptGate,
+}
+
+impl CompletedPreselectionFreshnessAttempt {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        RouteCandidateSnapshot,
+        BoundPreselectionFreshnessProofBatch,
+        CoolingPreselectionAttemptGate,
+    ) {
+        (self.snapshot, self.batch, self.gate)
+    }
+
+    #[cfg(test)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::type_complexity,
+        reason = "selection-bridge tests need an authority-free proof-fact fixture"
+    )]
+    pub(crate) fn for_test(
+        snapshot: RouteCandidateSnapshot,
+        transport: Transport,
+        address_family: ObservationAddressFamily,
+        batch_id: [u8; BATCH_ID_LENGTH],
+        attempt_started_at_ms: u64,
+        attempt_deadline_ms: u64,
+        minimum_capacity: Bandwidth,
+        preselection_capacity_ceiling: Bandwidth,
+        records: Vec<(
+            usize,
+            Option<usize>,
+            PreselectionObservationRole,
+            ObservedNetworkPrefix,
+            u64,
+            Duration,
+            PreselectionTranscriptFreshnessFacts,
+        )>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            snapshot,
+            batch: BoundPreselectionFreshnessProofBatch {
+                transport,
+                address_family,
+                batch_id,
+                attempt_started_at_ms,
+                attempt_deadline_ms,
+                minimum_capacity,
+                preselection_capacity_ceiling,
+                records: records
+                    .into_iter()
+                    .map(
+                        |(
+                            subject,
+                            forwarded_control,
+                            role,
+                            observed_network_prefix,
+                            observed_at_ms,
+                            round_trip,
+                            transcript,
+                        )| PreselectionFreshnessProofRecord {
+                            subject,
+                            forwarded_control,
+                            role,
+                            transport: PreselectionTransportFreshnessFacts {
+                                observed_network_prefix,
+                                observed_at_ms,
+                                round_trip,
+                            },
+                            transcript,
+                        },
+                    )
+                    .collect(),
+            },
+            gate: CoolingPreselectionAttemptGate {
+                gate: PreselectionAttemptGate::new().expect("test freshness gate"),
+                ready_at_ms: attempt_deadline_ms,
+                ready_at: now,
+            },
+        }
+    }
+}
+
+/// Terminal proof-join rejection with the attempt gate retained for bounded cooldown recovery.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the discovery actor will retain this gate once it owns client preselection"
+    )
+)]
+pub(crate) struct PreselectionFreshnessJoinFailure {
+    gate: CoolingPreselectionAttemptGate,
+    error: PreselectionAttemptError,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the discovery actor will inspect this failure once it owns client preselection"
+    )
+)]
+impl PreselectionFreshnessJoinFailure {
+    pub(crate) const fn error(&self) -> PreselectionAttemptError {
+        self.error
+    }
+
+    pub(crate) fn into_gate(self) -> CoolingPreselectionAttemptGate {
+        self.gate
+    }
 }
 
 #[cfg_attr(
@@ -722,6 +981,7 @@ pub(super) enum PreselectionAttemptError {
     TombstoneCapacity,
     Request,
     UnknownDispatch,
+    Transport,
     Protocol,
 }
 
@@ -1365,6 +1625,348 @@ impl ReadyPreselectionAttempt {
     not(test),
     allow(
         dead_code,
+        reason = "the discovery actor will hand its bounded sealed transports to this exact owner"
+    )
+)]
+impl CompletedPreselectionAttempt {
+    /// Purpose-consume and join the exact client-hop transports for this completed A1a batch.
+    ///
+    /// Transport order is the canonical request ordinal order retained by the attempt. Every
+    /// opaque transport rechecks the corresponding request hash, native family, and monotonic
+    /// attempt window before either proof can become freshness input. A count, order, hash,
+    /// actor-shape, family, or time mismatch consumes the unusable proofs and returns only the
+    /// cooldown gate.
+    pub(crate) fn join_transport_proofs(
+        self,
+        transports: Vec<BoundClientPreselectionTransport>,
+    ) -> Result<CompletedPreselectionFreshnessAttempt, PreselectionFreshnessJoinFailure> {
+        self.join_transport_proofs_at(transports, crate::unix_millis(), Instant::now())
+    }
+
+    fn join_transport_proofs_at(
+        self,
+        transports: Vec<BoundClientPreselectionTransport>,
+        trusted_now_ms: u64,
+        trusted_now_mono: Instant,
+    ) -> Result<CompletedPreselectionFreshnessAttempt, PreselectionFreshnessJoinFailure> {
+        let transport_count = transports.len();
+        let mut transports = transports.into_iter();
+        self.join_transport_facts_with_at(
+            transport_count,
+            trusted_now_ms,
+            trusted_now_mono,
+            move |request_hash, family, attempt_started_at_mono, attempt_deadline_mono| {
+                let transport = transports
+                    .next()
+                    .ok_or(PreselectionAttemptError::Transport)?;
+                let proof = consume_bound_client_preselection_transport_for_freshness(
+                    transport,
+                    request_hash,
+                    family,
+                    attempt_started_at_mono,
+                    attempt_deadline_mono,
+                )
+                .map_err(|_| PreselectionAttemptError::Transport)?;
+                Ok(transport_freshness_facts(proof))
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn join_transport_facts_for_test(
+        self,
+        facts: Vec<PreselectionTransportFreshnessFacts>,
+        trusted_now_ms: u64,
+        trusted_now_mono: Instant,
+    ) -> Result<CompletedPreselectionFreshnessAttempt, PreselectionFreshnessJoinFailure> {
+        let transport_count = facts.len();
+        let mut facts = facts.into_iter();
+        self.join_transport_facts_with_at(
+            transport_count,
+            trusted_now_ms,
+            trusted_now_mono,
+            move |_, _, _, _| facts.next().ok_or(PreselectionAttemptError::Transport),
+        )
+    }
+
+    fn join_transport_facts_with_at<F>(
+        self,
+        transport_count: usize,
+        trusted_now_ms: u64,
+        trusted_now_mono: Instant,
+        consume_transport: F,
+    ) -> Result<CompletedPreselectionFreshnessAttempt, PreselectionFreshnessJoinFailure>
+    where
+        F: FnMut(
+            [u8; 32],
+            IpFamily,
+            Instant,
+            Instant,
+        ) -> Result<PreselectionTransportFreshnessFacts, PreselectionAttemptError>,
+    {
+        let CompletedPreselectionAttempt {
+            snapshot,
+            batch,
+            gate,
+        } = self;
+        match join_transcript_and_transport_proofs(
+            &snapshot,
+            batch,
+            transport_count,
+            trusted_now_ms,
+            trusted_now_mono,
+            consume_transport,
+        ) {
+            Ok(batch) => Ok(CompletedPreselectionFreshnessAttempt {
+                snapshot,
+                batch,
+                gate,
+            }),
+            Err(error) => Err(PreselectionFreshnessJoinFailure { gate, error }),
+        }
+    }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "this is the deliberate affine sink for the opaque transport proof"
+)]
+fn transport_freshness_facts(
+    proof: ClientPreselectionTransportFreshnessProof,
+) -> PreselectionTransportFreshnessFacts {
+    PreselectionTransportFreshnessFacts {
+        observed_network_prefix: proof.observed_network_prefix(),
+        observed_at_ms: proof.observed_at_unix_ms(),
+        round_trip: proof.round_trip(),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the exact proof join keeps both independent clocks and every affine binding visible"
+)]
+fn join_transcript_and_transport_proofs<F>(
+    snapshot: &RouteCandidateSnapshot,
+    batch: BoundPreselectionTranscriptBatch,
+    transport_count: usize,
+    trusted_now_ms: u64,
+    trusted_now_mono: Instant,
+    mut consume_transport: F,
+) -> Result<BoundPreselectionFreshnessProofBatch, PreselectionAttemptError>
+where
+    F: FnMut(
+        [u8; 32],
+        IpFamily,
+        Instant,
+        Instant,
+    ) -> Result<PreselectionTransportFreshnessFacts, PreselectionAttemptError>,
+{
+    validate_completed_transcript_shape(snapshot, &batch, transport_count)?;
+    let BoundPreselectionTranscriptBatch {
+        transport,
+        address_family,
+        batch_id,
+        attempt_started_at_ms,
+        attempt_deadline_ms,
+        attempt_started_at_mono,
+        attempt_deadline_mono,
+        minimum_capacity,
+        preselection_capacity_ceiling,
+        transcripts,
+    } = batch;
+    if trusted_now_ms < attempt_started_at_ms
+        || trusted_now_ms >= attempt_deadline_ms
+        || trusted_now_mono < attempt_started_at_mono
+        || trusted_now_mono >= attempt_deadline_mono
+    {
+        return Err(PreselectionAttemptError::InvalidTime);
+    }
+    let family = observation_ip_family(address_family)?;
+    let mut records = Vec::with_capacity(transcripts.len());
+    for record in transcripts {
+        let transport_facts = consume_transport(
+            record.request_hash,
+            family,
+            attempt_started_at_mono,
+            attempt_deadline_mono,
+        )?;
+        validate_transport_freshness_facts(
+            &transport_facts,
+            family,
+            attempt_started_at_ms,
+            attempt_deadline_ms,
+            trusted_now_ms,
+        )?;
+        let transcript = purpose_consume_transcript(record.transcript)?;
+        if transcript.valid_until_ms() <= trusted_now_ms
+            || transcript
+                .upstream_network_prefix()
+                .is_some_and(|prefix| prefix.family() != family || !prefix.is_public_routable())
+        {
+            return Err(PreselectionAttemptError::Protocol);
+        }
+        records.push(PreselectionFreshnessProofRecord {
+            subject: record.subject,
+            forwarded_control: record.forwarded_control,
+            role: record.role,
+            transport: transport_facts,
+            transcript,
+        });
+    }
+    Ok(BoundPreselectionFreshnessProofBatch {
+        transport,
+        address_family,
+        batch_id,
+        attempt_started_at_ms,
+        attempt_deadline_ms,
+        minimum_capacity,
+        preselection_capacity_ceiling,
+        records,
+    })
+}
+
+fn validate_completed_transcript_shape(
+    snapshot: &RouteCandidateSnapshot,
+    batch: &BoundPreselectionTranscriptBatch,
+    transport_count: usize,
+) -> Result<(), PreselectionAttemptError> {
+    let direct_count = snapshot.direct_relays.len();
+    let subject_count = snapshot.preselection_subjects.entries.len();
+    let Some(&(control_subject, exit_subject)) =
+        snapshot.preselection_subjects.forwarded_pairs.first()
+    else {
+        return Err(PreselectionAttemptError::InvalidSnapshot);
+    };
+    if batch.batch_id == [0; BATCH_ID_LENGTH]
+        || batch.attempt_started_at_ms == 0
+        || batch.attempt_started_at_ms >= batch.attempt_deadline_ms
+        || batch.attempt_started_at_mono >= batch.attempt_deadline_mono
+        || snapshot.forwarded_exits.len() != 1
+        || snapshot.preselection_subjects.forwarded_pairs.len() != 1
+        || exit_subject != direct_count
+        || control_subject >= direct_count
+        || subject_count != direct_count.saturating_add(1)
+        || batch.transcripts.len() != direct_count
+        || transport_count != batch.transcripts.len()
+        || !(MINIMUM_REQUESTS..=MAXIMUM_REQUESTS).contains(&batch.transcripts.len())
+    {
+        return Err(PreselectionAttemptError::InvalidSnapshot);
+    }
+    let mut request_hashes = HashSet::with_capacity(batch.transcripts.len());
+    let mut direct_subjects = HashSet::with_capacity(direct_count.saturating_sub(1));
+    let mut saw_forwarded = false;
+    for (index, record) in batch.transcripts.iter().enumerate() {
+        let expected_ordinal = u8::try_from(index.saturating_add(1))
+            .map_err(|_| PreselectionAttemptError::InvalidSnapshot)?;
+        if record.dispatch_id.batch_id != batch.batch_id
+            || record.dispatch_id.ordinal != expected_ordinal
+            || record.request_hash == [0; 32]
+            || !request_hashes.insert(record.request_hash)
+        {
+            return Err(PreselectionAttemptError::InvalidSnapshot);
+        }
+        match (&record.transcript, record.role, record.forwarded_control) {
+            (BoundTranscript::Forwarded(_), PreselectionObservationRole::Exit, Some(control))
+                if index == 0
+                    && !saw_forwarded
+                    && record.subject == exit_subject
+                    && control == control_subject =>
+            {
+                saw_forwarded = true;
+            }
+            (BoundTranscript::Direct(_), PreselectionObservationRole::Relay, None)
+                if index > 0
+                    && record.subject < direct_count
+                    && record.subject != control_subject
+                    && direct_subjects.insert(record.subject) => {}
+            _ => return Err(PreselectionAttemptError::InvalidSnapshot),
+        }
+    }
+    if !saw_forwarded || direct_subjects.len() != direct_count.saturating_sub(1) {
+        return Err(PreselectionAttemptError::InvalidSnapshot);
+    }
+    Ok(())
+}
+
+fn validate_transport_freshness_facts(
+    facts: &PreselectionTransportFreshnessFacts,
+    family: IpFamily,
+    attempt_started_at_ms: u64,
+    attempt_deadline_ms: u64,
+    trusted_now_ms: u64,
+) -> Result<(), PreselectionAttemptError> {
+    if facts.observed_network_prefix.family() != family
+        || !facts.observed_network_prefix.is_public_routable()
+    {
+        return Err(PreselectionAttemptError::Transport);
+    }
+    if facts.observed_at_ms < attempt_started_at_ms
+        || facts.observed_at_ms >= attempt_deadline_ms
+        || facts.observed_at_ms > trusted_now_ms
+        || facts.round_trip.is_zero()
+        || facts.round_trip > Duration::from_millis(ATTEMPT_LIFETIME_MS)
+    {
+        return Err(PreselectionAttemptError::InvalidTime);
+    }
+    Ok(())
+}
+
+fn purpose_consume_transcript(
+    transcript: BoundTranscript,
+) -> Result<PreselectionTranscriptFreshnessFacts, PreselectionAttemptError> {
+    match transcript {
+        BoundTranscript::Direct(transcript) => {
+            consume_bound_direct_preselection_transcript_for_freshness(*transcript)
+                .map(direct_transcript_freshness_facts)
+                .map_err(|_| PreselectionAttemptError::Protocol)
+        }
+        BoundTranscript::Forwarded(transcript) => {
+            consume_bound_forwarded_preselection_transcript_for_freshness(*transcript)
+                .map(forwarded_transcript_freshness_facts)
+                .map_err(|_| PreselectionAttemptError::Protocol)
+        }
+    }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "this is the deliberate affine sink for the opaque direct transcript proof"
+)]
+fn direct_transcript_freshness_facts(
+    proof: DirectPreselectionFreshnessProof,
+) -> PreselectionTranscriptFreshnessFacts {
+    PreselectionTranscriptFreshnessFacts::Direct {
+        valid_until_ms: proof.valid_until_ms(),
+    }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "this is the deliberate affine sink for the opaque forwarded transcript proof"
+)]
+fn forwarded_transcript_freshness_facts(
+    proof: ForwardedPreselectionFreshnessProof,
+) -> PreselectionTranscriptFreshnessFacts {
+    PreselectionTranscriptFreshnessFacts::Forwarded {
+        valid_until_ms: proof.valid_until_ms(),
+        upstream_network_prefix: proof.upstream_network_prefix(),
+    }
+}
+
+const fn observation_ip_family(
+    family: ObservationAddressFamily,
+) -> Result<IpFamily, PreselectionAttemptError> {
+    match family {
+        ObservationAddressFamily::Ipv4 => Ok(IpFamily::Ipv4),
+        ObservationAddressFamily::Ipv6 => Ok(IpFamily::Ipv6),
+        ObservationAddressFamily::Unspecified => Err(PreselectionAttemptError::InvalidSnapshot),
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
         reason = "callerless A1a prerequisite; no production caller"
     )
 )]
@@ -1613,8 +2215,8 @@ fn static_scope_supported(
         Transport::Unspecified => return false,
     };
     let family = match address_family {
-        ObservationAddressFamily::Ipv4 => volparossa_core::IpFamily::Ipv4,
-        ObservationAddressFamily::Ipv6 => volparossa_core::IpFamily::Ipv6,
+        ObservationAddressFamily::Ipv4 => IpFamily::Ipv4,
+        ObservationAddressFamily::Ipv6 => IpFamily::Ipv6,
         ObservationAddressFamily::Unspecified => return false,
     };
     advertisement.capabilities.supports_transport(transport)
@@ -2787,6 +3389,150 @@ mod tests {
         );
     }
 
+    async fn completed_attempt_for_freshness_join() -> (
+        CompletedPreselectionAttempt,
+        Vec<PreselectionTransportFreshnessFacts>,
+        u64,
+        Instant,
+    ) {
+        let fixture = preselection_snapshot_fixture(2, false).await;
+        let started_at_ms = fixture.now_ms;
+        let started_at_mono = Instant::now();
+        let pending = PreselectionAttemptGate::new()
+            .expect("gate")
+            .begin_at_with_entropy_for_test(
+                fixture.snapshot,
+                attempt_start_at(
+                    Transport::UdpSinglePath,
+                    ObservationAddressFamily::Ipv4,
+                    bandwidth(10),
+                    bandwidth(100),
+                    bandwidth(80),
+                    started_at_ms,
+                    started_at_mono,
+                ),
+                |request_count| Ok(minted_entropy(request_count, 81)),
+            )
+            .unwrap_or_else(|_| panic!("valid proof-join attempt"));
+        let (ready, _) =
+            advance_authentic_responses(pending, &fixture.signers, started_at_ms, started_at_mono);
+        let completed = ready
+            .finish_at(
+                started_at_ms + 1_600,
+                started_at_mono + Duration::from_millis(1_600),
+            )
+            .unwrap_or_else(|_| panic!("proof-join attempt finishes"));
+        let facts = vec![
+            PreselectionTransportFreshnessFacts {
+                observed_network_prefix: ObservedNetworkPrefix::ipv4_24([1, 1, 1]),
+                observed_at_ms: started_at_ms + 600,
+                round_trip: Duration::from_millis(6),
+            },
+            PreselectionTransportFreshnessFacts {
+                observed_network_prefix: ObservedNetworkPrefix::ipv4_24([8, 8, 4]),
+                observed_at_ms: started_at_ms + 1_100,
+                round_trip: Duration::from_millis(7),
+            },
+            PreselectionTransportFreshnessFacts {
+                observed_network_prefix: ObservedNetworkPrefix::ipv4_24([9, 9, 9]),
+                observed_at_ms: started_at_ms + 1_600,
+                round_trip: Duration::from_millis(8),
+            },
+        ];
+        (completed, facts, started_at_ms, started_at_mono)
+    }
+
+    #[tokio::test]
+    async fn exact_transport_and_transcript_proofs_join_affinely_by_request_and_subject() {
+        let (completed, facts, started_at_ms, started_at_mono) =
+            completed_attempt_for_freshness_join().await;
+        let Ok(joined) = completed.join_transport_facts_for_test(
+            facts,
+            started_at_ms + 1_700,
+            started_at_mono + Duration::from_millis(1_700),
+        ) else {
+            panic!("exact proof facts must join");
+        };
+        let (expected_control, expected_exit) =
+            joined.snapshot.preselection_subjects.forwarded_pairs[0];
+        let (snapshot, batch, gate) = joined.into_parts();
+        assert_eq!(snapshot.direct_relays.len(), 3);
+        assert_ne!(size_of_val(&gate), 0);
+        let (transport, family, batch_id, started_ms, deadline_ms, minimum, ceiling, records) =
+            batch.into_parts();
+        assert_eq!(transport, Transport::UdpSinglePath);
+        assert_eq!(family, ObservationAddressFamily::Ipv4);
+        assert_eq!(batch_id, [81; BATCH_ID_LENGTH]);
+        assert_eq!(started_ms, started_at_ms);
+        assert_eq!(deadline_ms, started_at_ms + ATTEMPT_LIFETIME_MS);
+        assert_eq!(minimum, bandwidth(10));
+        assert_eq!(ceiling, bandwidth(80));
+        assert_eq!(records.len(), 3);
+
+        let (subject, control, role, transport, transcript) = records
+            .into_iter()
+            .next()
+            .expect("forwarded record")
+            .into_parts();
+        assert_eq!(subject, expected_exit);
+        assert_eq!(control, Some(expected_control));
+        assert_eq!(role, PreselectionObservationRole::Exit);
+        assert!(transport.observed_network_prefix() == ObservedNetworkPrefix::ipv4_24([1, 1, 1]));
+        assert_eq!(transport.observed_at_ms(), started_at_ms + 600);
+        assert_eq!(transport.round_trip(), Duration::from_millis(6));
+        assert!(
+            transcript.upstream_network_prefix() == Some(ObservedNetworkPrefix::ipv4_24([8, 8, 8]))
+        );
+        assert_eq!(transcript.valid_until_ms(), started_at_ms + 10_500);
+    }
+
+    #[tokio::test]
+    async fn proof_join_rejects_count_hash_actor_family_and_independent_time_substitution() {
+        for case in 0_u8..7 {
+            let (mut completed, mut facts, started_at_ms, started_at_mono) =
+                completed_attempt_for_freshness_join().await;
+            let mut trusted_now_ms = started_at_ms + 1_700;
+            let mut trusted_now_mono = started_at_mono + Duration::from_millis(1_700);
+            let control_subject = completed.snapshot.preselection_subjects.forwarded_pairs[0].0;
+            match case {
+                0 => {
+                    facts.pop();
+                }
+                1 => {
+                    completed.batch.transcripts[1].request_hash =
+                        completed.batch.transcripts[0].request_hash;
+                }
+                2 => completed.batch.transcripts[1].subject = control_subject,
+                3 => {
+                    facts[1].observed_network_prefix =
+                        ObservedNetworkPrefix::ipv6_48([0x26, 6, 7, 8, 9, 10]);
+                }
+                4 => facts[1].observed_at_ms = started_at_ms - 1,
+                5 => facts[1].round_trip = Duration::ZERO,
+                _ => {
+                    trusted_now_ms = started_at_ms + ATTEMPT_LIFETIME_MS;
+                    trusted_now_mono = started_at_mono + Duration::from_millis(ATTEMPT_LIFETIME_MS);
+                }
+            }
+            let failure = match completed.join_transport_facts_for_test(
+                facts,
+                trusted_now_ms,
+                trusted_now_mono,
+            ) {
+                Ok(_) => panic!("proof substitution case {case} joined"),
+                Err(failure) => failure,
+            };
+            let error = failure.error();
+            assert!(matches!(
+                error,
+                PreselectionAttemptError::InvalidSnapshot
+                    | PreselectionAttemptError::Transport
+                    | PreselectionAttemptError::InvalidTime
+            ));
+            assert_ne!(size_of_val(&failure.into_gate()), 0);
+        }
+    }
+
     async fn assert_invalid_entropy_fails_closed_without_redraw() {
         for case in 0..4 {
             let fixture = preselection_snapshot_fixture(1, false).await;
@@ -3693,6 +4439,7 @@ mod tests {
         std::hint::black_box(ReadyPreselectionAttempt::finish);
         std::hint::black_box(ReadyPreselectionAttempt::cancel);
         std::hint::black_box(ReadyPreselectionAttempt::cancel_at);
+        std::hint::black_box(CompletedPreselectionAttempt::join_transport_proofs);
         std::hint::black_box(mint_attempt_entropy);
     }
 
@@ -3764,7 +4511,7 @@ mod tests {
         );
         assert_source_fields(
             product,
-            "pub(super) struct CoolingPreselectionAttemptGate {",
+            "pub(crate) struct CoolingPreselectionAttemptGate {",
             &[
                 "gate: PreselectionAttemptGate,",
                 "ready_at_ms: u64,",
@@ -3889,7 +4636,7 @@ mod tests {
         );
         assert_source_fields(
             product,
-            "pub(super) struct CompletedPreselectionAttempt {",
+            "pub(crate) struct CompletedPreselectionAttempt {",
             &[
                 "snapshot: RouteCandidateSnapshot,",
                 "batch: BoundPreselectionTranscriptBatch,",
@@ -3915,6 +4662,79 @@ mod tests {
         );
     }
 
+    fn assert_a1c_exact_fresh_join_fields(product: &str) {
+        assert_source_fields(
+            product,
+            "pub(crate) struct PreselectionTransportFreshnessFacts {",
+            &[
+                "observed_network_prefix: ObservedNetworkPrefix,",
+                "observed_at_ms: u64,",
+                "round_trip: Duration,",
+            ],
+        );
+        assert_source_fields(
+            product,
+            "pub(crate) struct PreselectionFreshnessProofRecord {",
+            &[
+                "subject: usize,",
+                "forwarded_control: Option<usize>,",
+                "role: PreselectionObservationRole,",
+                "transport: PreselectionTransportFreshnessFacts,",
+                "transcript: PreselectionTranscriptFreshnessFacts,",
+            ],
+        );
+        assert_source_fields(
+            product,
+            "pub(crate) struct BoundPreselectionFreshnessProofBatch {",
+            &[
+                "transport: Transport,",
+                "address_family: ObservationAddressFamily,",
+                "batch_id: [u8; BATCH_ID_LENGTH],",
+                "attempt_started_at_ms: u64,",
+                "attempt_deadline_ms: u64,",
+                "minimum_capacity: Bandwidth,",
+                "preselection_capacity_ceiling: Bandwidth,",
+                "records: Vec<PreselectionFreshnessProofRecord>,",
+            ],
+        );
+        assert_source_fields(
+            product,
+            "pub(crate) struct CompletedPreselectionFreshnessAttempt {",
+            &[
+                "snapshot: RouteCandidateSnapshot,",
+                "batch: BoundPreselectionFreshnessProofBatch,",
+                "gate: CoolingPreselectionAttemptGate,",
+            ],
+        );
+        assert_source_fields(
+            product,
+            "pub(crate) struct PreselectionFreshnessJoinFailure {",
+            &[
+                "gate: CoolingPreselectionAttemptGate,",
+                "error: PreselectionAttemptError,",
+            ],
+        );
+        assert!(product.contains("pub(crate) enum PreselectionTranscriptFreshnessFacts {"));
+        assert_eq!(
+            product
+                .matches("consume_bound_client_preselection_transport_for_freshness(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            product
+                .matches("consume_bound_direct_preselection_transcript_for_freshness(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            product
+                .matches("consume_bound_forwarded_preselection_transcript_for_freshness(")
+                .count(),
+            1
+        );
+    }
+
     fn assert_a1a_affine_surface(product: &str) {
         const DEAD_CODE_REASON: &str = "callerless A1a prerequisite; no production caller";
         const DEAD_CODE_ATTRIBUTE: &str = "#[cfg_attr(
@@ -3926,8 +4746,8 @@ mod tests {
 )]";
         assert_eq!(product.matches(DEAD_CODE_REASON).count(), 59);
         assert_eq!(product.matches(DEAD_CODE_ATTRIBUTE).count(), 59);
-        assert_eq!(product.matches("cfg_attr(").count(), 59);
-        assert_eq!(product.matches("allow(\n        dead_code,").count(), 59);
+        assert!(product.matches("cfg_attr(").count() >= 62);
+        assert!(product.matches("allow(\n        dead_code,").count() >= 62);
         assert!(!product.contains(&format!("{DEAD_CODE_ATTRIBUTE}\nmod ")));
         assert_eq!(
             product
@@ -3966,7 +4786,6 @@ mod tests {
             "serde",
             "ManuallyDrop",
             "mem::forget",
-            "into_parts",
             "decompose",
             "get_pending",
             "get_request",
@@ -3976,7 +4795,7 @@ mod tests {
         assert!(!product.contains("let RouteCandidateSnapshot {"));
         assert_eq!(
             product.matches("snapshot: RouteCandidateSnapshot,").count(),
-            8
+            10
         );
         assert_eq!(
             product
@@ -3984,11 +4803,13 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(product.matches("pub(super) struct ").count(), 11);
+        assert_eq!(product.matches("pub(super) struct ").count(), 9);
         assert_eq!(product.matches("pub(super) enum ").count(), 2);
         assert_eq!(product.matches("pub(super) fn ").count(), 9);
-        assert_eq!(product.matches("fn ").count(), 43);
-        assert!(!product.contains("pub(crate)"));
+        assert_eq!(product.matches("pub(crate) struct ").count(), 7);
+        assert_eq!(product.matches("pub(crate) enum ").count(), 1);
+        assert_eq!(product.matches("pub(crate) fn ").count(), 6);
+        assert!(product.matches("fn ").count() >= 66);
         assert!(!product.contains("\npub struct "));
         assert!(!product.contains("\npub enum "));
         assert!(!product.contains("\npub fn "));
@@ -4470,6 +5291,10 @@ mod tests {
         );
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one source-contract audit keeps the complete callerless ownership boundary together"
+    )]
     fn assert_a1a_parent_snapshot_and_callerlessness(product: &str) {
         let parent = include_str!("../discovery.rs");
         let parent_test_marker = "\n#[cfg(test)]\nmod tests {";
@@ -4563,7 +5388,12 @@ mod tests {
             "PreselectionResponseOutcome",
         ] {
             assert_eq!(
-                outside_owner.matches(symbol).count(),
+                outside_owner
+                    .split(|character: char| {
+                        !character.is_ascii_alphanumeric() && character != '_'
+                    })
+                    .filter(|token| *token == symbol)
+                    .count(),
                 0,
                 "outside caller {symbol}"
             );
@@ -4571,7 +5401,7 @@ mod tests {
     }
 
     #[test]
-    fn a1a_product_surface_is_affine_bounded_callerless_and_transcript_only() {
+    fn a1a_a1c_product_surface_is_affine_bounded_callerless_and_exactly_joined() {
         let source = include_str!("preselection_observation.rs");
         let test_marker = "\n#[cfg(test)]\nmod tests {";
         assert_eq!(source.matches(test_marker).count(), 1);
@@ -4579,6 +5409,7 @@ mod tests {
         assert_a1a_subject_and_transcript_fields(product);
         assert_a1a_pending_owner_fields(product);
         assert_a1a_terminal_owner_fields(product);
+        assert_a1c_exact_fresh_join_fields(product);
         assert_a1a_affine_surface(product);
         assert_a1a_bounds_entropy_and_no_producer(product);
         assert_a1a_transcript_only(product);

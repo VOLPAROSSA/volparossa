@@ -2,6 +2,12 @@
 
 mod preselection_observation;
 
+pub(crate) use preselection_observation::{
+    BoundPreselectionFreshnessProofBatch, CompletedPreselectionFreshnessAttempt,
+    CoolingPreselectionAttemptGate, PreselectionTranscriptFreshnessFacts,
+    PreselectionTransportFreshnessFacts,
+};
+
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
