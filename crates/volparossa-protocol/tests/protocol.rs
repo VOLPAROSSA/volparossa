@@ -3219,6 +3219,60 @@ fn open_tcp_accepts_dns_raw_ip_or_dns_pinned_to_transparent_ip() {
         Err(ProtocolError::InvalidField("open_tcp destination"))
     ));
 }
+
+#[test]
+fn udp_authorization_accepts_dns_raw_ip_or_dns_pinned_to_transparent_ip() {
+    let signing_key = key(7);
+    let mut message = UdpFlowAuthorization {
+        route_context_id: vec![1; 16],
+        flow_id: vec![2; 16],
+        client_ephemeral_id: node_id(&signing_key),
+        hostname: "www.example.com".to_owned(),
+        destination_ip: Vec::new(),
+        port: 443,
+        policy_hash: vec![3; 32],
+        idle_timeout_ms: 30_000,
+        timestamp_ms: NOW,
+        expires_at_ms: EXPIRY,
+        nonce: vec![82; 32],
+    };
+    message.hostname.clear();
+    message.destination_ip = vec![93, 184, 216, 34];
+    sign_control_message(
+        &message,
+        &signing_key,
+        NOW,
+        EXPIRY,
+        [82; 32],
+        TimePolicy::default(),
+    )
+    .expect("raw-IP UDP authorization");
+
+    message.hostname = "www.example.com".to_owned();
+    sign_control_message(
+        &message,
+        &signing_key,
+        NOW,
+        EXPIRY,
+        [82; 32],
+        TimePolicy::default(),
+    )
+    .expect("hostname UDP authorization pinned to transparent IP");
+
+    message.hostname.clear();
+    message.destination_ip.clear();
+    assert!(matches!(
+        sign_control_message(
+            &message,
+            &signing_key,
+            NOW,
+            EXPIRY,
+            [82; 32],
+            TimePolicy::default(),
+        ),
+        Err(ProtocolError::InvalidField("udp_authorization destination"))
+    ));
+}
 #[test]
 fn v2_identity_and_retired_prefix_tags_are_noncanonical() {
     fn assert_old_tag_is_noncanonical<M: Message + Default>(tag_key: u8) {
@@ -4109,7 +4163,7 @@ fn signed_native_route_identity_is_required_canonical_and_tamper_evident() {
 }
 
 #[test]
-fn udp_authorization_pins_exactly_one_destination() {
+fn udp_authorization_accepts_hostname_pinned_to_one_destination() {
     let client_key = key(40);
     let mut authorization = UdpFlowAuthorization {
         route_context_id: vec![1; 16],
@@ -4143,7 +4197,7 @@ fn udp_authorization_pins_exactly_one_destination() {
     .unwrap();
 
     authorization.destination_ip = vec![192, 0, 2, 53];
-    assert!(authorization.validate().is_err());
+    assert!(authorization.validate().is_ok());
     authorization.hostname.clear();
     assert!(authorization.validate().is_ok());
 }

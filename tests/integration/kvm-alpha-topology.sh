@@ -3988,6 +3988,7 @@ if [ "$A06_STATUS" -eq 0 ]; then
         | ($native.paths | map(select(.relay == "relay2")) | .[0]) as $native_r2
         | (($app.protocol == "HTTP/3") and ($app.http_version == "HTTP/3")
             and ($app.negotiated_alpn == "h3")
+            and ($app.hostname == "destination.volparossa.test")
             and ($app.application.ip == "43.159.1.1")
             and ($app.destination == {ip:"47.163.4.2",port:443})
             and ($app.request_bytes == 4194304) and ($app.response_bytes == 8388608)
@@ -3996,6 +3997,7 @@ if [ "$A06_STATUS" -eq 0 ]; then
             and ($destination.protocol == "HTTP/3")
             and ($destination.http_version == "HTTP/3")
             and ($destination.negotiated_alpn == "h3")
+            and ($destination.hostname == $app.hostname)
             and ($destination.listen == $app.destination)
             and ($destination.source.ip == "47.163.4.1")
             and ($client.relay1_wireguard_data_datagrams > 0)
@@ -4017,6 +4019,11 @@ if [ "$A06_STATUS" -eq 0 ]; then
         | {schema_version:1,acceptance_id:"A06",success:$success,
            transport:"real HTTP/3 over genuine native Multipath QUIC",
            application:$app,destination:$destination,
+           hostname_policy:{hostname:$app.hostname,transport:"udp",port:443,
+             kernel_original_destination:$app.destination,
+             exit_dns_pin:{addresses:["47.163.4.2"],exact_original_destination_match:true},
+             client_initial_inspected_before_route:true,
+             exit_initial_reverified_before_egress:true},
            native_mpquic:{route_context_id:$native.route_context_id,
              required_path_count:2,paths:$native.paths},
            path_evidence:{client_capture:$client,exit_capture:$exit},

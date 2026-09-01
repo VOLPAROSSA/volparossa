@@ -162,6 +162,10 @@ grep -F 'native daemon exposes an ACK/accounting counter' "$GUEST" >/dev/null
 grep -F '"native_acked_bytes": int(user_bytes)' "$GUEST" >/dev/null
 grep -F 'agent local-control native MPQUIC status' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A06",success:$success' "$GUEST" >/dev/null
+grep -F 'hostname_policy:{hostname:$app.hostname,transport:"udp",port:443' "$GUEST" \
+    >/dev/null
+grep -F 'client_initial_inspected_before_route:true' "$GUEST" >/dev/null
+grep -F 'exit_initial_reverified_before_egress:true' "$GUEST" >/dev/null
 grep -F 'a06_http3_mpquic:{requested:$a06_requested,succeeded:$a06_succeeded' "$GUEST" \
     >/dev/null
 grep -F 'ip -n "$R1" link set r1c down' "$GUEST" >/dev/null
@@ -202,6 +206,8 @@ grep -F '.a01_bootstrap_resilience.evidence.bootstrap1_removed.fresh_advertiseme
     "$WORKFLOW" >/dev/null
 grep -F '.a06_http3_mpquic.evidence.native_mpquic.required_path_count == 2' "$WORKFLOW" \
     >/dev/null
+grep -F '.a06_http3_mpquic.evidence.hostname_policy.hostname == "destination.volparossa.test"' \
+    "$WORKFLOW" >/dev/null
 grep -F '.a07_http3_relay_failover.evidence.application_flow_completed == true' "$WORKFLOW" \
     >/dev/null
 grep -F '.a08_allowed_destination.evidence.protected_flow.tls_handshake_and_payload_completed == true' \

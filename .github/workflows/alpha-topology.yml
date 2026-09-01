@@ -208,6 +208,11 @@ jobs:
             .a06_http3_mpquic.succeeded == true and
             .a06_http3_mpquic.evidence.success == true and
             .a06_http3_mpquic.evidence.application.protocol == "HTTP/3" and
+            .a06_http3_mpquic.evidence.hostname_policy.hostname == "destination.volparossa.test" and
+            .a06_http3_mpquic.evidence.hostname_policy.kernel_original_destination.ip == "47.163.4.2" and
+            .a06_http3_mpquic.evidence.hostname_policy.exit_dns_pin.exact_original_destination_match == true and
+            .a06_http3_mpquic.evidence.hostname_policy.client_initial_inspected_before_route == true and
+            .a06_http3_mpquic.evidence.hostname_policy.exit_initial_reverified_before_egress == true and
             .a06_http3_mpquic.evidence.native_mpquic.required_path_count == 2 and
             (.a06_http3_mpquic.evidence.native_mpquic.paths | length) == 2 and
             .a06_http3_mpquic.evidence.path_evidence.client_capture.relay1_wireguard_data_bytes > 1048576 and

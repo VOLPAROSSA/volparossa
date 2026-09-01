@@ -1002,6 +1002,18 @@ impl ClientRouteControl {
             .as_ref()
             .or(active.browser_flow.as_ref())
             .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        if let Some(pending) = pending_binding.as_ref() {
+            active
+                .session
+                .authorize_browser_quic(
+                    pending.flow(),
+                    pending.application().port(),
+                    pending.signed_authorization(),
+                    now_ms,
+                )
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        }
         active
             .session
             .send_browser_quic(flow.flow(), packet, now_ms)

@@ -48,7 +48,10 @@ use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
 
-use client_ingress::{ClientIngressRuntime, ClientIngressTcpError, ClientIngressUdpError};
+use client_ingress::{
+    BrowserQuicIngressDecision, BrowserQuicIngressGate, ClientIngressRuntime,
+    ClientIngressTcpError, ClientIngressUdpError,
+};
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
 use helper::HelperClient;
@@ -505,8 +508,12 @@ async fn run_client_udp_ingress(
             .log(LogLevel::Error, "INGRESS_UDP_POLL_FAILED", unix_millis());
         return;
     };
+    let mut browser_gate = BrowserQuicIngressGate::new();
     loop {
         let browser_flow_active = routes.browser_quic_flow_active().await;
+        if !browser_flow_active {
+            browser_gate.reset_authorized_if_route_inactive();
+        }
         let mut ready = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -576,7 +583,7 @@ async fn run_client_udp_ingress(
             }
             continue;
         };
-        let ingress = match runtime.try_receive_ipv4_udp(&policy, now_ms) {
+        let observed = match runtime.try_receive_ipv4_udp() {
             Ok(ingress) => ingress,
             Err(ClientIngressUdpError::Receive(error))
                 if error.kind() == std::io::ErrorKind::WouldBlock =>
@@ -604,11 +611,30 @@ async fn run_client_udp_ingress(
             }
         };
         ready.clear_ready();
-        if ingress.is_browser_quic() {
+        if observed.is_browser_quic() {
+            let ingresses = match browser_gate.inspect(observed, &policy, now_ms) {
+                Ok(BrowserQuicIngressDecision::NeedMore) => continue,
+                Ok(BrowserQuicIngressDecision::Authorized(ingresses)) => ingresses,
+                Err(ClientIngressUdpError::Policy(_)) => {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    state.write().await.record_policy_rejection();
+                    continue;
+                }
+                Err(_) => {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_MPQUIC_CLIENT_HELLO_DENIED",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+            };
             if Box::pin(routes.ensure_browser_quic(&config, &discovery, &helper))
                 .await
                 .is_err()
             {
+                browser_gate = BrowserQuicIngressGate::new();
                 state.write().await.log(
                     LogLevel::Warn,
                     "INGRESS_MPQUIC_ROUTE_UNAVAILABLE",
@@ -616,20 +642,39 @@ async fn run_client_udp_ingress(
                 );
                 continue;
             }
-            if routes
-                .send_browser_quic_ingress(ingress, &policy, now_ms)
-                .await
-                .is_err()
-            {
-                routes.disconnect().await;
-                state.write().await.log(
-                    LogLevel::Warn,
-                    "INGRESS_MPQUIC_DATAGRAM_REJECTED",
-                    unix_millis(),
-                );
+            for ingress in ingresses {
+                if routes
+                    .send_browser_quic_ingress(ingress, &policy, now_ms)
+                    .await
+                    .is_err()
+                {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    routes.disconnect().await;
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_MPQUIC_DATAGRAM_REJECTED",
+                        unix_millis(),
+                    );
+                    break;
+                }
             }
             continue;
         }
+        let ingress = match observed.authorize_ip(&policy, now_ms) {
+            Ok(ingress) => ingress,
+            Err(ClientIngressUdpError::Policy(_)) => {
+                state.write().await.record_policy_rejection();
+                continue;
+            }
+            Err(_) => {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_UDP_DATAGRAM_REJECTED",
+                    unix_millis(),
+                );
+                continue;
+            }
+        };
         if Box::pin(routes.activate_udp_ingress(ingress, &policy, now_ms))
             .await
             .is_err()

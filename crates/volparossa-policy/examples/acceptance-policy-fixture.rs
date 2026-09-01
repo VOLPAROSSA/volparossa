@@ -50,14 +50,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?)?;
     specification.add_rule(DestinationRule::exact_ip(
         IpAddr::V4(Ipv4Addr::new(47, 163, 4, 2)),
-        [
-            ProtocolPort::new(TransportProtocol::Tcp, 18_080)?,
-            ProtocolPort::new(TransportProtocol::Udp, 443)?,
-        ],
+        [ProtocolPort::new(TransportProtocol::Tcp, 18_080)?],
     )?)?;
     specification.add_rule(DestinationRule::exact_domain(
         "destination.volparossa.test",
-        [ProtocolPort::new(TransportProtocol::Tcp, 443)?],
+        [
+            ProtocolPort::new(TransportProtocol::Tcp, 443)?,
+            ProtocolPort::new(TransportProtocol::Udp, 443)?,
+        ],
     )?)?;
     let signers = keys.iter().collect::<Vec<_>>();
     let manifest = sign_manifest(&specification, &trust, &signers)?;

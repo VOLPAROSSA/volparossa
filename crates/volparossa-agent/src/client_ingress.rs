@@ -17,13 +17,16 @@ use subtle::ConstantTimeEq as _;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, sleep, timeout_at};
-use volparossa_inspection::{InspectionError, InspectionProgress, TlsClientHelloInspector};
+use volparossa_inspection::{
+    InspectionError, InspectionProgress, QuicInitialInspector, TlsClientHelloInspector,
+};
 use volparossa_linux_uapi::{
     IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
     duplicate_descriptor_cloexec, receive_udp_with_original_destination, tcp_original_destination,
 };
 use volparossa_policy::{PolicyError, TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{ReplayCache, TimePolicy};
+use volparossa_quic::parse_initial;
 use volparossa_reservation::{CoordinatorError, ReservationCoordinator};
 use volparossa_routing::{PrepareClientIngress, REQUIRED_INGRESS_SOCKETS};
 use volparossa_udp::{
@@ -52,6 +55,8 @@ const TLS_CLIENT_HELLO_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const IPV4_HEADER_BYTES: usize = 20;
 const UDP_HEADER_BYTES: usize = 8;
 const MAX_BROWSER_QUIC_DATAGRAMS_PER_FLOW: u32 = 65_536;
+const MAX_PENDING_BROWSER_QUIC_DATAGRAMS: usize = 128;
+const MAX_PENDING_BROWSER_QUIC_BYTES: usize = 256 * 1024;
 
 const IPV4_TRANSPARENT_TCP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
     ClientIngressSocketKind::TransparentTcpListener,
@@ -169,11 +174,7 @@ impl ClientIngressRuntime {
     /// The descriptor is nonblocking. `WouldBlock` is returned unchanged so an actor can wait for
     /// readiness without inventing a destination. The payload and destination enter the returned
     /// affine value only after exact ORIGDST evidence and the active whitelist both agree.
-    pub(crate) fn try_receive_ipv4_udp(
-        &self,
-        policy: &VerifiedManifest,
-        now_ms: u64,
-    ) -> Result<PolicyAuthorizedUdpIngress, ClientIngressUdpError> {
+    pub(crate) fn try_receive_ipv4_udp(&self) -> Result<ObservedUdpIngress, ClientIngressUdpError> {
         let socket = self
             .active
             .socket(IPV4_TRANSPARENT_UDP)
@@ -191,13 +192,7 @@ impl ClientIngressRuntime {
         )
         .map_err(ClientIngressUdpError::Receive)?;
         payload.truncate(received.bytes());
-        PolicyAuthorizedUdpIngress::authorize(
-            received.source(),
-            received.original_destination(),
-            payload,
-            policy,
-            now_ms,
-        )
+        ObservedUdpIngress::new(received.source(), received.original_destination(), payload)
     }
 
     pub(crate) fn duplicate_ipv4_udp_poll_descriptor(&self) -> Result<OwnedFd, io::Error> {
@@ -464,7 +459,232 @@ fn authorize_tcp_destination(
     Ok((*policy.policy_hash(), expires_at_ms))
 }
 
-/// One kernel-observed UDP datagram whose exact raw-IP tuple passed the active policy.
+/// One kernel-observed UDP datagram before destination policy is selected.
+#[must_use = "kernel UDP evidence must be inspected and authorized or dropped"]
+pub(crate) struct ObservedUdpIngress {
+    source: SocketAddrV4,
+    destination: SocketAddrV4,
+    payload: Vec<u8>,
+}
+
+impl ObservedUdpIngress {
+    fn new(
+        source: SocketAddr,
+        destination: SocketAddr,
+        payload: Vec<u8>,
+    ) -> Result<Self, ClientIngressUdpError> {
+        let (SocketAddr::V4(source), SocketAddr::V4(destination)) = (source, destination) else {
+            return Err(ClientIngressUdpError::AddressFamily);
+        };
+        if source.port() == 0
+            || destination.port() == 0
+            || source.ip().is_unspecified()
+            || destination.ip().is_unspecified()
+            || payload.len() > MAX_UDP_PAYLOAD_BYTES
+        {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        Ok(Self {
+            source,
+            destination,
+            payload,
+        })
+    }
+
+    pub(crate) const fn is_browser_quic(&self) -> bool {
+        self.destination.port() == BROWSER_QUIC_PORT
+    }
+
+    pub(crate) fn authorize_ip(
+        self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<PolicyAuthorizedUdpIngress, ClientIngressUdpError> {
+        PolicyAuthorizedUdpIngress::authorize(
+            self.source.into(),
+            self.destination.into(),
+            self.payload,
+            policy,
+            now_ms,
+        )
+    }
+}
+
+/// Bounded owner of browser QUIC Initials until visible SNI selects domain policy.
+pub(crate) struct BrowserQuicIngressGate {
+    state: BrowserQuicIngressState,
+}
+
+enum BrowserQuicIngressState {
+    Empty,
+    Pending {
+        source: SocketAddrV4,
+        destination: SocketAddrV4,
+        inspector: QuicInitialInspector,
+        datagrams: Vec<Vec<u8>>,
+        bytes: usize,
+    },
+    Authorized {
+        source: SocketAddrV4,
+        destination: SocketAddrV4,
+        hostname: String,
+        policy_hash: [u8; 32],
+        expires_at_ms: u64,
+    },
+}
+
+pub(crate) enum BrowserQuicIngressDecision {
+    NeedMore,
+    Authorized(Vec<PolicyAuthorizedUdpIngress>),
+}
+
+impl BrowserQuicIngressGate {
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: BrowserQuicIngressState::Empty,
+        }
+    }
+
+    pub(crate) fn reset_authorized_if_route_inactive(&mut self) {
+        if matches!(self.state, BrowserQuicIngressState::Authorized { .. }) {
+            self.state = BrowserQuicIngressState::Empty;
+        }
+    }
+
+    pub(crate) fn inspect(
+        &mut self,
+        ingress: ObservedUdpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<BrowserQuicIngressDecision, ClientIngressUdpError> {
+        if !ingress.is_browser_quic() {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        let authorized_flow = if let BrowserQuicIngressState::Authorized {
+            source,
+            destination,
+            hostname,
+            policy_hash,
+            expires_at_ms,
+        } = &self.state
+        {
+            (ingress.source == *source
+                && ingress.destination == *destination
+                && now_ms < *expires_at_ms
+                && policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() == 1)
+                .then(|| hostname.clone())
+        } else {
+            None
+        };
+        if let Some(hostname) = authorized_flow {
+            let authorized =
+                PolicyAuthorizedUdpIngress::authorize_hostname(ingress, hostname, policy, now_ms)?;
+            return Ok(BrowserQuicIngressDecision::Authorized(vec![authorized]));
+        }
+        if matches!(self.state, BrowserQuicIngressState::Authorized { .. }) {
+            self.state = BrowserQuicIngressState::Empty;
+        }
+        let pending_tuple_changed = if let BrowserQuicIngressState::Pending {
+            source,
+            destination,
+            ..
+        } = &self.state
+        {
+            ingress.source != *source || ingress.destination != *destination
+        } else {
+            false
+        };
+        if pending_tuple_changed {
+            self.state = BrowserQuicIngressState::Empty;
+        }
+
+        if matches!(self.state, BrowserQuicIngressState::Empty) {
+            let initial = parse_initial(&ingress.payload)
+                .map_err(|_| ClientIngressUdpError::QuicInspection)?;
+            let inspector = QuicInitialInspector::new(initial.destination_connection_id)
+                .map_err(|_| ClientIngressUdpError::QuicInspection)?;
+            self.state = BrowserQuicIngressState::Pending {
+                source: ingress.source,
+                destination: ingress.destination,
+                inspector,
+                datagrams: Vec::new(),
+                bytes: 0,
+            };
+        }
+
+        let BrowserQuicIngressState::Pending {
+            source,
+            destination,
+            inspector,
+            datagrams,
+            bytes,
+        } = &mut self.state
+        else {
+            return Err(ClientIngressUdpError::QuicInspection);
+        };
+        if ingress.source != *source
+            || ingress.destination != *destination
+            || datagrams.len() >= MAX_PENDING_BROWSER_QUIC_DATAGRAMS
+            || bytes
+                .checked_add(ingress.payload.len())
+                .is_none_or(|total| total > MAX_PENDING_BROWSER_QUIC_BYTES)
+        {
+            return Err(ClientIngressUdpError::FlowBound);
+        }
+        let progress = inspector
+            .inspect_datagram(&ingress.payload)
+            .map_err(|_| ClientIngressUdpError::QuicInspection)?
+            .progress;
+        *bytes += ingress.payload.len();
+        datagrams.push(ingress.payload);
+        let InspectionProgress::Complete(server_name) = progress else {
+            return Ok(BrowserQuicIngressDecision::NeedMore);
+        };
+        let hostname = server_name.into_string();
+        policy
+            .authorize_domain(now_ms, &hostname, TransportProtocol::Udp, BROWSER_QUIC_PORT)
+            .map_err(ClientIngressUdpError::Policy)?;
+        let expires_at_ms = udp_flow_expiry(policy, now_ms)?;
+        let source = *source;
+        let destination = *destination;
+        let buffered = std::mem::take(datagrams);
+        let authorized = buffered
+            .into_iter()
+            .map(|payload| {
+                PolicyAuthorizedUdpIngress::authorize_hostname(
+                    ObservedUdpIngress {
+                        source,
+                        destination,
+                        payload,
+                    },
+                    hostname.clone(),
+                    policy,
+                    now_ms,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.state = BrowserQuicIngressState::Authorized {
+            source,
+            destination,
+            hostname,
+            policy_hash: *policy.policy_hash(),
+            expires_at_ms,
+        };
+        Ok(BrowserQuicIngressDecision::Authorized(authorized))
+    }
+}
+
+fn udp_flow_expiry(policy: &VerifiedManifest, now_ms: u64) -> Result<u64, ClientIngressUdpError> {
+    let expires_at_ms = now_ms
+        .checked_add(INGRESS_UDP_FLOW_TTL_MS)
+        .ok_or(ClientIngressUdpError::Clock)?
+        .min(policy.expires_at_ms());
+    (expires_at_ms > now_ms)
+        .then_some(expires_at_ms)
+        .ok_or(ClientIngressUdpError::Clock)
+}
+
+/// One kernel-observed UDP datagram whose exact destination passed the active policy.
 ///
 /// The destination, payload and policy binding are affine and immutable. This is deliberately not
 /// yet an [`AuthorizedUdpFlow`]: that type also requires the committed route's ephemeral identity
@@ -477,6 +697,7 @@ pub(crate) struct PolicyAuthorizedUdpIngress {
     payload: Vec<u8>,
     policy_hash: [u8; 32],
     expires_at_ms: u64,
+    hostname: Option<String>,
 }
 
 impl PolicyAuthorizedUdpIngress {
@@ -498,19 +719,38 @@ impl PolicyAuthorizedUdpIngress {
                 destination.port(),
             )
             .map_err(ClientIngressUdpError::Policy)?;
-        let expires_at_ms = now_ms
-            .checked_add(INGRESS_UDP_FLOW_TTL_MS)
-            .ok_or(ClientIngressUdpError::Clock)?
-            .min(policy.expires_at_ms());
-        if expires_at_ms <= now_ms {
-            return Err(ClientIngressUdpError::Clock);
-        }
+        let expires_at_ms = udp_flow_expiry(policy, now_ms)?;
         Ok(Self {
             source,
             destination,
             payload,
             policy_hash: *policy.policy_hash(),
             expires_at_ms,
+            hostname: None,
+        })
+    }
+
+    fn authorize_hostname(
+        ingress: ObservedUdpIngress,
+        hostname: String,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<Self, ClientIngressUdpError> {
+        policy
+            .authorize_domain(
+                now_ms,
+                &hostname,
+                TransportProtocol::Udp,
+                ingress.destination.port(),
+            )
+            .map_err(ClientIngressUdpError::Policy)?;
+        Ok(Self {
+            source: ingress.source,
+            destination: ingress.destination,
+            payload: ingress.payload,
+            policy_hash: *policy.policy_hash(),
+            expires_at_ms: udp_flow_expiry(policy, now_ms)?,
+            hostname: Some(hostname),
         })
     }
 
@@ -540,8 +780,19 @@ impl PolicyAuthorizedUdpIngress {
             return Err(ClientIngressUdpError::PolicyBinding);
         }
         let expires_at_ms = self.expires_at_ms.min(route_expires_at_ms);
-        let signed_authorization = coordinator
-            .sign_udp_ip(
+        let signed_authorization = if let Some(hostname) = self.hostname.as_deref() {
+            coordinator.sign_udp_hostname_pinned(
+                route_context_id,
+                self.policy_hash,
+                hostname,
+                IpAddr::V4(*self.destination.ip()),
+                self.destination.port(),
+                INGRESS_UDP_IDLE_TIMEOUT_MS,
+                now_ms,
+                expires_at_ms,
+            )
+        } else {
+            coordinator.sign_udp_ip(
                 route_context_id,
                 self.policy_hash,
                 IpAddr::V4(*self.destination.ip()),
@@ -550,7 +801,8 @@ impl PolicyAuthorizedUdpIngress {
                 now_ms,
                 expires_at_ms,
             )
-            .map_err(ClientIngressUdpError::Sign)?;
+        }
+        .map_err(ClientIngressUdpError::Sign)?;
         self.bind_signed_to_multipath_route(
             route_context_id,
             client_ephemeral_id,
@@ -596,6 +848,7 @@ impl PolicyAuthorizedUdpIngress {
             || self.source.ip().is_unspecified()
             || tunnel_source.is_unspecified()
             || !flow.matches_exact_ip_destination(SocketAddr::V4(self.destination))
+            || flow.hostname() != self.hostname.as_deref()
         {
             return Err(ClientIngressUdpError::DestinationBinding);
         }
@@ -614,6 +867,7 @@ impl PolicyAuthorizedUdpIngress {
                 policy_hash: self.policy_hash,
                 last_activity_ms: now_ms,
                 datagrams: 0,
+                signed_authorization: signed_authorization.to_vec(),
             },
             packet,
         ))
@@ -784,12 +1038,18 @@ pub(crate) struct BrowserQuicFlowBinding {
     policy_hash: [u8; 32],
     last_activity_ms: u64,
     datagrams: u32,
+    signed_authorization: Vec<u8>,
 }
 
 impl BrowserQuicFlowBinding {
     /// Borrow the exact signed flow consumed by the native MPQUIC boundary.
     pub(crate) const fn flow(&self) -> &AuthorizedUdpFlow {
         &self.flow
+    }
+
+    /// Borrow the one-shot authorization sent inside the protected tunnel before Initial data.
+    pub(crate) fn signed_authorization(&self) -> &[u8] {
+        &self.signed_authorization
     }
 
     /// Bind another intercepted datagram to the same application/remote tuple and flow.
@@ -1104,6 +1364,8 @@ pub(crate) enum ClientIngressUdpError {
     DestinationBinding,
     #[error("browser QUIC inner IPv4/UDP packet binding is invalid")]
     PacketBinding,
+    #[error("browser QUIC ClientHello inspection failed closed")]
+    QuicInspection,
     #[error("browser QUIC flow exceeded its idle, lifetime, or datagram bound")]
     FlowBound,
     #[error("UDP reply payload exceeded the fixed datagram bound")]
@@ -1131,8 +1393,8 @@ mod tests {
     use volparossa_udp::VerifiedSingleRelayPath;
 
     use super::{
-        ObservedTcpIngress, PolicyAuthorizedUdpIngress, authorize_tcp_destination,
-        build_ipv4_udp_packet, parse_ipv4_udp_packet,
+        ObservedTcpIngress, ObservedUdpIngress, PolicyAuthorizedUdpIngress,
+        authorize_tcp_destination, build_ipv4_udp_packet, parse_ipv4_udp_packet,
     };
 
     #[tokio::test]
@@ -1309,11 +1571,12 @@ mod tests {
     #[test]
     fn browser_quic_reuses_multipath_flow_with_tunnel_source_and_exact_reverse_packet() {
         const NOW_MS: u64 = 1_900_000_000_000;
+        const HOSTNAME: &str = "destination.volparossa.test";
         let application = SocketAddr::from((Ipv4Addr::new(43, 159, 1, 9), 52_000));
         let remote = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 443));
         let permission =
             ProtocolPort::new(TransportProtocol::Udp, remote.port()).expect("UDP permission");
-        let rule = DestinationRule::exact_ip(remote.ip(), [permission]).expect("IP rule");
+        let rule = DestinationRule::exact_domain(HOSTNAME, [permission]).expect("domain rule");
         let policy = verified_development_manifest(NOW_MS, vec![rule]).expect("policy");
         let fixture = SignedRouteFixture::new(2, &[Transport::MultipathQuic], NOW_MS)
             .expect("multipath route");
@@ -1323,7 +1586,7 @@ mod tests {
                 route_context_id: fixture.route_context_id().to_vec(),
                 flow_id: vec![9; 16],
                 client_ephemeral_id: fixture.client_session_id().to_vec(),
-                hostname: String::new(),
+                hostname: HOSTNAME.to_owned(),
                 destination_ip: match remote.ip() {
                     IpAddr::V4(address) => address.octets().to_vec(),
                     IpAddr::V6(_) => unreachable!("IPv4 fixture"),
@@ -1342,10 +1605,10 @@ mod tests {
             TimePolicy::default(),
         )
         .expect("signed browser flow");
-        let ingress = PolicyAuthorizedUdpIngress::authorize(
-            application,
-            remote,
-            b"quic-one".to_vec(),
+        let ingress = PolicyAuthorizedUdpIngress::authorize_hostname(
+            ObservedUdpIngress::new(application, remote, b"quic-one".to_vec())
+                .expect("kernel tuple"),
+            HOSTNAME.to_owned(),
             &policy,
             NOW_MS,
         )
@@ -1368,12 +1631,15 @@ mod tests {
         assert_eq!(first_source, "10.76.0.2:52000".parse().expect("source"));
         assert_eq!(SocketAddr::V4(first_remote), remote);
         assert_eq!(first_payload, b"quic-one");
+        assert_eq!(binding.flow().hostname(), Some(HOSTNAME));
+        assert!(binding.flow().matches_exact_ip_destination(remote));
+        assert!(!binding.signed_authorization().is_empty());
         binding.record_sent(NOW_MS).expect("first handoff");
 
-        let next = PolicyAuthorizedUdpIngress::authorize(
-            application,
-            remote,
-            b"quic-two".to_vec(),
+        let next = PolicyAuthorizedUdpIngress::authorize_hostname(
+            ObservedUdpIngress::new(application, remote, b"quic-two".to_vec())
+                .expect("next kernel tuple"),
+            HOSTNAME.to_owned(),
             &policy,
             NOW_MS + 1,
         )

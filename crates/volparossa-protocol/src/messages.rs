@@ -1188,16 +1188,16 @@ impl ControlPayload for UdpFlowAuthorization {
             &self.client_ephemeral_id,
             "udp_authorization.client_ephemeral_id",
         )?;
-        match (self.hostname.is_empty(), self.destination_ip.is_empty()) {
-            (false, true) => validate_canonical_hostname(&self.hostname)?,
-            (true, false) => {
-                parse_ip_bytes(&self.destination_ip).ok_or(ProtocolError::InvalidField(
-                    "udp_authorization.destination_ip",
-                ))?;
-            }
-            _ => {
-                return Err(ProtocolError::InvalidField("udp_authorization destination"));
-            }
+        if self.hostname.is_empty() && self.destination_ip.is_empty() {
+            return Err(ProtocolError::InvalidField("udp_authorization destination"));
+        }
+        if !self.hostname.is_empty() {
+            validate_canonical_hostname(&self.hostname)?;
+        }
+        if !self.destination_ip.is_empty() {
+            parse_ip_bytes(&self.destination_ip).ok_or(ProtocolError::InvalidField(
+                "udp_authorization.destination_ip",
+            ))?;
         }
         validate_port(self.port, "udp_authorization.port")?;
         require_nonzero_length::<HASH_LENGTH>(&self.policy_hash, "udp_authorization.policy_hash")?;

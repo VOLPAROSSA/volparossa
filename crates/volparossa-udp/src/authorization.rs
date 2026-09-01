@@ -140,7 +140,13 @@ impl<'a> UdpAuthorizationScope<'a> {
                 TransportProtocol::Udp,
                 port,
             )?;
-            AuthorizedDestination::Hostname(message.hostname.clone())
+            let pinned_address = (!message.destination_ip.is_empty())
+                .then(|| parse_ip(&message.destination_ip))
+                .transpose()?;
+            AuthorizedDestination::Hostname {
+                hostname: message.hostname.clone(),
+                pinned_address,
+            }
         };
 
         Ok(AuthorizedUdpFlow {
@@ -156,7 +162,10 @@ impl<'a> UdpAuthorizationScope<'a> {
 }
 
 enum AuthorizedDestination {
-    Hostname(String),
+    Hostname {
+        hostname: String,
+        pinned_address: Option<IpAddr>,
+    },
     DnsHostname(String),
     Ip(IpAddr),
 }
@@ -218,7 +227,27 @@ impl AuthorizedUdpFlow {
     #[must_use]
     pub fn matches_exact_ip_destination(&self, destination: SocketAddr) -> bool {
         self.port == destination.port()
-            && matches!(self.destination, AuthorizedDestination::Ip(address) if address == destination.ip())
+            && match self.destination {
+                AuthorizedDestination::Ip(address) => address == destination.ip(),
+                AuthorizedDestination::Hostname {
+                    pinned_address: Some(address),
+                    ..
+                } => address == destination.ip(),
+                AuthorizedDestination::Hostname {
+                    pinned_address: None,
+                    ..
+                } => false,
+                AuthorizedDestination::DnsHostname(_) => false,
+            }
+    }
+
+    /// Borrow the policy-authorized normalized hostname, when this is a domain flow.
+    #[must_use]
+    pub fn hostname(&self) -> Option<&str> {
+        match &self.destination {
+            AuthorizedDestination::Hostname { hostname, .. } => Some(hostname),
+            AuthorizedDestination::DnsHostname(_) | AuthorizedDestination::Ip(_) => None,
+        }
     }
 
     /// Return whether this is the dedicated protected DNS service for one exact signed name.
@@ -231,7 +260,7 @@ impl AuthorizedUdpFlow {
     pub(crate) fn dns_name(&self) -> Option<&str> {
         match &self.destination {
             AuthorizedDestination::DnsHostname(name) => Some(name),
-            AuthorizedDestination::Hostname(_) | AuthorizedDestination::Ip(_) => None,
+            AuthorizedDestination::Hostname { .. } | AuthorizedDestination::Ip(_) => None,
         }
     }
 
@@ -265,13 +294,24 @@ impl AuthorizedUdpFlow {
                 }
                 *address
             }
-            AuthorizedDestination::Hostname(hostname) => {
+            AuthorizedDestination::Hostname {
+                hostname,
+                pinned_address,
+            } => {
                 let addresses = lookup_host((hostname.as_str(), self.port)).await?;
-                addresses
-                    .take(MAX_RESOLUTION_RESULTS)
-                    .map(|socket| socket.ip())
-                    .find(|address| is_permitted_egress(*address))
-                    .ok_or(UdpError::ResolutionFailed)?
+                match pinned_address {
+                    Some(pinned) if is_permitted_egress(*pinned) => addresses
+                        .take(MAX_RESOLUTION_RESULTS)
+                        .map(|socket| socket.ip())
+                        .find(|address| address == pinned)
+                        .ok_or(UdpError::ResolutionFailed)?,
+                    Some(_) => return Err(UdpError::ResolutionFailed),
+                    None => addresses
+                        .take(MAX_RESOLUTION_RESULTS)
+                        .map(|socket| socket.ip())
+                        .find(|address| is_permitted_egress(*address))
+                        .ok_or(UdpError::ResolutionFailed)?,
+                }
             }
             AuthorizedDestination::DnsHostname(_) => {
                 return Err(UdpError::InvalidBinding("DNS flow cannot open UDP egress"));

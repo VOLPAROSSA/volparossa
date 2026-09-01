@@ -713,6 +713,60 @@ impl ReservationCoordinator {
         .map_err(CoordinatorError::from)
     }
 
+    /// Sign one visible hostname together with the kernel-observed original destination IP.
+    ///
+    /// The Exit must resolve the hostname independently and require this exact address in the
+    /// bounded answer set before it can open egress. This preserves domain policy while preventing
+    /// DNS or original-destination substitution between transparent ingress and the Exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid hostname, address, port, idle bound, scope, lifetime, or
+    /// canonical signature frame.
+    #[allow(clippy::too_many_arguments, reason = "fixed signed flow schema")]
+    pub fn sign_udp_hostname_pinned(
+        &self,
+        route_context_id: [u8; ID_BYTES],
+        policy_hash: [u8; KEY_BYTES],
+        hostname: &str,
+        destination: IpAddr,
+        port: u16,
+        idle_timeout_ms: u32,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if timestamp_ms >= expires_at_ms {
+            return Err(CoordinatorError::Scope("UDP flow lifetime"));
+        }
+        let destination_ip = match destination {
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        let nonce = generate_nonce();
+        let message = UdpFlowAuthorization {
+            route_context_id: route_context_id.to_vec(),
+            flow_id: random_nonzero_id().to_vec(),
+            client_ephemeral_id: self.client_session_id.to_vec(),
+            hostname: hostname.to_owned(),
+            destination_ip,
+            port: u32::from(port),
+            policy_hash: policy_hash.to_vec(),
+            idle_timeout_ms,
+            timestamp_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        sign_control_message(
+            &message,
+            &self.session_key,
+            timestamp_ms,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(CoordinatorError::from)
+    }
+
     /// Sign one exact-IP UDP flow with this fresh route-attempt session.
     ///
     /// This is the transparent-ingress counterpart of [`Self::sign_udp_hostname`]. The exact

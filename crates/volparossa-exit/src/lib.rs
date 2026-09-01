@@ -417,6 +417,7 @@ impl fmt::Debug for ExitNativeRouteAuthorization {
 pub struct ExitNativeRouteCredentialAuthorization {
     authorization: ExitNativeRouteAuthorization,
     auth_bearer: Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+    client_session_id: [u8; 32],
 }
 
 impl ExitNativeRouteCredentialAuthorization {
@@ -439,8 +440,9 @@ impl ExitNativeRouteCredentialAuthorization {
     ) -> (
         ExitNativeRouteAuthorization,
         Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+        [u8; 32],
     ) {
-        (self.authorization, self.auth_bearer)
+        (self.authorization, self.auth_bearer, self.client_session_id)
     }
 }
 
@@ -1120,6 +1122,11 @@ impl ExitService {
                     expires_at_ms: state.expires_at_ms,
                 },
                 auth_bearer,
+                client_session_id: state
+                    .client_session_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ExitError::NativeRouteAuthorizationMismatch)?,
             })
         })();
 
