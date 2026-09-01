@@ -3737,11 +3737,38 @@ may_own_preexec_barrier_is_exact() {
     may_own_barrier_invocation=$2
     may_own_barrier_restarts=$3
     may_own_barrier_fdstore=$4
+    may_own_barrier_record=$temporary_stage/may-own-output/may-own.pre-exec.$may_own_barrier_invocation
+    may_own_barrier_starttime=$(capture_process_starttime \
+        "$may_own_barrier_main_pid") || return 1
+    may_own_barrier_wait=0
+    while ! vp_capture_file_is_safe "$may_own_barrier_record"; do
+        [ ! -e "$may_own_barrier_record" ] \
+            && [ ! -L "$may_own_barrier_record" ] || return 1
+        [ "$(systemctl show --property=MainPID --value "$unit_name" \
+            2>/dev/null || true)" = "$may_own_barrier_main_pid" ] \
+            || return 1
+        [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+            "$may_own_barrier_invocation" ] || return 1
+        [ "$(capture_process_starttime "$may_own_barrier_main_pid" \
+            2>/dev/null || true)" = "$may_own_barrier_starttime" ] \
+            || return 1
+        unit_description_matches_marker || return 1
+        may_own_barrier_wait=$((may_own_barrier_wait + 1))
+        [ "$may_own_barrier_wait" -lt 600 ] || return 1
+        sleep 0.05
+    done
+    [ "$(systemctl show --property=MainPID --value "$unit_name" \
+        2>/dev/null || true)" = "$may_own_barrier_main_pid" ] \
+        || return 1
+    [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+        "$may_own_barrier_invocation" ] || return 1
+    [ "$(capture_process_starttime "$may_own_barrier_main_pid" \
+        2>/dev/null || true)" = "$may_own_barrier_starttime" ] \
+        || return 1
+    unit_description_matches_marker || return 1
     may_own_service_shape_is_exact "$may_own_barrier_main_pid" \
         "$may_own_barrier_invocation" "$may_own_barrier_restarts" \
         "$may_own_barrier_fdstore" || return 1
-    may_own_barrier_record=$temporary_stage/may-own-output/may-own.pre-exec.$may_own_barrier_invocation
-    vp_capture_file_is_safe "$may_own_barrier_record" || return 1
     [ "$(stat -Lc '%s' "$may_own_barrier_record")" -le 256 ] || return 1
     may_own_barrier_expected=$temporary_stage/may-own-pre-exec.$may_own_barrier_invocation.expected
     install -o root -g root -m 0600 /dev/null "$may_own_barrier_expected" \

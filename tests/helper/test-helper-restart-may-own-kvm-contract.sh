@@ -322,6 +322,90 @@ grep -F '/run/volparossa-helper-restart-launcher \' "$gate" >/dev/null
 preexec_contract=$tmp/preexec-contract
 sed -n '/^may_own_preexec_barrier_is_exact() {$/,/^}$/p' \
     "$gate" >"$preexec_contract"
+may_own_preexec_wait_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_preexec_source=$1
+    awk '
+        /may_own_barrier_starttime=\$\(capture_process_starttime/ {
+            starttime[++starttime_count] = NR
+        }
+        /while ! vp_capture_file_is_safe "\$may_own_barrier_record"; do/ {
+            wait_loop = NR; wait_loop_count++
+        }
+        /\[ ! -e "\$may_own_barrier_record"/ {
+            unsafe_exists = NR; unsafe_exists_count++
+        }
+        /&& \[ ! -L "\$may_own_barrier_record" \]/ {
+            unsafe_symlink = NR; unsafe_symlink_count++
+        }
+        /systemctl show --property=MainPID --value "\$unit_name"/ {
+            main_pid[++main_pid_count] = NR
+        }
+        /unit_current_invocation_id 2>\/dev\/null \|\| true/ {
+            invocation[++invocation_count] = NR
+        }
+        /capture_process_starttime "\$may_own_barrier_main_pid"/ {
+            process_starttime[++process_starttime_count] = NR
+        }
+        /unit_description_matches_marker \|\| return 1/ {
+            marker[++marker_count] = NR
+        }
+        index($0, "may_own_barrier_wait=$((may_own_barrier_wait + 1))") {
+            increment = NR; increment_count++
+        }
+        /\[ "\$may_own_barrier_wait" -lt 600 \] \|\| return 1/ {
+            bound = NR; bound_count++
+        }
+        /^        sleep 0\.05$/ { sleep_line = NR; sleep_count++ }
+        /^    done$/ { wait_done = NR; wait_done_count++ }
+        /may_own_service_shape_is_exact "\$may_own_barrier_main_pid"/ {
+            shape = NR; shape_count++
+        }
+        /stat -Lc '\''%s'\'' "\$may_own_barrier_record"/ {
+            size = NR; size_count++
+        }
+        /cmp -s "\$may_own_barrier_expected" "\$may_own_barrier_record"/ {
+            content = NR; content_count++
+        }
+        /stat -Lc '\''%d:%i'\'' "\/proc\/\$may_own_barrier_main_pid\/exe"/ {
+            executable = NR; executable_count++
+        }
+        /cgroup\.freeze"\)" = 0 \]/ { freezer = NR; freezer_count++ }
+        END {
+            valid = wait_loop_count == 1 && unsafe_exists_count == 1
+            valid = valid && unsafe_symlink_count == 1
+            valid = valid && main_pid_count == 2 && invocation_count == 2
+            valid = valid && starttime_count == 1
+            valid = valid && process_starttime_count == 2 && marker_count == 2
+            valid = valid && increment_count == 1 && bound_count == 1
+            valid = valid && sleep_count == 1 && wait_done_count == 1
+            valid = valid && shape_count == 1 && size_count == 1
+            valid = valid && content_count == 1 && executable_count == 1
+            valid = valid && freezer_count == 1
+            valid = valid && starttime[1] < wait_loop
+            valid = valid && wait_loop < unsafe_exists
+            valid = valid && unsafe_exists < unsafe_symlink
+            valid = valid && unsafe_symlink < main_pid[1]
+            valid = valid && main_pid[1] < invocation[1]
+            valid = valid && invocation[1] < process_starttime[1]
+            valid = valid && process_starttime[1] < marker[1]
+            valid = valid && marker[1] < increment && increment < bound
+            valid = valid && bound < sleep_line && sleep_line < wait_done
+            valid = valid && wait_done < main_pid[2]
+            valid = valid && main_pid[2] < invocation[2]
+            valid = valid && invocation[2] < process_starttime[2]
+            valid = valid && process_starttime[2] < marker[2]
+            valid = valid && marker[2] < shape && shape < size
+            valid = valid && size < content && content < executable
+            valid = valid && executable < freezer
+            if (!valid) exit 1
+        }
+    ' "$may_own_preexec_source"
+}
+if ! may_own_preexec_wait_contract_is_exact "$preexec_contract"; then
+    printf '%s\n' 'MayOwn pre-exec publication wait is not exact' >&2
+    exit 1
+fi
 for preexec_field in \
     'may_own_service_shape_is_exact "$may_own_barrier_main_pid" \' \
     'VOLPAROSSA_HELPER_MAY_OWN_PRE_EXEC_BARRIER_V1=ready' \
@@ -330,6 +414,57 @@ for preexec_field in \
     'cgroup.freeze")" = 0 ]'
 do
     grep -F "$preexec_field" "$preexec_contract" >/dev/null
+done
+
+preexec_single_shot_mutant=$tmp/preexec-single-shot-mutant
+sed \
+    -e 's/while ! vp_capture_file_is_safe "$may_own_barrier_record"; do/if ! vp_capture_file_is_safe "$may_own_barrier_record"; then/' \
+    -e 's/^    done$/    fi/' \
+    "$preexec_contract" >"$preexec_single_shot_mutant"
+preexec_main_pid_mutant=$tmp/preexec-main-pid-mutant
+sed '0,/--property=MainPID/s//--property=MainPID_REMOVED/' \
+    "$preexec_contract" >"$preexec_main_pid_mutant"
+preexec_invocation_mutant=$tmp/preexec-invocation-mutant
+sed '0,/unit_current_invocation_id/s//unit_current_invocation_id_removed/' \
+    "$preexec_contract" >"$preexec_invocation_mutant"
+preexec_starttime_mutant=$tmp/preexec-starttime-mutant
+sed '0,/capture_process_starttime/s//capture_removed_process_starttime/' \
+    "$preexec_contract" >"$preexec_starttime_mutant"
+preexec_bound_mutant=$tmp/preexec-bound-mutant
+sed 's/-lt 600/-lt 6000/' "$preexec_contract" >"$preexec_bound_mutant"
+preexec_shape_order_mutant=$tmp/preexec-shape-order-mutant
+awk '
+    { source[NR] = $0 }
+    /while ! vp_capture_file_is_safe "\$may_own_barrier_record"; do/ {
+        wait_loop = NR
+    }
+    /may_own_service_shape_is_exact "\$may_own_barrier_main_pid"/ {
+        shape_start = NR
+        shape_end = NR + 2
+    }
+    END {
+        if (!wait_loop || !shape_start) exit 1
+        for (line = 1; line <= NR; line++) {
+            if (line == wait_loop) {
+                for (shape_line = shape_start; shape_line <= shape_end; shape_line++) {
+                    print source[shape_line]
+                }
+            }
+            if (line < shape_start || line > shape_end) print source[line]
+        }
+    }
+' "$preexec_contract" >"$preexec_shape_order_mutant"
+for preexec_mutant in \
+    "$preexec_single_shot_mutant" "$preexec_main_pid_mutant" \
+    "$preexec_invocation_mutant" "$preexec_starttime_mutant" \
+    "$preexec_bound_mutant" "$preexec_shape_order_mutant"
+do
+    sh -n "$preexec_mutant"
+    if may_own_preexec_wait_contract_is_exact "$preexec_mutant"; then
+        printf 'MayOwn pre-exec wait accepted forbidden mutant: %s\n' \
+            "${preexec_mutant##*/}" >&2
+        exit 1
+    fi
 done
 observer_preexec_contract=$tmp/observer-preexec-contract
 sed -n '/^[[:space:]]*pre-exec-one|pre-exec-two|pre-exec-three)/,/^[[:space:]]*;;$/p' \
