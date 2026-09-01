@@ -46,8 +46,8 @@ override before applying the documented scanner exemptions; see
 
 `just package-deb` and `./packaging/build-deb.sh` are non-writing previews. Building requires the
 explicit `./packaging/build-deb.sh --build` form and refuses to run as root or overwrite an existing
-candidate. In the current tree, build mode exits 77 before compilation because the reviewed native
-launcher is absent; preview mode names this blocker explicitly.
+candidate. The development native launcher supports exactly one enabled client or exit role per
+node and refuses simultaneous client-plus-exit mode until separate native control sockets exist.
 
 The candidate package build uses `Cargo.lock`, a caller-supplied or repository source timestamp,
 root-owned archive metadata, deterministic file ordering from `dpkg-deb`, and a clean temporary

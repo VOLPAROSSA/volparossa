@@ -88,17 +88,16 @@ and the disposable VM must be discarded.
 Package removal stops services but preserves `/var/lib/volparossa`, including the encrypted identity.
 See `docs/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.
 
-The packaged native systemd unit is not operational yet. API v6 adds role/process-instance
-preflight and exact request correlation, and moves client auth, TLS names, signed reservation scope,
-and the exit's bounded, unparsed in-memory PEM candidate material into expiring route-session
-messages. It accepts no static product secret from the launcher. `AddPath` and
-`StartExitSession` each consume exactly one
-operation-bound UDP descriptor, but SCM_RIGHTS and its
-request hash do not authenticate privileged-helper origin. A reviewed launcher remains blocked
-until the agent orchestrates separate role-specific service identities and control sockets (the
-current single same-UID unit/socket is correlation, not authentication against the agent), helper
-acquisition binds trusted descriptor namespace and assigned-address provenance end to end, and a
-reviewed exit backend cryptographically validates and consumes the supplied listener and in-memory
-material without secret argv, environment, or files. Until then, `--build`
-exits 77 before compilation, no candidate package is created, and the installed service set must
-not be enabled.
+The development package now includes a bounded native launcher. It reads only `roles.client` and
+`roles.exit` from the packaged configuration, starts the fixed native executable in that exact
+mode, passes only the absolute control-socket path, and never accepts route credentials or TLS
+material through arguments, environment, or files. Nodes with neither role do not need a native
+process. Because the current agent has one native control socket, the launcher deliberately refuses
+a node that enables client and exit simultaneously; use separate development nodes until the two
+role-specific sockets are wired.
+
+This is sufficient to build and operate the current single-role development topology, not a
+release-security claim. `AddPath` and `StartExitSession` consume operation-bound UDP descriptors,
+but same-UID `SCM_RIGHTS` correlation still does not authenticate privileged-helper origin. Before
+release, separate role service identities/sockets and helper-derived descriptor namespace and
+assigned-address provenance remain required.
