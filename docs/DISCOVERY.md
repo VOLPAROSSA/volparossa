@@ -22,7 +22,7 @@ The current discovery crate composes:
   one prospective or selected datapath relay;
 - canonical-byte request-response on `/volparossa/preselection-observation/4` for the
   client-to-control/direct-relay hop and `/volparossa/preselection-observation-upstream/4` for the
-  control-relay-to-exit hop; both behaviours have independent dormant one-at-a-time affine
+  control-relay-to-exit hop; both behaviours have independent bounded one-at-a-time affine
   context/dispatch/bind/cancel seams; public event pumps expose no inbound response channel, the
   direct Relay and upstream Exit have one role-gated service-owned signer/responder pump, and the
   same private pump now owns one affine forwarded client request through the exact upstream Exit
@@ -143,25 +143,27 @@ envelope stay inside discovery. The hash is only an equality binding, not reserv
 dispatch authority: route execution still has to re-resolve and exactly compare current actor
 capabilities later.
 
-The protocol crate now also contains a production-callerless A0 preselection-observation transcript
-precursor. A direct relay can sign one exact short-lived challenge response. For a forwarded exit,
+The protocol crate contains the A0 preselection-observation transcript primitives. Discovery now
+has production-compiled role-gated Relay/Exit responders and an affine Relay-to-Exit forwarding
+wrapper; the client-side outbound attempt owner remains absent. A direct relay can sign one exact
+short-lived challenge response. For a forwarded exit,
 the exit signs the response and the exact prospective forwarding control named in the unsigned
 request countersigns the exact nested bytes plus a public IPv4 /24 or IPv6 /48 prefix claim. The
 control intentionally echoes the exit-subject challenge with its own signed-envelope nonce and
 time window; it is not separately challenged. The claim contains no host address, endpoint, port,
 capacity, reservation, or dispatch authority, and a control signature is not proof that a
-malicious control reported origin truthfully. A future handler must derive the prefix from the
-exact authenticated upstream connection. Prefix validation maps the fixed three- or six-byte wire
+malicious control reported origin truthfully. The production Relay handler derives the prefix from
+the exact authenticated upstream connection. Prefix validation maps the fixed three- or six-byte wire
 field directly into the shared normalized prefix type and checks its public range; it never
 constructs a representative host IP. That normalized value alone proves neither provenance nor
 origin truth.
 
-A0 still has no production outbound attempt owner, sampler, control-signed forwarded wrapper, or conversion into
+A0 still has no production client-side outbound attempt owner, sampler, or conversion into
 `FreshPeerEvidence`, `FreshEvidenceBatch`, or `CandidateEvidence`. Discovery composes
 request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
 dispatch one request, bind an opaque matching response arrival sealed and timestamped by the
 originating service's private pump to a current unique connection proof, or cancel that exact
-dispatch; upstream sending remains separate.
+dispatch; the affine Relay forwarding wrapper owns upstream sending separately.
 
 Discovery now also contains a role-gated Relay/Exit response poll seam called by the agent event
 loop while an exact active policy is present. The poll owner obtains a typed inbound request
@@ -194,8 +196,8 @@ uses the same actor-owned permanent identity, and a policy command cancels the p
 the replacement. A response still requires an exact currently served role advertisement;
 production deliberately publishes no usable Relay/Exit capability before dataplane readiness is
 proved, so no successful production response or readiness claim follows from this lifecycle
-connection yet. The control-signed prefix wrapper, the outbound attempt owner and the A0
-response-verification/A1a join owner remain absent. Dormant A1a
+connection yet. The control-signed prefix wrapper is now implemented, while the outbound attempt
+owner and the A0 response-verification/A1a exact-set join owner remain absent. Dormant A1a
 remains only a static consumer of verifier/consume functions. The opaque transcripts, transport
 proof and wire wrappers are not yet local freshness, capacity, or route authority.
 
@@ -230,8 +232,9 @@ verified transcript against the exact canonical request bytes. Its final
 sanitized subject/request bindings, process-local dispatch ID/request hash, opaque transcript
 tokens and attempt ceilings. It deliberately records no authenticated connection, local send or
 arrival event, socket origin, RTT, reachability, usable address, or Fresh-evidence validity. It
-has no production root, sampler, request-response handler, transport caller, or conversion into
-phase-A evidence, and creates no `RouteSessionAuthority` or `ReservationSession`. The completed
+has no production client root, sampler, transport-join owner, or conversion into phase-A evidence,
+and creates no `RouteSessionAuthority` or `ReservationSession`. The production request-response
+responders and forwarding wrapper do not consume this A1a value. The completed
 affine A1a owner retains the original, non-cloned `RouteCandidateSnapshot` beside—not inside—the
 endpoint-free transcript batch. This preserves the exact candidate-union allocation for a later
 owner without exposing a getter or reconstructing candidate state. That sibling is the existing
@@ -249,7 +252,7 @@ the local-arrival freshness ceiling and aggregate it with the unchanged absolute
 every applicable signed receipt/attestation window, actor advertisement/capability expiries, and
 policy expiry before minting a verified observation.
 
-The first dormant A1c precursor is composed as a private passive libp2p behaviour. It observes
+The first A1c provenance component is composed as a private passive libp2p behaviour. It observes
 the authenticated `ConnectionEstablished`, `AddressChange` and `ConnectionClosed` event lineage,
 bounds the registry by the existing 384-global/four-per-peer connection ceilings, and permanently
 poisons and clears the registry on overflow or inconsistent event lineage. Every connection,
@@ -267,7 +270,7 @@ observation accessor. The only consumers are the purpose-specific client and ups
 seams described below; there is still no A1a join or Fresh-evidence mint, so the rest of A1c
 remains required.
 
-A second dormant A1c wire precursor consists of two strictly separate libp2p request-response
+A second A1c wire component consists of two strictly separate libp2p request-response
 behaviours and event variants. The client-facing protocol is outbound for Client and inbound for
 Relay roles; it carries an A0-valid Relay or forwarded Exit request of at most 4096 bytes and
 returns either a Relay-role signed receipt of at most 4096 bytes or a control-signed forwarded Exit

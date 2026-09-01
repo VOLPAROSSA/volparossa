@@ -242,7 +242,7 @@ pub struct DiscoveryBehaviour {
     connection_limits: connection_limits::Behaviour,
     /// Private, passive lineage for exact authenticated connection observations.
     connection_provenance: ConnectionProvenanceBehaviour,
-    /// Client-hop A1c behaviour for the dormant affine owner seam.
+    /// Client-hop A1c behaviour; the client-side outbound attempt owner remains absent.
     preselection_observation: request_response::Behaviour<ClientPreselectionObservationCodec>,
     /// Affine control-relay-to-exit A1c transport behaviour.
     preselection_observation_upstream:
@@ -382,7 +382,7 @@ pub enum BehaviourEvent {
     RelayServer(relay::Event),
     /// Advertisement protocol event.
     Advertisements(request_response::Event<AdvertisementRequest, AdvertisementResponse>),
-    /// Client-to-control/direct-relay preselection event for the dormant affine owner seam.
+    /// Client-hop A1c event; the client-side outbound attempt owner remains absent.
     PreselectionObservation(
         request_response::Event<
             ClientPreselectionObservationRequest,

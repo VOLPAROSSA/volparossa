@@ -1,14 +1,14 @@
-//! Bounded request-response wire types for the dormant A1c transaction boundary.
+//! Bounded request-response wire types for the A1c transaction boundary.
 //!
 //! Sibling modules own affine client-hop and relay-to-exit dispatch, connection binding, and
-//! role-gated response seams. Both inbound hops have one service-owned signed response poll seam;
-//! the outbound transaction owner and the Relay's control-signed forwarding wrapper remain
-//! absent.
+//! role-gated response seams. Both inbound hops have one service-owned signed response poll seam,
+//! and the Relay poll owns the control-signed forwarding wrapper affinely. The client-side
+//! outbound attempt owner and Fresh-evidence join remain absent.
 //!
 //! Both codecs preserve exact canonical A0 bytes. They perform only state-free canonical,
 //! version, type, payload-local, and envelope-binding validation. Cryptographic verification,
 //! replay mutation, request correlation, signing, provenance binding, and evidence minting remain
-//! outside this precursor.
+//! outside these transport codecs.
 
 use std::{fmt, io, time::Duration};
 

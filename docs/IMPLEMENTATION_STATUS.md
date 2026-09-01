@@ -1041,7 +1041,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   receipts are bounded to 4096 bytes, forwarded attestations to 8192 bytes; both behaviours use an
   exact five-second timeout, 64 streams, distinct event/request-ID domains, no legacy aliases and
   no retry. Their opaque wrappers and codecs enforce only state-free canonical/version/hop
-  type/role/payload/envelope shape on read and write. Dormant client-hop and relay-to-exit service
+  type/role/payload/envelope shape on read and write. The client-hop and relay-to-exit service
   seams now have independent one-at-a-time slots. Each derives its target and family from the exact
   request, captures a connection witness immediately before its synchronous send, and can cancel or
   bind an opaque same-hop response arrival sealed by the originating service's private event pump,
@@ -1078,7 +1078,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   envelope thereby binds sender, timestamp, expiry, fresh fallible CSPRNG nonce, message type,
   payload hash and Ed25519 signature. Exact request hashes enter a 120-second no-rollback tombstone
   before signing, with 1024 global and 16-per-authenticated-peer limits; replay, capacity
-  exhaustion, signer failure, stale authority and ambiguous lineage fail closed. A real two-swarm
+  exhaustion, signer failure, stale authority and ambiguous lineage fail closed. Real two-swarm
   tests prove that the originating direct and upstream response channels carry the exact
   role-signed receipt; companion
   transport regressions prove the public pumps expose no inbound channel and a sibling service

@@ -133,9 +133,9 @@ pub struct UpstreamPreselectionDispatch {
 
 /// Affine relay-to-exit dispatch carrying its exact caller-owned forwarding context.
 ///
-/// A future service-owned upstream responder can retain its private originating request owner in
-/// `Context`; the value is returned only after this exact upstream dispatch binds or cancels. No
-/// public event pump yields the downstream response channel.
+/// A service-owned forwarder retains its private originating request owner in `Context`; the
+/// value is returned only after this exact upstream dispatch binds or cancels. No public event
+/// pump yields the downstream response channel.
 #[must_use = "a context-bound upstream preselection transaction must be bound or cancelled through its originating DiscoveryService"]
 pub struct UpstreamPreselectionTransaction<Context> {
     dispatch: UpstreamPreselectionDispatch,
@@ -164,7 +164,7 @@ pub struct UpstreamPreselectionResponseArrival {
     not(test),
     allow(
         dead_code,
-        reason = "opaque A1c proof awaits the single agent transaction owner"
+        reason = "the forwarding consumer keeps sealed correlation fields opaque"
     )
 )]
 pub struct BoundUpstreamPreselectionTransport {
@@ -603,7 +603,7 @@ impl DiscoveryService {
 
     /// Send one upstream request while retaining an exact affine caller context.
     ///
-    /// The context can own future private responder state and is returned only by this exact
+    /// The context owns the private originating responder state and is returned only by this exact
     /// upstream transaction's bind/cancel API. No public event pump supplies an inbound response
     /// channel to this method.
     ///

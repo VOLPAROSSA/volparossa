@@ -1,4 +1,4 @@
-//! Connection-scoped transport observations for the future A1c owner.
+//! Connection-scoped transport observations for A1c owners.
 
 use std::{
     collections::HashMap,

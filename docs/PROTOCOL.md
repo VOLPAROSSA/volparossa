@@ -102,25 +102,26 @@ or route-specific WireGuard endpoint. Advertised capacity, control reachability,
 quality remain untrusted preselection metadata. They are not reservation capacity or datapath
 evidence and cannot by themselves create a production route candidate.
 
-### Dormant preselection-observation precursor
+### Preselection-observation control messages
 
-Tags 17 and 18 are protocol-only primitives for a future phase-A observation producer. A
+Tags 17 and 18 are partial phase-A control-transcript primitives. A
 `PreselectionObservationRequest` is unsigned, version 4, at most 4096 bytes, and live for at most
-five seconds. A future caller MUST CSPRNG-generate a fresh unique 32-byte challenge for every
+five seconds. A future client-side attempt owner MUST CSPRNG-generate a fresh unique 32-byte challenge for every
 observation request, challenged subject (a direct relay or forwarded exit), and attempt, and MUST
 never reuse it across requests, subjects, or attempts. The protocol module checks only the
-challenge's exact 32-byte, non-zero shape. Dormant A1a is its only product-code static verifier
-consumer, and that consumer has no production root, orchestrator, transport caller, or network
-path. Discovery separately owns the callerless direct-Relay responder described below; this
-message type itself provides no producer or uniqueness authority.
+challenge's exact 32-byte, non-zero shape. Dormant A1a is the only product-code consumer that
+verifies a complete client-side transcript, and that consumer has no production client root,
+orchestrator, transport-join owner, or network path. Discovery separately owns the role-gated
+Relay/Exit responders and Relay forwarding wrapper described below; this message type itself
+provides no client request producer or challenge-uniqueness authority.
 
 A direct relay signs one `PreselectionObservationReceipt`. For a forwarded exit, the exit signs
 that same receipt and the exact prospective forwarding control named in the request signs a
 `ForwardedPreselectionAttestation` around the exact nested receipt bytes. The control intentionally
 echoes the exit-subject challenge while using its own envelope nonce and time window; there is no
 second control challenge. The wrapper carries only a control-attested public IPv4 /24 or IPv6 /48
-claim, never a host address, endpoint, or port. A future handler MUST derive that claim from the
-exact authenticated upstream connection. A valid control signature does not prove that a malicious
+claim, never a host address, endpoint, or port. The production Relay handler derives that claim
+from the exact authenticated upstream connection. A valid control signature does not prove that a malicious
 control relay reported the origin truthfully.
 
 A signed actor-receipt envelope is at most 4096 bytes. A forwarded wrapper is at most 8192 bytes
@@ -129,7 +130,7 @@ node ID, Peer ID, public key, advertisement sequence and expiry, advertisement p
 capability expiry; the request and both signed layers repeat the exact role, transport, address
 family, and policy version/hash/expiry scope.
 
-Every actor binding carries `advertisement_payload_hash`. A future producer MUST copy the exact
+Every actor binding carries `advertisement_payload_hash`. A future client-side attempt owner MUST copy the exact
 32-byte `SignedEnvelope.payload_hash` from the same freshly cryptographically verified canonical
 `NodeAdvertisement`; A0 validates only its non-zero shape and exact transcript echo, not that
 advertisement provenance. The dormant agent-side A1a owner copies this value only from the exact
@@ -213,10 +214,11 @@ the endpoint-free subject/scope binding, opaque bound transcript tokens, process
 correlation, and attempt ceilings. It has no getter or decomposition surface and contains no local
 socket, connection ID, send/arrival event, prefix-derived direct origin, RTT, reachability,
 `FreshPeerEvidence`, route-session, reservation, or dispatch authority. There is still no
-production owner, request-response handler, transport caller, or network producer; A1a therefore
-does not alter production discovery behavior.
+production client-side attempt owner, transport exact-set join, or Fresh-evidence producer. A1a
+therefore grants no production route authority; the server-side responders and forwarding wrapper
+described below operate independently of this dormant client value.
 
-Discovery now composes a dormant A1c wire shell without changing A0 or adding a protobuf wrapper.
+Discovery composes A1c wire protocols without changing A0 or adding a protobuf wrapper.
 `/volparossa/preselection-observation/4` carries an exact canonical Relay or forwarded
 Exit request (at most 4096 bytes) from Client to Relay and returns either the exact Relay signed
 receipt (at most 4096 bytes) or exact control-signed forwarded Exit attestation (at most 8192
@@ -230,7 +232,7 @@ no retry.
 The opaque hop wrappers admit bytes only after state-free canonical, version, hop type/role,
 payload-local, and typed envelope-binding validation; codec writes repeat those checks. This is
 not cryptographic verification, replay acceptance, signature/origin authority, or usable evidence.
-Discovery has independent dormant client-hop and relay-to-exit transport seams. Each derives its
+Discovery has independent client-hop and relay-to-exit transport seams. Each derives its
 target and family from the exact request, admits one active same-hop dispatch, takes a
 connection-generation witness immediately before send, and binds only a typed matching response
 arrival sealed by the originating service's private swarm pump under the fixed/request/caller
