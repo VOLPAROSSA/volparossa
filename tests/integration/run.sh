@@ -47,16 +47,18 @@ done
 [ -x "$WORKER" ] || { printf 'topology worker is not executable\n' >&2; exit 69; }
 [ "$(sed -n '1{s/\..*$//;p;}' /etc/debian_version)" = 13 ] && [ "$(uname -m)" = x86_64 ] || { printf '%s\n' 'execute requires Debian 13 amd64' >&2; exit 69; }
 printf '%s\n' 'EXECUTE: every network mutation is confined to disposable anonymous namespaces; the outer host is observed only.' >&2
-/bin/mkdir -p "$REPO/target/acceptance"
-ARTIFACT=$(mktemp -d "$REPO/target/acceptance/run.XXXXXX")
+TARGET=${CARGO_TARGET_DIR:-$REPO/target/acceptance-build}
+case $TARGET in /*) ;; *) TARGET=$REPO/$TARGET;; esac
+ARTIFACT_ROOT=${VOLPAROSSA_ACCEPTANCE_ARTIFACT_ROOT:-$TARGET/acceptance-artifacts}
+case $ARTIFACT_ROOT in /*) ;; *) ARTIFACT_ROOT=$REPO/$ARTIFACT_ROOT;; esac
+/bin/mkdir -p "$ARTIFACT_ROOT"
+ARTIFACT=$(mktemp -d "$ARTIFACT_ROOT/run.XXXXXX")
 /bin/mkdir "$ARTIFACT/evidence"
 REPORT=$ARTIFACT/report.json
 RUN_ID=$(tr -d -- - </proc/sys/kernel/random/uuid)
 START=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 REVISION=$(git -C "$REPO" rev-parse HEAD)
 HOST_NET=$(readlink /proc/self/ns/net); HOST_MNT=$(readlink /proc/self/ns/mnt)
-TARGET=${CARGO_TARGET_DIR:-$REPO/target/acceptance-build}
-case $TARGET in /*) ;; *) TARGET=$REPO/$TARGET;; esac
 snapshot() {
  out=$1
  {
