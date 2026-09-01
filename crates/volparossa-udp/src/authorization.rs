@@ -176,6 +176,17 @@ impl AuthorizedUdpFlow {
         self.expires_at_ms
     }
 
+    /// Return whether this authorization pins one exact raw-IP destination tuple.
+    ///
+    /// The method intentionally reveals no stored destination. It lets transparent ingress prove
+    /// that the signed authorization exactly matches kernel original-destination evidence before
+    /// a protected association is activated.
+    #[must_use]
+    pub fn matches_exact_ip_destination(&self, destination: SocketAddr) -> bool {
+        self.port == destination.port()
+            && matches!(self.destination, AuthorizedDestination::Ip(address) if address == destination.ip())
+    }
+
     /// Fail closed before creating an association from a stale authorization.
     ///
     /// # Errors
