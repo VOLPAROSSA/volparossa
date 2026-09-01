@@ -5619,7 +5619,8 @@ mod tests {
         );
         assert_eq!(
             parent_product.matches("advertisement_fingerprint(").count(),
-            3
+            4,
+            "stored ingest, local Relay publication and revalidation are the only fingerprint consumers"
         );
         assert_eq!(
             parent_product

@@ -35,6 +35,7 @@ use libp2p::{
     request_response,
     swarm::{ConnectionId, SwarmEvent},
 };
+use rand_core::{OsRng, RngCore};
 #[cfg(test)]
 use std::cell::Cell;
 #[cfg(test)]
@@ -95,6 +96,7 @@ const PEER_RETENTION_SECONDS: u64 = 3_600;
 const ROLE_COMMAND_CAPACITY: usize = 8;
 const ROLE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RESERVATION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+const CAPABILITY_QUERY_INTERVAL: Duration = Duration::from_secs(5);
 const MAXIMUM_RESERVATION_TTL_SECONDS: u64 = 15 * 60;
 const TUNNEL_SETUP_TIMEOUT_SECONDS: u64 = 30;
 const SERVICE_REPLAY_CAPACITY: usize = 65_536;
@@ -1213,6 +1215,9 @@ pub struct DiscoveryRuntime {
     provider_queries: HashMap<kad::QueryId, ProviderQueryKind>,
     relay_advertisement_requests: HashMap<request_response::OutboundRequestId, Libp2pPeerId>,
     exit_provider_peers: HashMap<Libp2pPeerId, u64>,
+    automatic_exit_fetches: HashMap<ForwardedExitKey, u64>,
+    automatic_exit_fetch_receivers:
+        Vec<oneshot::Receiver<Result<ExitForwardResponse, OutboundReservationError>>>,
     direct_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
     local_relay_snapshot: Option<DirectRelayCapability>,
     forwarded_exits: HashMap<ForwardedExitKey, ForwardedExitCapability>,
@@ -1331,6 +1336,8 @@ impl DiscoveryRuntime {
             provider_queries: HashMap::new(),
             relay_advertisement_requests: HashMap::new(),
             exit_provider_peers: HashMap::new(),
+            automatic_exit_fetches: HashMap::new(),
+            automatic_exit_fetch_receivers: Vec::new(),
             direct_relays: HashMap::new(),
             local_relay_snapshot: None,
             forwarded_exits: HashMap::new(),
@@ -1372,16 +1379,23 @@ impl DiscoveryRuntime {
 
     /// Runs provider queries, advertisement verification, and bounded
     /// peerstore maintenance until shutdown.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one actor loop owns publication, capability convergence, reservations and commands"
+    )]
     pub async fn run(
         mut self,
         state: Arc<RwLock<AgentState>>,
         mut shutdown: watch::Receiver<bool>,
     ) {
         self.synchronize_exit_policy(&state).await;
+        self.publish_local(&state).await;
         self.query_capabilities(&state).await;
         self.refresh_candidates(&state).await;
         let mut maintenance = tokio::time::interval(self.publisher.refresh_interval());
         maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut capability_maintenance = tokio::time::interval(CAPABILITY_QUERY_INTERVAL);
+        capability_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut reservation_maintenance = tokio::time::interval(RESERVATION_MAINTENANCE_INTERVAL);
         reservation_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -1411,6 +1425,7 @@ impl DiscoveryRuntime {
                     self.publish_local(&state).await;
                     Self::log_expiry_reclaim(&state, relay_purged, exit_purged).await;
                     self.query_capabilities(&state).await;
+                    self.schedule_exit_advertisement_fetches();
                     let now = UnixTime::from_secs(unix_seconds());
                     if self.store.prune_expired(now, PEER_RETENTION_SECONDS).is_err() {
                         state.write().await.log(LogLevel::Warn, "PEERSTORE_PRUNE_FAILED", unix_millis());
@@ -1446,6 +1461,10 @@ impl DiscoveryRuntime {
                             "RESERVATION_RPC_CALLER_CLOSED",
                         ).await;
                     }
+                }
+                _ = capability_maintenance.tick() => {
+                    self.query_capabilities(&state).await;
+                    self.schedule_exit_advertisement_fetches();
                 }
                 event = next_actor_discovery_event(
                     &mut self.service,
@@ -1636,6 +1655,10 @@ impl DiscoveryRuntime {
         match &self.client_preselection {
             ClientPreselectionOwner::Available(_) => {}
             ClientPreselectionOwner::Active(_) | ClientPreselectionOwner::Cooling(_) => {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Debug, "PRESELECTION_OWNER_BUSY", unix_millis());
                 let _ = reply.send(Err(ClientPreselectionError::Busy));
                 return;
             }
@@ -1674,6 +1697,11 @@ impl DiscoveryRuntime {
         ) {
             Ok(snapshot) => snapshot,
             Err(RouteCandidateSnapshotError::InvalidLimit) => {
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "PRESELECTION_SNAPSHOT_INVALID_LIMIT",
+                    captured_at_ms,
+                );
                 let _ = reply.send(Err(ClientPreselectionError::InvalidParameters));
                 return;
             }
@@ -1684,6 +1712,11 @@ impl DiscoveryRuntime {
                 | RouteCandidateSnapshotError::PolicyUnavailable
                 | RouteCandidateSnapshotError::StoreUnavailable,
             ) => {
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "PRESELECTION_SNAPSHOT_UNAVAILABLE",
+                    captured_at_ms,
+                );
                 let _ = reply.send(Err(ClientPreselectionError::Unavailable));
                 return;
             }
@@ -1698,6 +1731,25 @@ impl DiscoveryRuntime {
         let snapshot = match narrow_route_candidate_snapshot(snapshot, scope) {
             Ok(snapshot) => snapshot,
             Err(failure) => {
+                let diagnostic = match failure.error {
+                    PreselectionSamplingError::InvalidPolicy => {
+                        "PRESELECTION_SAMPLE_INVALID_POLICY"
+                    }
+                    PreselectionSamplingError::InvalidSnapshot => {
+                        "PRESELECTION_SAMPLE_INVALID_SNAPSHOT"
+                    }
+                    PreselectionSamplingError::NoEligibleForwardedExit => {
+                        "PRESELECTION_SAMPLE_NO_EXIT"
+                    }
+                    PreselectionSamplingError::InsufficientDiverseRelays => {
+                        "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS"
+                    }
+                    PreselectionSamplingError::Entropy => "PRESELECTION_SAMPLE_ENTROPY",
+                };
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Debug, diagnostic, captured_at_ms);
                 let error = if failure.error == PreselectionSamplingError::InvalidPolicy {
                     ClientPreselectionError::InvalidParameters
                 } else {
@@ -1741,6 +1793,11 @@ impl DiscoveryRuntime {
                 self.install_client_preselection_gate_recovery(consume_preselection_begin_failure(
                     failure,
                 ));
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "PRESELECTION_GATE_BEGIN_FAILED",
+                    unix_millis(),
+                );
                 let _ = reply.send(Err(ClientPreselectionError::Unavailable));
                 return;
             }
@@ -1780,15 +1837,22 @@ impl DiscoveryRuntime {
                     self.client_preselection = ClientPreselectionOwner::Active(active);
                 }
             }
-            Err(failure) => self.install_client_preselection_transition_failure(
-                failure,
-                Vec::new(),
-                reply,
-                request_deadline,
-                attempt_deadline,
-                ClientPreselectionError::Transport,
-                Some(ClientPreselectionError::Transport),
-            ),
+            Err(failure) => {
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "PRESELECTION_INITIAL_DISPATCH_FAILED",
+                    unix_millis(),
+                );
+                self.install_client_preselection_transition_failure(
+                    failure,
+                    Vec::new(),
+                    reply,
+                    request_deadline,
+                    attempt_deadline,
+                    ClientPreselectionError::Transport,
+                    Some(ClientPreselectionError::Transport),
+                );
+            }
         }
     }
 
@@ -2465,6 +2529,7 @@ impl DiscoveryRuntime {
             );
         if !valid_before_ingest {
             self.finish_client_definitive_error(pending, OutboundReservationError::InvalidResponse);
+            log_reservation_event(state, "EXIT_FORWARD_CLIENT_RESPONSE_INVALID").await;
             return OutboundEventOutcome::InvalidResponse;
         }
         let ingest = self
@@ -2475,6 +2540,7 @@ impl DiscoveryRuntime {
             if let Some(commit) = ingest.commit.as_ref() {
                 self.finish_advertisement_commit(commit, state).await;
             }
+            log_reservation_event(state, "EXIT_FORWARD_CLIENT_INGEST_REJECTED").await;
             return OutboundEventOutcome::InvalidResponse;
         }
         self.cache_client_result(&pending, Ok(response.clone()));
@@ -2484,6 +2550,7 @@ impl DiscoveryRuntime {
         if let Some(commit) = ingest.commit.as_ref() {
             self.finish_advertisement_commit(commit, state).await;
         }
+        log_reservation_event(state, "EXIT_FORWARD_CLIENT_COMPLETED").await;
         OutboundEventOutcome::Completed
     }
 
@@ -2540,8 +2607,11 @@ impl DiscoveryRuntime {
             .direct_relays
             .get(&pending.key.control_relay_peer)
             .is_some_and(|current| {
-                current == &pending.authorized_control
-                    && current.expires_at_ms >= pending.operation_expires_at_ms
+                direct_relay_authority_lineage_matches(
+                    current,
+                    &pending.authorized_control,
+                    pending.operation_expires_at_ms,
+                )
             });
         if !control_current
             || !self.forwarded_exit_peer_is_eligible(pending.expected_exit_peer, now_ms)
@@ -2830,6 +2900,14 @@ impl DiscoveryRuntime {
             .retain(|_, record| record.expires_at_ms > now_ms);
         self.exit_provider_peers
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.automatic_exit_fetches
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.automatic_exit_fetch_receivers.retain_mut(|receiver| {
+            matches!(
+                receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            )
+        });
         if self.forwarded_exit_fail_closed_until_ms <= now_ms {
             self.forwarded_exit_fail_closed_until_ms = 0;
         }
@@ -3281,6 +3359,10 @@ impl DiscoveryRuntime {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one local publication transaction installs its served and affine authority state"
+    )]
     async fn publish_local(&mut self, state: &Arc<RwLock<AgentState>>) {
         let now_ms = unix_millis();
         if !(self.roles.relay || self.roles.exit) {
@@ -3339,6 +3421,31 @@ impl DiscoveryRuntime {
             return;
         }
         self.served_local_advertisement = Some(signed.envelope.clone());
+
+        if roles.relay {
+            let Some(fingerprint) = advertisement_fingerprint(&signed.envelope) else {
+                self.withdraw_local();
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "ADVERTISEMENT_PUBLISH_FAILED", now_ms);
+                return;
+            };
+            self.local_relay_snapshot = Some(DirectRelayCapability {
+                node_id: self.local_node_id,
+                peer_id: *self.service.local_peer_id(),
+                public_key: self.local_public_key,
+                advertisement_sequence: signed.sequence_number,
+                advertisement_expires_at_ms: signed.expires_at_ms,
+                advertisement_payload_hash: fingerprint.payload_hash,
+                policy_version: policy.manifest_version,
+                policy_hash,
+                policy_expires_at_ms: policy.expires_at_ms,
+                expires_at_ms: signed.expires_at_ms.min(policy.expires_at_ms),
+            });
+        } else {
+            self.local_relay_snapshot = None;
+        }
 
         let removed: Vec<String> = self
             .active_provider_keys
@@ -3490,6 +3597,7 @@ impl DiscoveryRuntime {
 
     fn withdraw_local(&mut self) {
         self.served_local_advertisement = None;
+        self.local_relay_snapshot = None;
         self.service.clear_local_advertisement();
         for key in std::mem::take(&mut self.active_provider_keys) {
             let _ = self.service.stop_providing(&key);
@@ -3702,6 +3810,110 @@ impl DiscoveryRuntime {
                 }
             }
         }
+        self.schedule_exit_advertisement_fetches();
+    }
+
+    /// Fetch provider-only Exit advertisements through one authenticated control Relay.
+    ///
+    /// A client never dials the Exit here. The actor sends the existing bounded fetch RPC to one
+    /// current direct Relay, and only the normal forwarded-provenance commit can make the response
+    /// selectable.
+    fn schedule_exit_advertisement_fetches(&mut self) {
+        if !self.roles.client
+            || self.automatic_exit_fetch_receivers.len() >= self.candidate_limit.max(1)
+        {
+            return;
+        }
+        let now_ms = unix_millis();
+        self.automatic_exit_fetches
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.automatic_exit_fetch_receivers.retain_mut(|receiver| {
+            matches!(
+                receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            )
+        });
+
+        let mut controls = self
+            .direct_relays
+            .values()
+            .filter(|control| control.expires_at_ms > now_ms.saturating_add(1_000))
+            .cloned()
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        let mut exits = self
+            .exit_provider_peers
+            .iter()
+            .filter_map(|(peer, expiry)| {
+                (*expiry > now_ms.saturating_add(1_000)).then_some((*peer, *expiry))
+            })
+            .collect::<Vec<_>>();
+        exits.sort_by(|(left, _), (right, _)| left.to_bytes().cmp(&right.to_bytes()));
+
+        for (exit_peer, provider_expiry_ms) in exits {
+            if self.automatic_exit_fetch_receivers.len() >= self.candidate_limit.max(1)
+                || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+            {
+                continue;
+            }
+            let Some(control) = controls
+                .iter()
+                .find(|control| control.peer_id != exit_peer)
+                .cloned()
+            else {
+                continue;
+            };
+            let key = ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            };
+            if self.forwarded_exits.contains_key(&key)
+                || self
+                    .automatic_exit_fetches
+                    .get(&key)
+                    .is_some_and(|expiry| *expiry > now_ms)
+            {
+                continue;
+            }
+            let deadline_unix_ms = now_ms
+                .saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS)
+                .min(provider_expiry_ms)
+                .min(control.expires_at_ms.saturating_sub(1));
+            if deadline_unix_ms <= now_ms.saturating_add(1_000) {
+                continue;
+            }
+            let mut forward_id = [0_u8; FORWARD_ID_BYTES];
+            OsRng.fill_bytes(&mut forward_id);
+            forward_id[0] |= 1;
+            let Ok(request) = ExitForwardRequest::new(
+                forward_id.to_vec(),
+                control.node_id.to_vec(),
+                control.peer_id.to_bytes(),
+                control.public_key.to_vec(),
+                exit_peer.to_bytes(),
+                Vec::new(),
+                deadline_unix_ms,
+                ExitForwardOperation::FetchExitAdvertisement,
+                Vec::new(),
+            ) else {
+                continue;
+            };
+            let (reply, receiver) = oneshot::channel();
+            self.automatic_exit_fetches.insert(key, deadline_unix_ms);
+            self.begin_client_forward(control.peer_id, request, reply);
+            let request_key = ClientForwardKey {
+                control_relay_peer: control.peer_id,
+                forward_id,
+            };
+            if self.client_forward_index.contains_key(&request_key)
+                || self.completed_client_forwards.contains_key(&request_key)
+                || self.retry_client_forwards.contains_key(&request_key)
+            {
+                self.automatic_exit_fetch_receivers.push(receiver);
+            } else {
+                self.automatic_exit_fetches.remove(&key);
+            }
+        }
     }
 
     async fn handle_exit_forward_event(
@@ -3717,7 +3929,7 @@ impl DiscoveryRuntime {
                         request, channel, ..
                     },
                 ..
-            } => self.begin_relay_forward(peer, &request, channel),
+            } => self.begin_relay_forward_observed(peer, &request, channel, state),
             request_response::Event::Message {
                 peer,
                 message:
@@ -3757,7 +3969,7 @@ impl DiscoveryRuntime {
                         request, channel, ..
                     },
                 ..
-            } => self.answer_exit_forward_upstream(peer, connection_id, request, channel),
+            } => self.answer_exit_forward_upstream(peer, connection_id, request, channel, state),
             request_response::Event::Message {
                 peer,
                 message:
@@ -3832,38 +4044,55 @@ impl DiscoveryRuntime {
         }
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "single-owner relay admission transaction"
-    )]
-    fn begin_relay_forward(
+    fn begin_relay_forward_observed(
         &mut self,
         authenticated_client_peer: Libp2pPeerId,
         request: &ExitForwardRequest,
         channel: request_response::ResponseChannel<ExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
     ) {
+        self.begin_relay_forward_inner(authenticated_client_peer, request, channel, Some(state));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single-owner relay admission transaction"
+    )]
+    fn begin_relay_forward_inner(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<ExitForwardResponse>,
+        state: Option<&Arc<RwLock<AgentState>>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(state, $code);
+                return;
+            }};
+        }
         self.purge_completed(Instant::now());
         let Some(forward_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.forward_id()) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let Some(control_node) = fixed_bytes::<32>(request.control_relay_node_id()) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let Ok(control_peer) = Libp2pPeerId::from_bytes(request.control_relay_peer_id()) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let Ok(exit_peer) = Libp2pPeerId::from_bytes(request.exit_peer_id()) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let Ok(operation) = request.validated_operation() else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let expected_exit_node_id = optional_fixed_bytes::<32>(request.exit_node_id());
         let operation_expires_at_ms = request.deadline_unix_ms();
         let now_ms = unix_millis();
         let local_peer = *self.service.local_peer_id();
         let Some(authorized_control) = self.local_relay_snapshot.clone() else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_LOCAL_ADVERTISEMENT_UNAVAILABLE");
         };
         let authorized_exit = expected_exit_node_id.and_then(|exit_node_id| {
             self.forwarded_exits
@@ -3901,18 +4130,22 @@ impl DiscoveryRuntime {
             )
             || authenticated_client_peer == local_peer
             || exit_peer == local_peer
-            || !self.exit_provider_peers.contains_key(&exit_peer)
-            || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
-            || (operation != ExitForwardOperation::FetchExitAdvertisement
-                && authorized_exit.is_none())
         {
-            return;
+            reject!("EXIT_FORWARD_RELAY_SCOPE_REJECTED");
+        }
+        if !self.exit_provider_peers.contains_key(&exit_peer)
+            || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+        {
+            reject!("EXIT_FORWARD_RELAY_PROVIDER_UNAVAILABLE");
+        }
+        if operation != ExitForwardOperation::FetchExitAdvertisement && authorized_exit.is_none() {
+            reject!("EXIT_FORWARD_RELAY_EXIT_AUTHORITY_UNAVAILABLE");
         }
         let Ok(canonical_request) = encode_canonical(
             request,
             usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
         ) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let key = RelayForwardKey {
             authenticated_client_peer,
@@ -3941,20 +4174,20 @@ impl DiscoveryRuntime {
         if retry.is_some_and(|entry| {
             entry.canonical_request != canonical_request || entry.target_peer != exit_peer
         }) {
-            return;
+            reject!("EXIT_FORWARD_RELAY_RETRY_CONFLICT");
         }
         let dispatch_attempts = retry.map_or(1, |entry| entry.dispatch_attempts.saturating_add(1));
         if dispatch_attempts > MAX_DISPATCH_ATTEMPTS {
-            return;
+            reject!("EXIT_FORWARD_RELAY_RETRY_EXHAUSTED");
         }
         let Some(reserved_bytes) = retry
             .map(|entry| entry.reserved_bytes)
             .or_else(|| ledger_reservation_bytes(canonical_request.len()))
         else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_CAPACITY");
         };
         if retry.is_none() && !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes) {
-            return;
+            reject!("EXIT_FORWARD_RELAY_CAPACITY");
         }
         if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
             || self
@@ -3968,14 +4201,14 @@ impl DiscoveryRuntime {
                 >= MAX_PENDING_PER_PEER
             || !self.mark_forwarded_exit_target(exit_peer, operation_expires_at_ms)
         {
-            return;
+            reject!("EXIT_FORWARD_RELAY_CAPACITY");
         }
         let attempt_deadline = rpc_deadline(operation_expires_at_ms, EXIT_FORWARD_UPSTREAM_TIMEOUT);
         let Ok(outbound_id) = self
             .service
             .request_exit_forward_upstream(&exit_peer, request.clone().into())
         else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_TRANSPORT_UNAVAILABLE");
         };
         self.retry_relay_forwards.remove(&key);
         self.relay_forward_index.insert(key, outbound_id);
@@ -3996,6 +4229,7 @@ impl DiscoveryRuntime {
                 client_channels: vec![channel],
             },
         );
+        log_relay_forward_admission(state, "EXIT_FORWARD_RELAY_DISPATCHED");
     }
 
     async fn complete_relay_forward(
@@ -4029,6 +4263,7 @@ impl DiscoveryRuntime {
             );
         if !valid_before_ingest {
             self.finish_relay_definitive(pending);
+            log_reservation_event(state, "EXIT_FORWARD_RELAY_RESPONSE_INVALID").await;
             return OutboundEventOutcome::InvalidResponse;
         }
         let mut commit = None;
@@ -4088,13 +4323,17 @@ impl DiscoveryRuntime {
         if let Some(outcome) = commit.as_ref() {
             self.finish_advertisement_commit(outcome, state).await;
         }
+        log_reservation_event(state, "EXIT_FORWARD_RELAY_COMPLETED").await;
         OutboundEventOutcome::Completed
     }
 
     fn relay_authority_is_current(&self, pending: &PendingRelayForward, now_ms: u64) -> bool {
         let control_current = self.local_relay_snapshot.as_ref().is_some_and(|current| {
-            current == &pending.authorized_control
-                && current.expires_at_ms >= pending.operation_expires_at_ms
+            direct_relay_authority_lineage_matches(
+                current,
+                &pending.authorized_control,
+                pending.operation_expires_at_ms,
+            )
         });
         if !control_current
             || !self.forwarded_exit_peer_is_eligible(pending.expected_exit_peer, now_ms)
@@ -4197,16 +4436,27 @@ impl DiscoveryRuntime {
         OutboundEventOutcome::Failed
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Exit admission path validates every forwarded operation and response"
+    )]
     fn answer_exit_forward_upstream(
         &mut self,
         authenticated_control_relay: Libp2pPeerId,
         connection_id: ConnectionId,
         request: UpstreamExitForwardRequest,
         channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
     ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                return;
+            }};
+        }
         let request = request.into_forward_request();
         let Ok(operation) = request.validated_operation() else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         if operation == ExitForwardOperation::NativeProbePermit {
             if let Some(prepared) = self.prepare_native_probe_permit_response(
@@ -4220,35 +4470,36 @@ impl DiscoveryRuntime {
             return;
         }
         let Some(control_relay_node_id) = fixed_bytes::<32>(request.control_relay_node_id()) else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         let Some(control_relay_public_key) = fixed_bytes::<32>(request.control_relay_public_key())
         else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         let Ok(control_relay_peer) = Libp2pPeerId::from_bytes(request.control_relay_peer_id())
         else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         let Ok(exit_peer) = Libp2pPeerId::from_bytes(request.exit_peer_id()) else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         let local_peer = *self.service.local_peer_id();
         let now_ms = unix_millis();
         let valid_exit_target = operation == ExitForwardOperation::FetchExitAdvertisement
             || fixed_bytes::<32>(request.exit_node_id()) == Some(self.local_node_id);
-        let valid_control_relay = self
-            .direct_relays
-            .get(&authenticated_control_relay)
-            .is_some_and(|capability| {
-                direct_relay_capability_matches(
-                    capability,
-                    control_relay_node_id,
-                    authenticated_control_relay,
-                    control_relay_public_key,
-                    request.deadline_unix_ms(),
-                )
-            });
+        let valid_control_relay = operation == ExitForwardOperation::FetchExitAdvertisement
+            || self
+                .direct_relays
+                .get(&authenticated_control_relay)
+                .is_some_and(|capability| {
+                    direct_relay_capability_matches(
+                        capability,
+                        control_relay_node_id,
+                        authenticated_control_relay,
+                        control_relay_public_key,
+                        request.deadline_unix_ms(),
+                    )
+                });
         if request.validate().is_err()
             || !forward_request_scope_matches(&request, operation, now_ms)
             || !self.roles.exit
@@ -4259,7 +4510,7 @@ impl DiscoveryRuntime {
             || exit_peer == authenticated_control_relay
             || !valid_exit_target
         {
-            return;
+            reject!("EXIT_FORWARD_EXIT_SCOPE_REJECTED");
         }
         let local_peer_bytes = local_peer.to_bytes();
         let response = if operation == ExitForwardOperation::FetchExitAdvertisement {
@@ -4296,6 +4547,9 @@ impl DiscoveryRuntime {
             let _ = self
                 .service
                 .send_exit_forward_upstream_response(channel, response.into());
+            log_relay_forward_admission(Some(state), "EXIT_FORWARD_EXIT_RESPONDED");
+        } else {
+            log_relay_forward_admission(Some(state), "EXIT_FORWARD_EXIT_RESPONSE_UNAVAILABLE");
         }
     }
 
@@ -4504,13 +4758,16 @@ impl DiscoveryRuntime {
             self.direct_relays.get(control_relay_peer)
         };
         current.is_some_and(|current| {
-            current == &authority.authorized_control
-                && direct_relay_target_matches(
-                    current,
-                    *control_relay_node_id,
-                    *control_relay_peer,
-                    *request_deadline_ms,
-                )
+            direct_relay_authority_lineage_matches(
+                current,
+                &authority.authorized_control,
+                *request_deadline_ms,
+            ) && direct_relay_target_matches(
+                current,
+                *control_relay_node_id,
+                *control_relay_peer,
+                *request_deadline_ms,
+            )
         }) && self.forwarded_exit_peer_is_eligible(*exit_peer, clock.unix_ms)
             && self.peer_is_forwarded_exit_target(*exit_peer, clock.unix_ms)
     }
@@ -4556,6 +4813,7 @@ impl DiscoveryRuntime {
         }
         if outcome.refresh_candidates {
             self.refresh_candidates(state).await;
+            self.schedule_exit_advertisement_fetches();
         }
     }
 
@@ -5049,10 +5307,14 @@ impl DiscoveryRuntime {
         force_control_revoke: bool,
     ) -> Option<u64> {
         let control_authority_changed = force_control_revoke
-            || self
-                .direct_relays
-                .get(&peer)
-                .is_some_and(|current| accepted.sequence_number > current.advertisement_sequence);
+            || self.direct_relays.get(&peer).is_some_and(|current| {
+                current.node_id != accepted.node_id
+                    || current.peer_id != accepted.peer_id
+                    || current.public_key != accepted.public_key
+                    || current.policy_version != accepted.policy_version
+                    || current.policy_hash != accepted.policy_hash
+                    || current.policy_expires_at_ms != accepted.policy_expires_at_ms
+            });
         let mut keys = self
             .forwarded_exits
             .iter()
@@ -5630,18 +5892,16 @@ impl DiscoveryRuntime {
         let upper_expiry = exact
             .signed_expires_at_ms
             .min(policy.expires_at_ms)
-            .min(control.expires_at_ms);
+            .min(control.expires_at_ms)
+            .min(capability.control_relay_advertisement_expires_at_ms);
         exact.exit
             && !self.direct_relays.contains_key(&exact.peer_id)
             && self.forwarded_exit_peer_is_eligible(exact.peer_id, captured_at_ms)
             && capability.control_relay_node_id == control.node_id
             && capability.control_relay_peer_id == control.peer_id
             && capability.control_relay_public_key == control.public_key
-            && capability.control_relay_advertisement_sequence == control.advertisement_sequence
-            && capability.control_relay_advertisement_expires_at_ms
-                == control.advertisement_expires_at_ms
-            && capability.control_relay_advertisement_payload_hash
-                == control.advertisement_payload_hash
+            && capability.control_relay_advertisement_sequence != 0
+            && capability.control_relay_advertisement_expires_at_ms > captured_at_ms
             && capability.exit_node_id == exact.wire_node_id
             && capability.exit_peer_id == exact.peer_id
             && capability.exit_public_key == exact.public_key
@@ -5779,6 +6039,14 @@ async fn log_reservation_event(state: &Arc<RwLock<AgentState>>, event_code: &'st
         .log(LogLevel::Debug, event_code, unix_millis());
 }
 
+fn log_relay_forward_admission(state: Option<&Arc<RwLock<AgentState>>>, event_code: &'static str) {
+    if let Some(state) = state {
+        if let Ok(mut guard) = state.try_write() {
+            guard.log(LogLevel::Debug, event_code, unix_millis());
+        }
+    }
+}
+
 async fn log_outbound_event(state: &Arc<RwLock<AgentState>>, outcome: OutboundEventOutcome) {
     let (level, code) = match outcome {
         OutboundEventOutcome::Completed => return,
@@ -5834,6 +6102,21 @@ fn direct_relay_capability_matches(
     ) && capability.public_key == expected_public_key
 }
 
+fn direct_relay_authority_lineage_matches(
+    current: &DirectRelayCapability,
+    authorized: &DirectRelayCapability,
+    required_until_ms: u64,
+) -> bool {
+    current.node_id == authorized.node_id
+        && current.peer_id == authorized.peer_id
+        && current.public_key == authorized.public_key
+        && current.policy_version == authorized.policy_version
+        && current.policy_hash == authorized.policy_hash
+        && current.policy_expires_at_ms == authorized.policy_expires_at_ms
+        && current.expires_at_ms >= required_until_ms
+        && authorized.expires_at_ms >= required_until_ms
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "two immutable identity snapshots"
@@ -5854,10 +6137,8 @@ fn forwarded_exit_capability_matches(
         && capability.control_relay_node_id == control.node_id
         && capability.control_relay_peer_id == control.peer_id
         && capability.control_relay_public_key == control.public_key
-        && capability.control_relay_advertisement_sequence == control.advertisement_sequence
-        && capability.control_relay_advertisement_expires_at_ms
-            == control.advertisement_expires_at_ms
-        && capability.control_relay_advertisement_payload_hash == control.advertisement_payload_hash
+        && capability.control_relay_advertisement_sequence != 0
+        && capability.control_relay_advertisement_expires_at_ms >= required_until_ms
         && capability.exit_node_id == expected_exit_node_id
         && capability.exit_peer_id == expected_exit_peer_id
         && capability.policy_version == control.policy_version
@@ -8199,11 +8480,9 @@ mod tests {
             .0;
         let handler = braced_item(production, "async fn handle_exit_forward_upstream_event(");
         assert!(handler.contains("connection_id,"));
-        assert!(
-            handler.contains(
-                "self.answer_exit_forward_upstream(peer, connection_id, request, channel)"
-            )
-        );
+        assert!(handler.contains(
+            "self.answer_exit_forward_upstream(peer, connection_id, request, channel, state)"
+        ));
 
         let caller = braced_item(production, "fn prepare_native_probe_permit_response(");
         assert_eq!(
@@ -9041,7 +9320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immutable_forwarded_capability_binds_both_ads_and_policy() {
+    async fn affine_forwarded_capability_survives_refresh_but_not_policy_change() {
         let fixture = fixture(RolesConfig::default());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
@@ -9087,7 +9366,7 @@ mod tests {
         ));
         let mut rekeyed = control.clone();
         rekeyed.advertisement_sequence = rekeyed.advertisement_sequence.saturating_add(1);
-        assert!(!forwarded_exit_capability_matches(
+        assert!(forwarded_exit_capability_matches(
             &capability,
             &rekeyed,
             rekeyed.node_id,
@@ -11477,7 +11756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_snapshot_rejects_every_payload_hash_drift_against_fresh_storage() {
+    async fn route_snapshot_rejects_external_hash_drift_and_retains_affine_control_provenance() {
         for mutation in 0_u8..5 {
             let mut fixture = fixture(RolesConfig::default());
             let now_ms = unix_millis();
@@ -11556,7 +11835,11 @@ mod tests {
             let drifted = route_snapshot_at(&mut fixture, 10, now_ms)
                 .await
                 .expect("hash drift is filtered, not surfaced");
-            assert!(drifted.forwarded_exits().is_empty(), "mutation {mutation}");
+            assert_eq!(
+                drifted.forwarded_exits().is_empty(),
+                mutation != 2,
+                "a verified forwarded capability retains its original control-advertisement provenance across a same-lineage refresh"
+            );
             let control_present = drifted
                 .direct_relays()
                 .iter()

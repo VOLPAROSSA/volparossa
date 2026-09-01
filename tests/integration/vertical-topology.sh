@@ -76,6 +76,18 @@ link "$CLIENT" cr2 10.241.12.1/30 "$R2" r2c 10.241.12.2/30
 link "$R1" r1x 10.241.21.1/30 "$EXIT" xr1 10.241.21.2/30
 link "$R2" r2x 10.241.22.1/30 "$EXIT" xr2 10.241.22.2/30
 link "$EXIT" xd 10.241.31.1/30 "$DEST" dx 10.241.31.2/30
+ip -n "$CLIENT" address add 43.159.1.1/32 dev lo
+ip -n "$R1" address add 44.160.1.1/32 dev lo
+ip -n "$R2" address add 45.161.2.1/32 dev lo
+ip -n "$EXIT" address add 46.162.3.1/32 dev lo
+ip -n "$CLIENT" route add 44.160.1.1/32 via 10.241.11.2 dev cr1 src 43.159.1.1
+ip -n "$CLIENT" route add 45.161.2.1/32 via 10.241.12.2 dev cr2 src 43.159.1.1
+ip -n "$R1" route add 43.159.1.1/32 via 10.241.11.1 dev r1c src 44.160.1.1
+ip -n "$R1" route add 46.162.3.1/32 via 10.241.21.2 dev r1x src 44.160.1.1
+ip -n "$R2" route add 43.159.1.1/32 via 10.241.12.1 dev r2c src 45.161.2.1
+ip -n "$R2" route add 46.162.3.1/32 via 10.241.22.2 dev r2x src 45.161.2.1
+ip -n "$EXIT" route add 44.160.1.1/32 via 10.241.21.1 dev xr1 src 46.162.3.1
+ip -n "$EXIT" route add 45.161.2.1/32 via 10.241.22.1 dev xr2 src 46.162.3.1
 for address in 10.241.21.2 10.241.22.2 10.241.31.2; do
     ip -n "$CLIENT" route get "$address" >/dev/null 2>&1 && exit 71 || true
 done
@@ -103,11 +115,15 @@ config() {
     [ "$relay" = false ] || relay_cap=32
     if [ "$exit_role" = true ]; then exit_cap=32; fi
     if [ "$relay" = true ] || [ "$exit_role" = true ]; then
-        case $node in relay1) advertised_asn=64512;; relay2) advertised_asn=64513;; exit) advertised_asn=64514;; *) exit 64;; esac
-        advertised_prefix=$(printf '%s\n' "$ip1" | awk -F. '{print $1 "." $2 "." $3 ".0/24"}')
+        case $node in
+            relay1) advertised_asn=64512; advertised_prefix=44.160.1.0/24;;
+            relay2) advertised_asn=64513; advertised_prefix=45.161.2.0/24;;
+            exit) advertised_asn=64514; advertised_prefix=46.162.3.0/24;;
+            *) exit 64;;
+        esac
     fi
     {
-      printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-acceptance-%s\n  protocol_version: 4\n' "$RUN_ID"
+      printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-acceptance-%s\n  protocol_version: 4\n  advertisement_ttl_seconds: 300\n' "$RUN_ID"
       [ "$operator" = null ] && printf '  operator_id: null\n' || printf '  operator_id: %s\n' "$operator"
       printf '  advertised_region: acceptance\n  advertised_country_code: ZZ\n'
       printf '  advertised_asn: %s\n' "$advertised_asn"
@@ -129,14 +145,14 @@ config() {
     chmod 0600 "$WORK/config-$node.yaml"
 }
 "$BIN/examples/acceptance-policy-fixture" "$WORK"
-config client null false false 10.241.11.1 10.241.12.1 \
-  /ip4/10.241.11.2/udp/41000/quic-v1/p2p/$R1_PEER \
-  /ip4/10.241.12.2/udp/41000/quic-v1/p2p/$R2_PEER
-config relay1 acceptance-relay-one true false 10.241.11.2 10.241.21.1 none none
-config relay2 acceptance-relay-two true false 10.241.12.2 10.241.22.1 none none
-config exit acceptance-exit false true 10.241.21.2 10.241.22.2 \
-  /ip4/10.241.21.1/udp/41000/quic-v1/p2p/$R1_PEER \
-  /ip4/10.241.22.1/udp/41000/quic-v1/p2p/$R2_PEER
+config client null false false 43.159.1.1 none \
+  /ip4/44.160.1.1/udp/41000/quic-v1/p2p/$R1_PEER \
+  /ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER
+config relay1 acceptance-relay-one true false 44.160.1.1 none none none
+config relay2 acceptance-relay-two true false 45.161.2.1 none none none
+config exit acceptance-exit false true 46.162.3.1 none \
+  /ip4/44.160.1.1/udp/41000/quic-v1/p2p/$R1_PEER \
+  /ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER
 
 agent() {
     ns=$1; node=$2
@@ -203,15 +219,25 @@ while [ "$attempt" -lt 200 ]; do
 done
 [ "$control_ready" = yes ] || exit 73
 
-set +e
-"$BIN/volparossa" --control-socket "$CONTROL/client-agent.sock" connect \
-    >"$WORK/connect-client.txt" 2>"$WORK/connect-client.err"
-connect_status=$?
-set -e
+attempt=0
+while :; do
+    set +e
+    "$BIN/volparossa" --control-socket "$CONTROL/client-agent.sock" connect \
+        >"$WORK/connect-client.txt" 2>"$WORK/connect-client.err"
+    connect_status=$?
+    set -e
+    [ "$connect_status" -ne 0 ] || break
+    grep -F 'PRESELECTION_UNAVAILABLE' "$WORK/connect-client.err" >/dev/null 2>&1 || break
+    [ "$attempt" -lt 20 ] || break
+    sleep 1
+    attempt=$((attempt + 1))
+done
 [ "$connect_status" -ne 0 ] || exit 74
-"$BIN/volparossa" --control-socket "$CONTROL/client-agent.sock" logs --limit 20 \
-    >"$WORK/logs-client.txt"
-grep -F 'event=CONNECT_DATAPLANE_UNAVAILABLE' "$WORK/logs-client.txt" >/dev/null || exit 74
+for node in client relay1 relay2 exit; do
+    "$BIN/volparossa" --control-socket "$CONTROL/$node-agent.sock" logs --limit 100 \
+        >"$WORK/logs-$node.txt"
+done
+grep -F 'event=CONNECT_NATIVE_PERMIT_UNAVAILABLE' "$WORK/logs-client.txt" >/dev/null || exit 74
 
 jq -n --arg id "$RUN_ID" --arg c "$CLIENT" --arg r1 "$R1" --arg r2 "$R2" \
  --arg x "$EXIT" --arg d "$DEST" --arg cp "$CLIENT_PEER" --arg p1 "$R1_PEER" \
@@ -225,8 +251,8 @@ jq -n --arg id "$RUN_ID" --arg c "$CLIENT" --arg r1 "$R1" --arg r2 "$R2" \
     {name:"destination",namespace:$d,role:"destination",tcp:"10.241.31.2:18080",udp:"10.241.31.2:18081",endpoints_started:true}],
   links:["client-relay1","client-relay2","relay1-exit","relay2-exit","exit-destination"],
   direct_client_exit_adjacency:false,
-  client_connect:{requested:true,diagnostic_code:"DATAPLANE_UNAVAILABLE",route_created:false},
-  first_product_blocker:{code:"PRODUCT_DATAPLANE_UNAVAILABLE",message:"The real client control API reached its production fail-closed DATAPLANE_UNAVAILABLE response; no route context was created."}
+  client_connect:{requested:true,diagnostic_code:"NATIVE_PERMIT_UNAVAILABLE",route_created:false},
+  first_product_blocker:{code:"PRODUCT_NATIVE_PERMIT_UNAVAILABLE",message:"The real client control API completed discovery and preselection, then failed closed while the native Permit provider was unavailable; no route context was created."}
  }' >"$WORK/evidence/topology.json"
 
 cleanup

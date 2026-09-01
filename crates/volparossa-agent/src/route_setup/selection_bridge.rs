@@ -6815,12 +6815,18 @@ mod tests {
             "only legacy spawn and C2c handoff may enter the one-task seam"
         );
         assert_eq!(product_bridge.matches("fn spawn_preprobe<").count(), 1);
+        assert_eq!(
+            product_bridge
+                .matches("pub(super) fn spawn_preprobe")
+                .count(),
+            1,
+            "the parent route actor is the only permitted caller"
+        );
         let preprobe_call = [".spawn_", "preprobe("].concat();
         assert_eq!(product_bridge.matches(&preprobe_call).count(), 0);
         for forbidden in [
             "pub fn spawn_preprobe",
             "pub(crate) fn spawn_preprobe",
-            "pub(super) fn spawn_preprobe",
             "pub trait RouteCapabilityResolver",
             "pub(crate) trait RouteCapabilityResolver",
             "pub(super) trait RouteCapabilityResolver",

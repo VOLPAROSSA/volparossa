@@ -43,6 +43,8 @@ pub(crate) struct LocalAdvertisementInput {
 pub(crate) struct SignedLocalAdvertisement {
     pub(crate) envelope: Vec<u8>,
     pub(crate) provider_keys: BTreeSet<String>,
+    pub(crate) sequence_number: u64,
+    pub(crate) expires_at_ms: u64,
 }
 
 pub(crate) struct AdvertisementPublisher {
@@ -155,6 +157,8 @@ impl AdvertisementPublisher {
         Ok(SignedLocalAdvertisement {
             envelope,
             provider_keys,
+            sequence_number,
+            expires_at_ms,
         })
     }
 }

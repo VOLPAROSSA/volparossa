@@ -1002,7 +1002,7 @@ mod tests {
         }
         assert!(discovery.contains("Relay and Exit runtimes now publish"));
         assert!(status.contains("Relay and Exit runtimes now publish"));
-        assert!(protocol.contains("Relay and Exit runtimes now install"));
+        assert!(protocol.contains("Relay and Exit runtimes install"));
         assert!(status.contains(
             "| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |"
         ));

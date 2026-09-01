@@ -83,8 +83,8 @@ TOPOLOGY_DIGEST=$(sha256sum "$ARTIFACT/evidence/topology.json"|awk '{print $1}')
 CLEANUP_DIGEST=$(sha256sum "$ARTIFACT/evidence/cleanup.json"|awk '{print $1}')
 FINISH=$(date -u '+%Y-%m-%dT%H:%M:%SZ'); KERNEL=$(uname -r); RUSTC=$(rustc --version)
 [ "$BEFORE" = "$AFTER" ] && UNCHANGED=true || UNCHANGED=false
-if [ "$worker_status" -eq 77 ] && jq -e '.topology_ready and .first_product_blocker.code=="PRODUCT_DATAPLANE_UNAVAILABLE" and .client_connect.diagnostic_code=="DATAPLANE_UNAVAILABLE"' "$ARTIFACT/evidence/topology.json" >/dev/null && jq -e '.complete and .remaining_owned_objects==0' "$ARTIFACT/evidence/cleanup.json" >/dev/null; then
- TOPOLOGY=true; COMPLETED=true; CODE=PRODUCT_DATAPLANE_UNAVAILABLE; MESSAGE='All five disposable roles started; the real client control API then failed closed with DATAPLANE_UNAVAILABLE before creating a route.'
+if [ "$worker_status" -eq 77 ] && jq -e '.topology_ready and .first_product_blocker.code=="PRODUCT_NATIVE_PERMIT_UNAVAILABLE" and .client_connect.diagnostic_code=="NATIVE_PERMIT_UNAVAILABLE"' "$ARTIFACT/evidence/topology.json" >/dev/null && jq -e '.complete and .remaining_owned_objects==0' "$ARTIFACT/evidence/cleanup.json" >/dev/null; then
+ TOPOLOGY=true; COMPLETED=true; CODE=PRODUCT_NATIVE_PERMIT_UNAVAILABLE; MESSAGE='All five disposable roles completed discovery and preselection; native Permit then failed closed before creating a route.'
 else
  TOPOLOGY=false; COMPLETED=false; CODE=TOPOLOGY_EXECUTION_ERROR; MESSAGE='The isolated topology did not reach exact role readiness.'
 fi

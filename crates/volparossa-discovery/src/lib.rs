@@ -315,8 +315,12 @@ impl DiscoveryBehaviour {
         kad_config.set_record_ttl(Some(Duration::from_secs(300)));
         kad_config.set_provider_record_ttl(Some(Duration::from_secs(300)));
         kad_config.set_provider_publication_interval(Some(Duration::from_secs(180)));
-        let kademlia =
+        let mut kademlia =
             kad::Behaviour::with_config(local_peer_id, MemoryStore::new(local_peer_id), kad_config);
+        // Voluntary service nodes are explicit private-overlay DHT servers. Waiting for libp2p's
+        // public external-address heuristic leaves a disposable/private topology permanently in
+        // client mode, so no Relay or Exit provider record can be stored or discovered.
+        kademlia.set_mode(Some(kademlia_mode_for_roles(protocol_roles)));
         let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
         let dcutr = dcutr::Behaviour::new(local_peer_id);
         let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());
@@ -356,6 +360,14 @@ impl DiscoveryBehaviour {
             exit_forward_upstream,
             datapath_relay,
         }
+    }
+}
+
+const fn kademlia_mode_for_roles(roles: DiscoveryProtocolRoles) -> kad::Mode {
+    if roles.relay() || roles.exit() {
+        kad::Mode::Server
+    } else {
+        kad::Mode::Client
     }
 }
 
@@ -1735,6 +1747,21 @@ fn validate_capability_key(value: &str) -> Result<(), DiscoveryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_roles_are_private_kademlia_servers() {
+        assert_eq!(
+            kademlia_mode_for_roles(DiscoveryProtocolRoles::new(true, false, false)),
+            kad::Mode::Client
+        );
+        for roles in [
+            DiscoveryProtocolRoles::new(false, true, false),
+            DiscoveryProtocolRoles::new(false, false, true),
+            DiscoveryProtocolRoles::new(true, true, true),
+        ] {
+            assert_eq!(kademlia_mode_for_roles(roles), kad::Mode::Server);
+        }
+    }
 
     #[test]
     fn advertisement_protocol_matrix_never_serves_an_exit_only_node_directly() {
