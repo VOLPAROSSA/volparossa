@@ -3029,7 +3029,7 @@ record_a14_owned_inventory() {
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-client/control/agent.sock" paths \
         >"$WORK/a14-paths-before.txt" || return 1
-    a14_path_records=$(awk '
+    a14_control_path_records=$(awk '
         /^context=[0-9a-f][0-9a-f]* path=[1-8] relay=/ { count++ }
         END { print count + 0 }
     ' "$WORK/a14-paths-before.txt")
@@ -3069,7 +3069,7 @@ record_a14_owned_inventory() {
     jq -S -c -n \
         --argjson namespace_count "$a14_namespace_count" \
         --argjson runtime_sockets "$a14_socket_count" \
-        --argjson mpquic_path_records "$a14_path_records" \
+        --argjson control_path_records "$a14_control_path_records" \
         --slurpfile client "$WORK/a14-owned-client.json" \
         --slurpfile bootstrap1 "$WORK/a14-owned-bootstrap1.json" \
         --slurpfile bootstrap2 "$WORK/a14-owned-bootstrap2.json" \
@@ -3080,7 +3080,7 @@ record_a14_owned_inventory() {
         --slurpfile destination "$WORK/a14-owned-destination.json" \
         '{schema_version:1,network_namespace_count:$namespace_count,
           runtime_socket_count:$runtime_sockets,
-          active_mpquic_path_records:$mpquic_path_records,
+          active_control_path_records:$control_path_records,
           namespaces:[$client[0],$bootstrap1[0],$bootstrap2[0],$relay0[0],
             $relay1[0],$relay2[0],$exit_node[0],$destination[0]]}' \
         >"$WORK/a14-owned-before.json"
@@ -4670,10 +4670,13 @@ PHASE=a14-forced-crash
 A14_REQUESTED=true
 A14_STATUS=1
 record_a14_owned_inventory || fail A14_OWNED_INVENTORY_UNAVAILABLE
+# A08 deliberately replaced and retired the native MPQUIC route with the active MPTCP route.
+# Therefore inventory the still-owned namespaces, sockets and ingress policy instead of requiring
+# stale MPQUIC-only local-control path records.
 jq -e '
   .network_namespace_count == 8 and
   .runtime_socket_count >= 16 and
-  .active_mpquic_path_records >= 2
+  ([.namespaces[] | select(.nftables_rules > 0)] | length) >= 1
 ' "$WORK/a14-owned-before.json" >/dev/null \
     || fail A14_OWNED_INVENTORY_INCOMPLETE
 for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do

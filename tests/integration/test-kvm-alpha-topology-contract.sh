@@ -227,6 +227,13 @@ grep -F 'acceptance_id:"A12",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A13",success:$success' "$GUEST" >/dev/null
 grep -F 'systemctl kill --kill-whom=all --signal=KILL "$crash_unit"' "$GUEST" \
     >/dev/null
+grep -F 'active_control_path_records:$control_path_records' "$GUEST" >/dev/null
+grep -F '([.namespaces[] | select(.nftables_rules > 0)] | length) >= 1' "$GUEST" \
+    >/dev/null
+if grep -F '.active_mpquic_path_records >= 2' "$GUEST" >/dev/null; then
+    printf '%s\n' 'A14 must not require a retired MPQUIC route after A08 switched to MPTCP' >&2
+    exit 1
+fi
 grep -F 'acceptance_id:"A14",success:$success' "$GUEST" >/dev/null
 grep -F 'capture_host_state "$WORK/host-state-before.json"' "$GUEST" >/dev/null
 grep -F 'capture_host_state "$WORK/host-state-after.json"' "$GUEST" >/dev/null
