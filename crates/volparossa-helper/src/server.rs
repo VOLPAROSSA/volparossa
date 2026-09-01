@@ -241,7 +241,7 @@ fn bind_production_socket(
         engine: HelperEngine::new_with_backend(
             runtime.cleanup_token,
             trusted_uid,
-            crate::worker_v3::functional_alpha_lease_backend(durable_ownership),
+            crate::worker_v3::functional_alpha_lease_backend(durable_ownership, trusted_uid),
         ),
         allowed_peer: AllowedPeer {
             uid: trusted_uid,
@@ -991,9 +991,9 @@ mod tests {
             .expect("private server loop");
         let bind = &source[bind_start..bind_end];
         assert!(bind.contains("HelperEngine::new_with_backend("));
-        assert!(
-            bind.contains("crate::worker_v3::functional_alpha_lease_backend(durable_ownership)")
-        );
+        assert!(bind.contains(
+            "crate::worker_v3::functional_alpha_lease_backend(durable_ownership, trusted_uid)"
+        ));
         assert!(bind.contains("ownership_runtime.prepare_handle()"));
         assert!(!bind.contains("HelperEngine::new_with_protected_cleanup_token("));
 

@@ -9,19 +9,26 @@ use nix::{
 };
 use thiserror::Error;
 
-use crate::{deadline::HardDeadline, kernel::CLIENT_INGRESS_IPV4_MARK};
+use crate::{
+    deadline::HardDeadline,
+    kernel::{CLIENT_INGRESS_IPV4_MARK, CLIENT_INGRESS_PARENT_IPV4_MARK},
+};
 
 const TABLE_PREFIX: &[u8] = b"vpi_";
+const PARENT_TABLE_PREFIX: &[u8] = b"vpo_";
 const TABLE_USERDATA_DOMAIN: &[u8] = b"VOLPAROSSA client ingress v1\0";
+const PARENT_TABLE_USERDATA_DOMAIN: &[u8] = b"VOLPAROSSA client output steering v1\0";
 const MANGLE_CHAIN: &[u8] = b"prerouting";
 const NAT_CHAIN: &[u8] = b"prerouting_nat";
+const OUTPUT_CHAIN: &[u8] = b"output";
 const FILTER_CHAIN_TYPE: &[u8] = b"filter";
 const NAT_CHAIN_TYPE: &[u8] = b"nat";
+const ROUTE_CHAIN_TYPE: &[u8] = b"route";
 
 const MAX_BATCH_BYTES: usize = 16 * 1024;
 const MAX_BATCH_MESSAGES: usize = 16;
 const MAX_ACK_BYTES: usize = 16 * 1024;
-const MAX_ACK_DATAGRAMS: usize = 8;
+const MAX_ACK_DATAGRAMS: usize = 16;
 const MAX_ACK_FRAMES: usize = 16;
 const NLMSG_HEADER_LEN: usize = 16;
 const ATTRIBUTE_HEADER_LEN: usize = 4;
@@ -48,12 +55,15 @@ const NFPROTO_INET: u8 = 1;
 const NFPROTO_IPV4: u8 = 2;
 const NFNETLINK_V0: u8 = 0;
 const NF_INET_PRE_ROUTING: u32 = 0;
+const NF_INET_LOCAL_OUT: u32 = 3;
 const NF_DROP: u32 = 0;
 const NF_ACCEPT: u32 = 1;
 const NFT_REG_VERDICT: u32 = 0;
 const NFT_REG_1: u32 = 1;
 const NFT_META_MARK: u32 = 3;
 const NFT_META_IIF: u32 = 4;
+const NFT_META_OIF: u32 = 5;
+const NFT_META_SKUID: u32 = 10;
 const NFT_META_NFPROTO: u32 = 15;
 const NFT_META_L4PROTO: u32 = 16;
 const NFT_PAYLOAD_TRANSPORT_HEADER: u32 = 2;
@@ -128,6 +138,10 @@ pub(super) struct ActiveClientIngressPolicy {
     table_name: Vec<u8>,
 }
 
+pub(super) struct ActiveParentClientIngressPolicy {
+    table_name: Vec<u8>,
+}
+
 pub(super) fn install(
     client_runtime_id: [u8; 16],
     ingress_ifindex: u32,
@@ -152,11 +166,47 @@ pub(super) fn remove(
     delete_table(&active.table_name, deadline)
 }
 
+pub(super) fn install_parent(
+    client_runtime_id: [u8; 16],
+    ingress_ifindex: u32,
+    loopback_ifindex: u32,
+    trusted_agent_uid: u32,
+    deadline: HardDeadline,
+) -> Result<ActiveParentClientIngressPolicy, ClientIngressPolicyError> {
+    if ingress_ifindex == 0 || loopback_ifindex == 0 || trusted_agent_uid == 0 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
+    let table_name = parent_table_name(client_runtime_id)?;
+    let transaction = parent_install_transaction(
+        &table_name,
+        client_runtime_id,
+        ingress_ifindex,
+        loopback_ifindex,
+        trusted_agent_uid,
+    )?;
+    execute(&transaction, deadline)?;
+    Ok(ActiveParentClientIngressPolicy { table_name })
+}
+
+pub(super) fn remove_parent(
+    active: &ActiveParentClientIngressPolicy,
+    deadline: HardDeadline,
+) -> Result<(), ClientIngressPolicyError> {
+    delete_table(&active.table_name, deadline)
+}
+
 pub(super) fn cleanup_runtime(
     client_runtime_id: [u8; 16],
     deadline: HardDeadline,
 ) -> Result<(), ClientIngressPolicyError> {
     delete_table(&table_name(client_runtime_id)?, deadline)
+}
+
+pub(super) fn cleanup_parent_runtime(
+    client_runtime_id: [u8; 16],
+    deadline: HardDeadline,
+) -> Result<(), ClientIngressPolicyError> {
+    delete_table(&parent_table_name(client_runtime_id)?, deadline)
 }
 
 fn delete_table(table: &[u8], deadline: HardDeadline) -> Result<(), ClientIngressPolicyError> {
@@ -180,11 +230,22 @@ fn validate_ports(ports: ClientIngressIpv4Ports) -> Result<(), ClientIngressPoli
 }
 
 fn table_name(runtime: [u8; 16]) -> Result<Vec<u8>, ClientIngressPolicyError> {
+    derived_table_name(TABLE_PREFIX, runtime)
+}
+
+fn parent_table_name(runtime: [u8; 16]) -> Result<Vec<u8>, ClientIngressPolicyError> {
+    derived_table_name(PARENT_TABLE_PREFIX, runtime)
+}
+
+fn derived_table_name(
+    prefix: &[u8],
+    runtime: [u8; 16],
+) -> Result<Vec<u8>, ClientIngressPolicyError> {
     if runtime.iter().all(|byte| *byte == 0) {
         return Err(ClientIngressPolicyError::Malformed);
     }
-    let mut name = Vec::with_capacity(TABLE_PREFIX.len() + runtime.len() * 2);
-    name.extend_from_slice(TABLE_PREFIX);
+    let mut name = Vec::with_capacity(prefix.len() + runtime.len() * 2);
+    name.extend_from_slice(prefix);
     for byte in runtime {
         name.push(HEX_DIGITS[usize::from(byte >> 4)]);
         name.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
@@ -202,7 +263,7 @@ fn install_transaction(
         return Err(ClientIngressPolicyError::Malformed);
     }
     let mut transaction = Transaction::new();
-    transaction.push(NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST, 1, &nfgen(AF_UNSPEC))?;
+    transaction.push(NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST, 1, &batch_nfgen())?;
 
     let mut table_payload = nfgen(NFPROTO_INET);
     attr(&mut table_payload, NFTA_TABLE_NAME, &nul(table)?)?;
@@ -225,6 +286,7 @@ fn install_transaction(
             table,
             MANGLE_CHAIN,
             FILTER_CHAIN_TYPE,
+            NF_INET_PRE_ROUTING,
             MANGLE_PRIORITY,
             NF_DROP,
         )?,
@@ -233,7 +295,14 @@ fn install_transaction(
         NFT_MSG_NEWCHAIN,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         4,
-        &chain(table, NAT_CHAIN, NAT_CHAIN_TYPE, NAT_PRIORITY, NF_ACCEPT)?,
+        &chain(
+            table,
+            NAT_CHAIN,
+            NAT_CHAIN_TYPE,
+            NF_INET_PRE_ROUTING,
+            NAT_PRIORITY,
+            NF_ACCEPT,
+        )?,
     )?;
 
     let rules = [
@@ -274,17 +343,96 @@ fn install_transaction(
             rule,
         )?;
     }
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 13, &nfgen(AF_UNSPEC))?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 13, &batch_nfgen())?;
+    Ok(transaction)
+}
+
+fn parent_install_transaction(
+    table: &[u8],
+    runtime: [u8; 16],
+    ingress_ifindex: u32,
+    loopback_ifindex: u32,
+    trusted_agent_uid: u32,
+) -> Result<Transaction, ClientIngressPolicyError> {
+    if ingress_ifindex == 0 || loopback_ifindex == 0 || trusted_agent_uid == 0 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
+    let mut transaction = Transaction::new();
+    transaction.push(NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST, 1, &batch_nfgen())?;
+
+    let mut table_payload = nfgen(NFPROTO_INET);
+    attr(&mut table_payload, NFTA_TABLE_NAME, &nul(table)?)?;
+    attr(&mut table_payload, NFTA_TABLE_FLAGS, &0_u32.to_be_bytes())?;
+    let mut userdata = Vec::with_capacity(PARENT_TABLE_USERDATA_DOMAIN.len() + runtime.len());
+    userdata.extend_from_slice(PARENT_TABLE_USERDATA_DOMAIN);
+    userdata.extend_from_slice(&runtime);
+    attr(&mut table_payload, NFTA_TABLE_USERDATA, &userdata)?;
+    transaction.push(
+        NFT_MSG_NEWTABLE,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        2,
+        &table_payload,
+    )?;
+    transaction.push(
+        NFT_MSG_NEWCHAIN,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        3,
+        &chain(
+            table,
+            OUTPUT_CHAIN,
+            ROUTE_CHAIN_TYPE,
+            NF_INET_LOCAL_OUT,
+            MANGLE_PRIORITY,
+            NF_DROP,
+        )?,
+    )?;
+    let rules = [
+        rule(
+            table,
+            OUTPUT_CHAIN,
+            mark_accept_expressions(CLIENT_INGRESS_PARENT_IPV4_MARK)?,
+        )?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
+            mark_accept_expressions(CLIENT_INGRESS_IPV4_MARK)?,
+        )?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
+            output_interface_accept_expressions(loopback_ifindex)?,
+        )?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
+            output_interface_accept_expressions(ingress_ifindex)?,
+        )?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
+            uid_accept_expressions(trusted_agent_uid)?,
+        )?,
+        rule(table, OUTPUT_CHAIN, ipv4_parent_steering_expressions()?)?,
+    ];
+    for (index, rule) in rules.iter().enumerate() {
+        transaction.push(
+            NFT_MSG_NEWRULE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
+            u32::try_from(index + 4).map_err(|_| ClientIngressPolicyError::Limit)?,
+            rule,
+        )?;
+    }
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 10, &batch_nfgen())?;
     Ok(transaction)
 }
 
 fn delete_transaction(table: &[u8]) -> Result<Transaction, ClientIngressPolicyError> {
     let mut transaction = Transaction::new();
-    transaction.push(NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST, 1, &nfgen(AF_UNSPEC))?;
+    transaction.push(NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST, 1, &batch_nfgen())?;
     let mut payload = nfgen(NFPROTO_INET);
     attr(&mut payload, NFTA_TABLE_NAME, &nul(table)?)?;
     transaction.push(NFT_MSG_DELTABLE, NLM_F_REQUEST | NLM_F_ACK, 2, &payload)?;
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 3, &nfgen(AF_UNSPEC))?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 3, &batch_nfgen())?;
     Ok(transaction)
 }
 
@@ -292,15 +440,12 @@ fn chain(
     table: &[u8],
     name: &[u8],
     chain_type: &[u8],
+    hook_number: u32,
     priority: i32,
     policy: u32,
 ) -> Result<Vec<u8>, ClientIngressPolicyError> {
     let mut hook = Vec::new();
-    attr(
-        &mut hook,
-        NFTA_HOOK_HOOKNUM,
-        &NF_INET_PRE_ROUTING.to_be_bytes(),
-    )?;
+    attr(&mut hook, NFTA_HOOK_HOOKNUM, &hook_number.to_be_bytes())?;
     attr(&mut hook, NFTA_HOOK_PRIORITY, &priority.to_be_bytes())?;
     let mut payload = nfgen(NFPROTO_INET);
     attr(&mut payload, NFTA_CHAIN_TABLE, &nul(table)?)?;
@@ -340,9 +485,47 @@ struct Expression {
 }
 
 fn mark_exclusion_expressions() -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    mark_accept_expressions(CLIENT_INGRESS_IPV4_MARK)
+}
+
+fn mark_accept_expressions(mark: u32) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    if mark == 0 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
     Ok(vec![
         meta_load(NFT_META_MARK)?,
-        compare(NFT_CMP_EQ, &CLIENT_INGRESS_IPV4_MARK.to_be_bytes())?,
+        compare(NFT_CMP_EQ, &mark.to_ne_bytes())?,
+        verdict(NF_ACCEPT)?,
+    ])
+}
+
+fn output_interface_accept_expressions(
+    ifindex: u32,
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    if ifindex == 0 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
+    Ok(vec![
+        meta_load(NFT_META_OIF)?,
+        compare(NFT_CMP_EQ, &ifindex.to_ne_bytes())?,
+        verdict(NF_ACCEPT)?,
+    ])
+}
+
+fn uid_accept_expressions(uid: u32) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    Ok(vec![
+        meta_load(NFT_META_SKUID)?,
+        compare(NFT_CMP_EQ, &uid.to_ne_bytes())?,
+        verdict(NF_ACCEPT)?,
+    ])
+}
+
+fn ipv4_parent_steering_expressions() -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    Ok(vec![
+        meta_load(NFT_META_NFPROTO)?,
+        compare(NFT_CMP_EQ, &[NFPROTO_IPV4])?,
+        immediate_value(&CLIENT_INGRESS_PARENT_IPV4_MARK.to_ne_bytes())?,
+        meta_set(NFT_META_MARK)?,
         verdict(NF_ACCEPT)?,
     ])
 }
@@ -352,7 +535,7 @@ fn interface_exclusion_expressions(
 ) -> Result<Vec<Expression>, ClientIngressPolicyError> {
     Ok(vec![
         meta_load(NFT_META_IIF)?,
-        compare(NFT_CMP_NEQ, &ingress_ifindex.to_be_bytes())?,
+        compare(NFT_CMP_NEQ, &ingress_ifindex.to_ne_bytes())?,
         verdict(NF_ACCEPT)?,
     ])
 }
@@ -381,7 +564,7 @@ fn tproxy_expressions(
         name: b"tproxy",
         data: tproxy,
     });
-    expressions.push(immediate_value(&CLIENT_INGRESS_IPV4_MARK.to_be_bytes())?);
+    expressions.push(immediate_value(&CLIENT_INGRESS_IPV4_MARK.to_ne_bytes())?);
     expressions.push(meta_set(NFT_META_MARK)?);
     expressions.push(verdict(NF_ACCEPT)?);
     Ok(expressions)
@@ -394,7 +577,7 @@ fn dns_redirect_expressions(
 ) -> Result<Vec<Expression>, ClientIngressPolicyError> {
     let mut expressions = vec![
         meta_load(NFT_META_IIF)?,
-        compare(NFT_CMP_EQ, &ingress_ifindex.to_be_bytes())?,
+        compare(NFT_CMP_EQ, &ingress_ifindex.to_ne_bytes())?,
     ];
     expressions.extend(ipv4_protocol_expressions(protocol)?);
     expressions.extend(destination_port_expressions(DNS_PORT)?);
@@ -722,6 +905,12 @@ fn nfgen(family: u8) -> Vec<u8> {
     value
 }
 
+fn batch_nfgen() -> Vec<u8> {
+    let mut value = vec![AF_UNSPEC, NFNETLINK_V0];
+    value.extend_from_slice(&NFNL_SUBSYS_NFTABLES.to_be_bytes());
+    value
+}
+
 fn nul(value: &[u8]) -> Result<Vec<u8>, ClientIngressPolicyError> {
     if value.is_empty() || value.contains(&0) || value.len() >= 256 {
         return Err(ClientIngressPolicyError::Malformed);
@@ -820,7 +1009,41 @@ fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, ClientIngressPolicyError
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeMap,
+        env,
+        fs::File,
+        io::{self, BufReader, Write as _},
+        net::UdpSocket,
+        os::fd::{AsFd as _, AsRawFd as _, OwnedFd},
+        process::{Command, Stdio},
+        time::Duration,
+    };
+
+    use nix::unistd::{getegid, geteuid};
+
     use super::*;
+    use crate::{
+        internal_protocol::{
+            AcquireClientIngressSocket, ClientIngressDestroyed, DestroyClientIngress,
+            INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, IngressSocketReady,
+            InternalIngressAddressFamily, InternalIngressSocketKind, InternalSocketAddress,
+            InternalWorkerRequest, InternalWorkerResult, internal_worker_request,
+            internal_worker_response,
+        },
+        kernel::{BirthNamespaceKernel, NamespaceKernel},
+        worker_transport::{
+            ExpectedUnixCredentials, create_client_ingress_socket,
+            private_credential_worker_channel, receive_credential_worker_request,
+            receive_credential_worker_response, send_credential_worker_request,
+            send_credential_worker_response,
+        },
+    };
+
+    const SMOKE_RUNTIME: [u8; 16] = [0x91; 16];
+    const SMOKE_OUTER: &str = "VOLPAROSSA_TEST_INGRESS_OUTPUT_NETNS";
+    const SMOKE_WORKER: &str = "VOLPAROSSA_TEST_INGRESS_WORKER_NETNS";
+    const SMOKE_TEST: &str = "worker_v3::client_ingress_policy::tests::parent_output_steering_delivers_udp_over_real_veth";
 
     #[test]
     fn ipv4_policy_is_one_atomic_bounded_batch() {
@@ -846,5 +1069,373 @@ mod tests {
                 .count(),
             11
         );
+    }
+
+    #[test]
+    fn parent_output_steering_is_one_atomic_fail_closed_batch() {
+        let transaction = parent_install_transaction(
+            &parent_table_name([8; 16]).expect("table"),
+            [8; 16],
+            7,
+            1,
+            1_001,
+        )
+        .expect("transaction");
+        assert_eq!(transaction.requests.len(), 10);
+        assert!(transaction.bytes.len() <= MAX_BATCH_BYTES);
+        assert_eq!(
+            transaction
+                .requests
+                .iter()
+                .filter(|request| request.ack)
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    fn parent_output_steering_delivers_udp_over_real_veth() {
+        if env::var(SMOKE_WORKER).ok().as_deref() == Some("1") {
+            run_worker_smoke_child();
+            return;
+        }
+        if env::var(SMOKE_OUTER).ok().as_deref() != Some("1") {
+            let output = Command::new("/usr/bin/timeout")
+                .args([
+                    "--preserve-status",
+                    "--signal=TERM",
+                    "--kill-after=2s",
+                    "20s",
+                    "/usr/bin/unshare",
+                    "--user",
+                    "--map-root-user",
+                    "--net",
+                ])
+                .arg(env::current_exe().expect("test image"))
+                .args(["--exact", SMOKE_TEST, "--nocapture", "--test-threads=1"])
+                .env(SMOKE_OUTER, "1")
+                .env("LC_ALL", "C")
+                .output()
+                .expect("launch disposable app namespace");
+            assert!(
+                output.status.success(),
+                "disposable ingress smoke failed\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        run_parent_smoke();
+    }
+
+    fn run_parent_smoke() {
+        prepare_dummy_underlay();
+        let (parent_channel, worker_channel) =
+            private_credential_worker_channel().expect("private credential channel");
+        let mut child = Command::new("/usr/bin/unshare")
+            .arg("--net")
+            .arg(env::current_exe().expect("test image"))
+            .args(["--exact", SMOKE_TEST, "--nocapture", "--test-threads=1"])
+            .env(SMOKE_OUTER, "1")
+            .env(SMOKE_WORKER, "1")
+            .env(
+                "VOLPAROSSA_TEST_INGRESS_PARENT_PID",
+                std::process::id().to_string(),
+            )
+            .env("LC_ALL", "C")
+            .stdin(Stdio::from(OwnedFd::from(worker_channel)))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn separate worker namespace");
+        let child_pid = child.id();
+        let mut child_output = BufReader::new(child.stdout.take().expect("worker stdout"));
+        read_worker_line(&mut child_output, "VPI_READY");
+
+        let namespace =
+            File::open(format!("/proc/{child_pid}/ns/net")).expect("open exact worker namespace");
+        let deadline = HardDeadline::after(Duration::from_secs(3)).expect("setup deadline");
+        let mut parent_kernel = BirthNamespaceKernel::connect(deadline).expect("parent rtnetlink");
+        let ingress_link = parent_kernel
+            .create_client_ingress_veth(SMOKE_RUNTIME, namespace.as_raw_fd(), deadline)
+            .expect("create real app-to-worker veth");
+        let ports = parse_worker_ports(&read_worker_line(&mut child_output, "VPI_PORTS"));
+
+        let acquire = ingress_request(
+            [0xa1; 16],
+            internal_worker_request::Operation::AcquireClientIngressSocket(
+                AcquireClientIngressSocket {
+                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                    descriptor_kind: InternalIngressSocketKind::TransparentUdp as i32,
+                    address_family: InternalIngressAddressFamily::Ipv4 as i32,
+                    expected_local: Some(InternalSocketAddress {
+                        address: vec![0; 4],
+                        port: u32::from(ports.transparent_udp),
+                    }),
+                },
+            ),
+        );
+        send_credential_worker_request(&parent_channel, &acquire).expect("request transferred UDP");
+        let expected_worker = ExpectedUnixCredentials::new(child_pid, 0, 0)
+            .expect("worker credentials in disposable user namespace");
+        let mut execution =
+            receive_credential_worker_response(&parent_channel, &acquire, expected_worker)
+                .expect("credentialed UDP descriptor");
+        assert_eq!(execution.response.result, InternalWorkerResult::Ok as i32);
+        let transparent_udp = execution.descriptor.take().expect("transparent UDP owner");
+
+        let parent_routing = parent_kernel
+            .install_client_ingress_parent_ipv4_routing(&ingress_link, deadline)
+            .expect("install parent marked route");
+        let parent_policy = install_parent(
+            SMOKE_RUNTIME,
+            parent_routing.parent_ifindex(),
+            parent_routing.loopback_ifindex(),
+            1_001,
+            deadline,
+        )
+        .expect("install parent output steering");
+
+        const PAYLOAD: &[u8] = b"volparossa-real-ingress-udp";
+        let app = UdpSocket::bind("192.0.2.2:0").expect("bind app underlay address");
+        app.send_to(PAYLOAD, "198.18.0.42:4242")
+            .expect("send app packet");
+        let receiver = UdpSocket::from(transparent_udp);
+        receiver
+            .set_nonblocking(false)
+            .expect("blocking receive for bounded smoke");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bounded receive");
+        let mut received = [0_u8; 128];
+        let (length, _) = receiver
+            .recv_from(&mut received)
+            .expect("packet reached transferred transparent socket");
+        assert_eq!(&received[..length], PAYLOAD);
+
+        remove_parent(&parent_policy, deadline).expect("remove exact parent nft table");
+        parent_kernel
+            .remove_client_ingress_parent_ipv4_routing(&parent_routing, deadline)
+            .expect("remove exact parent route and rule");
+        let destroy = ingress_request(
+            [0xa2; 16],
+            internal_worker_request::Operation::DestroyClientIngress(DestroyClientIngress {
+                client_runtime_id: SMOKE_RUNTIME.to_vec(),
+            }),
+        );
+        send_credential_worker_request(&parent_channel, &destroy).expect("request worker cleanup");
+        let destroyed =
+            receive_credential_worker_response(&parent_channel, &destroy, expected_worker)
+                .expect("worker cleanup response");
+        assert_eq!(destroyed.response.result, InternalWorkerResult::Ok as i32);
+        parent_kernel
+            .delete_client_ingress_veth(&ingress_link, deadline)
+            .expect("delete exact veth pair");
+        drop(receiver);
+        drop(parent_channel);
+        assert!(child.wait().expect("wait worker smoke child").success());
+    }
+
+    fn run_worker_smoke_child() {
+        println!("VPI_READY");
+        io::stdout().flush().expect("flush readiness");
+        let deadline = HardDeadline::after(Duration::from_secs(5)).expect("worker deadline");
+        let mut kernel = NamespaceKernel::connect(deadline).expect("worker rtnetlink");
+        kernel.activate_loopback(deadline).expect("worker loopback");
+        let ingress_ifindex = loop {
+            match kernel.activate_client_ingress_link(SMOKE_RUNTIME, deadline) {
+                Ok(ifindex) => break ifindex,
+                Err(error) => {
+                    if deadline.ensure_remaining().is_err() {
+                        let links = Command::new("/usr/bin/ip")
+                            .args(["-details", "link", "show"])
+                            .output()
+                            .expect("inspect worker links");
+                        panic!(
+                            "veth creation deadline: {error:?}; links: {}",
+                            String::from_utf8_lossy(&links.stdout)
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+        let mut sockets = BTreeMap::new();
+        let mut locals = BTreeMap::new();
+        for kind in [
+            InternalIngressSocketKind::TransparentTcpListener,
+            InternalIngressSocketKind::TransparentUdp,
+            InternalIngressSocketKind::DnsTcpListener,
+            InternalIngressSocketKind::DnsUdp,
+        ] {
+            let (descriptor, local) =
+                create_client_ingress_socket(kind, InternalIngressAddressFamily::Ipv4)
+                    .expect("create real IPv4 ingress socket");
+            sockets.insert(kind, descriptor);
+            locals.insert(kind, local);
+        }
+        let ports = ClientIngressIpv4Ports {
+            transparent_tcp: local_port(&locals, InternalIngressSocketKind::TransparentTcpListener),
+            transparent_udp: local_port(&locals, InternalIngressSocketKind::TransparentUdp),
+            dns_tcp: local_port(&locals, InternalIngressSocketKind::DnsTcpListener),
+            dns_udp: local_port(&locals, InternalIngressSocketKind::DnsUdp),
+        };
+        let routing = kernel
+            .install_client_ingress_ipv4_routing(ingress_ifindex, deadline)
+            .expect("worker TPROXY route");
+        let policy =
+            install(SMOKE_RUNTIME, ingress_ifindex, ports, deadline).expect("worker TPROXY policy");
+        println!(
+            "VPI_PORTS {} {} {} {}",
+            ports.transparent_tcp, ports.transparent_udp, ports.dns_tcp, ports.dns_udp
+        );
+        io::stdout().flush().expect("flush socket ports");
+
+        let stdin = io::stdin();
+        let channel = socket2::Socket::from(
+            rustix::io::fcntl_dupfd_cloexec(stdin.as_fd(), 3).expect("duplicate worker channel"),
+        );
+        let parent_pid = env::var("VOLPAROSSA_TEST_INGRESS_PARENT_PID")
+            .expect("parent pid")
+            .parse::<u32>()
+            .expect("numeric parent pid");
+        let expected_parent =
+            ExpectedUnixCredentials::new(parent_pid, geteuid().as_raw(), getegid().as_raw())
+                .expect("parent credentials");
+        let acquire = receive_credential_worker_request(&channel, expected_parent)
+            .expect("receive Acquire")
+            .request;
+        let expected_local = locals
+            .get(&InternalIngressSocketKind::TransparentUdp)
+            .cloned()
+            .expect("UDP local");
+        assert!(matches!(
+            acquire.operation.as_ref(),
+            Some(internal_worker_request::Operation::AcquireClientIngressSocket(value))
+                if value.client_runtime_id.as_slice() == SMOKE_RUNTIME
+                    && value.descriptor_kind == InternalIngressSocketKind::TransparentUdp as i32
+                    && value.address_family == InternalIngressAddressFamily::Ipv4 as i32
+                    && value.expected_local.as_ref() == Some(&expected_local)
+        ));
+        let response = super::super::correlated_response(
+            &acquire,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::IngressSocketReady(
+                IngressSocketReady {
+                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                    descriptor_kind: InternalIngressSocketKind::TransparentUdp as i32,
+                    address_family: InternalIngressAddressFamily::Ipv4 as i32,
+                    local: Some(expected_local),
+                },
+            )),
+        )
+        .expect("correlated Acquire response");
+        let udp = sockets
+            .remove(&InternalIngressSocketKind::TransparentUdp)
+            .expect("UDP owner");
+        send_credential_worker_response(&channel, &acquire, &response, Some(udp))
+            .expect("transfer transparent UDP descriptor");
+
+        let destroy = receive_credential_worker_request(&channel, expected_parent)
+            .expect("receive Destroy")
+            .request;
+        assert!(matches!(
+            destroy.operation.as_ref(),
+            Some(internal_worker_request::Operation::DestroyClientIngress(value))
+                if value.client_runtime_id.as_slice() == SMOKE_RUNTIME
+        ));
+        remove(policy, deadline).expect("remove worker nft table");
+        kernel
+            .remove_client_ingress_ipv4_routing(routing, deadline)
+            .expect("remove worker TPROXY route");
+        let response = super::super::correlated_response(
+            &destroy,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::ClientIngressDestroyed(
+                ClientIngressDestroyed {
+                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                },
+            )),
+        )
+        .expect("correlated Destroy response");
+        send_credential_worker_response(&channel, &destroy, &response, None)
+            .expect("send cleanup response");
+    }
+
+    fn ingress_request(
+        request_id: [u8; 16],
+        operation: internal_worker_request::Operation,
+    ) -> InternalWorkerRequest {
+        InternalWorkerRequest {
+            protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+            magic: INTERNAL_WORKER_MAGIC.to_vec(),
+            request_id: request_id.to_vec(),
+            operation: Some(operation),
+        }
+    }
+
+    fn local_port(
+        locals: &BTreeMap<InternalIngressSocketKind, InternalSocketAddress>,
+        kind: InternalIngressSocketKind,
+    ) -> u16 {
+        u16::try_from(locals.get(&kind).expect("local").port)
+            .ok()
+            .filter(|port| *port != 0)
+            .expect("kernel port")
+    }
+
+    fn read_worker_line(reader: &mut impl io::BufRead, prefix: &str) -> String {
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).expect("worker output"), 0);
+            if let Some(position) = line.find(prefix) {
+                return line[position..].to_owned();
+            }
+        }
+    }
+
+    fn parse_worker_ports(line: &str) -> ClientIngressIpv4Ports {
+        let values = line
+            .split_whitespace()
+            .skip(1)
+            .map(|value| value.parse::<u16>().expect("numeric port"))
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 4);
+        ClientIngressIpv4Ports {
+            transparent_tcp: values[0],
+            transparent_udp: values[1],
+            dns_tcp: values[2],
+            dns_udp: values[3],
+        }
+    }
+
+    fn prepare_dummy_underlay() {
+        for arguments in [
+            vec!["link", "add", "vpu0", "type", "dummy"],
+            vec!["address", "add", "192.0.2.2/24", "dev", "vpu0"],
+            vec!["link", "set", "dev", "vpu0", "up"],
+            vec![
+                "route",
+                "add",
+                "default",
+                "via",
+                "192.0.2.1",
+                "dev",
+                "vpu0",
+                "onlink",
+            ],
+        ] {
+            assert!(
+                Command::new("/usr/bin/ip")
+                    .args(&arguments)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .expect("run disposable ip setup")
+                    .success(),
+                "failed disposable ip {arguments:?}"
+            );
+        }
     }
 }

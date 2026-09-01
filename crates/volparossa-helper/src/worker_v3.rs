@@ -2002,7 +2002,7 @@ impl WorkerClientIngress {
         };
         let routing = self
             .kernel
-            .install_client_ingress_ipv4_routing(deadline)
+            .install_client_ingress_ipv4_routing(self.ingress_ifindex, deadline)
             .map_err(|_| InternalWorkerResult::Kernel)?;
         let Ok(policy) = client_ingress_policy::install(
             self.client_runtime_id,

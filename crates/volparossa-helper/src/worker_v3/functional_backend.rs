@@ -72,7 +72,8 @@ use crate::{
         internal_worker_response,
     },
     kernel::{
-        BirthLinkError, BirthNamespaceKernel, LiveClientIngressVeth, LiveWireguardLeaseOwner,
+        BirthLinkError, BirthNamespaceKernel, ClientIngressParentIpv4Routing,
+        LiveClientIngressVeth, LiveWireguardLeaseOwner,
     },
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
     ownership_journal::{
@@ -115,6 +116,7 @@ const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 /// Install the deliberately narrow process-owned backend used only by the production server.
 pub(crate) fn functional_alpha_lease_backend(
     durable_ownership: DurableOwnershipPrepareHandle,
+    trusted_agent_uid: u32,
 ) -> Arc<dyn AsyncLeaseBackend> {
     Arc::new(FunctionalAlphaLeaseBackend {
         coordinator: WorkerCoordinator::new(WorkerRegistry::new(
@@ -130,6 +132,7 @@ pub(crate) fn functional_alpha_lease_backend(
             DEFAULT_MAX_TTL,
         )),
         ingress_state: Mutex::new(None),
+        trusted_agent_uid,
         durable_ownership: Some(durable_ownership),
     })
 }
@@ -147,6 +150,7 @@ struct FunctionalAlphaLeaseBackend {
     relay_replay: Mutex<ReplayCache>,
     state: Mutex<Option<OpenLeaseEntry>>,
     ingress_state: Mutex<Option<OpenIngressEntry>>,
+    trusted_agent_uid: u32,
     /// Always present in production. `None` exists only for narrow unit fixtures which never
     /// execute Prepare.
     durable_ownership: Option<DurableOwnershipPrepareHandle>,
@@ -165,6 +169,8 @@ struct OpenIngressEntry {
     backend_generation: u64,
     worker: Option<WorkerGenerationOwnership>,
     ingress_link: Option<LiveClientIngressVeth>,
+    parent_routing: Option<ClientIngressParentIpv4Routing>,
+    parent_policy: Option<super::client_ingress_policy::ActiveParentClientIngressPolicy>,
     worker_generation: u64,
     sockets: BTreeMap<(i32, i32), IngressSocketAddress>,
     acquired: BTreeSet<(i32, i32)>,
@@ -1950,6 +1956,8 @@ impl FunctionalAlphaLeaseBackend {
                 backend_generation: binding.generation,
                 worker: Some(worker),
                 ingress_link: Some(ingress_link),
+                parent_routing: None,
+                parent_policy: None,
                 worker_generation,
                 sockets: BTreeMap::new(),
                 acquired: BTreeSet::new(),
@@ -2151,6 +2159,52 @@ impl FunctionalAlphaLeaseBackend {
                 .collect::<Result<Vec<_>, BackendError>>()?;
             (entry.worker_generation, identities)
         };
+        let parent_routing = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = exact_ingress_entry_mut(&mut state, binding)?;
+            if entry.parent_routing.is_some() || entry.parent_policy.is_some() {
+                return Err(BackendError::Invalid);
+            }
+            let link = entry.ingress_link.as_ref().ok_or(BackendError::Invalid)?;
+            let mut kernel = BirthNamespaceKernel::connect(deadline)
+                .map_err(|_| BackendError::CleanupIncomplete)?;
+            let routing = kernel
+                .install_client_ingress_parent_ipv4_routing(link, deadline)
+                .map_err(|_| BackendError::CleanupIncomplete)?;
+            let coordinates = (routing.parent_ifindex(), routing.loopback_ifindex());
+            entry.parent_routing = Some(routing);
+            coordinates
+        };
+        let parent_policy = super::client_ingress_policy::install_parent(
+            binding.client_runtime_id,
+            parent_routing.0,
+            parent_routing.1,
+            self.trusted_agent_uid,
+            deadline,
+        );
+        match parent_policy {
+            Ok(policy) => {
+                let mut state = self
+                    .ingress_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let entry = exact_ingress_entry_mut(&mut state, binding)?;
+                entry.parent_policy = Some(policy);
+            }
+            Err(_) => {
+                let _ = super::client_ingress_policy::cleanup_parent_runtime(
+                    binding.client_runtime_id,
+                    deadline,
+                );
+                let _ = self
+                    .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+                    .await;
+                return Err(BackendError::CleanupIncomplete);
+            }
+        }
         let request = worker_request(
             ingress_worker_request_id(binding, STAGE_ACTIVATE_INGRESS),
             internal_worker_request::Operation::ActivateClientIngress(
@@ -2179,6 +2233,9 @@ impl FunctionalAlphaLeaseBackend {
                 )
         });
         if !exact {
+            let _ = self
+                .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+                .await;
             return Err(BackendError::CleanupIncomplete);
         }
         let mut state = self
@@ -2236,6 +2293,8 @@ impl FunctionalAlphaLeaseBackend {
                 backend_generation: binding.generation,
                 worker: Some(worker),
                 ingress_link: None,
+                parent_routing: None,
+                parent_policy: None,
                 worker_generation,
                 sockets: BTreeMap::new(),
                 acquired: BTreeSet::new(),
@@ -2313,6 +2372,49 @@ impl FunctionalAlphaLeaseBackend {
                 }
             }
         }
+        let parent_policy = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.as_mut().and_then(|entry| entry.parent_policy.take())
+        };
+        if let Some(parent_policy) = parent_policy {
+            if super::client_ingress_policy::remove_parent(&parent_policy, deadline).is_err() {
+                let mut state = self
+                    .ingress_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = state.as_mut() {
+                    entry.parent_policy = Some(parent_policy);
+                    entry.phase = OpenIngressPhase::Quarantined;
+                }
+                return false;
+            }
+        }
+        let parent_routing = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.as_mut().and_then(|entry| entry.parent_routing.take())
+        };
+        if let Some(parent_routing) = parent_routing {
+            let removed = BirthNamespaceKernel::connect(deadline).and_then(|mut kernel| {
+                kernel.remove_client_ingress_parent_ipv4_routing(&parent_routing, deadline)
+            });
+            if removed.is_err() {
+                let mut state = self
+                    .ingress_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = state.as_mut() {
+                    entry.parent_routing = Some(parent_routing);
+                    entry.phase = OpenIngressPhase::Quarantined;
+                }
+                return false;
+            }
+        }
         let ingress_link = {
             let mut state = self
                 .ingress_state
@@ -2344,6 +2446,8 @@ impl FunctionalAlphaLeaseBackend {
                 && entry.backend_generation == backend_generation
                 && entry.worker.is_none()
                 && entry.ingress_link.is_none()
+                && entry.parent_routing.is_none()
+                && entry.parent_policy.is_none()
         }) {
             *state = None;
             true
@@ -5062,6 +5166,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(state),
             ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: None,
         }
     }
@@ -5122,6 +5227,7 @@ mod tests {
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
                 state: Mutex::new(Some(entry)),
                 ingress_state: Mutex::new(None),
+                trusted_agent_uid: 1_001,
                 durable_ownership: None,
             },
             peer,
@@ -5418,6 +5524,7 @@ mod tests {
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
                 state: Mutex::new(Some(entry)),
                 ingress_state: Mutex::new(None),
+                trusted_agent_uid: 1_001,
                 durable_ownership: None,
             }),
             peer,
@@ -9460,6 +9567,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
             ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: None,
         };
 
@@ -9687,6 +9795,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
             ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: None,
         };
 
@@ -9957,6 +10066,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
             ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: None,
         };
 
@@ -10070,6 +10180,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
             ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: Some(handle),
         };
 
