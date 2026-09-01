@@ -1,6 +1,7 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
 mod preselection_observation;
+mod preselection_sampler;
 
 pub(crate) use preselection_observation::{
     BoundPreselectionFreshnessProofBatch, CompletedPreselectionFreshnessAttempt,
@@ -561,16 +562,17 @@ impl RouteCandidatePolicySnapshot {
 /// Revalidated advertisement projection safe to hand to in-process selection.
 ///
 /// The signed envelope, fingerprint signature and encoded length, persisted endpoint, and stored
-/// RTT/capacity history stay inside discovery. Only the opaque, redacted payload-hash equality
-/// binding leaves discovery; it grants no authority. Historical reputation and a serious-fault
-/// cooldown are the only peerstore evidence projected; neither is fresh route reachability or
-/// capacity evidence.
+/// RTT/capacity values stay inside discovery. Only the opaque, redacted payload-hash equality
+/// binding leaves discovery; it grants no authority. A bounded local measurement count,
+/// historical reputation and a serious-fault cooldown are the only peerstore evidence projected;
+/// none is fresh route reachability or capacity evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RouteCandidateAdvertisement {
     advertisement: CoreAdvertisement,
     signed_measured_at_ms: u64,
     signed_expires_at_ms: u64,
     advertisement_payload_hash: AdvertisementPayloadHash,
+    local_measurement_count: usize,
     historical_reputation_score: f64,
     serious_protocol_fault_until: Option<UnixTime>,
 }
@@ -592,6 +594,10 @@ impl RouteCandidateAdvertisement {
         self.advertisement_payload_hash
     }
 
+    pub(crate) const fn local_measurement_count(&self) -> usize {
+        self.local_measurement_count
+    }
+
     pub(crate) const fn historical_reputation_score(&self) -> f64 {
         self.historical_reputation_score
     }
@@ -611,6 +617,7 @@ impl RouteCandidateAdvertisement {
             signed_measured_at_ms: exact.signed_measured_at_ms,
             signed_expires_at_ms: exact.signed_expires_at_ms,
             advertisement_payload_hash: exact.fingerprint.payload_hash,
+            local_measurement_count: stored.evidence.measurement_count,
             historical_reputation_score: stored.evidence.reputation_score(),
             serious_protocol_fault_until: stored.evidence.serious_protocol_fault_until,
         })
@@ -4536,6 +4543,7 @@ impl DiscoveryRuntime {
                     signed_measured_at_ms: exact.signed_measured_at_ms,
                     signed_expires_at_ms: exact.signed_expires_at_ms,
                     advertisement_payload_hash: exact.fingerprint.payload_hash,
+                    local_measurement_count: stored.evidence.measurement_count,
                     historical_reputation_score: stored.evidence.reputation_score(),
                     serious_protocol_fault_until: stored.evidence.serious_protocol_fault_until,
                 },
@@ -5856,8 +5864,8 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::{RwLock, oneshot};
     use volparossa_protocol::{
-        ControlPayload, ProbeAddressFamily, Transport, generate_nonce, sign_control_message,
-        sign_control_message_with,
+        AdvertisementNetwork, ControlPayload, ProbeAddressFamily, Transport, generate_nonce,
+        sign_control_message, sign_control_message_with,
     };
     use volparossa_test_support::{SignedRouteFixture, verified_development_manifest};
 
@@ -6348,6 +6356,35 @@ mod tests {
         )
     }
 
+    fn populate_test_network(
+        network: &mut AdvertisementNetwork,
+        advertised: PreselectionTestCapabilities,
+        nonce: [u8; 32],
+        sequence_number: u64,
+    ) {
+        network.country_code = "NL".to_owned();
+        network.operator_id = format!("operator-{}-{sequence_number}", nonce[0]);
+        network.asn = 64_512_u32
+            .saturating_add(u32::from(nonce[0]).saturating_mul(16))
+            .saturating_add(u32::try_from(sequence_number % 16).expect("bounded sequence suffix"));
+        network.ipv4_prefix_hint = advertised
+            .families
+            .ipv4
+            .then(|| format!("44.{}.{}.0/24", nonce[0], sequence_number % 255))
+            .unwrap_or_default();
+        network.ipv6_prefix_hint = advertised
+            .families
+            .ipv6
+            .then(|| {
+                format!(
+                    "2606:4700:{:02x}{:02x}::/48",
+                    nonce[0],
+                    sequence_number % 255
+                )
+            })
+            .unwrap_or_default();
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "test fixture preserves the signed advertisement inputs explicitly"
@@ -6428,7 +6465,8 @@ mod tests {
             capacity.estimated_free_up_mbps = 100;
             capacity.estimated_free_down_mbps = 100;
         }
-        wire.network.as_mut().expect("network").country_code = "NL".to_owned();
+        let network = wire.network.as_mut().expect("network");
+        populate_test_network(network, advertised, nonce, sequence_number);
         let public_key = identity
             .ed25519_public_key_bytes()
             .expect("Ed25519 public key");
@@ -6700,6 +6738,103 @@ mod tests {
             advertisement_payload_hashes,
             now_ms,
         }
+    }
+
+    pub(super) async fn preselection_multi_exit_snapshot_fixture(
+        exits: usize,
+        other_relays: usize,
+        duplicate_relay_hint_clusters: Option<usize>,
+        advertised: PreselectionTestCapabilities,
+    ) -> RouteCandidateSnapshot {
+        assert!((2..=8).contains(&exits));
+        assert!((1..=32).contains(&other_relays));
+        assert!(
+            duplicate_relay_hint_clusters.is_none_or(|clusters| {
+                (1..=other_relays).contains(&clusters) && clusters <= 32
+            })
+        );
+        let mut fixture = Box::new(fixture(RolesConfig::default()));
+        let now_ms = unix_millis();
+        let relay_roles = RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        };
+        for offset in 0..exits {
+            let control = Identity::generate();
+            let control_nonce = 32_u8
+                .checked_add(u8::try_from(offset.saturating_mul(2)).expect("bounded exit offset"))
+                .expect("bounded control nonce");
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    &control,
+                    relay_roles,
+                    1,
+                    [control_nonce; 32],
+                    now_ms,
+                    advertised,
+                )
+                .await
+                .is_some()
+            );
+            let control_capability = fixture
+                .runtime
+                .direct_relays
+                .get(control.peer_id())
+                .expect("multi-exit control capability")
+                .clone();
+            let exit = Identity::generate();
+            assert!(
+                ingest_forwarded_snapshot_exit_with_capabilities(
+                    &mut fixture,
+                    &control_capability,
+                    &exit,
+                    RolesConfig {
+                        client: false,
+                        relay: false,
+                        exit: true,
+                    },
+                    1,
+                    [control_nonce + 1; 32],
+                    now_ms,
+                    advertised,
+                )
+                .await
+                .is_some()
+            );
+        }
+        for offset in 0..other_relays {
+            let relay = Identity::generate();
+            let cluster =
+                duplicate_relay_hint_clusters.map_or(offset, |clusters| offset % clusters);
+            let nonce = 96_u8
+                .checked_add(u8::try_from(cluster).expect("bounded relay cluster"))
+                .expect("bounded relay nonce");
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    &relay,
+                    relay_roles,
+                    1,
+                    [nonce; 32],
+                    now_ms,
+                    advertised,
+                )
+                .await
+                .is_some()
+            );
+        }
+        let snapshot = route_snapshot_at(
+            &mut fixture,
+            exits.saturating_mul(2).saturating_add(other_relays),
+            now_ms,
+        )
+        .await
+        .expect("multi-exit preselection snapshot");
+        assert_eq!(snapshot.forwarded_exits().len(), exits);
+        assert_eq!(snapshot.direct_relays().len(), exits + other_relays);
+        snapshot
     }
 
     fn assert_exact_persisted_snapshot_time(

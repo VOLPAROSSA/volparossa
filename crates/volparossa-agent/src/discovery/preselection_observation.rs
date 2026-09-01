@@ -193,9 +193,9 @@ pub(super) struct PreselectionSubjectBinding {
     )
 )]
 pub(super) struct PreselectionSubjectSet {
-    available: bool,
-    entries: Vec<PreselectionSubjectBinding>,
-    forwarded_pairs: Vec<(usize, usize)>,
+    pub(super) available: bool,
+    pub(super) entries: Vec<PreselectionSubjectBinding>,
+    pub(super) forwarded_pairs: Vec<(usize, usize)>,
 }
 
 impl PreselectionSubjectSet {
@@ -4467,9 +4467,9 @@ mod tests {
             product,
             "pub(super) struct PreselectionSubjectSet {",
             &[
-                "available: bool,",
-                "entries: Vec<PreselectionSubjectBinding>,",
-                "forwarded_pairs: Vec<(usize, usize)>,",
+                "pub(super) available: bool,",
+                "pub(super) entries: Vec<PreselectionSubjectBinding>,",
+                "pub(super) forwarded_pairs: Vec<(usize, usize)>,",
             ],
         );
         assert_source_fields(
