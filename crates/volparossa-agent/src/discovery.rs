@@ -6190,8 +6190,9 @@ impl DiscoveryRuntime {
             reject!("EXIT_FORWARD_EXIT_SCOPE_REJECTED");
         }
         let local_peer_bytes = local_peer.to_bytes();
-        let response = if operation == ExitForwardOperation::FetchExitAdvertisement {
-            self.served_local_advertisement
+        let responses = match operation {
+            ExitForwardOperation::FetchExitAdvertisement => self
+                .served_local_advertisement
                 .as_ref()
                 .filter(|advertisement| {
                     decode_canonical::<SignedEnvelope>(
@@ -6201,25 +6202,94 @@ impl DiscoveryRuntime {
                     .is_ok_and(|envelope| envelope.expires_at_ms > now_ms)
                 })
                 .cloned()
-                .and_then(|advertisement| {
-                    ExitForwardResponse::granted(
-                        request.forward_id().to_vec(),
-                        operation,
-                        self.local_node_id.to_vec(),
-                        local_peer_bytes.clone(),
-                        vec![advertisement],
-                    )
-                    .ok()
-                })
-        } else {
-            ExitForwardResponse::unavailable(
-                request.forward_id().to_vec(),
-                operation,
-                self.local_node_id.to_vec(),
-                local_peer_bytes,
-            )
-            .ok()
+                .map(|advertisement| vec![advertisement]),
+            ExitForwardOperation::CapacityHold => {
+                let identity = &self.identity;
+                self.exit_service
+                    .as_mut()
+                    .and_then(|service| {
+                        service
+                            .hold_capacity_with(
+                                request.canonical_request(),
+                                &control_relay_node_id,
+                                &authenticated_control_relay.to_bytes(),
+                                now_ms,
+                                self.local_public_key,
+                                |message| identity.sign(message).ok(),
+                            )
+                            .ok()
+                    })
+                    .map(|accepted| {
+                        vec![
+                            accepted.signed_capability().to_vec(),
+                            accepted.signed_hold().to_vec(),
+                        ]
+                    })
+            }
+            ExitForwardOperation::ProbePermit => {
+                let identity = &self.identity;
+                self.exit_service
+                    .as_mut()
+                    .and_then(|service| {
+                        service
+                            .issue_probe_permit_with(
+                                request.canonical_request(),
+                                &control_relay_node_id,
+                                &authenticated_control_relay.to_bytes(),
+                                now_ms,
+                                self.local_public_key,
+                                |message| identity.sign(message).ok(),
+                            )
+                            .ok()
+                    })
+                    .map(|accepted| vec![accepted.encoded().to_vec()])
+            }
+            ExitForwardOperation::ConfirmRelay => {
+                let identity = &self.identity;
+                self.exit_service
+                    .as_mut()
+                    .and_then(|service| {
+                        service
+                            .confirm_relay_with(
+                                request.canonical_request(),
+                                &control_relay_node_id,
+                                &authenticated_control_relay.to_bytes(),
+                                now_ms,
+                                self.local_public_key,
+                                |message| identity.sign(message).ok(),
+                            )
+                            .ok()
+                    })
+                    .map(|accepted| vec![accepted.signed_receipt().to_vec()])
+            }
+            ExitForwardOperation::FinalizeReservation
+            | ExitForwardOperation::NativeProbePermit
+            | ExitForwardOperation::NativeProbeAuthorize
+            | ExitForwardOperation::NativeProbeReady
+            | ExitForwardOperation::NativeProbeResult
+            | ExitForwardOperation::UdpSessionStart
+            | ExitForwardOperation::Unspecified => None,
         };
+        let response = responses
+            .and_then(|responses| {
+                ExitForwardResponse::granted(
+                    request.forward_id().to_vec(),
+                    operation,
+                    self.local_node_id.to_vec(),
+                    local_peer_bytes.clone(),
+                    responses,
+                )
+                .ok()
+            })
+            .or_else(|| {
+                ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    operation,
+                    self.local_node_id.to_vec(),
+                    local_peer_bytes,
+                )
+                .ok()
+            });
         if let Some(response) = response {
             let _ = self
                 .service
