@@ -999,7 +999,7 @@ mod tests {
         assert!(status.contains("private callerless native attempt owner"));
         assert!(protocol.contains("crate-private, callerless native-preselection child"));
         for document in [discovery, status, protocol] {
-            assert!(document.contains("typed Exit producer"));
+            assert!(document.contains("module-private, non-Clone Exit"));
             assert!(document.contains("production runtime"));
         }
         assert!(status.contains(
