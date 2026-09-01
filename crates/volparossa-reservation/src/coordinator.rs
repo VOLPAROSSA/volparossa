@@ -407,10 +407,28 @@ impl VerifiedRelayGrant {
         &self.reservation_id
     }
 
+    /// Route context shared by every relay in the finalized route.
+    #[must_use]
+    pub const fn route_context_id(&self) -> &[u8; ID_BYTES] {
+        &self.route_context_id
+    }
+
     /// Context-local path number.
     #[must_use]
     pub const fn path_id(&self) -> u32 {
         self.path_id
+    }
+
+    /// Stable identity of the independently verified data relay.
+    #[must_use]
+    pub const fn relay_node_id(&self) -> &[u8; KEY_BYTES] {
+        &self.relay_node_id
+    }
+
+    /// Exclusive expiry shared with this relay's nested Exit grant.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
     }
     /// Verified relay endpoint facing this route-attempt client.
     #[must_use]

@@ -13,6 +13,7 @@ mod discovery;
 mod endpoint_leases;
 #[path = "helper_v3.rs"]
 pub mod helper;
+pub mod mpquic_runtime;
 mod paths;
 mod policy;
 mod roles;
