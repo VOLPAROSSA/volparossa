@@ -7443,9 +7443,40 @@ if [ "$proof_ok" = yes ]; then
             "$may_own_pid_one" ]; then
         failed 'MayOwn first invocation is not hook-bound'
     fi
-    may_own_service_shape_is_exact "$may_own_pid_one" \
-        "$may_own_invocation_one" 0 2 \
-        || failed 'MayOwn first service shape is not production-exact'
+    may_own_wait=0
+    while ! may_own_service_shape_is_exact "$may_own_pid_one" \
+        "$may_own_invocation_one" 0 2
+    do
+        if [ "$may_own_preexec_barrier_failure_stage" != shape-fdstore-count ]; then
+            report_may_own_preexec_barrier_failure_stage \
+                || failed 'MayOwn first service shape is not production-exact'
+            failed 'MayOwn first service shape is not production-exact'
+        fi
+        [ "$(capture_process_starttime "$may_own_driver_observer_pid" \
+            2>/dev/null || true)" = "$may_own_driver_observer_starttime" ] \
+            || failed 'MayOwn first driver-side observer exited before service convergence'
+        [ "$(capture_process_starttime "$may_own_debugger_pid" \
+            2>/dev/null || true)" = "$may_own_debugger_starttime" ] \
+            || failed 'MayOwn first debugger exited before service convergence'
+        [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+            "$may_own_invocation_one" ] \
+            || failed 'MayOwn first invocation changed before service convergence'
+        [ "$(capture_process_starttime "$may_own_pid_one" \
+            2>/dev/null || true)" = "$may_own_pid_one_starttime" ] \
+            || failed 'MayOwn first MainPID changed before service convergence'
+        may_own_shape_observed_fdstore=$(systemctl show \
+            --property=NFileDescriptorStore --value "$unit_name" \
+            2>/dev/null || true)
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] \
+            || failed 'MayOwn first descriptor store did not converge'
+        case $may_own_shape_observed_fdstore in
+            2) continue ;;
+            0|1) ;;
+            *) failed 'MayOwn first descriptor-store convergence is invalid' ;;
+        esac
+        sleep 0.05
+    done
     if [ ! -f "$may_own_cgroup/cgroup.freeze" ] \
         || [ -L "$may_own_cgroup/cgroup.freeze" ] \
         || [ "$(stat -Lc '%u:%g:%a:%h' "$may_own_cgroup/cgroup.freeze" \

@@ -527,6 +527,18 @@ non_retained_may_own_launch_failure_category() {
             printf '%s\n' identity-binding ;;
         'MayOwn first service shape is not production-exact')
             printf '%s\n' service-shape ;;
+        'MayOwn first descriptor-store convergence is invalid')
+            printf '%s\n' service-fdstore-shape ;;
+        'MayOwn first driver-side observer exited before service convergence')
+            printf '%s\n' service-observer-exit ;;
+        'MayOwn first debugger exited before service convergence')
+            printf '%s\n' service-debugger-exit ;;
+        'MayOwn first invocation changed before service convergence')
+            printf '%s\n' service-invocation-drift ;;
+        'MayOwn first MainPID changed before service convergence')
+            printf '%s\n' service-mainpid-drift ;;
+        'MayOwn first descriptor store did not converge')
+            printf '%s\n' service-fdstore-timeout ;;
         'MayOwn cgroup freezer is unavailable')
             printf '%s\n' freezer-shape ;;
         'MayOwn first debugger driver release could not be published')
@@ -662,7 +674,8 @@ report_non_retained_may_own_launch_failure_category() {
             "$non_retained_may_own_reason" \
     ) || return 1
     non_retained_may_own_preexec_category=
-    if [ "$non_retained_may_own_category" = preexec-barrier ]; then
+    if [ "$non_retained_may_own_category" = preexec-barrier ] \
+        || [ "$non_retained_may_own_category" = service-shape ]; then
         non_retained_may_own_preexec_prefix='VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1='
         [ "$(grep -Fc "$non_retained_may_own_preexec_prefix" \
             "$non_retained_diagnostic")" -eq 1 ] || return 1

@@ -648,7 +648,7 @@ do
         exit 1
     fi
 done
-[ "$(grep -Fc 'report_may_own_preexec_barrier_failure_stage \' "$gate")" -eq 3 ]
+[ "$(grep -Fc 'report_may_own_preexec_barrier_failure_stage \' "$gate")" -eq 4 ]
 preexec_assigned_categories=$tmp/preexec-assigned-categories
 sed -n 's/^[[:space:]]*may_own_preexec_barrier_failure_stage=\([a-z][a-z0-9-]*\)$/\1/p' \
     "$gate" >"$preexec_assigned_categories"
@@ -1288,6 +1288,96 @@ if ! awk '
     printf '%s\n' 'MayOwn cgroup proof is not bracketed around first identity' >&2
     exit 1
 fi
+
+may_own_first_shape_wait=$tmp/may-own-first-shape-wait.sh
+sed -n '/^    while ! may_own_service_shape_is_exact "\$may_own_pid_one"/,/^    done$/p' \
+    "$gate" >"$may_own_first_shape_wait"
+sh -n "$may_own_first_shape_wait"
+may_own_first_shape_wait_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_first_shape_source=$1
+    [ "$(grep -Fc \
+        '"$may_own_preexec_barrier_failure_stage" != shape-fdstore-count' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'report_may_own_preexec_barrier_failure_stage' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc -- \
+        '--property=NFileDescriptorStore --value "$unit_name"' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fxc '            2) continue ;;' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fxc '            0|1) ;;' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'capture_process_starttime "$may_own_driver_observer_pid"' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '"$may_own_driver_observer_starttime"' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'capture_process_starttime "$may_own_debugger_pid"' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '"$may_own_debugger_starttime"' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'unit_current_invocation_id' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'capture_process_starttime "$may_own_pid_one"' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '"$may_own_wait" -lt 600' \
+        "$may_own_first_shape_source")" -eq 1 ] || return 1
+    awk '
+        /may_own_wait=\$\(\(may_own_wait \+ 1\)\)/ {
+            increment = NR
+            increment_count++
+        }
+        /"\$may_own_wait" -lt 600/ {
+            bound = NR
+            bound_count++
+        }
+        /^[[:space:]]*2\) continue ;;/ {
+            converged = NR
+            converged_count++
+        }
+        /^[[:space:]]*sleep 0\.05$/ {
+            sleep_line = NR
+            sleep_count++
+        }
+        END {
+            valid = increment_count == 1 && bound_count == 1
+            valid = valid && converged_count == 1 && sleep_count == 1
+            valid = valid && increment < bound && bound < converged
+            valid = valid && converged < sleep_line
+            if (!valid) exit 1
+        }
+    ' "$may_own_first_shape_source" || return 1
+}
+may_own_first_shape_wait_is_exact "$may_own_first_shape_wait" \
+    || {
+        printf '%s\n' 'MayOwn first FD-store convergence wait is not exact' >&2
+        exit 1
+    }
+may_own_first_shape_stage_mutant=$tmp/may-own-first-shape-stage-mutant.sh
+sed 's/= shape-fdstore-count/= shape-cgroup-members/' \
+    "$may_own_first_shape_wait" >"$may_own_first_shape_stage_mutant"
+may_own_first_shape_count_mutant=$tmp/may-own-first-shape-count-mutant.sh
+sed 's/^            0|1) ;;/            0|1|2) ;;/' \
+    "$may_own_first_shape_wait" >"$may_own_first_shape_count_mutant"
+may_own_first_shape_observer_identity_mutant=$tmp/may-own-first-shape-observer-identity-mutant.sh
+sed 's/"$may_own_driver_observer_starttime"/"$may_own_debugger_starttime"/' \
+    "$may_own_first_shape_wait" >"$may_own_first_shape_observer_identity_mutant"
+may_own_first_shape_debugger_identity_mutant=$tmp/may-own-first-shape-debugger-identity-mutant.sh
+sed 's/"$may_own_debugger_starttime"/"$may_own_driver_observer_starttime"/' \
+    "$may_own_first_shape_wait" >"$may_own_first_shape_debugger_identity_mutant"
+for may_own_first_shape_mutant in \
+    "$may_own_first_shape_stage_mutant" \
+    "$may_own_first_shape_count_mutant" \
+    "$may_own_first_shape_observer_identity_mutant" \
+    "$may_own_first_shape_debugger_identity_mutant"
+do
+    sh -n "$may_own_first_shape_mutant"
+    if may_own_first_shape_wait_is_exact "$may_own_first_shape_mutant"; then
+        printf 'MayOwn first shape wait accepted mutant: %s\n' \
+            "${may_own_first_shape_mutant##*/}" >&2
+        exit 1
+    fi
+done
 
 may_own_driver_entry_stage_functions=$tmp/may-own-driver-entry-stage-functions.sh
 sed -n '/^may_own_driver_entry_failure_stage_is_safe() {$/,/^}$/p' \

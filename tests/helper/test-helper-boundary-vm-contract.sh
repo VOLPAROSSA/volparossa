@@ -1489,7 +1489,8 @@ test ! -s "$last_stdout" && test ! -s "$last_stderr"
 while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
     printf 'live worker-identity proof failed: %s\n' "$may_own_reason" \
         >"$branch_failure_diagnostic"
-    if [ "$may_own_category" = preexec-barrier ]; then
+    if [ "$may_own_category" = preexec-barrier ] \
+        || [ "$may_own_category" = service-shape ]; then
         printf '%s\n' \
             'VOLPAROSSA_HELPER_LIVE_MAY_OWN_PREEXEC_BARRIER_DIAGNOSTIC_V1=shape-cgroup-stat' \
             >>"$branch_failure_diagnostic"
@@ -1504,10 +1505,11 @@ while IFS='|' read -r may_own_reason may_own_category may_own_phase; do
     expect_status 0 report_non_retained_may_own_launch_failure_category \
         "$branch_failure_diagnostic"
     test ! -s "$last_stdout"
-    if [ "$may_own_category" = preexec-barrier ]; then
+    if [ "$may_own_category" = preexec-barrier ] \
+        || [ "$may_own_category" = service-shape ]; then
         test "$(cat "$last_stderr")" = \
             "$(printf '%s\n%s' \
-                'non-retained helper-boundary PR smoke MayOwn launch category: preexec-barrier' \
+                "non-retained helper-boundary PR smoke MayOwn launch category: $may_own_category" \
                 'non-retained helper-boundary PR smoke MayOwn preexec category: shape-cgroup-stat')"
     elif [ "$may_own_category" = identity-observer-exit ]; then
         test "$(cat "$last_stderr")" = \
@@ -1553,6 +1555,12 @@ MayOwn first driver-side observer exited before identity proof|identity-observer
 MayOwn first invocation identity did not appear|identity-timeout|may-own-first-crash
 MayOwn first invocation is not hook-bound|identity-binding|may-own-first-crash
 MayOwn first service shape is not production-exact|service-shape|may-own-first-crash
+MayOwn first descriptor-store convergence is invalid|service-fdstore-shape|may-own-first-crash
+MayOwn first driver-side observer exited before service convergence|service-observer-exit|may-own-first-crash
+MayOwn first debugger exited before service convergence|service-debugger-exit|may-own-first-crash
+MayOwn first invocation changed before service convergence|service-invocation-drift|may-own-first-crash
+MayOwn first MainPID changed before service convergence|service-mainpid-drift|may-own-first-crash
+MayOwn first descriptor store did not converge|service-fdstore-timeout|may-own-first-crash
 MayOwn cgroup freezer is unavailable|freezer-shape|may-own-first-crash
 MayOwn first debugger driver release could not be published|driver-release|may-own-first-crash
 MayOwn first debugger exited before the freeze fence|freeze-fence-exit|may-own-first-crash
@@ -1575,7 +1583,7 @@ sed -n '/^[[:space:]]*driver_phase=may-own-first-crash$/,/^[[:space:]]*driver_ph
 may_own_first_crash_reasons=$temporary_directory/may-own-first-crash.reasons
 sed -n "s/.*failed '\([^']*\)'.*/\1/p" \
     "$may_own_first_crash_segment" >"$may_own_first_crash_reasons"
-test "$(wc -l <"$may_own_first_crash_reasons")" -eq 29
+test "$(wc -l <"$may_own_first_crash_reasons")" -eq 36
 while IFS= read -r may_own_first_crash_reason; do
     test "$(grep -Fc "'$may_own_first_crash_reason')" \
         "$branch_failure_functions")" -eq 1
