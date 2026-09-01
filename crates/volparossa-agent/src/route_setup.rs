@@ -13,6 +13,8 @@
 mod retirement;
 mod selection_bridge;
 
+pub(crate) use selection_bridge::{PreparedPreselectionEvidence, prepare_preselection_evidence};
+
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},

@@ -822,6 +822,17 @@ struct JoinedPreselectionFreshEvidence {
     gate: CoolingPreselectionAttemptGate,
 }
 
+/// Opaque, affine handoff from the discovery owner to the later native-path sampler.
+///
+/// This wrapper deliberately exposes neither the retained actor snapshot nor the private Fresh
+/// batch. It grants no route, reservation, dispatch, or dataplane authority. Only this child
+/// module may consume it once native dataplane-address evidence is available.
+#[must_use = "prepared preselection evidence must remain with its route owner"]
+pub(crate) struct PreparedPreselectionEvidence {
+    snapshot: RouteCandidateSnapshot,
+    evidence_batch: FreshEvidenceBatch,
+}
+
 /// Terminal proof-to-evidence rejection with cooldown ownership retained.
 struct PreselectionEvidenceJoinFailure {
     gate: CoolingPreselectionAttemptGate,
@@ -844,6 +855,32 @@ fn join_preselection_fresh_evidence(
     completed: CompletedPreselectionFreshnessAttempt,
 ) -> Result<JoinedPreselectionFreshEvidence, PreselectionEvidenceJoinFailure> {
     join_preselection_fresh_evidence_at(completed, crate::unix_millis())
+}
+
+/// Consume the complete discovery proof chain into one opaque selection-child handoff.
+///
+/// The discovery actor retains the returned cooldown gate. On failure it receives only that gate;
+/// no partially minted Fresh evidence or reusable proof authority escapes this boundary.
+pub(crate) fn prepare_preselection_evidence(
+    completed: CompletedPreselectionFreshnessAttempt,
+) -> Result<
+    (PreparedPreselectionEvidence, CoolingPreselectionAttemptGate),
+    CoolingPreselectionAttemptGate,
+> {
+    match join_preselection_fresh_evidence(completed) {
+        Ok(JoinedPreselectionFreshEvidence {
+            snapshot,
+            evidence_batch,
+            gate,
+        }) => Ok((
+            PreparedPreselectionEvidence {
+                snapshot,
+                evidence_batch,
+            },
+            gate,
+        )),
+        Err(failure) => Err(failure.gate),
+    }
 }
 
 #[allow(
@@ -4383,6 +4420,24 @@ mod tests {
         assert_eq!(batch_impl.matches("fn validate_at(").count(), 1);
         assert!(!batch_impl.contains("fn new("));
         assert!(!batch_impl.contains("\n    pub "));
+
+        let prepared_start = observation
+            .find("/// Opaque, affine handoff from the discovery owner")
+            .expect("prepared evidence documentation");
+        let prepared_end = observation[prepared_start..]
+            .find("/// Terminal proof-to-evidence rejection")
+            .map(|offset| prepared_start + offset)
+            .expect("prepared evidence section end");
+        let prepared = &observation[prepared_start..prepared_end];
+        assert!(prepared.contains("pub(crate) struct PreparedPreselectionEvidence {"));
+        assert!(!prepared.contains("#[derive"));
+        assert!(!prepared.contains("\n    pub"));
+        assert!(!product.contains("impl PreparedPreselectionEvidence"));
+        assert_eq!(
+            product.matches("PreparedPreselectionEvidence {").count(),
+            2,
+            "only the declaration and exact proof-consumer may open the handoff"
+        );
     }
 
     fn assert_phase_a_planner_is_dormant(product: &str) {
@@ -4697,6 +4752,32 @@ mod tests {
                 HardFilterReason::UnusableNetworkAddress
             )))
         ));
+    }
+
+    #[test]
+    fn prepared_preselection_handoff_retains_only_private_evidence_and_cooldown() {
+        let (snapshot, _) = snapshot_fixture();
+        let completed = preselection_freshness_attempt(
+            snapshot,
+            exact_preselection_freshness_records(),
+            ProtocolTransport::TcpMptcp,
+            ObservationAddressFamily::Ipv4,
+            EVIDENCE_BATCH_BYTES,
+            Bandwidth::new(80, 80).expect("configured ceiling"),
+        );
+        let Ok((prepared, gate)) = prepare_preselection_evidence(completed) else {
+            panic!("exact A1 proofs must prepare opaque evidence");
+        };
+        assert_ne!(size_of_val(&gate), 0);
+        assert_ne!(size_of_val(&prepared.snapshot), 0);
+        assert_eq!(prepared.evidence_batch.entries.len(), 4);
+        assert!(
+            prepared
+                .evidence_batch
+                .entries
+                .iter()
+                .all(|evidence| !evidence.network_address_usable)
+        );
     }
 
     #[test]
