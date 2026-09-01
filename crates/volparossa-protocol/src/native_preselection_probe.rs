@@ -414,10 +414,52 @@ pub struct IssuedNativeProbeStart {
 
 /// Complete cryptographic result chain. It is not helper or datapath evidence by itself.
 pub struct VerifiedNativeProbeResult {
-    _start: IssuedNativeProbeStart,
-    _client_lease: NativeProbeLeaseProof,
+    start: IssuedNativeProbeStart,
+    client_lease: NativeProbeLeaseProof,
     _relay_result: VerifiedControlMessage<NativeProbeRelayResult>,
-    _exit_result: VerifiedControlMessage<NativeProbeExitResult>,
+    exit_result: VerifiedControlMessage<NativeProbeExitResult>,
+}
+
+impl VerifiedNativeProbeResult {
+    /// Borrow the exact signed path scope retained by this terminal result chain.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.start.relay_ready.scope()
+    }
+
+    /// Borrow the helper incarnation which committed the Client endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if verified state is corrupted after construction. Result verification rejects
+    /// a missing, zero, or incorrectly sized helper runtime identifier.
+    #[must_use]
+    pub fn client_helper_runtime_id(&self) -> &[u8; KEY_LENGTH] {
+        self.client_lease
+            .helper_runtime_id
+            .as_slice()
+            .try_into()
+            .expect("verified native Client lease has one helper runtime identifier")
+    }
+
+    /// Borrow the helper incarnation which committed the Exit endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if verified state is corrupted after construction. Result verification rejects
+    /// an absent, zero, or incorrectly sized Exit lease runtime identifier.
+    #[must_use]
+    pub fn exit_helper_runtime_id(&self) -> &[u8; KEY_LENGTH] {
+        self.exit_result
+            .message()
+            .exit_lease
+            .as_ref()
+            .expect("verified native Exit result has one lease proof")
+            .helper_runtime_id
+            .as_slice()
+            .try_into()
+            .expect("verified native Exit lease has one helper runtime identifier")
+    }
 }
 
 impl VerifiedNativeProbePermit {
@@ -1942,10 +1984,10 @@ pub fn verify_native_probe_result(
         return Err(ProtocolError::InvalidField("native Exit-result binding"));
     }
     Ok(VerifiedNativeProbeResult {
-        _start: start,
-        _client_lease: client_lease,
+        start,
+        client_lease,
         _relay_result: verified_relay,
-        _exit_result: exit,
+        exit_result: exit,
     })
 }
 

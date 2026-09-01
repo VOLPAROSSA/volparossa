@@ -237,15 +237,22 @@ impl ClientRouteControl {
 
 async fn admit_completed_native_route(
     completed: selection_bridge::CompletedClientNativeProbe,
-    _config: &Config,
+    config: &Config,
     discovery: &DiscoveryControlHandle,
     helper: &HelperClient,
 ) -> Result<EstablishedClientRoute, ClientRouteConnectError> {
-    let Ok(admission) = completed.into_route_admission() else {
+    let (transport, _) = client_native_path_requirement(config)?;
+    if transport == Transport::MultipathQuic {
+        let _ = helper.cleanup_owned().await;
+        return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
+    }
+    let client_native_instance_id = random_runtime_instance_id()?;
+    let Ok(admission) = completed.into_route_admission(client_native_instance_id) else {
         let _ = helper.cleanup_owned().await;
         return Err(ClientRouteConnectError::RouteAdmissionUnavailable);
     };
-    let (continuation, remote_retirement_confirmed) = admission.into_parts();
+    let (continuation, remote_retirement_confirmed, _exit_helper_runtime_id) =
+        admission.into_parts();
     if !remote_retirement_confirmed {
         return Err(ClientRouteConnectError::NativeRemoteRetirementUnavailable);
     }
@@ -350,6 +357,19 @@ fn random_mptcp_source_port(exit_listener_port: u16) -> Result<u16, ClientRouteC
         }
     }
     Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+}
+
+fn random_runtime_instance_id() -> Result<[u8; 32], ClientRouteConnectError> {
+    for _ in 0..8 {
+        let mut instance_id = [0_u8; 32];
+        OsRng
+            .try_fill_bytes(&mut instance_id)
+            .map_err(|_| ClientRouteConnectError::NativeTransportIdentityUnavailable)?;
+        if instance_id != [0; 32] {
+            return Ok(instance_id);
+        }
+    }
+    Err(ClientRouteConnectError::NativeTransportIdentityUnavailable)
 }
 
 /// Repeat an affine Ready-to-proof lifecycle until the selected transport's hard minimum is met.
@@ -827,12 +847,11 @@ struct PostProbeSelectionPolicy {
     relay_policy: RelaySelectionPolicy,
 }
 
-/// Native-process scope required before any exit finalization may be dispatched.
+/// Locally proven dataplane-runtime scope required before Exit finalization may be dispatched.
 ///
-/// API v6 can obtain this process instance through role-specific preflight, but the production
-/// route bridge is not wired to that client yet and therefore deliberately leaves this absent. A
-/// production caller must copy the channel-correlated native response rather than minting an
-/// identifier in the agent. This process incarnation is not binary attestation.
+/// Kernel-backed UDP/TCP routes bind a fresh in-process route-runtime incarnation after the helper
+/// endpoints prove live. A userspace MPQUIC route must instead bind its role-specific preflight
+/// incarnation before it can establish a native session. Neither identifier is binary attestation.
 #[derive(Clone, Debug)]
 struct ClientNativeRouteScope {
     masque_context_id: u64,

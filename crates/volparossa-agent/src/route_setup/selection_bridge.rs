@@ -64,15 +64,46 @@ use volparossa_selection::{
 use volparossa_wireguard::overlay_addresses;
 
 use super::{
-    DiversitySnapshot, ID_BYTES, LocalRouteBackend, MAXIMUM_REPLAY_CAPACITY,
-    MAXIMUM_RESERVATION_LIFETIME_MS, MAXIMUM_SETUP_DURATION, PostProbeSelectionPolicy,
-    ProbeProjection, ProspectiveDirectRelay, ProspectiveForwardedExit, ProspectivePeerIdentity,
-    ProspectiveRouteRelay, ReservationSession, ReservationTransport, RouteCapabilityResolver,
-    RouteSetupAuthorities, RouteSetupClock, RouteSetupError, RouteSetupFailure, RouteSetupHandle,
-    RouteSetupLimits, RouteSetupManager, RouteSetupParameters, RouteSetupPath, RouteSetupPhase,
-    RouteSetupRequest, RouteSetupTransaction, SelectedForwardedExit, SelectedRouteSetupPath,
-    UnmeasuredRouteSetup, bounded_call,
+    ClientNativeRouteScope, DiversitySnapshot, ID_BYTES, LocalRouteBackend,
+    MAXIMUM_REPLAY_CAPACITY, MAXIMUM_RESERVATION_LIFETIME_MS, MAXIMUM_SETUP_DURATION,
+    PostProbeSelectionPolicy, ProbeProjection, ProspectiveDirectRelay, ProspectiveForwardedExit,
+    ProspectivePeerIdentity, ProspectiveRouteRelay, ReservationSession, ReservationTransport,
+    RouteCapabilityResolver, RouteSetupAuthorities, RouteSetupClock, RouteSetupError,
+    RouteSetupFailure, RouteSetupHandle, RouteSetupLimits, RouteSetupManager, RouteSetupParameters,
+    RouteSetupPath, RouteSetupPhase, RouteSetupRequest, RouteSetupTransaction,
+    SelectedForwardedExit, SelectedRouteSetupPath, UnmeasuredRouteSetup, bounded_call,
 };
+
+/// Exit helper incarnation proven by a terminal native path, affined to its signed attempt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct VerifiedExitHelperRuntimeId {
+    helper_runtime_id: [u8; 32],
+    attempt_id: [u8; ID_BYTES],
+    candidate_set_hash: [u8; 32],
+}
+
+impl VerifiedExitHelperRuntimeId {
+    const fn new(
+        helper_runtime_id: [u8; 32],
+        attempt_id: [u8; ID_BYTES],
+        candidate_set_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            helper_runtime_id,
+            attempt_id,
+            candidate_set_hash,
+        }
+    }
+
+    /// Borrow the exact Exit helper runtime accepted by the signed native probe.
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.helper_runtime_id
+    }
+
+    pub(crate) fn is_same_signed_attempt(&self, other: &Self) -> bool {
+        self.attempt_id == other.attempt_id && self.candidate_set_hash == other.candidate_set_hash
+    }
+}
 
 const MAXIMUM_EVIDENCE_AGE_MS: u64 = 60_000;
 const NATIVE_PROBE_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -594,6 +625,7 @@ pub(crate) struct PreProbeContinuation {
     deadline: Instant,
     route_authority: RouteSessionAuthority,
     reservation_session: ReservationSession,
+    client_native_route_scope: Option<ClientNativeRouteScope>,
 }
 
 /// Fully assembled, still unresolved handoff state owned by the one manager task.
@@ -1013,6 +1045,7 @@ pub(crate) struct CompletedClientNativeProbe {
 pub(crate) struct PreparedNativeRouteAdmission {
     continuation: PreProbeContinuation,
     remote_retirement: RemoteNativeSamplerRetirement,
+    exit_helper_runtime_id: VerifiedExitHelperRuntimeId,
 }
 
 enum RemoteNativeSamplerRetirement {
@@ -1021,12 +1054,12 @@ enum RemoteNativeSamplerRetirement {
 
 impl PreparedNativeRouteAdmission {
     /// Consume the admission into its route handoff and remote-retirement status.
-    pub(crate) fn into_parts(self) -> (PreProbeContinuation, bool) {
+    pub(crate) fn into_parts(self) -> (PreProbeContinuation, bool, VerifiedExitHelperRuntimeId) {
         let confirmed = matches!(
             self.remote_retirement,
             RemoteNativeSamplerRetirement::ConfirmedByTerminalResults
         );
-        (self.continuation, confirmed)
+        (self.continuation, confirmed, self.exit_helper_runtime_id)
     }
 }
 
@@ -1669,8 +1702,13 @@ impl CompletedClientNativeProbe {
     }
 
     /// Consume terminal native evidence into the existing production route continuation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the affine proof join and expiry computation remain one fail-closed transaction"
+    )]
     pub(crate) fn into_route_admission(
         mut self,
+        client_native_instance_id: [u8; 32],
     ) -> Result<PreparedNativeRouteAdmission, ClientNativeProbeError> {
         let mut plan = self
             .batch
@@ -1713,6 +1751,25 @@ impl CompletedClientNativeProbe {
             || proven_relays != expected_relays
             || !actors_match
         {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let first_proof = self
+            .batch
+            .proofs
+            .first()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        if client_native_instance_id == [0; 32] {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let client_helper_runtime_id = *first_proof.client_helper_runtime_id();
+        let exit_helper_runtime_id = first_proof.exit_helper_runtime_id();
+        if self.batch.proofs.iter().any(|proof| {
+            proof.client_helper_runtime_id() != &client_helper_runtime_id
+                || proof.exit_helper_runtime_id().as_bytes() != exit_helper_runtime_id.as_bytes()
+                || !proof
+                    .exit_helper_runtime_id()
+                    .is_same_signed_attempt(&exit_helper_runtime_id)
+        }) {
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
         plan.native_proof_state = NativeProofState::Satisfied;
@@ -1765,10 +1822,17 @@ impl CompletedClientNativeProbe {
             limits,
             MAXIMUM_REPLAY_CAPACITY,
         )
+        .map_err(|_| ClientNativeProbeError::HelperCorrelation)?
+        .bind_client_native_route_scope(ClientNativeRouteScope {
+            masque_context_id: generate_masque_context_id()
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+            client_native_instance_id,
+        })
         .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
         Ok(PreparedNativeRouteAdmission {
             continuation,
             remote_retirement: RemoteNativeSamplerRetirement::ConfirmedByTerminalResults,
+            exit_helper_runtime_id,
         })
     }
 }
@@ -3134,6 +3198,7 @@ impl ValidatedPreProbePlan {
             deadline: self.deadline,
             route_authority,
             reservation_session,
+            client_native_route_scope: None,
         }
     }
 
@@ -3297,6 +3362,21 @@ impl PendingPreProbeResolve {
 }
 
 impl PreProbeContinuation {
+    fn bind_client_native_route_scope(
+        mut self,
+        scope: ClientNativeRouteScope,
+    ) -> Result<Self, RouteSetupError> {
+        if self.client_native_route_scope.is_some()
+            || scope.masque_context_id == 0
+            || scope.masque_context_id > volparossa_protocol::MAX_MASQUE_CONTEXT_ID
+            || scope.client_native_instance_id == [0; 32]
+        {
+            return Err(RouteSetupError::Invalid("client native route scope"));
+        }
+        self.client_native_route_scope = Some(scope);
+        Ok(self)
+    }
+
     fn ensure_handoff_live_at(
         &self,
         trusted_now_ms: u64,
@@ -3360,6 +3440,7 @@ impl PreProbeContinuation {
             deadline,
             route_authority,
             reservation_session,
+            client_native_route_scope,
         } = self;
         let ProspectiveForwardedExitBinding {
             selected,
@@ -3385,6 +3466,7 @@ impl PreProbeContinuation {
             deadlines,
             hard_expiry_ms,
             evidence_expiry_ms,
+            client_native_route_scope,
         )
         .map_err(|_| RouteSetupError::Invalid("pre-probe route parameters"))?;
         let request = RouteSetupRequest::new(selected, prospective_relays, parameters)?;
@@ -3726,6 +3808,10 @@ impl SelectedExit {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exact-set selection and proof consumption remain one affine transaction"
+    )]
     fn select_relays_and_build<R: RngCore + ?Sized>(
         self,
         paths: &[CompleteRelayPathEvidence],
@@ -3832,6 +3918,7 @@ impl SelectedExit {
             deadlines,
             earliest_expiry_ms,
             earliest_setup_evidence_expiry_ms,
+            None,
         )?;
         RouteSetupRequest::new(self.forwarded_exit, relay_bindings, parameters)
             .map_err(SelectionBridgeError::RouteSetup)
@@ -4415,6 +4502,7 @@ fn build_parameters(
     deadlines: RouteDeadlines,
     earliest_expiry_ms: u64,
     earliest_setup_evidence_expiry_ms: u64,
+    client_native_route_scope: Option<ClientNativeRouteScope>,
 ) -> Result<RouteSetupParameters, SelectionBridgeError> {
     let maximum_setup_ms = u64::try_from(MAXIMUM_SETUP_DURATION.as_millis())
         .map_err(|_| SelectionBridgeError::InvalidDeadline)?;
@@ -4472,8 +4560,22 @@ fn build_parameters(
         expires_at_ms: deadlines.hard_expires_at_ms,
         setup_expires_at_unix,
         hard_expires_at_unix,
-        client_native_route_scope: None,
+        client_native_route_scope,
     })
+}
+
+fn generate_masque_context_id() -> Result<u64, SelectionBridgeError> {
+    let mut rng = OsRng;
+    for _ in 0..8 {
+        let mut bytes = [0_u8; 8];
+        rng.try_fill_bytes(&mut bytes)
+            .map_err(|_| SelectionBridgeError::EntropyUnavailable)?;
+        let value = u64::from_le_bytes(bytes) & volparossa_protocol::MAX_MASQUE_CONTEXT_ID;
+        if value != 0 {
+            return Ok(value);
+        }
+    }
+    Err(SelectionBridgeError::EntropyUnavailable)
 }
 
 const fn protocol_transport(transport: SelectionTransport) -> ProtocolTransport {
@@ -9213,6 +9315,7 @@ mod tests {
             deadlines(),
             NOW_MS + 90_000,
             NOW_MS + 60_000,
+            None,
         )
         .expect("representable post-probe policy");
 

@@ -184,7 +184,7 @@ pub(super) struct NativeRelayAuthorizationDispatch {
 /// Terminal exact cryptographic chain; deliberately not route-admission or usability evidence.
 #[must_use = "a bound native path proof grants no route until a later provider validates it"]
 pub(super) struct BoundNativePathProof {
-    _verified_result: VerifiedNativeProbeResult,
+    verified_result: VerifiedNativeProbeResult,
     candidate: NativeCandidateTemplate,
 }
 
@@ -661,6 +661,29 @@ impl BoundNativePathProof {
     pub(super) fn exit(&self) -> &PreselectionActorBinding {
         &self.candidate.exit
     }
+
+    /// Borrow the exact Client helper incarnation committed into the signed terminal chain.
+    pub(super) fn client_helper_runtime_id(&self) -> &[u8; KEY_BYTES] {
+        self.verified_result.client_helper_runtime_id()
+    }
+
+    /// Copy the exact Exit helper incarnation together with its signed attempt correlation.
+    pub(super) fn exit_helper_runtime_id(&self) -> super::VerifiedExitHelperRuntimeId {
+        let scope = self.verified_result.scope();
+        super::VerifiedExitHelperRuntimeId::new(
+            *self.verified_result.exit_helper_runtime_id(),
+            scope
+                .attempt_id
+                .as_slice()
+                .try_into()
+                .expect("verified native scope has one attempt identifier"),
+            scope
+                .candidate_set_hash
+                .as_slice()
+                .try_into()
+                .expect("verified native scope has one candidate-set digest"),
+        )
+    }
 }
 
 impl PendingNativeProbeAuthority {
@@ -1041,7 +1064,7 @@ impl AwaitingNativeResult {
             replay,
         )?;
         Ok(BoundNativePathProof {
-            _verified_result: verified_result,
+            verified_result,
             candidate: self.candidate,
         })
     }
