@@ -32,11 +32,14 @@ pub use native_route::{
 };
 pub use preselection_observation::{
     BoundDirectPreselectionTranscript, BoundForwardedPreselectionTranscript,
-    ForwardedPreselectionAttestation, MAX_FORWARDED_ATTESTATION_SIZE,
+    DirectPreselectionFreshnessProof, ForwardedPreselectionAttestation,
+    ForwardedPreselectionFreshnessProof, MAX_FORWARDED_ATTESTATION_SIZE,
     MAX_PRESELECTION_RECEIPT_SIZE, MAX_PRESELECTION_REQUEST_SIZE, ObservationAddressFamily,
     ObservationNetworkPrefix, PreselectionActorBinding, PreselectionObservationReceipt,
     PreselectionObservationRequest, PreselectionObservationRole, PreselectionObservationScope,
     VerifiedDirectPreselectionTranscript, VerifiedForwardedPreselectionTranscript,
+    consume_bound_direct_preselection_transcript_for_freshness,
+    consume_bound_forwarded_preselection_transcript_for_freshness,
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
     preselection_observation_receipt_hash, preselection_observation_request_hash,
     verify_direct_preselection_transcript, verify_forwarded_preselection_transcript,

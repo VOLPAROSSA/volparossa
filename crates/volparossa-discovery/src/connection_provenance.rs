@@ -117,6 +117,30 @@ pub(super) struct BoundConnectionObservation {
 }
 
 impl BoundConnectionObservation {
+    /// Consume one exact client connection proof into its freshness-safe public prefix.
+    ///
+    /// The expected family comes from the caller-owned canonical preselection request. This
+    /// terminal projection drops peer, connection and generation authority and emits only the
+    /// normalized public /24 or /48 needed by the later private freshness owner.
+    pub(super) fn consume_into_client_preselection_prefix(
+        self,
+        expected_family: IpFamily,
+    ) -> Option<ObservedNetworkPrefix> {
+        let Self {
+            peer_id: _,
+            connection_id: _,
+            generation: _,
+            prefix,
+        } = self;
+        if !prefix.is_consistent()
+            || !prefix.normalized.is_public_routable()
+            || prefix.normalized.family() != expected_family
+        {
+            return None;
+        }
+        Some(prefix.normalized)
+    }
+
     /// Consume one exact upstream connection proof into only the prefix a control Relay may sign.
     ///
     /// This is deliberately not a generic prefix accessor: it consumes the complete affine proof,
@@ -722,6 +746,53 @@ mod tests {
                 .expect("public purpose-specific projection");
             assert_eq!(projected.address_family, expected_family as i32);
             assert_eq!(projected.network_prefix, expected_prefix);
+        }
+    }
+
+    #[test]
+    fn purpose_specific_client_projection_consumes_only_matching_normalized_prefixes() {
+        for (endpoint, family, expected_prefix) in [
+            (
+                dialer("/ip4/8.8.8.8/tcp/443"),
+                IpFamily::Ipv4,
+                ObservedNetworkPrefix::ipv4_24([8, 8, 8]),
+            ),
+            (
+                dialer("/ip6/2606:4700:4700::1111/udp/443/quic-v1"),
+                IpFamily::Ipv6,
+                ObservedNetworkPrefix::ipv6_48([0x26, 0x06, 0x47, 0x00, 0x47, 0x00]),
+            ),
+        ] {
+            let peer = PeerId::random();
+            let mut behaviour = ConnectionProvenanceBehaviour::new();
+            established(&mut behaviour, peer, 1, &endpoint, 0);
+            let witness = behaviour
+                .unique_witness(peer, family)
+                .expect("unique native witness");
+            let bound = behaviour
+                .bind(witness, peer, ConnectionId::new_unchecked(1))
+                .expect("exact affine observation");
+            let projected = bound
+                .consume_into_client_preselection_prefix(family)
+                .expect("matching public normalized prefix");
+            assert!(projected == expected_prefix);
+
+            let witness = behaviour
+                .unique_witness(peer, family)
+                .expect("replacement unique native witness");
+            let bound = behaviour
+                .bind(witness, peer, ConnectionId::new_unchecked(1))
+                .expect("replacement exact affine observation");
+            let wrong_family = match family {
+                IpFamily::Ipv4 => IpFamily::Ipv6,
+                IpFamily::Ipv6 => IpFamily::Ipv4,
+            };
+            assert!(
+                bound
+                    .consume_into_client_preselection_prefix(wrong_family)
+                    .is_none(),
+                "the caller cannot relabel a native prefix"
+            );
         }
     }
 

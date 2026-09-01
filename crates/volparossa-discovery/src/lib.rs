@@ -60,9 +60,11 @@ pub use preselection_responder::{
 };
 pub use preselection_transaction::{
     BoundClientPreselectionTransport, BoundUpstreamPreselectionTransport,
-    ClientPreselectionDispatch, ClientPreselectionResponseArrival, ClientPreselectionTransaction,
+    ClientPreselectionBindFailure, ClientPreselectionCancelFailure, ClientPreselectionDispatch,
+    ClientPreselectionDispatchFailure, ClientPreselectionResponseArrival,
+    ClientPreselectionTransaction, ClientPreselectionTransportFreshnessProof,
     PreselectionDispatchError, UpstreamPreselectionDispatch, UpstreamPreselectionResponseArrival,
-    UpstreamPreselectionTransaction,
+    UpstreamPreselectionTransaction, consume_bound_client_preselection_transport_for_freshness,
 };
 use preselection_transaction::{
     PreselectionTransactionState, client_request_has_local_target_from_distinct_sender,

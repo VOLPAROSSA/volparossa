@@ -15,6 +15,8 @@ use volparossa_protocol::{
     PreselectionObservationRequest, PreselectionObservationRole, PreselectionObservationScope,
     ProtocolError, RelayAuthorization, RelayReservation, RelayReservationRequest, ReplayCache,
     SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, WireguardEndpoint,
+    consume_bound_direct_preselection_transcript_for_freshness,
+    consume_bound_forwarded_preselection_transcript_for_freshness,
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
     decode_canonical, encode_canonical, exit_confirmation_envelope_hash,
     finalized_reservation_bundle_hash, frame_control_message, generate_nonce,
@@ -335,6 +337,25 @@ fn verified_direct_transcript_is_consumed_only_for_its_exact_canonical_request()
 }
 
 #[test]
+fn bound_direct_transcript_terminally_projects_only_its_signed_freshness_ceiling() {
+    let (request, signed_receipt) = direct_preselection_fixture();
+    let encoded_request = encode_preselection_request(&request);
+    let mut replay = ReplayCache::new(8).unwrap();
+    let verified = verify_direct_preselection_transcript(
+        &signed_receipt,
+        &encoded_request,
+        NOW + 1,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .unwrap();
+    let bound = consume_direct_preselection_transcript(verified, &encoded_request).unwrap();
+    let freshness = consume_bound_direct_preselection_transcript_for_freshness(bound).unwrap();
+    assert_eq!(freshness.valid_until_ms(), NOW + 40_000);
+    assert_eq!(replay.len(), 1);
+}
+
+#[test]
 fn verified_forwarded_transcript_is_consumed_only_for_its_exact_canonical_request() {
     let (request, _, signed_attestation, _, _) = forwarded_preselection_fixture();
     let encoded_request = encode_preselection_request(&request);
@@ -383,6 +404,29 @@ fn verified_forwarded_transcript_is_consumed_only_for_its_exact_canonical_reques
         Err(ProtocolError::Replay)
     ));
     assert_eq!(mismatch_cache.len(), 2);
+}
+
+#[test]
+fn bound_forwarded_transcript_projects_joint_ceiling_and_endpoint_free_prefix() {
+    let (request, _, signed_attestation, _, _) = forwarded_preselection_fixture();
+    let encoded_request = encode_preselection_request(&request);
+    let mut replay = ReplayCache::new(8).unwrap();
+    let verified = verify_forwarded_preselection_transcript(
+        &signed_attestation,
+        &encoded_request,
+        NOW + 1,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .unwrap();
+    let bound = consume_forwarded_preselection_transcript(verified, &encoded_request).unwrap();
+    let freshness = consume_bound_forwarded_preselection_transcript_for_freshness(bound).unwrap();
+    assert_eq!(freshness.valid_until_ms(), NOW + 40_000);
+    assert!(
+        freshness.upstream_network_prefix()
+            == volparossa_core::ObservedNetworkPrefix::ipv4_24([8, 8, 4])
+    );
+    assert_eq!(replay.len(), 2);
 }
 
 #[test]
@@ -1845,6 +1889,7 @@ fn assert_opaque_transcript_surface(product: &str) {
     assert_opaque_transcript_type_counts(product);
     let bodies = assert_opaque_transcript_field_shapes(product);
     assert_opaque_transcript_bodies_are_sanitized(&bodies);
+    assert_purpose_specific_freshness_projection(product);
     for forbidden in ["serde", "Serialize", "Deserialize"] {
         assert!(!product.contains(forbidden));
     }
@@ -1863,10 +1908,10 @@ fn assert_opaque_transcript_surface(product: &str) {
 
 fn assert_opaque_transcript_type_counts(product: &str) {
     for (name, count) in [
-        ("VerifiedDirectPreselectionTranscript", 5),
-        ("VerifiedForwardedPreselectionTranscript", 5),
-        ("BoundDirectPreselectionTranscript", 3),
-        ("BoundForwardedPreselectionTranscript", 3),
+        ("VerifiedDirectPreselectionTranscript", 6),
+        ("VerifiedForwardedPreselectionTranscript", 6),
+        ("BoundDirectPreselectionTranscript", 5),
+        ("BoundForwardedPreselectionTranscript", 5),
     ] {
         assert_eq!(product.matches(name).count(), count);
         assert_eq!(product.matches(&format!("pub struct {name} {{")).count(), 1);
@@ -1876,6 +1921,57 @@ fn assert_opaque_transcript_type_counts(product: &str) {
                 .lines()
                 .any(|line| { line.trim_start().starts_with("impl") && line.contains(name) })
         );
+    }
+}
+
+fn assert_purpose_specific_freshness_projection(product: &str) {
+    let direct = item_body(product, "pub struct DirectPreselectionFreshnessProof {");
+    assert_eq!(
+        direct
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>(),
+        ["valid_until_ms: u64,"]
+    );
+    let forwarded = item_body(product, "pub struct ForwardedPreselectionFreshnessProof {");
+    assert_eq!(
+        forwarded
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>(),
+        [
+            "valid_until_ms: u64,",
+            "upstream_network_prefix: ObservedNetworkPrefix,",
+        ]
+    );
+    for body in [direct, forwarded] {
+        for forbidden in [
+            "request",
+            "receipt",
+            "attestation",
+            "identity",
+            "signature",
+            "nonce",
+            "peer",
+            "endpoint",
+            "bytes",
+            "dispatch",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "freshness proof leaked {forbidden}"
+            );
+        }
+    }
+    for name in [
+        "DirectPreselectionFreshnessProof",
+        "ForwardedPreselectionFreshnessProof",
+    ] {
+        for trait_name in ["Clone", "Copy", "Debug", "Serialize", "Deserialize"] {
+            assert!(!product.contains(&format!("impl {trait_name} for {name}")));
+        }
     }
 }
 
@@ -2011,6 +2107,10 @@ fn assert_protocol_preselection_surface(direct_name: &str, forwarded_name: &str)
         "BoundForwardedPreselectionTranscript",
         "consume_direct_preselection_transcript",
         "consume_forwarded_preselection_transcript",
+        "DirectPreselectionFreshnessProof",
+        "ForwardedPreselectionFreshnessProof",
+        "consume_bound_direct_preselection_transcript_for_freshness",
+        "consume_bound_forwarded_preselection_transcript_for_freshness",
     ] {
         assert_eq!(protocol_exports.matches(symbol).count(), 1);
     }

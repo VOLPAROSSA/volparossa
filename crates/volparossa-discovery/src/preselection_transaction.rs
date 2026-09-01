@@ -8,7 +8,7 @@ use std::{
 use libp2p::{PeerId, request_response::OutboundRequestId, swarm::ConnectionId};
 use thiserror::Error;
 use tokio::time::Instant;
-use volparossa_core::IpFamily;
+use volparossa_core::{IpFamily, ObservedNetworkPrefix};
 use volparossa_protocol::{
     ObservationAddressFamily, ObservationNetworkPrefix, PreselectionObservationRequest,
     PreselectionObservationRole, decode_canonical, preselection_observation_request_hash,
@@ -84,6 +84,69 @@ pub struct ClientPreselectionTransaction<Context> {
     context: Context,
 }
 
+/// Failed client dispatch with the caller's exact affine context returned unchanged.
+///
+/// This type is deliberately non-cloneable and exposes neither a request nor dispatch authority.
+pub struct ClientPreselectionDispatchFailure<Context> {
+    context: Context,
+    error: PreselectionDispatchError,
+}
+
+impl<Context> ClientPreselectionDispatchFailure<Context> {
+    /// Return the detail-free dispatch rejection.
+    #[must_use]
+    pub const fn error(&self) -> PreselectionDispatchError {
+        self.error
+    }
+
+    /// Recover the exact caller context after no dispatch was created.
+    #[must_use]
+    pub fn into_context(self) -> Context {
+        self.context
+    }
+}
+
+/// Failed client bind with exactly one safe affine recovery path.
+///
+/// A token that does not belong to the receiving service is retained so its originating service
+/// can still bind or cancel it. Once the receiving service proves that the token owns its active
+/// slot, every response outcome is terminal: the slot is released and only the context returns.
+pub enum ClientPreselectionBindFailure<Context> {
+    /// The receiving service had no authority to consume this transaction.
+    Retained {
+        /// Exact unchanged transaction recoverable by its originating service.
+        transaction: Box<ClientPreselectionTransaction<Context>>,
+        /// Detail-free correlation rejection.
+        error: PreselectionDispatchError,
+    },
+    /// The originating service terminally consumed the active dispatch and released its slot.
+    Released {
+        /// Exact unchanged caller context.
+        context: Context,
+        /// Detail-free terminal bind rejection.
+        error: PreselectionDispatchError,
+    },
+}
+
+/// Failed client cancellation with the exact unchanged transaction returned.
+pub struct ClientPreselectionCancelFailure<Context> {
+    transaction: Box<ClientPreselectionTransaction<Context>>,
+    error: PreselectionDispatchError,
+}
+
+impl<Context> ClientPreselectionCancelFailure<Context> {
+    /// Return the detail-free cancellation rejection.
+    #[must_use]
+    pub const fn error(&self) -> PreselectionDispatchError {
+        self.error
+    }
+
+    /// Recover the transaction for its originating still-active service.
+    pub fn into_transaction(self) -> ClientPreselectionTransaction<Context> {
+        *self.transaction
+    }
+}
+
 /// Service-sealed arrival of one outbound client-hop response.
 ///
 /// All fields are private and this type has no constructor or inspection API. Only the
@@ -117,6 +180,88 @@ pub struct BoundClientPreselectionTransport {
     arrived_at_mono: Instant,
     arrived_at_unix_ms: u64,
     deadline_mono: Instant,
+}
+
+/// Terminal client transport proof retained only for private freshness minting.
+///
+/// This affine projection exposes no peer, connection, request ID/hash, deadline, native address,
+/// or dispatch authority. A later private owner must still consume this value together with the
+/// exact cryptographic transcript and caller-owned attempt context.
+#[must_use = "a client preselection freshness proof must be consumed by its private owner"]
+pub struct ClientPreselectionTransportFreshnessProof {
+    observed_network_prefix: ObservedNetworkPrefix,
+    observed_at_unix_ms: u64,
+    round_trip: Duration,
+}
+
+impl ClientPreselectionTransportFreshnessProof {
+    /// Return the endpoint-free public prefix from the exact authenticated connection lineage.
+    #[must_use]
+    pub const fn observed_network_prefix(&self) -> ObservedNetworkPrefix {
+        self.observed_network_prefix
+    }
+
+    /// Return the local wall clock sealed when the service observed the response.
+    #[must_use]
+    pub const fn observed_at_unix_ms(&self) -> u64 {
+        self.observed_at_unix_ms
+    }
+
+    /// Return the monotonic local round trip from synchronous dispatch to sealed arrival.
+    #[must_use]
+    pub const fn round_trip(&self) -> Duration {
+        self.round_trip
+    }
+}
+
+/// Purpose-consume one bound client transport for private freshness minting.
+///
+/// The caller supplies the request hash and monotonic attempt window retained by its affine A1a
+/// owner. Exact binding is rechecked before the underlying connection proof can emit its sole
+/// endpoint-free prefix; all transport and correlation authority is then destroyed.
+///
+/// # Errors
+///
+/// Returns a detail-free correlation, time, or provenance rejection.
+pub fn consume_bound_client_preselection_transport_for_freshness(
+    transport: BoundClientPreselectionTransport,
+    expected_request_hash: [u8; 32],
+    expected_family: IpFamily,
+    attempt_started_at_mono: Instant,
+    attempt_deadline_mono: Instant,
+) -> Result<ClientPreselectionTransportFreshnessProof, PreselectionDispatchError> {
+    let BoundClientPreselectionTransport {
+        observation,
+        request_hash,
+        request_id: _,
+        sent_at_mono,
+        arrived_at_mono,
+        arrived_at_unix_ms,
+        deadline_mono,
+    } = transport;
+    if expected_request_hash == [0; 32] || request_hash != expected_request_hash {
+        return Err(PreselectionDispatchError::Correlation);
+    }
+    if attempt_started_at_mono >= attempt_deadline_mono
+        || sent_at_mono < attempt_started_at_mono
+        || arrived_at_mono < sent_at_mono
+        || arrived_at_mono >= deadline_mono
+        || deadline_mono > attempt_deadline_mono
+        || arrived_at_unix_ms == 0
+    {
+        return Err(PreselectionDispatchError::Time);
+    }
+    let round_trip = arrived_at_mono
+        .checked_duration_since(sent_at_mono)
+        .ok_or(PreselectionDispatchError::Time)?;
+    let observed_network_prefix = observation
+        .consume_into_client_preselection_prefix(expected_family)
+        .ok_or(PreselectionDispatchError::Provenance)?;
+    Ok(ClientPreselectionTransportFreshnessProof {
+        observed_network_prefix,
+        observed_at_unix_ms: arrived_at_unix_ms,
+        round_trip,
+    })
 }
 
 /// Affine owner of one exact relay-to-exit request and its pre-send connection witness.
@@ -248,23 +393,29 @@ impl DiscoveryService {
     ///
     /// # Errors
     ///
-    /// Returns the same detail-free dispatch errors as [`Self::dispatch_preselection_observation`].
+    /// Returns the same detail-free dispatch error as
+    /// [`Self::dispatch_preselection_observation`] together with the exact unchanged context.
     pub fn dispatch_preselection_observation_with_context<Context>(
         &mut self,
         request: ClientPreselectionObservationRequest,
         absolute_deadline: Instant,
         context: Context,
-    ) -> Result<ClientPreselectionTransaction<Context>, PreselectionDispatchError> {
-        let dispatch = self.dispatch_preselection_observation(request, absolute_deadline)?;
-        Ok(ClientPreselectionTransaction { dispatch, context })
+    ) -> Result<ClientPreselectionTransaction<Context>, ClientPreselectionDispatchFailure<Context>>
+    {
+        match self.dispatch_preselection_observation(request, absolute_deadline) {
+            Ok(dispatch) => Ok(ClientPreselectionTransaction { dispatch, context }),
+            Err(error) => Err(ClientPreselectionDispatchFailure { context, error }),
+        }
     }
 
     /// Bind a matching client response and return its unchanged exact caller context.
     ///
     /// # Errors
     ///
-    /// Returns the same detail-free binding errors as
-    /// [`Self::bind_preselection_observation_response`].
+    /// Returns the same detail-free binding error as
+    /// [`Self::bind_preselection_observation_response`]. A foreign or stale transaction is
+    /// retained whole; any failure after this service recognizes its active transaction returns
+    /// only the unchanged context because that terminal path has released the dispatch slot.
     pub fn bind_preselection_observation_response_with_context<Context>(
         &mut self,
         transaction: ClientPreselectionTransaction<Context>,
@@ -275,25 +426,42 @@ impl DiscoveryService {
             BoundClientPreselectionTransport,
             ClientPreselectionObservationResponse,
         ),
-        PreselectionDispatchError,
+        ClientPreselectionBindFailure<Context>,
     > {
+        if !self.client_preselection_dispatch_is_active(&transaction.dispatch) {
+            return Err(ClientPreselectionBindFailure::Retained {
+                transaction: Box::new(transaction),
+                error: PreselectionDispatchError::Correlation,
+            });
+        }
         let ClientPreselectionTransaction { dispatch, context } = transaction;
-        let (transport, response) =
-            self.bind_preselection_observation_response(dispatch, arrival)?;
-        Ok((context, transport, response))
+        match self.bind_preselection_observation_response(dispatch, arrival) {
+            Ok((transport, response)) => Ok((context, transport, response)),
+            Err(error) => Err(ClientPreselectionBindFailure::Released { context, error }),
+        }
     }
 
     /// Cancel a client-hop transaction and return its unchanged exact caller context.
     ///
     /// # Errors
     ///
-    /// Returns the same correlation error as [`Self::cancel_preselection_observation_dispatch`].
+    /// Returns the same correlation error as [`Self::cancel_preselection_observation_dispatch`]
+    /// together with the exact unchanged transaction.
     pub fn cancel_preselection_observation_transaction<Context>(
         &mut self,
         transaction: ClientPreselectionTransaction<Context>,
-    ) -> Result<Context, PreselectionDispatchError> {
-        let ClientPreselectionTransaction { dispatch, context } = transaction;
-        self.cancel_preselection_observation_dispatch(dispatch)?;
+    ) -> Result<Context, ClientPreselectionCancelFailure<Context>> {
+        if !self.client_preselection_dispatch_is_active(&transaction.dispatch) {
+            return Err(ClientPreselectionCancelFailure {
+                transaction: Box::new(transaction),
+                error: PreselectionDispatchError::Correlation,
+            });
+        }
+        let ClientPreselectionTransaction {
+            dispatch: _,
+            context,
+        } = transaction;
+        self.preselection_transaction.client_active = None;
         Ok(context)
     }
 
@@ -384,9 +552,10 @@ impl DiscoveryService {
     ///
     /// Returns a detail-free error for a service-instance, peer, or request mismatch, an invalid
     /// monotonic arrival time, or a stale, ambiguous, closed, changed, or otherwise unavailable
-    /// connection proof. Dropping either affine value or submitting a cross-service arrival
-    /// deliberately leaves the originating slot occupied. After exact correlation the slot is
-    /// consumed even when time or connection-provenance binding then fails closed.
+    /// connection proof. A dispatch from another service cannot affect this service's slot. Once
+    /// this service recognizes its own exact active dispatch, however, every sealed response is a
+    /// terminal outcome and releases the slot before arrival correlation, time, or provenance is
+    /// checked.
     pub fn bind_preselection_observation_response(
         &mut self,
         dispatch: ClientPreselectionDispatch,
@@ -407,13 +576,16 @@ impl DiscoveryService {
             arrived_at_mono,
             arrived_at_unix_ms,
         } = arrival;
-        if !Arc::ptr_eq(&self.preselection_transaction.instance, &dispatch.instance)
-            || !Arc::ptr_eq(&self.preselection_transaction.instance, &instance)
+        if !self.client_preselection_dispatch_is_active(&dispatch) {
+            return Err(PreselectionDispatchError::Correlation);
+        }
+        self.preselection_transaction.client_active = None;
+        if !Arc::ptr_eq(&self.preselection_transaction.instance, &instance)
             || !Arc::ptr_eq(&dispatch.instance, &instance)
         {
             return Err(PreselectionDispatchError::Correlation);
         }
-        let transport = self.bind_preselection_observation_response_at(
+        let transport = self.bind_preselection_observation_response_after_slot_release(
             dispatch,
             peer,
             connection_id,
@@ -422,6 +594,14 @@ impl DiscoveryService {
             arrived_at_unix_ms,
         )?;
         Ok((transport, response))
+    }
+
+    fn client_preselection_dispatch_is_active(
+        &self,
+        dispatch: &ClientPreselectionDispatch,
+    ) -> bool {
+        Arc::ptr_eq(&self.preselection_transaction.instance, &dispatch.instance)
+            && self.preselection_transaction.client_active == Some(dispatch.request_id)
     }
 
     pub(super) fn seal_client_preselection_response(
@@ -445,6 +625,13 @@ impl DiscoveryService {
         })
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "deterministic arrival-clock seam exercises the same terminal binder"
+        )
+    )]
     fn bind_preselection_observation_response_at(
         &mut self,
         dispatch: ClientPreselectionDispatch,
@@ -454,11 +641,29 @@ impl DiscoveryService {
         arrived_at_mono: Instant,
         arrived_at_unix_ms: u64,
     ) -> Result<BoundClientPreselectionTransport, PreselectionDispatchError> {
-        if !Arc::ptr_eq(&self.preselection_transaction.instance, &dispatch.instance)
-            || self.preselection_transaction.client_active != Some(dispatch.request_id)
-        {
+        if !self.client_preselection_dispatch_is_active(&dispatch) {
             return Err(PreselectionDispatchError::Correlation);
         }
+        self.preselection_transaction.client_active = None;
+        self.bind_preselection_observation_response_after_slot_release(
+            dispatch,
+            event_peer,
+            event_connection,
+            event_request,
+            arrived_at_mono,
+            arrived_at_unix_ms,
+        )
+    }
+
+    fn bind_preselection_observation_response_after_slot_release(
+        &self,
+        dispatch: ClientPreselectionDispatch,
+        event_peer: PeerId,
+        event_connection: ConnectionId,
+        event_request: OutboundRequestId,
+        arrived_at_mono: Instant,
+        arrived_at_unix_ms: u64,
+    ) -> Result<BoundClientPreselectionTransport, PreselectionDispatchError> {
         let ClientPreselectionDispatch {
             request_id,
             request_hash,
@@ -471,7 +676,6 @@ impl DiscoveryService {
         if expected_peer_id != event_peer || request_id != event_request {
             return Err(PreselectionDispatchError::Correlation);
         }
-        self.preselection_transaction.client_active = None;
         if arrived_at_mono < sent_at || arrived_at_mono >= deadline {
             return Err(PreselectionDispatchError::Time);
         }
@@ -1608,6 +1812,30 @@ mod tests {
             .expect("direct dispatch")
     }
 
+    fn dispatch_direct_with_context(
+        service: &mut DiscoveryService,
+        binding: PreselectionActorBinding,
+        marker: u8,
+    ) -> ClientPreselectionTransaction<AttemptContext> {
+        let fixture = client_request(
+            PreselectionObservationRole::Relay,
+            binding,
+            None,
+            ObservationAddressFamily::Ipv4,
+            now_ms(),
+        );
+        let Ok(transaction) = service.dispatch_preselection_observation_with_context(
+            fixture.request,
+            Instant::now() + Duration::from_secs(30),
+            AttemptContext {
+                candidate_snapshot_marker: vec![marker].into_boxed_slice(),
+            },
+        ) else {
+            panic!("context dispatch failed");
+        };
+        transaction
+    }
+
     #[tokio::test]
     async fn direct_target_hash_id_timeout_cap_and_single_slot_are_exact() {
         let (mut service, _, relay, peer, _) = direct_context();
@@ -1918,7 +2146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_id_and_peer_correlation_are_exact_and_mismatch_stays_busy() {
+    async fn request_id_and_peer_correlation_are_exact_and_mismatch_is_terminal() {
         let (mut wrong_id_service, _, relay, peer, _) = direct_context();
         let wrong_id = dispatch_direct(&mut wrong_id_service, relay.clone());
         let unrelated = client_request(
@@ -1948,23 +2176,13 @@ mod tests {
             ),
             Err(PreselectionDispatchError::Correlation)
         ));
-        let blocked = client_request(
-            PreselectionObservationRole::Relay,
-            relay,
-            None,
-            ObservationAddressFamily::Ipv4,
-            now_ms(),
-        );
-        assert!(matches!(
-            wrong_id_service.dispatch_preselection_observation(
-                blocked.request,
-                Instant::now() + Duration::from_secs(30)
-            ),
-            Err(PreselectionDispatchError::Busy)
-        ));
+        let replacement = dispatch_direct(&mut wrong_id_service, relay);
+        wrong_id_service
+            .cancel_preselection_observation_dispatch(replacement)
+            .expect("same-service request mismatch releases the slot");
 
         let (mut wrong_peer_service, _, relay, _, _) = direct_context();
-        let wrong_peer = dispatch_direct(&mut wrong_peer_service, relay);
+        let wrong_peer = dispatch_direct(&mut wrong_peer_service, relay.clone());
         let request_id = wrong_peer.request_id;
         let sent_at = wrong_peer.sent_at;
         assert!(matches!(
@@ -1978,6 +2196,10 @@ mod tests {
             ),
             Err(PreselectionDispatchError::Correlation)
         ));
+        let replacement = dispatch_direct(&mut wrong_peer_service, relay);
+        wrong_peer_service
+            .cancel_preselection_observation_dispatch(replacement)
+            .expect("same-service peer mismatch releases the slot");
     }
 
     #[tokio::test]
@@ -2079,15 +2301,15 @@ mod tests {
             preselection_observation_request_hash(&fixture.encoded).expect("request hash");
         let response = signed_response(&fixture, &relay_key, now_ms());
         let expected_response = response.as_encoded().to_vec();
-        let transaction = service
-            .dispatch_preselection_observation_with_context(
-                fixture.request,
-                Instant::now() + Duration::from_secs(30),
-                AttemptContext {
-                    candidate_snapshot_marker: vec![41, 42, 43].into_boxed_slice(),
-                },
-            )
-            .expect("dispatch");
+        let Ok(transaction) = service.dispatch_preselection_observation_with_context(
+            fixture.request,
+            Instant::now() + Duration::from_secs(30),
+            AttemptContext {
+                candidate_snapshot_marker: vec![41, 42, 43].into_boxed_slice(),
+            },
+        ) else {
+            panic!("dispatch failed");
+        };
         let dispatch = &transaction.dispatch;
         let request_id = dispatch.request_id;
         let sent_at = dispatch.sent_at;
@@ -2099,9 +2321,11 @@ mod tests {
                 response,
             )
             .expect("service-sealed arrival");
-        let (context, bound, returned_response) = service
-            .bind_preselection_observation_response_with_context(transaction, arrival)
-            .expect("sealed arrival binding");
+        let Ok((context, bound, returned_response)) =
+            service.bind_preselection_observation_response_with_context(transaction, arrival)
+        else {
+            panic!("sealed arrival binding failed");
+        };
         assert_eq!(&*context.candidate_snapshot_marker, &[41, 42, 43]);
         assert_eq!(returned_response.as_encoded(), expected_response);
         assert_eq!(bound.request_hash, expected_hash);
@@ -2118,7 +2342,268 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_service_sealed_arrival_is_rejected_and_leaves_the_slot_fail_closed() {
+    async fn rejected_dispatch_returns_the_exact_unchanged_affine_context() {
+        let created_at_ms = now_ms();
+        let relay_key = identity::Keypair::generate_ed25519();
+        let relay = actor(&relay_key, 101, created_at_ms);
+        let fixture = client_request(
+            PreselectionObservationRole::Relay,
+            relay,
+            None,
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+        let mut non_client = relay_service(identity::Keypair::generate_ed25519());
+        let failure = match non_client.dispatch_preselection_observation_with_context(
+            fixture.request,
+            Instant::now() + Duration::from_secs(30),
+            AttemptContext {
+                candidate_snapshot_marker: vec![9, 8, 7].into_boxed_slice(),
+            },
+        ) {
+            Ok(_) => panic!("disabled client role dispatched"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.error(), PreselectionDispatchError::Role);
+        assert_eq!(
+            &*failure.into_context().candidate_snapshot_marker,
+            &[9, 8, 7]
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_service_bind_retains_transaction_for_its_originating_service() {
+        let (mut origin, relay_key, relay, peer, _) = direct_context();
+        let transaction = dispatch_direct_with_context(&mut origin, relay.clone(), 31);
+        let request_id = transaction.dispatch.request_id;
+
+        let mut sibling = client_service(identity::Keypair::generate_ed25519());
+        established(
+            &mut sibling,
+            peer,
+            CONNECTION,
+            &dialer("/ip4/1.1.1.8/tcp/443"),
+            0,
+        );
+        let sibling_dispatch = dispatch_direct(&mut sibling, relay.clone());
+        assert_eq!(sibling_dispatch.request_id, request_id);
+        let response_fixture = client_request(
+            PreselectionObservationRole::Relay,
+            relay,
+            None,
+            ObservationAddressFamily::Ipv4,
+            now_ms(),
+        );
+        let arrival = sibling
+            .seal_client_preselection_response(
+                peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                request_id,
+                signed_response(&response_fixture, &relay_key, now_ms()),
+            )
+            .expect("sibling arrival");
+        let retained = match sibling
+            .bind_preselection_observation_response_with_context(transaction, arrival)
+        {
+            Err(ClientPreselectionBindFailure::Retained { transaction, error }) => {
+                assert_eq!(error, PreselectionDispatchError::Correlation);
+                *transaction
+            }
+            Err(ClientPreselectionBindFailure::Released { .. }) => {
+                panic!("foreign service consumed the context")
+            }
+            Ok(_) => panic!("foreign service bound the transaction"),
+        };
+        sibling
+            .cancel_preselection_observation_dispatch(sibling_dispatch)
+            .expect("foreign transaction did not disturb sibling slot");
+        let Ok(context) = origin.cancel_preselection_observation_transaction(retained) else {
+            panic!("origin could not cancel retained transaction");
+        };
+        assert_eq!(&*context.candidate_snapshot_marker, &[31]);
+    }
+
+    #[tokio::test]
+    async fn every_same_service_terminal_bind_failure_releases_slot_and_returns_context() {
+        for case in 0_u8..5 {
+            let (mut service, relay_key, relay, peer, _) = direct_context();
+            let transaction = dispatch_direct_with_context(&mut service, relay.clone(), case + 40);
+            let request_id = transaction.dispatch.request_id;
+            let response_fixture = client_request(
+                PreselectionObservationRole::Relay,
+                relay.clone(),
+                None,
+                ObservationAddressFamily::Ipv4,
+                now_ms(),
+            );
+            let mut arrival = service
+                .seal_client_preselection_response(
+                    peer,
+                    ConnectionId::new_unchecked(CONNECTION),
+                    request_id,
+                    signed_response(&response_fixture, &relay_key, now_ms()),
+                )
+                .expect("same-service arrival");
+            let expected_error = match case {
+                0 => {
+                    arrival.instance = Arc::new(());
+                    PreselectionDispatchError::Correlation
+                }
+                1 => {
+                    arrival.peer = PeerId::random();
+                    PreselectionDispatchError::Correlation
+                }
+                2 => {
+                    let unrelated = client_request(
+                        PreselectionObservationRole::Relay,
+                        relay.clone(),
+                        None,
+                        ObservationAddressFamily::Ipv4,
+                        now_ms(),
+                    );
+                    arrival.request_id = service
+                        .swarm
+                        .behaviour_mut()
+                        .preselection_observation
+                        .send_request(&peer, unrelated.request);
+                    PreselectionDispatchError::Correlation
+                }
+                3 => {
+                    arrival.arrived_at_mono = transaction.dispatch.deadline;
+                    PreselectionDispatchError::Time
+                }
+                _ => {
+                    arrival.connection_id = ConnectionId::new_unchecked(CONNECTION + 1);
+                    PreselectionDispatchError::Provenance
+                }
+            };
+            let context = match service
+                .bind_preselection_observation_response_with_context(transaction, arrival)
+            {
+                Err(ClientPreselectionBindFailure::Released { context, error }) => {
+                    assert_eq!(error, expected_error);
+                    context
+                }
+                Err(ClientPreselectionBindFailure::Retained { .. }) => {
+                    panic!("same-service terminal failure retained an active transaction")
+                }
+                Ok(_) => panic!("malformed terminal arrival bound"),
+            };
+            assert_eq!(&*context.candidate_snapshot_marker, &[case + 40]);
+            let replacement = dispatch_direct(&mut service, relay);
+            service
+                .cancel_preselection_observation_dispatch(replacement)
+                .expect("terminal failure released exact same-service slot");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_cancel_returns_transaction_for_its_originating_service() {
+        let (mut origin, _, relay, _, _) = direct_context();
+        let transaction = dispatch_direct_with_context(&mut origin, relay, 77);
+        let mut sibling = client_service(identity::Keypair::generate_ed25519());
+        let failure = match sibling.cancel_preselection_observation_transaction(transaction) {
+            Ok(_) => panic!("foreign service cancelled transaction"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.error(), PreselectionDispatchError::Correlation);
+        let Ok(context) =
+            origin.cancel_preselection_observation_transaction(failure.into_transaction())
+        else {
+            panic!("origin could not cancel recovered transaction");
+        };
+        assert_eq!(&*context.candidate_snapshot_marker, &[77]);
+    }
+
+    #[tokio::test]
+    async fn purpose_specific_client_transport_projection_is_exact_and_authority_free() {
+        let (mut service, _, relay, peer, _) = direct_context();
+        let dispatch = dispatch_direct(&mut service, relay);
+        let request_hash = dispatch.request_hash;
+        let request_id = dispatch.request_id;
+        let sent_at = dispatch.sent_at;
+        let deadline = dispatch.deadline;
+        let arrived_at = sent_at
+            .checked_add(Duration::from_millis(2))
+            .expect("arrival instant");
+        let arrived_at_unix_ms = now_ms();
+        let bound = service
+            .bind_preselection_observation_response_at(
+                dispatch,
+                peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                request_id,
+                arrived_at,
+                arrived_at_unix_ms,
+            )
+            .expect("bound transport");
+        let freshness = consume_bound_client_preselection_transport_for_freshness(
+            bound,
+            request_hash,
+            IpFamily::Ipv4,
+            sent_at,
+            deadline,
+        )
+        .expect("freshness projection");
+        assert!(freshness.observed_network_prefix() == ObservedNetworkPrefix::ipv4_24([1, 1, 1]));
+        assert_eq!(freshness.observed_at_unix_ms(), arrived_at_unix_ms);
+        assert_eq!(freshness.round_trip(), Duration::from_millis(2));
+    }
+
+    #[tokio::test]
+    async fn client_transport_projection_rejects_hash_time_and_family_substitution() {
+        for case in 0_u8..3 {
+            let (mut service, _, relay, peer, _) = direct_context();
+            let dispatch = dispatch_direct(&mut service, relay);
+            let request_hash = dispatch.request_hash;
+            let request_id = dispatch.request_id;
+            let sent_at = dispatch.sent_at;
+            let deadline = dispatch.deadline;
+            let bound = service
+                .bind_preselection_observation_response_at(
+                    dispatch,
+                    peer,
+                    ConnectionId::new_unchecked(CONNECTION),
+                    request_id,
+                    sent_at,
+                    now_ms(),
+                )
+                .expect("bound transport");
+            let (expected_hash, expected_family, attempt_started, expected_error) = match case {
+                0 => (
+                    [0; 32],
+                    IpFamily::Ipv4,
+                    sent_at,
+                    PreselectionDispatchError::Correlation,
+                ),
+                1 => (
+                    request_hash,
+                    IpFamily::Ipv4,
+                    deadline,
+                    PreselectionDispatchError::Time,
+                ),
+                _ => (
+                    request_hash,
+                    IpFamily::Ipv6,
+                    sent_at,
+                    PreselectionDispatchError::Provenance,
+                ),
+            };
+            assert!(matches!(
+                consume_bound_client_preselection_transport_for_freshness(
+                    bound,
+                    expected_hash,
+                    expected_family,
+                    attempt_started,
+                    deadline,
+                ),
+                Err(error) if error == expected_error
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn foreign_sealed_arrival_is_rejected_as_a_terminal_same_service_outcome() {
         let (mut service, relay_key, relay, peer, _) = direct_context();
         let dispatch = dispatch_direct(&mut service, relay.clone());
         let request_id = dispatch.request_id;
@@ -2152,20 +2637,10 @@ mod tests {
             service.bind_preselection_observation_response(dispatch, arrival),
             Err(PreselectionDispatchError::Correlation)
         ));
-        let blocked = client_request(
-            PreselectionObservationRole::Relay,
-            relay,
-            None,
-            ObservationAddressFamily::Ipv4,
-            now_ms(),
-        );
-        assert!(matches!(
-            service.dispatch_preselection_observation(
-                blocked.request,
-                Instant::now() + Duration::from_secs(30)
-            ),
-            Err(PreselectionDispatchError::Busy)
-        ));
+        let replacement = dispatch_direct(&mut service, relay);
+        service
+            .cancel_preselection_observation_dispatch(replacement)
+            .expect("terminal foreign arrival releases the owned slot");
     }
 
     #[tokio::test]
@@ -2367,20 +2842,10 @@ mod tests {
             origin.bind_preselection_observation_response(dispatch, foreign_arrival),
             Err(PreselectionDispatchError::Correlation)
         ));
-        let blocked = client_request(
-            PreselectionObservationRole::Relay,
-            relay_binding,
-            None,
-            ObservationAddressFamily::Ipv4,
-            now_ms(),
-        );
-        assert!(matches!(
-            origin.dispatch_preselection_observation(
-                blocked.request,
-                Instant::now() + Duration::from_secs(30),
-            ),
-            Err(PreselectionDispatchError::Busy)
-        ));
+        let replacement = dispatch_direct(&mut origin, relay_binding);
+        origin
+            .cancel_preselection_observation_dispatch(replacement)
+            .expect("terminal independent-behaviour arrival releases the owned slot");
     }
 
     #[tokio::test]
@@ -3396,9 +3861,30 @@ mod tests {
         assert_eq!(
             compact(item_body(
                 production,
+                "pub struct ClientPreselectionDispatchFailure<Context> {"
+            )),
+            "context:Context,error:PreselectionDispatchError,"
+        );
+        assert_eq!(
+            compact(item_body(
+                production,
+                "pub struct ClientPreselectionCancelFailure<Context> {"
+            )),
+            "transaction:Box<ClientPreselectionTransaction<Context>>,error:PreselectionDispatchError,"
+        );
+        assert_eq!(
+            compact(item_body(
+                production,
                 "pub struct ClientPreselectionResponseArrival {"
             )),
             "peer:PeerId,connection_id:ConnectionId,request_id:OutboundRequestId,response:ClientPreselectionObservationResponse,instance:Arc<()>,arrived_at_mono:Instant,arrived_at_unix_ms:u64,"
+        );
+        assert_eq!(
+            compact(item_body(
+                production,
+                "pub struct ClientPreselectionTransportFreshnessProof {"
+            )),
+            "observed_network_prefix:ObservedNetworkPrefix,observed_at_unix_ms:u64,round_trip:Duration,"
         );
         assert_eq!(
             compact(item_body(
@@ -3442,8 +3928,12 @@ mod tests {
         for token in [
             "ClientPreselectionDispatch",
             "ClientPreselectionTransaction",
+            "ClientPreselectionDispatchFailure",
+            "ClientPreselectionBindFailure",
+            "ClientPreselectionCancelFailure",
             "ClientPreselectionResponseArrival",
             "BoundClientPreselectionTransport",
+            "ClientPreselectionTransportFreshnessProof",
             "UpstreamPreselectionDispatch",
             "UpstreamPreselectionTransaction",
             "UpstreamPreselectionResponseArrival",
@@ -3465,7 +3955,6 @@ mod tests {
             "IpAddr",
             "Ipv4Addr",
             "Ipv6Addr",
-            "ObservedNetworkPrefix",
             "into_observed_prefix",
             "fn request_hash",
             "fn request_id",
