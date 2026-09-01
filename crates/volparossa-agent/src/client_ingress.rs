@@ -1276,6 +1276,21 @@ impl RouteAuthorizedUdpIngress {
     pub(crate) fn payload(&self) -> &[u8] {
         &self.payload
     }
+
+    /// Validate a reverse native CONNECT-IP packet and expose only its application payload.
+    ///
+    /// The native session has already pinned the tunnel Client address; this final boundary also
+    /// requires the exact remote source and original application port retained from ingress.
+    pub(crate) fn accept_native_response<'a>(
+        &self,
+        packet: &'a [u8],
+    ) -> Result<&'a [u8], ClientIngressUdpError> {
+        let (source, destination, payload) = parse_ipv4_udp_packet(packet)?;
+        if source != self.destination || destination.port() != self.source.port() {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        Ok(payload)
+    }
 }
 
 async fn cleanup_prepared_failure(

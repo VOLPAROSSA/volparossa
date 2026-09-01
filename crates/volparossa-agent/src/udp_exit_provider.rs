@@ -306,11 +306,24 @@ pub(crate) async fn start_production_udp_exit(
         )
         .await);
     };
+    let Ok(exit_native_instance_id): Result<[u8; 32], _> = authorization
+        .public_identity()
+        .exit_native_instance_id
+        .as_slice()
+        .try_into()
+    else {
+        return Err(failed_after_cleanup(
+            ProductionUdpExitCleanup { helper, owner },
+            ProductionUdpExitError::TlsIdentity,
+        )
+        .await);
+    };
     let Ok(signal) = UdpExitSessionSignal::new(
         *path.reservation_id(),
         *path.route_context_id(),
         path.path_id(),
         certificate_der,
+        exit_native_instance_id,
     ) else {
         return Err(failed_after_cleanup(
             ProductionUdpExitCleanup { helper, owner },

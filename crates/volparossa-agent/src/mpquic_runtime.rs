@@ -15,7 +15,7 @@ use tokio::{
     net::UdpSocket,
     time::{Instant, MissedTickBehavior, interval, sleep_until},
 };
-use volparossa_discovery::ExitMpquicSessionSignal;
+use volparossa_discovery::{ExitMpquicSessionSignal, UdpExitSessionSignal};
 use volparossa_exit::{ExitNativeRouteAuthorization, ExitNativeRouteCredentialAuthorization};
 use volparossa_inspection::{InspectionProgress, QuicInitialInspector};
 use volparossa_policy::{TransportProtocol, VerifiedManifest};
@@ -31,7 +31,7 @@ use volparossa_routing::{
     AcquireTransportSocket, CommitLeaseBatch, ContextRole, TransportSocketAddress,
     TransportSocketKind, WireguardRole,
 };
-use volparossa_udp::{AuthorizedUdpFlow, UdpAuthorizationScope, UdpError};
+use volparossa_udp::{AuthorizedUdpFlow, UdpAuthorizationScope, UdpError, VerifiedSingleRelayPath};
 use volparossa_wireguard::{HELPER_HANDLE_BYTES, overlay_addresses};
 use zeroize::Zeroizing;
 
@@ -48,6 +48,7 @@ const EXIT_DATAGRAM_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAXIMUM_EXIT_UDP_FLOWS: usize = 256;
 const MAXIMUM_EXIT_DATAGRAMS_PER_TICK: usize = 64;
 const MAXIMUM_EXIT_FLOW_IDLE: Duration = Duration::from_secs(10 * 60);
+const EXIT_FLOW_REPLAY_CAPACITY: usize = 4_096;
 const MINIMUM_MPQUIC_TUNNEL_MTU: usize = 1_280;
 const MAXIMUM_EXIT_UDP_PAYLOAD_BYTES: usize = MINIMUM_MPQUIC_TUNNEL_MTU - 20 - 8;
 const MPQUIC_TUNNEL_IPV4_PREFIX: [u8; 3] = [10, 76, 0];
@@ -59,6 +60,8 @@ const BROWSER_QUIC_AUTHORIZATION_PORT: u16 = 44_445;
 const TUNNEL_SERVER_IPV4: Ipv4Addr = Ipv4Addr::new(10, 76, 0, 1);
 const MAXIMUM_PENDING_BROWSER_QUIC_DATAGRAMS: usize = 128;
 const MAXIMUM_PENDING_BROWSER_QUIC_BYTES: usize = 256 * 1024;
+const GENERAL_UDP_AUTH_PORT: u16 = 47_001;
+const GENERAL_UDP_AUTH_MAGIC: &[u8] = b"VOLPAROSSA-UDP-AUTH-V1\0";
 
 /// Affine preflight of the exact native Exit process incarnation signed into finalization.
 #[must_use = "native Exit preflight authority must be consumed by one route"]
@@ -251,6 +254,8 @@ pub(crate) struct ActiveProductionMpquicExitRoute {
     policy: VerifiedManifest,
     flow_idle_timeout: Duration,
     client_session_id: [u8; 32],
+    transport_mode: TransportMode,
+    single_path_udp: Option<VerifiedSingleRelayPath>,
 }
 
 impl ActiveProductionMpquicExitRoute {
@@ -283,6 +288,11 @@ impl ActiveProductionMpquicExitRoute {
         let mut pending_browser_flows = HashMap::<SocketAddrV4, PendingExitBrowserQuicFlow>::new();
         let mut authorization_replay = ReplayCache::new(MAXIMUM_EXIT_UDP_FLOWS)
             .map_err(|_| ProductionMpquicError::Invalid("MPQUIC UDP authorization replay"))?;
+        let mut authorized_general_udp = HashMap::<ExitUdpFlowKey, AuthorizedUdpFlow>::new();
+        let mut general_udp_replay = (self.transport_mode == TransportMode::SinglePathGeneralUdp)
+            .then(|| ReplayCache::new(EXIT_FLOW_REPLAY_CAPACITY))
+            .transpose()
+            .map_err(|_| ProductionMpquicError::Invalid("native UDP replay bound"))?;
         let mut packet_id = 0_u16;
         let mut response_buffer = vec![0_u8; MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1];
         let mut poll = interval(EXIT_DATAGRAM_POLL_INTERVAL);
@@ -299,6 +309,7 @@ impl ActiveProductionMpquicExitRoute {
             flows.retain(|_, flow| now.duration_since(flow.last_activity) < self.flow_idle_timeout);
             pending_browser_flows
                 .retain(|_, flow| now.duration_since(flow.last_activity) < self.flow_idle_timeout);
+            authorized_general_udp.retain(|_, flow| flow.ensure_active_at(current_ms).is_ok());
 
             for _ in 0..MAXIMUM_EXIT_DATAGRAMS_PER_TICK {
                 let Some(packet) =
@@ -307,10 +318,42 @@ impl ActiveProductionMpquicExitRoute {
                 else {
                     break;
                 };
+                if self.transport_mode == TransportMode::SinglePathGeneralUdp {
+                    if let Some(control) =
+                        parse_general_udp_authorization(&packet, assigned_client_ipv4)?
+                    {
+                        assigned_client_ipv4 = Some(*control.key.client.ip());
+                        let path = self
+                            .single_path_udp
+                            .as_ref()
+                            .ok_or(ProductionMpquicError::Invalid("native UDP verified path"))?;
+                        let replay = general_udp_replay
+                            .as_mut()
+                            .ok_or(ProductionMpquicError::Invalid("native UDP replay owner"))?;
+                        let flow = UdpAuthorizationScope::new(path, &self.policy).verify(
+                            control.signed_authorization,
+                            current_ms,
+                            TimePolicy::default(),
+                            replay,
+                        )?;
+                        if !flow
+                            .matches_exact_ip_destination(SocketAddr::V4(control.key.destination))
+                            || (!authorized_general_udp.contains_key(&control.key)
+                                && authorized_general_udp.len() >= MAXIMUM_EXIT_UDP_FLOWS)
+                        {
+                            return Err(ProductionMpquicError::Invalid(
+                                "native UDP signed destination",
+                            ));
+                        }
+                        authorized_general_udp.insert(control.key, flow);
+                        continue;
+                    }
+                }
                 let datagram = parse_exit_ipv4_udp(&packet, assigned_client_ipv4)?;
                 assigned_client_ipv4 = Some(*datagram.client.ip());
-                if datagram.destination
-                    == SocketAddrV4::new(TUNNEL_SERVER_IPV4, BROWSER_QUIC_AUTHORIZATION_PORT)
+                if self.transport_mode == TransportMode::MultipathQuic
+                    && datagram.destination
+                        == SocketAddrV4::new(TUNNEL_SERVER_IPV4, BROWSER_QUIC_AUTHORIZATION_PORT)
                 {
                     if pending_browser_flows.len() >= MAXIMUM_EXIT_UDP_FLOWS
                         || flows.keys().any(|key| key.client == datagram.client)
@@ -348,6 +391,47 @@ impl ActiveProductionMpquicExitRoute {
                     client: datagram.client,
                     destination: datagram.destination,
                 };
+                if self.transport_mode == TransportMode::SinglePathGeneralUdp {
+                    let authorization =
+                        authorized_general_udp
+                            .get(&key)
+                            .ok_or(ProductionMpquicError::Invalid(
+                                "native UDP missing signed destination",
+                            ))?;
+                    authorization.ensure_active_at(current_ms)?;
+                    if key.destination.port() == BROWSER_QUIC_PORT
+                        || !authorization
+                            .matches_exact_ip_destination(SocketAddr::V4(key.destination))
+                    {
+                        return Err(ProductionMpquicError::Invalid(
+                            "native UDP signed destination",
+                        ));
+                    }
+                    if let Some(flow) = flows.get_mut(&key) {
+                        flow.authorize(&self.policy, current_ms, key.destination)?;
+                        flow.send(datagram.payload).await?;
+                        continue;
+                    }
+                    self.policy
+                        .authorize_ip(
+                            current_ms,
+                            IpAddr::V4(*key.destination.ip()),
+                            TransportProtocol::Udp,
+                            key.destination.port(),
+                        )
+                        .map_err(|_| {
+                            ProductionMpquicError::Invalid(
+                                "policy-authorized native UDP destination",
+                            )
+                        })?;
+                    if flows.len() >= MAXIMUM_EXIT_UDP_FLOWS {
+                        return Err(ProductionMpquicError::Invalid("native UDP flow bound"));
+                    }
+                    let mut flow = ExitUdpFlow::connect(key.destination, None).await?;
+                    flow.send(datagram.payload).await?;
+                    flows.insert(key, flow);
+                    continue;
+                }
                 if let Some(flow) = flows.get_mut(&key) {
                     flow.authorize(&self.policy, current_ms, key.destination)?;
                     flow.send(datagram.payload).await?;
@@ -604,6 +688,61 @@ struct ParsedExitIpv4Udp<'a> {
     payload: &'a [u8],
 }
 
+struct ParsedGeneralUdpAuthorization<'a> {
+    key: ExitUdpFlowKey,
+    signed_authorization: &'a [u8],
+}
+
+fn parse_general_udp_authorization(
+    packet: &[u8],
+    assigned_client_ipv4: Option<Ipv4Addr>,
+) -> Result<Option<ParsedGeneralUdpAuthorization<'_>>, ProductionMpquicError> {
+    let datagram = parse_exit_ipv4_udp(packet, assigned_client_ipv4)?;
+    if datagram.destination != SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 1), GENERAL_UDP_AUTH_PORT)
+    {
+        return Ok(None);
+    }
+    let fixed = GENERAL_UDP_AUTH_MAGIC.len() + 4 + 2 + 2;
+    if datagram.payload.len() < fixed || !datagram.payload.starts_with(GENERAL_UDP_AUTH_MAGIC) {
+        return Err(ProductionMpquicError::Invalid(
+            "native UDP authorization packet",
+        ));
+    }
+    let offset = GENERAL_UDP_AUTH_MAGIC.len();
+    let destination = SocketAddrV4::new(
+        Ipv4Addr::new(
+            datagram.payload[offset],
+            datagram.payload[offset + 1],
+            datagram.payload[offset + 2],
+            datagram.payload[offset + 3],
+        ),
+        u16::from_be_bytes([datagram.payload[offset + 4], datagram.payload[offset + 5]]),
+    );
+    let signed_length = usize::from(u16::from_be_bytes([
+        datagram.payload[offset + 6],
+        datagram.payload[offset + 7],
+    ]));
+    let signed_authorization = datagram
+        .payload
+        .get(fixed..)
+        .filter(|signed| signed.len() == signed_length && !signed.is_empty())
+        .ok_or(ProductionMpquicError::Invalid(
+            "native UDP authorization length",
+        ))?;
+    if destination.ip().is_unspecified() || destination.port() == 0 {
+        return Err(ProductionMpquicError::Invalid(
+            "native UDP authorization destination",
+        ));
+    }
+    Ok(Some(ParsedGeneralUdpAuthorization {
+        key: ExitUdpFlowKey {
+            client: datagram.client,
+            destination,
+        },
+        signed_authorization,
+    }))
+}
+
 #[cfg(test)]
 fn authorize_exit_ipv4_udp<'a>(
     policy: &VerifiedManifest,
@@ -767,7 +906,7 @@ fn internet_checksum(bytes: &[u8]) -> u16 {
 pub(crate) async fn start_production_mpquic_exit(
     preflight: ProductionMpquicExitPreflight,
     helper: HelperClient,
-    mut owner: RuntimeBoundPreparedLeaseBatch,
+    owner: RuntimeBoundPreparedLeaseBatch,
     commit: CommitLeaseBatch,
     credential: ExitNativeRouteCredentialAuthorization,
     paths: Vec<ExitMpquicPathAuthorization>,
@@ -776,6 +915,103 @@ pub(crate) async fn start_production_mpquic_exit(
     flow_idle_timeout: Duration,
     now_ms: u64,
 ) -> Result<(ActiveProductionMpquicExitRoute, ExitMpquicSessionSignal), ProductionMpquicError> {
+    let (active, ready) = start_production_native_exit(
+        preflight,
+        helper,
+        owner,
+        commit,
+        credential,
+        paths,
+        policy,
+        signed_policy_hash,
+        flow_idle_timeout,
+        TransportMode::MultipathQuic,
+        None,
+        now_ms,
+    )
+    .await?;
+    let signal = ExitMpquicSessionSignal::new(
+        ready.reservation_id,
+        ready.route_context_id,
+        ready.exit_native_instance_id,
+        ready.path_ids,
+    )
+    .map_err(|_| ProductionMpquicError::Invalid("MPQUIC Exit readiness signal"))?;
+    Ok((active, signal))
+}
+
+/// Start one native MASQUE CONNECT-IP Exit association over exactly one committed Relay.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "single-path native Exit activation is affine"
+)]
+pub(crate) async fn start_production_single_path_udp_exit(
+    preflight: ProductionMpquicExitPreflight,
+    helper: HelperClient,
+    owner: RuntimeBoundPreparedLeaseBatch,
+    commit: CommitLeaseBatch,
+    credential: ExitNativeRouteCredentialAuthorization,
+    path: ExitMpquicPathAuthorization,
+    verified_path: VerifiedSingleRelayPath,
+    policy: VerifiedManifest,
+    signed_policy_hash: [u8; 32],
+    flow_idle_timeout: Duration,
+    certificate_der: Vec<u8>,
+    now_ms: u64,
+) -> Result<(ActiveProductionMpquicExitRoute, UdpExitSessionSignal), ProductionMpquicError> {
+    let path_id = path.path_id;
+    let (active, ready) = start_production_native_exit(
+        preflight,
+        helper,
+        owner,
+        commit,
+        credential,
+        vec![path],
+        policy,
+        signed_policy_hash,
+        flow_idle_timeout,
+        TransportMode::SinglePathGeneralUdp,
+        Some(verified_path),
+        now_ms,
+    )
+    .await?;
+    let signal = UdpExitSessionSignal::new(
+        ready.reservation_id,
+        ready.route_context_id,
+        path_id,
+        certificate_der,
+        ready.exit_native_instance_id,
+    )
+    .map_err(|_| ProductionMpquicError::Invalid("native UDP Exit readiness signal"))?;
+    Ok((active, signal))
+}
+
+struct NativeExitReady {
+    reservation_id: [u8; 16],
+    route_context_id: [u8; 16],
+    exit_native_instance_id: [u8; 32],
+    path_ids: Vec<u32>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one fail-closed helper-to-native Exit transaction"
+)]
+async fn start_production_native_exit(
+    preflight: ProductionMpquicExitPreflight,
+    helper: HelperClient,
+    mut owner: RuntimeBoundPreparedLeaseBatch,
+    commit: CommitLeaseBatch,
+    credential: ExitNativeRouteCredentialAuthorization,
+    paths: Vec<ExitMpquicPathAuthorization>,
+    policy: VerifiedManifest,
+    signed_policy_hash: [u8; 32],
+    flow_idle_timeout: Duration,
+    transport_mode: TransportMode,
+    single_path_udp: Option<VerifiedSingleRelayPath>,
+    now_ms: u64,
+) -> Result<(ActiveProductionMpquicExitRoute, NativeExitReady), ProductionMpquicError> {
     let authorization = match NativeExitAuthorizationParts::from_credential(credential) {
         Ok(authorization) => authorization,
         Err(error) => {
@@ -791,7 +1027,21 @@ pub(crate) async fn start_production_mpquic_exit(
     };
     let mut path_ids = paths.iter().map(|path| path.path_id).collect::<Vec<_>>();
     path_ids.sort_unstable();
-    let exact_paths = (MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&paths.len())
+    let valid_cardinality = match transport_mode {
+        TransportMode::MultipathQuic => {
+            (MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&paths.len())
+                && single_path_udp.is_none()
+        }
+        TransportMode::SinglePathGeneralUdp => {
+            paths.len() == 1
+                && single_path_udp.as_ref().is_some_and(|path| {
+                    path.route_context_id() == &route_context_id
+                        && path.path_id() == paths[0].path_id
+                })
+        }
+        TransportMode::Unspecified => false,
+    };
+    let exact_paths = valid_cardinality
         && path_ids.windows(2).all(|pair| pair[0] < pair[1])
         && paths
             .iter()
@@ -876,7 +1126,9 @@ pub(crate) async fn start_production_mpquic_exit(
         listeners.push(listener);
     }
     let client = preflight.client;
-    if let Err(error) = start_native_exit_listener_set(&client, &authorization, listeners).await {
+    if let Err(error) =
+        start_native_exit_listener_set(&client, &authorization, listeners, transport_mode).await
+    {
         let _ = client
             .stop_session(StopSession {
                 route_context_id: route_context_id.to_vec(),
@@ -885,22 +1137,11 @@ pub(crate) async fn start_production_mpquic_exit(
         let _ = helper.destroy_context(&owner).await;
         return Err(error);
     }
-    let signal = ExitMpquicSessionSignal::new(
-        authorization.reservation_id,
+    let ready = NativeExitReady {
+        reservation_id: authorization.reservation_id,
         route_context_id,
-        authorization.exit_native_instance_id,
+        exit_native_instance_id: authorization.exit_native_instance_id,
         path_ids,
-    );
-    let Ok(signal) = signal else {
-        let _ = client
-            .stop_session(StopSession {
-                route_context_id: route_context_id.to_vec(),
-            })
-            .await;
-        let _ = helper.destroy_context(&owner).await;
-        return Err(ProductionMpquicError::Invalid(
-            "MPQUIC Exit readiness signal",
-        ));
     };
     Ok((
         ActiveProductionMpquicExitRoute {
@@ -913,8 +1154,10 @@ pub(crate) async fn start_production_mpquic_exit(
             policy,
             flow_idle_timeout,
             client_session_id: authorization.client_session_id,
+            transport_mode,
+            single_path_udp,
         },
-        signal,
+        ready,
     ))
 }
 
@@ -922,10 +1165,18 @@ async fn start_native_exit_listener_set(
     client: &NativeClient,
     authorization: &NativeExitAuthorizationParts,
     listeners: Vec<CommittedMpquicExitListener>,
+    transport_mode: TransportMode,
 ) -> Result<(), ProductionMpquicError> {
     let minimum_paths = u32::try_from(listeners.len())
         .map_err(|_| ProductionMpquicError::Invalid("MPQUIC Exit path count"))?;
-    if !(MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&listeners.len()) {
+    let cardinality_matches = match transport_mode {
+        TransportMode::MultipathQuic => {
+            (MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&listeners.len())
+        }
+        TransportMode::SinglePathGeneralUdp => listeners.len() == 1,
+        TransportMode::Unspecified => false,
+    };
+    if !cardinality_matches {
         return Err(ProductionMpquicError::Invalid("MPQUIC Exit path count"));
     }
     let last = listeners.len() - 1;
@@ -938,7 +1189,7 @@ async fn start_native_exit_listener_set(
                     expires_at_ms: authorization.expires_at_ms,
                     minimum_paths,
                     masque_context_id: authorization.masque_context_id,
-                    transport_mode: TransportMode::MultipathQuic as i32,
+                    transport_mode: transport_mode as i32,
                     exit_spki_sha256: authorization.spki_sha256.to_vec(),
                     tls_server_name: authorization.tls_server_name.clone(),
                     path_id: listener.path_id,
@@ -1060,6 +1311,58 @@ impl ProductionMpquicPreflight {
             active_paths,
             warm_paths,
             minimum_paths,
+            now_ms,
+            ready_wait,
+        )
+        .await
+    }
+
+    /// Acquire and start one native general-UDP CONNECT-IP association over exactly one Relay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the signal, authorization, helper socket and sole Relay grant all
+    /// describe the same live route, or native cannot make that one path ready.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the signed one-path scope stays explicit"
+    )]
+    pub async fn establish_single_path_udp(
+        self,
+        helper: &HelperClient,
+        context_handle: [u8; HELPER_HANDLE_BYTES],
+        authorization: ClientNativeRouteAuthorization,
+        grant: &VerifiedRelayGrant,
+        signal: &UdpExitSessionSignal,
+        now_ms: u64,
+        ready_wait: Duration,
+    ) -> Result<ProductionMpquicSession, ProductionMpquicError> {
+        signal
+            .validate()
+            .map_err(|_| ProductionMpquicError::Invalid("native UDP Exit signal"))?;
+        let identity = authorization.native_route_identity();
+        if now_ms >= authorization.expires_at_ms()
+            || signal.reservation_id() != authorization.reservation_id()
+            || signal.route_context_id() != authorization.route_context_id()
+            || signal.path_id() != grant.path_id()
+            || signal.exit_native_instance_id() != identity.exit_native_instance_id
+            || self.native_instance_id().as_slice() != identity.client_native_instance_id
+            || grant.reservation_id() != authorization.reservation_id()
+            || grant.route_context_id() != authorization.route_context_id()
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "native UDP committed Exit signal",
+            ));
+        }
+        let request = committed_client_socket_request(context_handle, grant)?;
+        let acquired = helper.acquire_transport_socket(request).await?;
+        let path =
+            CommittedMpquicPath::from_authenticated_udp_exit_signal(acquired, grant, signal)?;
+        ProductionMpquicSession::establish_preflighted_mode(
+            self,
+            authorization,
+            vec![path],
+            TransportMode::SinglePathGeneralUdp,
             now_ms,
             ready_wait,
         )
@@ -1207,6 +1510,59 @@ impl CommittedMpquicPath {
         })
     }
 
+    fn from_authenticated_udp_exit_signal(
+        acquired: AcquiredTransportSocket,
+        grant: &VerifiedRelayGrant,
+        signal: &UdpExitSessionSignal,
+    ) -> Result<Self, ProductionMpquicError> {
+        let (descriptor, metadata) = acquired.into_parts();
+        let path_id = u8::try_from(grant.path_id())
+            .map_err(|_| ProductionMpquicError::Invalid("native UDP path id"))?;
+        let addresses = overlay_addresses(*grant.route_context_id(), path_id)
+            .map_err(|_| ProductionMpquicError::Invalid("native UDP overlay"))?;
+        let local_port = mpquic_client_port(grant.path_id())?;
+        let local = transport_address(
+            metadata
+                .local
+                .as_ref()
+                .ok_or(ProductionMpquicError::Invalid("native UDP local address"))?,
+        )?;
+        if metadata.path_id != grant.path_id()
+            || WireguardRole::try_from(metadata.role).ok() != Some(WireguardRole::Client)
+            || TransportSocketKind::try_from(metadata.descriptor_kind).ok()
+                != Some(TransportSocketKind::QuicUdpUnconnected)
+            || metadata.remote.is_some()
+            || local != SocketAddr::new(IpAddr::V6(addresses.client), local_port)
+            || signal.route_context_id() != grant.route_context_id()
+            || signal.path_id() != grant.path_id()
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "authenticated committed native UDP path",
+            ));
+        }
+        let exit_native_instance_id = signal
+            .exit_native_instance_id()
+            .try_into()
+            .map_err(|_| ProductionMpquicError::Invalid("Exit native instance"))?;
+        Ok(Self {
+            descriptor,
+            add: AddPath {
+                route_context_id: grant.route_context_id().to_vec(),
+                path_id: grant.path_id(),
+                local_ip: addresses.client.octets().to_vec(),
+                remote_ip: addresses.exit.octets().to_vec(),
+                remote_port: u32::from(MPQUIC_EXIT_LISTENER_PORT),
+                reservation_hash: Sha256::digest(grant.signed_relay_reservation()).to_vec(),
+                local_port: u32::from(local_port),
+            },
+            reservation_id: *grant.reservation_id(),
+            relay_node_id: *grant.relay_node_id(),
+            exit_native_instance_id,
+            expires_at_ms: grant.expires_at_ms(),
+            listener_set_ready: true,
+        })
+    }
+
     #[cfg(test)]
     fn for_test(
         descriptor: OwnedFd,
@@ -1248,6 +1604,7 @@ pub struct ProductionMpquicSession {
     warm_paths: BTreeMap<u32, CommittedMpquicPath>,
     minimum_paths: usize,
     assignment: TunnelAssignment,
+    transport_mode: TransportMode,
 }
 
 impl ProductionMpquicSession {
@@ -1303,6 +1660,55 @@ impl ProductionMpquicSession {
         now_ms: u64,
         ready_wait: Duration,
     ) -> Result<Self, ProductionMpquicError> {
+        Self::establish_preflighted_with_backups_mode(
+            preflight,
+            authorization,
+            active_paths,
+            warm_paths,
+            minimum_paths,
+            TransportMode::MultipathQuic,
+            now_ms,
+            ready_wait,
+        )
+        .await
+    }
+
+    async fn establish_preflighted_mode(
+        preflight: ProductionMpquicPreflight,
+        authorization: ClientNativeRouteAuthorization,
+        paths: Vec<CommittedMpquicPath>,
+        transport_mode: TransportMode,
+        now_ms: u64,
+        ready_wait: Duration,
+    ) -> Result<Self, ProductionMpquicError> {
+        let minimum_paths = paths.len();
+        Self::establish_preflighted_with_backups_mode(
+            preflight,
+            authorization,
+            paths,
+            Vec::new(),
+            minimum_paths,
+            transport_mode,
+            now_ms,
+            ready_wait,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "native path ownership stays explicit"
+    )]
+    async fn establish_preflighted_with_backups_mode(
+        preflight: ProductionMpquicPreflight,
+        authorization: ClientNativeRouteAuthorization,
+        active_paths: Vec<CommittedMpquicPath>,
+        warm_paths: Vec<CommittedMpquicPath>,
+        minimum_paths: usize,
+        transport_mode: TransportMode,
+        now_ms: u64,
+        ready_wait: Duration,
+    ) -> Result<Self, ProductionMpquicError> {
         if ready_wait.is_zero() || ready_wait > MAXIMUM_READY_WAIT {
             return Err(ProductionMpquicError::Invalid("MPQUIC ready wait"));
         }
@@ -1319,14 +1725,23 @@ impl ProductionMpquicSession {
                 "authorized native Client instance",
             ));
         }
-        if !(MINIMUM_MULTIPATH_PATHS..=active_paths.len()).contains(&minimum_paths)
-            || active_paths.len().saturating_add(warm_paths.len()) > MAXIMUM_MULTIPATH_PATHS
-        {
+        let cardinality_matches = match transport_mode {
+            TransportMode::MultipathQuic => {
+                (MINIMUM_MULTIPATH_PATHS..=active_paths.len()).contains(&minimum_paths)
+                    && active_paths.len().saturating_add(warm_paths.len())
+                        <= MAXIMUM_MULTIPATH_PATHS
+            }
+            TransportMode::SinglePathGeneralUdp => {
+                minimum_paths == 1 && active_paths.len() == 1 && warm_paths.is_empty()
+            }
+            TransportMode::Unspecified => false,
+        };
+        if !cardinality_matches {
             return Err(ProductionMpquicError::Invalid(
                 "MPQUIC active and minimum path cardinality",
             ));
         }
-        let start = start_request(&authorization, minimum_paths, now_ms)?;
+        let start = start_request(&authorization, minimum_paths, transport_mode, now_ms)?;
         let path_ids = validate_complete_path_set(&start, &active_paths, now_ms)?;
         let mut all_ids = path_ids.iter().copied().collect::<BTreeSet<_>>();
         let mut relay_ids = active_paths
@@ -1363,6 +1778,7 @@ impl ProductionMpquicSession {
             warm_paths: warm_by_id,
             minimum_paths,
             assignment,
+            transport_mode,
         })
     }
 
@@ -1423,14 +1839,20 @@ impl ProductionMpquicSession {
         ready_wait: Duration,
     ) -> Result<(), ProductionMpquicError> {
         validate_reconfiguration_wait(ready_wait)?;
-        if !self.active_path_ids.contains(&unhealthy_path_id)
+        if self.transport_mode != TransportMode::MultipathQuic
+            || !self.active_path_ids.contains(&unhealthy_path_id)
             || self.active_path_ids.contains(&warm_path_id)
         {
             return Err(ProductionMpquicError::Invalid(
                 "MPQUIC replacement path state",
             ));
         }
-        let start = start_request(&self.authorization, self.minimum_paths, now_ms)?;
+        let start = start_request(
+            &self.authorization,
+            self.minimum_paths,
+            self.transport_mode,
+            now_ms,
+        )?;
         let warm = self
             .warm_paths
             .remove(&warm_path_id)
@@ -1462,14 +1884,20 @@ impl ProductionMpquicSession {
         ready_wait: Duration,
     ) -> Result<(), ProductionMpquicError> {
         validate_reconfiguration_wait(ready_wait)?;
-        if !self.active_path_ids.contains(&unhealthy_path_id)
+        if self.transport_mode != TransportMode::MultipathQuic
+            || !self.active_path_ids.contains(&unhealthy_path_id)
             || self.active_path_ids.len().saturating_sub(1) < self.minimum_paths
         {
             return Err(ProductionMpquicError::Invalid(
                 "MPQUIC minimum path removal",
             ));
         }
-        let start = start_request(&self.authorization, self.minimum_paths, now_ms)?;
+        let start = start_request(
+            &self.authorization,
+            self.minimum_paths,
+            self.transport_mode,
+            now_ms,
+        )?;
         self.client
             .remove_path(RemovePath {
                 route_context_id: self.route_context_id.to_vec(),
@@ -1581,6 +2009,111 @@ impl ProductionMpquicSession {
             receive_inner_ip(&self.client, self.route_context_id, self.masque_context_id).await?;
         if let Some(packet) = packet.as_deref() {
             validate_browser_quic_packet(flow, self.route_context_id, packet, now_ms, false)?;
+        }
+        Ok(packet)
+    }
+
+    /// Submit one policy-signed general-UDP flow over native single-path CONNECT-IP.
+    ///
+    /// The first datagram carries its signed exact-destination authorization as a separate
+    /// tunnel-internal control packet. The following packet is an ordinary inner IPv4/UDP
+    /// datagram; neither packet is a fallback transport frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for another transport mode, an invalid/expired destination binding, an
+    /// oversized inner packet, or a rejected native send.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the transparent and tunnel tuples stay explicit"
+    )]
+    pub async fn send_general_udp(
+        &self,
+        flow: &AuthorizedUdpFlow,
+        signed_authorization: Option<&[u8]>,
+        application_port: u16,
+        destination: SocketAddrV4,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> Result<(), ProductionMpquicError> {
+        if self.transport_mode != TransportMode::SinglePathGeneralUdp
+            || application_port == 0
+            || !flow.matches_exact_ip_destination(SocketAddr::V4(destination))
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "native general UDP exact destination",
+            ));
+        }
+        flow.ensure_active_at(now_ms)?;
+        if flow.route_context_id() != &self.route_context_id {
+            return Err(ProductionMpquicError::Invalid(
+                "native general UDP route context",
+            ));
+        }
+        let (client, server, maximum_packet_bytes) = tunnel_ipv4_scope(&self.assignment)?;
+        let source = SocketAddrV4::new(client, application_port);
+        if let Some(signed) = signed_authorization {
+            let control = build_general_udp_authorization_packet(
+                source,
+                server,
+                destination,
+                signed,
+                maximum_packet_bytes,
+            )?;
+            send_inner_ip(
+                &self.client,
+                self.route_context_id,
+                self.masque_context_id,
+                control,
+            )
+            .await?;
+        }
+        let packet = build_ipv4_udp_packet(source, destination, payload, maximum_packet_bytes)?;
+        send_inner_ip(
+            &self.client,
+            self.route_context_id,
+            self.masque_context_id,
+            packet,
+        )
+        .await
+    }
+
+    /// Poll and validate one native reverse packet for the same signed UDP destination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for another transport mode, an invalid/expired flow or reverse tuple, or
+    /// a failed native receive.
+    pub async fn receive_general_udp(
+        &self,
+        flow: &AuthorizedUdpFlow,
+        application_port: u16,
+        destination: SocketAddrV4,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, ProductionMpquicError> {
+        if self.transport_mode != TransportMode::SinglePathGeneralUdp {
+            return Err(ProductionMpquicError::Invalid("native general UDP mode"));
+        }
+        flow.ensure_active_at(now_ms)?;
+        if flow.route_context_id() != &self.route_context_id
+            || !flow.matches_exact_ip_destination(SocketAddr::V4(destination))
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "native general UDP response scope",
+            ));
+        }
+        let (client, _, _) = tunnel_ipv4_scope(&self.assignment)?;
+        let packet =
+            receive_inner_ip(&self.client, self.route_context_id, self.masque_context_id).await?;
+        if let Some(packet) = packet.as_deref() {
+            let (source, target) = udp_packet_tuple(packet)?;
+            if source != SocketAddr::V4(destination)
+                || target != SocketAddr::V4(SocketAddrV4::new(client, application_port))
+            {
+                return Err(ProductionMpquicError::Invalid(
+                    "native general UDP reverse tuple",
+                ));
+            }
         }
         Ok(packet)
     }
@@ -1711,11 +2244,17 @@ fn mpquic_client_port(path_id: u32) -> Result<u16, ProductionMpquicError> {
 fn start_request(
     authorization: &ClientNativeRouteAuthorization,
     path_count: usize,
+    transport_mode: TransportMode,
     now_ms: u64,
 ) -> Result<StartSession, ProductionMpquicError> {
-    if !(MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&path_count)
-        || now_ms >= authorization.expires_at_ms()
-    {
+    let valid_cardinality = match transport_mode {
+        TransportMode::MultipathQuic => {
+            (MINIMUM_MULTIPATH_PATHS..=MAXIMUM_MULTIPATH_PATHS).contains(&path_count)
+        }
+        TransportMode::SinglePathGeneralUdp => path_count == 1,
+        TransportMode::Unspecified => false,
+    };
+    if !valid_cardinality || now_ms >= authorization.expires_at_ms() {
         return Err(ProductionMpquicError::Invalid(
             "live MPQUIC path cardinality",
         ));
@@ -1727,7 +2266,7 @@ fn start_request(
         minimum_paths: u32::try_from(path_count)
             .map_err(|_| ProductionMpquicError::Invalid("MPQUIC path cardinality"))?,
         masque_context_id: identity.masque_context_id,
-        transport_mode: TransportMode::MultipathQuic as i32,
+        transport_mode: transport_mode as i32,
         auth_secret: authorization.auth_bearer().to_vec(),
         tls_server_name: identity.tls_server_name.as_bytes().to_vec(),
         expires_at_ms: authorization.expires_at_ms(),
@@ -1757,10 +2296,12 @@ fn validate_complete_path_set(
         }
         listener_set_ready |= path.listener_set_ready;
     }
-    if path_ids.len() < MINIMUM_MULTIPATH_PATHS
-        || path_ids.len() != paths.len()
-        || !listener_set_ready
-    {
+    let cardinality_matches = match TransportMode::try_from(start.transport_mode).ok() {
+        Some(TransportMode::MultipathQuic) => path_ids.len() >= MINIMUM_MULTIPATH_PATHS,
+        Some(TransportMode::SinglePathGeneralUdp) => path_ids.len() == 1,
+        _ => false,
+    };
+    if !cardinality_matches || path_ids.len() != paths.len() || !listener_set_ready {
         return Err(ProductionMpquicError::Invalid(
             "distinct committed MPQUIC paths",
         ));
@@ -1957,6 +2498,88 @@ fn transport_address(value: &TransportSocketAddress) -> Result<SocketAddr, Produ
         .filter(|port| *port != 0)
         .ok_or(ProductionMpquicError::Invalid("MPQUIC local port"))?;
     Ok(SocketAddr::new(ip, port))
+}
+
+fn tunnel_ipv4_scope(
+    assignment: &TunnelAssignment,
+) -> Result<(Ipv4Addr, Ipv4Addr, usize), ProductionMpquicError> {
+    let client: [u8; 4] = assignment
+        .assigned_ipv4
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProductionMpquicError::Invalid("native tunnel client IPv4"))?;
+    let server: [u8; 4] = assignment
+        .server_ipv4
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProductionMpquicError::Invalid("native tunnel server IPv4"))?;
+    let mtu = usize::try_from(assignment.mtu)
+        .ok()
+        .filter(|mtu| *mtu >= MINIMUM_MPQUIC_TUNNEL_MTU)
+        .ok_or(ProductionMpquicError::Invalid("native tunnel MTU"))?;
+    Ok((
+        Ipv4Addr::from(client),
+        Ipv4Addr::from(server),
+        mtu.min(MINIMUM_MPQUIC_TUNNEL_MTU),
+    ))
+}
+
+fn build_general_udp_authorization_packet(
+    source: SocketAddrV4,
+    server: Ipv4Addr,
+    destination: SocketAddrV4,
+    signed_authorization: &[u8],
+    maximum_packet_bytes: usize,
+) -> Result<Vec<u8>, ProductionMpquicError> {
+    let signed_length = u16::try_from(signed_authorization.len())
+        .map_err(|_| ProductionMpquicError::Invalid("native UDP authorization size"))?;
+    let mut payload =
+        Vec::with_capacity(GENERAL_UDP_AUTH_MAGIC.len() + 4 + 2 + 2 + signed_authorization.len());
+    payload.extend_from_slice(GENERAL_UDP_AUTH_MAGIC);
+    payload.extend_from_slice(&destination.ip().octets());
+    payload.extend_from_slice(&destination.port().to_be_bytes());
+    payload.extend_from_slice(&signed_length.to_be_bytes());
+    payload.extend_from_slice(signed_authorization);
+    build_ipv4_udp_packet(
+        source,
+        SocketAddrV4::new(server, GENERAL_UDP_AUTH_PORT),
+        &payload,
+        maximum_packet_bytes,
+    )
+}
+
+fn build_ipv4_udp_packet(
+    source: SocketAddrV4,
+    destination: SocketAddrV4,
+    payload: &[u8],
+    maximum_packet_bytes: usize,
+) -> Result<Vec<u8>, ProductionMpquicError> {
+    let udp_length = 8_usize
+        .checked_add(payload.len())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or(ProductionMpquicError::Invalid("native UDP payload size"))?;
+    let packet_length = 20_usize
+        .checked_add(usize::from(udp_length))
+        .filter(|length| *length <= maximum_packet_bytes)
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or(ProductionMpquicError::Invalid("native UDP packet size"))?;
+    let mut packet = vec![0_u8; usize::from(packet_length)];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&packet_length.to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&source.ip().octets());
+    packet[16..20].copy_from_slice(&destination.ip().octets());
+    let header_checksum = internet_checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+    packet[20..22].copy_from_slice(&source.port().to_be_bytes());
+    packet[22..24].copy_from_slice(&destination.port().to_be_bytes());
+    packet[24..26].copy_from_slice(&udp_length.to_be_bytes());
+    packet[28..].copy_from_slice(payload);
+    let checksum = udp_ipv4_checksum(*source.ip(), *destination.ip(), &packet[20..]);
+    packet[26..28]
+        .copy_from_slice(&(if checksum == 0 { u16::MAX } else { checksum }).to_be_bytes());
+    Ok(packet)
 }
 
 fn validate_browser_quic_packet(
@@ -2585,6 +3208,7 @@ mod tests {
                 committed_exit_listener([2; 16], 1),
                 committed_exit_listener([2; 16], 2),
             ],
+            TransportMode::MultipathQuic,
         )
         .await
         .unwrap();

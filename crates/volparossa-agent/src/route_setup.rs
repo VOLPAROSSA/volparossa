@@ -123,7 +123,6 @@ const MAXIMUM_REPLAY_CAPACITY: usize = 65_536;
 const MAXIMUM_RETIREMENT_OWNERS: usize = 64;
 const ID_BYTES: usize = 16;
 const CLIENT_SINGLE_RELAY_UDP_PORT: u16 = 40_001;
-const MAXIMUM_EXIT_CERTIFICATE_DER_BYTES: usize = 64 * 1_024;
 const MAXIMUM_TCP_STREAM_CHUNK_BYTES: usize = 64 * 1_024;
 const OPEN_TCP_LIFETIME_MS: u64 = 60_000;
 const MPQUIC_READY_WAIT: Duration = Duration::from_secs(10);
@@ -163,7 +162,13 @@ enum ClientTransportState {
     TcpMptcp(ClientMptcpTransport),
     UdpReady(CertificateBoundProductionUdpRoute),
     UdpActive(ActiveProductionUdpRoute),
+    NativeUdp(Box<ActiveProductionNativeUdpRoute>),
     Mpquic(Box<ActiveProductionMpquicRoute>),
+}
+
+struct ActiveProductionNativeUdpRoute {
+    session: ProductionMpquicSession,
+    binding: Option<RouteAuthorizedUdpIngress>,
 }
 
 struct ActiveProductionMpquicRoute {
@@ -211,6 +216,7 @@ impl EstablishedClientRoute {
             ClientTransportState::UdpReady(_) => ClientRouteProgress::UdpRouteReady,
             ClientTransportState::TcpMptcp(_)
             | ClientTransportState::UdpActive(_)
+            | ClientTransportState::NativeUdp(_)
             | ClientTransportState::Mpquic(_) => ClientRouteProgress::TransportActive,
         }
     }
@@ -228,6 +234,9 @@ impl EstablishedClientRoute {
             }
             ClientTransportState::UdpActive(route) => {
                 let _ = route.shutdown().await;
+            }
+            ClientTransportState::NativeUdp(active) => {
+                let _ = active.session.shutdown().await;
             }
             ClientTransportState::Mpquic(active) => {
                 let _ = active.session.shutdown().await;
@@ -755,12 +764,52 @@ impl ClientRouteControl {
         Box::pin(self.connect(&profile, discovery, helper)).await
     }
 
+    /// Ensure general UDP uses native single-path MASQUE CONNECT-IP through one Relay.
+    pub(crate) async fn ensure_general_udp(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !config.udp.enabled {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        {
+            let state = self.state.lock().await;
+            match &*state {
+                ClientRouteControlState::Established(established)
+                    if matches!(established.transport, ClientTransportState::NativeUdp(_)) =>
+                {
+                    return Ok(ClientRouteProgress::TransportActive);
+                }
+                ClientRouteControlState::Idle => {}
+                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
+                    return Err(ClientRouteConnectError::Busy);
+                }
+            }
+        }
+        let mut profile = config.clone();
+        profile.tcp.enabled = false;
+        profile.quic.enabled = false;
+        Box::pin(self.connect_with_udp_mode(&profile, discovery, helper, true)).await
+    }
+
     /// Starts exactly one config-bound preselection and retains its affine continuation.
     pub(crate) async fn connect(
         &self,
         config: &Config,
         discovery: &DiscoveryControlHandle,
         helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        Box::pin(self.connect_with_udp_mode(config, discovery, helper, false)).await
+    }
+
+    async fn connect_with_udp_mode(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+        native_single_udp: bool,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         {
             let mut state = self.state.lock().await;
@@ -788,6 +837,7 @@ impl ClientRouteControl {
                             discovery,
                             helper,
                             self.mpquic_socket.as_ref().clone(),
+                            native_single_udp,
                         ))
                         .await
                     }
@@ -1041,12 +1091,56 @@ impl ClientRouteControl {
     }
 
     /// Bind one kernel-observed datagram to this route, activate Quinn, and queue its payload.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native and DNS-only UDP owners require distinct affine activation paths"
+    )]
     pub(crate) async fn activate_udp_ingress(
         &self,
         ingress: PolicyAuthorizedUdpIngress,
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        {
+            let mut state = self.state.lock().await;
+            if let ClientRouteControlState::Established(established) = &mut *state {
+                if let ClientTransportState::NativeUdp(active) = &mut established.transport {
+                    if active.binding.is_some() {
+                        return Err(ClientRouteConnectError::Busy);
+                    }
+                    let route = established
+                        .route
+                        .as_ref()
+                        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                    let path = verified_single_relay_udp_path(&route.established, now_ms)
+                        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                    let protocol = route
+                        .established
+                        .owner
+                        .as_ref()
+                        .and_then(PreparedContextOwner::protocol)
+                        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                    let authorized = ingress
+                        .bind_to_route(&path, &protocol.coordinator, policy, now_ms)
+                        .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
+                    let (flow, signed_authorization) = authorized.activation();
+                    active
+                        .session
+                        .send_general_udp(
+                            flow,
+                            Some(signed_authorization),
+                            authorized.source().port(),
+                            authorized.destination(),
+                            authorized.payload(),
+                            now_ms,
+                        )
+                        .await
+                        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                    active.binding = Some(authorized);
+                    return Ok(ClientRouteProgress::TransportActive);
+                }
+            }
+        }
         let previous = {
             let mut state = self.state.lock().await;
             std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
@@ -1234,10 +1328,45 @@ impl ClientRouteControl {
     pub(crate) async fn receive_udp_response(
         &self,
     ) -> Result<ClientUdpResponse, ClientRouteConnectError> {
-        let state = self.state.lock().await;
-        let ClientRouteControlState::Established(established) = &*state else {
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
             return Err(ClientRouteConnectError::Busy);
         };
+        if let ClientTransportState::NativeUdp(active) = &mut established.transport {
+            let binding = active
+                .binding
+                .as_ref()
+                .ok_or(ClientRouteConnectError::Busy)?;
+            let packet = timeout(MAXIMUM_CALL_DURATION, async {
+                loop {
+                    if let Some(packet) = active
+                        .session
+                        .receive_general_udp(
+                            binding.activation().0,
+                            binding.source().port(),
+                            binding.destination(),
+                            crate::unix_millis(),
+                        )
+                        .await?
+                    {
+                        return Ok::<_, crate::mpquic_runtime::ProductionMpquicError>(packet);
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let payload = binding
+                .accept_native_response(&packet)
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+                .to_vec();
+            return Ok(ClientUdpResponse {
+                application: binding.source(),
+                remote: binding.destination(),
+                payload,
+            });
+        }
         let ClientTransportState::UdpActive(active) = &established.transport else {
             return Err(ClientRouteConnectError::Busy);
         };
@@ -1572,9 +1701,12 @@ async fn admit_completed_native_route(
     discovery: &DiscoveryControlHandle,
     helper: &HelperClient,
     mpquic_socket: PathBuf,
+    native_single_udp: bool,
 ) -> Result<EstablishedClientRoute, ClientRouteConnectError> {
     let (transport, _) = client_native_path_requirement(config)?;
-    let mpquic_preflight = if transport == Transport::MultipathQuic {
+    let mpquic_preflight = if transport == Transport::MultipathQuic
+        || (transport == Transport::UdpSinglePath && native_single_udp)
+    {
         let native = NativeClient::new(mpquic_socket)
             .map_err(|_| ClientRouteConnectError::NativeTransportIdentityUnavailable)?;
         Some(
@@ -1603,6 +1735,73 @@ async fn admit_completed_native_route(
         .map_err(|_| ClientRouteConnectError::RouteAdmissionUnavailable)?;
     let attempt = orchestrator.connect(continuation, discovery.clone());
     match attempt.wait().await {
+        Ok(mut route)
+            if route.selected_transport() == Some(Transport::UdpSinglePath)
+                && native_single_udp =>
+        {
+            let Some(preflight) = mpquic_preflight else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
+            };
+            let now_ms = crate::unix_millis();
+            let Ok(path) = verified_single_relay_udp_path(&route.established, now_ms) else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let signal = start_native_udp_exit_session(&route, &path, discovery, now_ms).await;
+            let Ok(signal) = signal else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::UdpExitSessionSignalUnavailable);
+            };
+            let Ok(context_handle): Result<[u8; HELPER_HANDLE_BYTES], _> =
+                route.context_handle().try_into()
+            else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let Some(authorization) = route.established.native_authorization.take() else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let [grant] = route.established.relay_grants.as_slice() else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let session = preflight
+                .establish_single_path_udp(
+                    helper,
+                    context_handle,
+                    authorization,
+                    grant,
+                    &signal,
+                    crate::unix_millis(),
+                    MPQUIC_READY_WAIT,
+                )
+                .await;
+            let Ok(session) = session else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            Ok(EstablishedClientRoute {
+                transport: ClientTransportState::NativeUdp(Box::new(
+                    ActiveProductionNativeUdpRoute {
+                        session,
+                        binding: None,
+                    },
+                )),
+                tcp_flow: None,
+                route: Some(route),
+                orchestrator,
+                helper: helper.clone(),
+            })
+        }
         Ok(route) if route.selected_transport() == Some(Transport::UdpSinglePath) => {
             let prepared = route
                 .prepare_single_relay_udp(helper, crate::unix_millis())
@@ -3961,25 +4160,6 @@ pub(crate) struct PreparedProductionUdpRoute {
     route: ProductionRoute,
 }
 
-/// Minimal public signal returned only after the Exit has committed its matching helper route and
-/// started `SingleRelayUdpExit`. Certificate bytes are not trusted by construction: the Client
-/// still matches their SHA-256 digest to the Exit-signed reservation before connecting.
-pub(crate) struct UdpExitSessionSignal {
-    certificate_der: Vec<u8>,
-}
-
-impl UdpExitSessionSignal {
-    pub(crate) fn from_certificate_der(
-        certificate_der: Vec<u8>,
-    ) -> Result<Self, ProductionUdpRouteError> {
-        if certificate_der.is_empty() || certificate_der.len() > MAXIMUM_EXIT_CERTIFICATE_DER_BYTES
-        {
-            return Err(ProductionUdpRouteError::ExitCertificate);
-        }
-        Ok(Self { certificate_der })
-    }
-}
-
 /// A prepared route whose exact Exit certificate has been matched to the signed reservation.
 #[must_use = "a certificate-bound UDP route must be activated or disconnected"]
 pub(crate) struct CertificateBoundProductionUdpRoute {
@@ -4290,16 +4470,16 @@ impl PreparedProductionUdpRoute {
         discovery: &DiscoveryControlHandle,
         now_ms: u64,
     ) -> Result<CertificateBoundProductionUdpRoute, ProductionUdpSessionFailure> {
-        let dispatch = match udp_session_start_dispatch(&self.route.established, &self.path, now_ms)
-        {
-            Ok(dispatch) => dispatch,
-            Err(cause) => {
-                return Err(ProductionUdpSessionFailure {
-                    prepared: self,
-                    cause,
-                });
-            }
-        };
+        let dispatch =
+            match udp_session_start_dispatch(&self.route.established, &self.path, false, now_ms) {
+                Ok(dispatch) => dispatch,
+                Err(cause) => {
+                    return Err(ProductionUdpSessionFailure {
+                        prepared: self,
+                        cause,
+                    });
+                }
+            };
         let Ok(response) = discovery
             .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
             .await
@@ -4329,7 +4509,7 @@ impl PreparedProductionUdpRoute {
                 });
             }
         };
-        self.bind_exit_session_signal(local_signal)
+        self.bind_exit_session_signal(&local_signal)
             .map_err(|failure| ProductionUdpSessionFailure {
                 prepared: failure.prepared,
                 cause: failure.cause,
@@ -4343,9 +4523,9 @@ impl PreparedProductionUdpRoute {
     /// owner.
     fn bind_exit_session_signal(
         self,
-        signal: UdpExitSessionSignal,
+        signal: &DiscoveryUdpExitSessionSignal,
     ) -> Result<CertificateBoundProductionUdpRoute, ProductionUdpCertificateFailure> {
-        let certificate_der = signal.certificate_der;
+        let certificate_der = signal.certificate_der().to_vec();
         let Some(authorization) = self.route.established.native_authorization.as_ref() else {
             return Err(ProductionUdpCertificateFailure {
                 prepared: self,
@@ -4575,6 +4755,7 @@ struct UdpSessionStartDispatch {
 fn udp_session_start_dispatch(
     route: &EstablishedRoute<ReservationSession>,
     path: &VerifiedSingleRelayPath,
+    native_connect_ip: bool,
     now_ms: u64,
 ) -> Result<UdpSessionStartDispatch, ProductionUdpRouteError> {
     let [grant] = route.relay_grants.as_slice() else {
@@ -4591,11 +4772,29 @@ fn udp_session_start_dispatch(
     {
         return Err(ProductionUdpRouteError::InvalidRoute);
     }
+    let signed_credential_delivery = if native_connect_ip {
+        let authorization = route
+            .native_authorization
+            .as_ref()
+            .ok_or(ProductionUdpRouteError::InvalidRoute)?;
+        let protocol = route
+            .owner
+            .as_ref()
+            .and_then(PreparedContextOwner::protocol)
+            .ok_or(ProductionUdpRouteError::InvalidRoute)?;
+        protocol
+            .coordinator
+            .sign_native_route_credential_delivery(authorization, now_ms)
+            .map_err(|_| ProductionUdpRouteError::InvalidRoute)?
+    } else {
+        Vec::new()
+    };
     let start = UdpSessionStartRequest::new(
         route.signed_exit_reservation.clone(),
         ReservationSession::signed_relay_reservation(grant).to_vec(),
         confirmation.signed_confirmation.clone(),
         confirmation.signed_receipt.clone(),
+        signed_credential_delivery,
     )
     .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
     let confirmation_envelope = decode_canonical::<SignedEnvelope>(
@@ -4644,7 +4843,7 @@ fn udp_session_start_dispatch(
 fn verified_udp_exit_session_signal(
     encoded: &[u8],
     path: &VerifiedSingleRelayPath,
-) -> Result<UdpExitSessionSignal, ProductionUdpRouteError> {
+) -> Result<DiscoveryUdpExitSessionSignal, ProductionUdpRouteError> {
     let signal =
         decode_canonical::<DiscoveryUdpExitSessionSignal>(encoded, MAX_CONTROL_MESSAGE_SIZE)
             .map_err(|_| ProductionUdpRouteError::SessionStart)?;
@@ -4652,10 +4851,37 @@ fn verified_udp_exit_session_signal(
         || signal.reservation_id() != path.reservation_id()
         || signal.route_context_id() != path.route_context_id()
         || signal.path_id() != path.path_id()
+        || signal.exit_native_instance_id().len() != 32
+        || signal
+            .exit_native_instance_id()
+            .iter()
+            .all(|byte| *byte == 0)
     {
         return Err(ProductionUdpRouteError::SessionStart);
     }
-    UdpExitSessionSignal::from_certificate_der(signal.certificate_der().to_vec())
+    Ok(signal)
+}
+
+/// Commit the sole data Relay and obtain the native Exit readiness bound to that exact path.
+async fn start_native_udp_exit_session(
+    route: &ProductionRoute,
+    path: &VerifiedSingleRelayPath,
+    discovery: &DiscoveryControlHandle,
+    now_ms: u64,
+) -> Result<DiscoveryUdpExitSessionSignal, ProductionUdpRouteError> {
+    let dispatch = udp_session_start_dispatch(&route.established, path, true, now_ms)?;
+    let response = discovery
+        .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
+        .await
+        .map_err(|_| ProductionUdpRouteError::SessionStart)?;
+    let encoded_signal = accepted_datapath_response(
+        &dispatch.request,
+        &response,
+        &dispatch.relay,
+        RouteSetupPhase::Committing,
+    )
+    .map_err(|_| ProductionUdpRouteError::SessionStart)?;
+    verified_udp_exit_session_signal(&encoded_signal, path)
 }
 
 struct MptcpSessionStartDispatch {
@@ -10809,7 +11035,7 @@ mod tests {
             .expect("real route yields one verified UDP path");
         let acquire = client_udp_socket_request(&established, &verified_path)
             .expect("real route yields one exact helper socket request");
-        let start = udp_session_start_dispatch(&established, &verified_path, NOW_MS)
+        let start = udp_session_start_dispatch(&established, &verified_path, true, NOW_MS)
             .expect("real route yields one exact UDP session start");
         assert_eq!(start.relay.node_id, *verified_path.relay_node_id());
         assert_eq!(
@@ -10848,6 +11074,7 @@ mod tests {
             *verified_path.route_context_id(),
             verified_path.path_id(),
             vec![0x30, 1, 2],
+            [9; 32],
         )
         .expect("bounded Exit signal");
         let exit_signal = encode_canonical(&exit_signal, MAX_CONTROL_MESSAGE_SIZE)
@@ -10855,7 +11082,7 @@ mod tests {
         assert_eq!(
             verified_udp_exit_session_signal(&exit_signal, &verified_path)
                 .expect("exact Exit signal")
-                .certificate_der,
+                .certificate_der(),
             [0x30, 1, 2]
         );
         let wrong_path_signal = DiscoveryUdpExitSessionSignal::new(
@@ -10863,6 +11090,7 @@ mod tests {
             *verified_path.route_context_id(),
             verified_path.path_id() + 1,
             vec![0x30, 1, 2],
+            [9; 32],
         )
         .expect("bounded wrong-path Exit signal");
         let wrong_path_signal = encode_canonical(&wrong_path_signal, MAX_CONTROL_MESSAGE_SIZE)

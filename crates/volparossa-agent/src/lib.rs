@@ -677,6 +677,17 @@ async fn run_client_udp_ingress(
                 continue;
             }
         };
+        if Box::pin(routes.ensure_general_udp(&config, &discovery, &helper))
+            .await
+            .is_err()
+        {
+            state.write().await.log(
+                LogLevel::Warn,
+                "INGRESS_UDP_ROUTE_UNAVAILABLE",
+                unix_millis(),
+            );
+            continue;
+        }
         if Box::pin(routes.activate_udp_ingress(ingress, &policy, now_ms))
             .await
             .is_err()
@@ -721,6 +732,7 @@ async fn run_client_udp_ingress(
                 .await
                 .log(LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis());
         }
+        routes.disconnect().await;
     }
 }
 

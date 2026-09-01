@@ -121,6 +121,7 @@ use crate::{
     helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
     mpquic_runtime::{
         ExitMpquicPathAuthorization, ProductionMpquicExitPreflight, start_production_mpquic_exit,
+        start_production_single_path_udp_exit,
     },
     mptcp_flow_runtime::{
         ProductionMptcpExitCleanup, ProductionMptcpExitCompletion, ProductionMptcpExitRuntime,
@@ -8244,16 +8245,16 @@ impl DiscoveryRuntime {
         let capability =
             decoded_signed_payload::<ClientSessionCapability>(&finalize.client_session_capability)?;
 
-        // In-process UDP and kernel-MPTCP own a fresh per-route incarnation. Userspace MPQUIC
-        // must instead sign the real native instance observed during preflight.
+        // Kernel MPTCP owns a fresh per-route incarnation. Both userspace native QUIC modes must
+        // instead sign the real process instance observed during preflight.
         let native_mpquic = match capability.allowed_transports.as_slice() {
+            [transport] if *transport == Transport::TcpMptcp as i32 => false,
             [transport]
                 if *transport == Transport::UdpSinglePath as i32
-                    || *transport == Transport::TcpMptcp as i32 =>
+                    || *transport == Transport::MultipathQuic as i32 =>
             {
-                false
+                true
             }
-            [transport] if *transport == Transport::MultipathQuic as i32 => true,
             _ => return None,
         };
         if let Some(existing) = self.prepared_production_exit_routes.get(&route_context_id) {
@@ -8440,6 +8441,10 @@ impl DiscoveryRuntime {
 
     /// Commit the exact confirmed Exit helper route, adopt its socket and return readiness only
     /// after a real Quinn listener owns it.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native and DNS-only UDP activation retain affine cleanup in one transaction"
+    )]
     async fn start_production_udp_exit_session(
         &mut self,
         encoded_start: &[u8],
@@ -8453,7 +8458,11 @@ impl DiscoveryRuntime {
         )
         .ok()?;
         let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)?;
+        let signed_policy_hash = fixed_bytes::<32>(&scope.exit.policy_hash)?;
         let policy = state.read().await.active_policy(now_ms)?;
+        if policy.policy_hash() != &signed_policy_hash {
+            return None;
+        }
         let route = self
             .prepared_production_exit_routes
             .get(&route_context_id)?;
@@ -8471,6 +8480,7 @@ impl DiscoveryRuntime {
             || route.bundle.accepted().maximum_paths() != 1
             || route.expires_at_ms <= now_ms
             || route.commit.is_none()
+            || route.mpquic_preflight.is_none()
             || !exact_activation
         {
             return None;
@@ -8488,57 +8498,106 @@ impl DiscoveryRuntime {
                 now_ms,
             )
             .ok()?;
-        let authorization = self
-            .exit_service
-            .as_mut()?
-            .take_native_route_authorization(&native_scope, now_ms)
-            .ok()?;
         let commit = route.commit.take()?;
-        let limits =
-            DatagramLimits::new(volparossa_udp::MAX_UDP_PAYLOAD_BYTES, 1_000_000, 1_000_000)
+        let path = activated.into_verified_path();
+        if start.uses_native_connect_ip() {
+            let credential = self
+                .exit_service
+                .as_mut()?
+                .take_native_route_authorization_with_credential(
+                    &native_scope,
+                    start.signed_credential_delivery(),
+                    now_ms,
+                )
                 .ok()?;
-        let authorization_timeout = Duration::from_secs(
-            self.config
-                .udp
-                .idle_timeout_seconds
-                .clamp(1, TUNNEL_SETUP_TIMEOUT_SECONDS),
-        );
-        let result = start_production_udp_exit(
-            self.helper.clone(),
-            route.helper_owner,
-            commit,
-            activated.into_verified_path(),
-            authorization,
-            policy,
-            authorization_timeout,
-            limits,
-            now_ms,
-        )
-        .await;
-        let (active, signal) = match result {
-            Ok(active) => active,
-            Err(failure) => {
-                if let Some(cleanup) = failure.into_cleanup() {
-                    tokio::spawn(async move {
-                        let _ = cleanup.destroy().await;
-                    });
-                }
+            let certificate_der = route_certificate_der(credential.authorization()).ok()?;
+            let native_path = ExitMpquicPathAuthorization::new(
+                path.path_id(),
+                start.signed_relay_reservation().to_vec(),
+            )?;
+            let result = start_production_single_path_udp_exit(
+                route.mpquic_preflight.take()?,
+                self.helper.clone(),
+                route.helper_owner,
+                commit,
+                credential,
+                native_path,
+                path,
+                policy,
+                signed_policy_hash,
+                Duration::from_secs(self.config.udp.idle_timeout_seconds),
+                certificate_der,
+                now_ms,
+            )
+            .await;
+            let Ok((active, signal)) = result else {
                 let _ = self
                     .exit_service
                     .as_mut()
                     .and_then(|service| service.release(route.bundle.reservation_id()).ok());
                 return None;
-            }
-        };
-        let encoded = encode_canonical(
-            &signal,
-            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
-        )
-        .ok()?;
-        tokio::spawn(async move {
-            let _ = active.run(now_ms).await;
-        });
-        Some(encoded)
+            };
+            let encoded = encode_canonical(
+                &signal,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .ok()?;
+            tokio::spawn(async move {
+                let _ = active.run(now_ms).await;
+            });
+            Some(encoded)
+        } else {
+            let authorization = self
+                .exit_service
+                .as_mut()?
+                .take_native_route_authorization(&native_scope, now_ms)
+                .ok()?;
+            let limits =
+                DatagramLimits::new(volparossa_udp::MAX_UDP_PAYLOAD_BYTES, 1_000_000, 1_000_000)
+                    .ok()?;
+            let authorization_timeout = Duration::from_secs(
+                self.config
+                    .udp
+                    .idle_timeout_seconds
+                    .clamp(1, TUNNEL_SETUP_TIMEOUT_SECONDS),
+            );
+            let result = start_production_udp_exit(
+                self.helper.clone(),
+                route.helper_owner,
+                commit,
+                path,
+                authorization,
+                policy,
+                authorization_timeout,
+                limits,
+                now_ms,
+            )
+            .await;
+            let (active, signal) = match result {
+                Ok(active) => active,
+                Err(failure) => {
+                    if let Some(cleanup) = failure.into_cleanup() {
+                        tokio::spawn(async move {
+                            let _ = cleanup.destroy().await;
+                        });
+                    }
+                    let _ = self
+                        .exit_service
+                        .as_mut()
+                        .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+                    return None;
+                }
+            };
+            let encoded = encode_canonical(
+                &signal,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .ok()?;
+            tokio::spawn(async move {
+                let _ = active.run(now_ms).await;
+            });
+            Some(encoded)
+        }
     }
 
     /// Coalesce the same Client-signed MPQUIC proof set from every selected carrying Relay.
