@@ -2839,16 +2839,16 @@ fn timed_out_operation_fences_queue_and_drop_never_waits_forever_for_executor() 
     )
     .expect("start actor");
     let first = actor
-        .register_intent(durable_intent(11))
+        .register_intent_until(durable_intent(11), io_deadline())
         .expect("register first intent");
     actor
-        .arm_prepare(&first, durable_anchor(11))
+        .arm_prepare_until(&first, durable_anchor(11), io_deadline())
         .expect("arm first intent");
     let second = actor
-        .register_intent(durable_intent(12))
+        .register_intent_until(durable_intent(12), io_deadline())
         .expect("register second intent");
     actor
-        .arm_prepare(&second, durable_anchor(12))
+        .arm_prepare_until(&second, durable_anchor(12), io_deadline())
         .expect("arm second intent");
     let client = actor.client.as_ref().expect("actor client");
     let first_deadline = io_deadline();
@@ -2857,7 +2857,7 @@ fn timed_out_operation_fences_queue_and_drop_never_waits_forever_for_executor() 
         .expect("admit blocked recovery");
     gate.wait_entered();
     let second_reply = client
-        .confirm_cleanup_pending(second.coordinates)
+        .confirm_cleanup_pending_until(second.coordinates, io_deadline())
         .expect("queue second recovery");
     assert_eq!(first_reply.wait(), Err(DurableOwnershipError::Ambiguous));
     assert_eq!(
@@ -2886,17 +2886,17 @@ fn timed_out_operation_fences_queue_and_drop_never_waits_forever_for_executor() 
     )
     .expect("start second actor");
     let key = second_actor
-        .register_intent(durable_intent(13))
+        .register_intent_until(durable_intent(13), io_deadline())
         .expect("register drop fixture");
     second_actor
-        .arm_prepare(&key, durable_anchor(13))
+        .arm_prepare_until(&key, durable_anchor(13), io_deadline())
         .expect("arm drop fixture");
     drop(
         second_actor
             .client
             .as_ref()
             .expect("actor client")
-            .confirm_cleanup_pending(key.coordinates)
+            .confirm_cleanup_pending_until(key.coordinates, io_deadline())
             .expect("admit drop fixture"),
     );
     second_gate.wait_entered();
