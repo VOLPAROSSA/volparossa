@@ -261,7 +261,7 @@ impl ForwardedPreselectionFreshnessProof {
 }
 
 impl PreselectionActorBinding {
-    fn validate(&self, field: &'static str) -> Result<(), ProtocolError> {
+    pub(crate) fn validate(&self, field: &'static str) -> Result<(), ProtocolError> {
         let node_id = fixed_array::<KEY_LENGTH>(&self.node_id, field)?;
         let public_key = fixed_array::<KEY_LENGTH>(&self.public_key, field)?;
         if node_id.iter().all(|byte| *byte == 0)
@@ -366,7 +366,7 @@ impl PreselectionObservationRequest {
 }
 
 impl ObservationNetworkPrefix {
-    fn validated_normalized(&self) -> Result<ObservedNetworkPrefix, ProtocolError> {
+    pub(crate) fn validated_normalized(&self) -> Result<ObservedNetworkPrefix, ProtocolError> {
         let family = ObservationAddressFamily::try_from(self.address_family)
             .map_err(|_| ProtocolError::InvalidField("observation network prefix"))?;
         let prefix =

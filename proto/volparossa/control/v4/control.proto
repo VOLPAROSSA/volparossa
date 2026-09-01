@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package volparossa.control.v4;
 
-// Hard-incompatible v4 schema evidence for SignedEnvelope and the eighteen
+// Hard-incompatible v4 schema evidence for SignedEnvelope and the twenty-five
 // signed ControlPayload messages implemented by volparossa-protocol.
 //
 // This file deliberately does NOT specify the hand-written discovery,
@@ -34,6 +34,13 @@ enum ControlMessageType {
   CONTROL_MESSAGE_TYPE_EXIT_CONFIRMATION_RECEIPT = 16;
   CONTROL_MESSAGE_TYPE_PRESELECTION_OBSERVATION_RECEIPT = 17;
   CONTROL_MESSAGE_TYPE_FORWARDED_PRESELECTION_ATTESTATION = 18;
+  CONTROL_MESSAGE_TYPE_NATIVE_PROBE_PERMIT_REQUEST = 19;
+  CONTROL_MESSAGE_TYPE_NATIVE_PROBE_PERMIT = 20;
+  CONTROL_MESSAGE_TYPE_NATIVE_PROBE_EXIT_READY = 21;
+  CONTROL_MESSAGE_TYPE_NATIVE_PROBE_RELAY_READY = 22;
+  CONTROL_MESSAGE_TYPE_NATIVE_PROBE_START = 23;
+  CONTROL_MESSAGE_TYPE_NATIVE_PROBE_EXIT_RESULT = 24;
+  CONTROL_MESSAGE_TYPE_NATIVE_PROBE_RELAY_RESULT = 25;
 }
 
 enum Transport {
@@ -180,6 +187,158 @@ message ForwardedPreselectionAttestation {
   uint64 observed_at_ms = 9;
   uint64 valid_until_ms = 10;
   bytes nonce = 11;
+}
+
+// Endpoint-free exact set. data_relays contains the control Relay first plus
+// one to eight alternatives (two to nine candidates total). This is a bounded
+// preselection pool; later route admission still selects at most eight paths.
+message NativeProbeCandidateSet {
+  uint32 protocol_version = 1;
+  bytes preselection_batch_id = 2;
+  PreselectionActorBinding control = 3;
+  PreselectionActorBinding exit = 4;
+  repeated PreselectionActorBinding data_relays = 5;
+  Transport transport = 6;
+  ObservationAddressFamily address_family = 7;
+  uint64 policy_version = 8;
+  bytes policy_hash = 9;
+  uint64 policy_expires_at_ms = 10;
+}
+
+message NativeProbePathScope {
+  bytes attempt_id = 1;
+  bytes probe_id = 2;
+  bytes candidate_set_hash = 3;
+  uint32 candidate_ordinal = 4;
+  PreselectionActorBinding data_relay = 5;
+  PreselectionActorBinding control = 6;
+  PreselectionActorBinding exit = 7;
+  bytes client_session_id = 8;
+  bytes client_session_public_key = 9;
+  Transport transport = 10;
+  ObservationAddressFamily address_family = 11;
+  uint64 policy_version = 12;
+  bytes policy_hash = 13;
+  uint64 policy_expires_at_ms = 14;
+  bytes challenge_hash = 15;
+  uint64 attempt_expires_at_ms = 16;
+}
+
+// Permit exchange is endpoint-free and binds one exact attempt, candidate set,
+// ordinal, data Relay, forwarded Exit, policy, family, transport and expiry.
+message NativeProbePermitRequest {
+  NativeProbePathScope scope = 1;
+  uint64 created_at_ms = 2;
+  uint64 expires_at_ms = 3;
+  bytes nonce = 4;
+}
+
+message NativeProbePermit {
+  bytes request_hash = 1;
+  NativeProbePathScope scope = 2;
+  uint64 issued_at_ms = 3;
+  uint64 expires_at_ms = 4;
+  bytes nonce = 5;
+}
+
+// prepared_lease_commitment contains a secret random 256-bit helper lease
+// handle under a domain-separated digest. It is not a deterministic endpoint
+// digest and does not disclose the helper authority handle. All four endpoints
+// of a path use route_context_id == NativeProbePathScope.probe_id. Cross-node
+// endpoints use different helper runtimes; both Relay endpoints use one Relay
+// helper runtime. All four roles use distinct endpoint keys, underlay IP:port
+// tuples, and lease commitments.
+message NativeProbeEndpointBinding {
+  bytes helper_runtime_id = 1;
+  bytes route_context_id = 2;
+  WireguardEndpoint endpoint = 3;
+  bytes prepared_lease_commitment = 4;
+}
+
+// Delivered only to the exact data Relay. Neither the client nor control Relay
+// receives these RelayExit or Exit endpoint bytes.
+message NativeProbeExitReady {
+  bytes permit_hash = 1;
+  NativeProbePathScope scope = 2;
+  NativeProbeEndpointBinding relay_exit_endpoint = 3;
+  NativeProbeEndpointBinding exit_endpoint = 4;
+  uint64 ready_at_ms = 5;
+  uint64 expires_at_ms = 6;
+  bytes nonce = 7;
+}
+
+// Client-visible readiness contains only the RelayClient endpoint and a
+// high-entropy hash of the hidden, Exit-signed readiness message.
+message NativeProbeRelayReady {
+  bytes permit_hash = 1;
+  bytes exit_ready_hash = 2;
+  NativeProbePathScope scope = 3;
+  NativeProbeEndpointBinding relay_client_endpoint = 4;
+  uint64 ready_at_ms = 5;
+  uint64 expires_at_ms = 6;
+  bytes nonce = 7;
+}
+
+// Delivered only to the exact data Relay; the Exit never receives the Client
+// endpoint or its prepared-lease commitment.
+message NativeProbeStart {
+  bytes permit_hash = 1;
+  bytes relay_ready_hash = 2;
+  NativeProbePathScope scope = 3;
+  NativeProbeEndpointBinding client_endpoint = 4;
+  uint64 started_at_ms = 5;
+  uint64 expires_at_ms = 6;
+  bytes nonce = 7;
+}
+
+// route_context_id must exactly equal NativeProbePathScope.probe_id.
+message NativeProbeLeaseProof {
+  bytes helper_runtime_id = 1;
+  bytes route_context_id = 2;
+  bytes prepared_lease_commitment = 3;
+  uint64 latest_handshake_unix = 4;
+  uint64 received_bytes_after_baseline = 5;
+  uint64 transmitted_bytes_after_baseline = 6;
+}
+
+message NativeProbeForwardingProof {
+  uint64 client_to_exit_packets_after_baseline = 1;
+  uint64 client_to_exit_bytes_after_baseline = 2;
+  uint64 exit_to_client_packets_after_baseline = 3;
+  uint64 exit_to_client_bytes_after_baseline = 4;
+  uint64 terminal_drop_packets_after_baseline = 5;
+  uint64 terminal_drop_bytes_after_baseline = 6;
+}
+
+// Results carry no WireGuard or underlay endpoint. challenge_response is the
+// exact 256-bit random value first delivered over the native dataplane; merely
+// knowing the permit's challenge hash cannot fabricate it.
+message NativeProbeExitResult {
+  bytes permit_hash = 1;
+  bytes exit_ready_hash = 2;
+  NativeProbePathScope scope = 3;
+  bytes challenge_response = 4;
+  ObservationNetworkPrefix observed_network_prefix = 5;
+  NativeProbeLeaseProof exit_lease = 6;
+  uint64 measured_at_ms = 7;
+  uint64 expires_at_ms = 8;
+  bytes nonce = 9;
+}
+
+message NativeProbeRelayResult {
+  bytes permit_hash = 1;
+  bytes relay_ready_hash = 2;
+  bytes start_hash = 3;
+  NativeProbePathScope scope = 4;
+  bytes challenge_hash = 5;
+  NativeProbeLeaseProof relay_client_lease = 6;
+  NativeProbeLeaseProof relay_exit_lease = 7;
+  NativeProbeForwardingProof forwarding = 8;
+  bytes signed_exit_result = 9;
+  bytes exit_result_hash = 10;
+  uint64 measured_at_ms = 11;
+  uint64 expires_at_ms = 12;
+  bytes nonce = 13;
 }
 
 message AdvertisementRoles {

@@ -579,6 +579,14 @@ impl AdvertisementPayloadHash {
         value.iter().any(|byte| *byte != 0).then_some(Self(value))
     }
 
+    /// Append this exact authenticated digest to an endpoint-free native-probe commitment.
+    ///
+    /// This purpose-limited writer avoids introducing a general byte accessor for the opaque
+    /// equality token. The digest remains non-authoritative and never reveals an endpoint.
+    pub(crate) fn append_native_probe_commitment(&self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.0);
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(value: [u8; 32]) -> Self {
         Self::from_fresh_fingerprint(value).expect("non-zero advertisement payload hash")

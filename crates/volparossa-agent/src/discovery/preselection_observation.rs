@@ -5521,7 +5521,7 @@ mod tests {
             1
         );
         assert_eq!(token_surface.matches("#[cfg(test)]").count(), 2);
-        assert_eq!(token_surface.matches("fn ").count(), 4);
+        assert_eq!(token_surface.matches("fn ").count(), 5);
         assert_eq!(
             token_surface
                 .matches("impl AdvertisementPayloadHash {")
@@ -5552,6 +5552,12 @@ mod tests {
         );
         assert_eq!(token_surface.matches("Self(value)").count(), 1);
         assert!(!token_surface.contains("pub(crate) fn from_fresh_fingerprint("));
+        assert_eq!(
+            token_surface
+                .matches("pub(crate) fn append_native_probe_commitment(")
+                .count(),
+            1
+        );
         assert_eq!(
             token_surface
                 .matches("AdvertisementPayloadHash([REDACTED])")

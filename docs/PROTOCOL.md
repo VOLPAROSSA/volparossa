@@ -6,7 +6,7 @@ every future version are rejected without fallback. Historical schemas are retai
 archaeology and refusal tests; they are not registered or negotiated.
 
 The checked-in [control-v4 schema](../proto/volparossa/control/v4/control.proto) covers
-`SignedEnvelope` and all eighteen signed `ControlPayload` messages. The separate checked-in
+`SignedEnvelope` and all twenty-five signed `ControlPayload` messages. The separate checked-in
 [discovery-v4 schema](../proto/volparossa/discovery/v4/discovery.proto) mirrors the hand-written
 advertisement, exit-forwarding, and datapath-relay request-response wrappers. Descriptor and fuzz
 gates verify tag/enum parity; the two forwarding-hop Rust marker types remain distinct even though
@@ -95,6 +95,13 @@ The v4 discriminators are fixed:
 | 16 | `ExitConfirmationReceipt` | exit-signed positive acknowledgement of exact confirmation bytes |
 | 17 | `PreselectionObservationReceipt` | actor-signed response to one exact unsigned preselection challenge |
 | 18 | `ForwardedPreselectionAttestation` | control-signed public-prefix claim around one exact exit receipt |
+| 19 | `NativeProbePermitRequest` | endpoint-free request for one exact native candidate path |
+| 20 | `NativeProbePermit` | exit-signed endpoint-free permit for that exact path |
+| 21 | `NativeProbeExitReady` | Exit-to-data-Relay readiness containing only the Relay-Exit and Exit endpoints |
+| 22 | `NativeProbeRelayReady` | data-Relay-to-client readiness containing only the Relay-Client endpoint |
+| 23 | `NativeProbeStart` | client-to-data-Relay start containing only the Client endpoint |
+| 24 | `NativeProbeExitResult` | endpoint-free Exit result bound to the exact challenge and local lease |
+| 25 | `NativeProbeRelayResult` | endpoint-free data-Relay result wrapping the exact Exit result and local proofs |
 
 `NodeAdvertisement` contains roles, transport/family flags, bounded capacity counters, coarse
 network/operator hints, quality claims, policy version/hash, and lifetime. It contains no reusable
@@ -254,9 +261,48 @@ zero proximity and egress-quality scores, and `network_address_usable = false`. 
 `locally_blocked = false` means only that no local blocklist hit was supplied, not that policy was
 proved. The existing hard filter therefore rejects the batch until a separate native-path sampler
 adds dataplane evidence. The actor calls this join/mint and returns only opaque
-`PreparedPreselectionEvidence`; no downstream route orchestrator consumes it, and it grants no
-admission, reservation, route or datapath authority. The server-side responders and forwarding
-wrapper operate independently of this client value.
+`PreparedPreselectionEvidence`. A crate-private, callerless native-preselection child can consume
+that value through its test seam while the five-second receipts are still live, but no production
+runtime invokes it. Neither the Prepared handoff nor the child grants admission, reservation,
+route, usability or datapath authority. The server-side responders and forwarding wrapper operate
+independently of this client value.
+
+### Callerless native-preselection contract foundation
+
+Tags 19 through 25 define an endpoint-separated native-probe transcript and affine verification
+states. The private client owner consumes the exact Prepared handoff before its signed five-second
+receipt window closes, discards the control-plane reachability observations and mints a distinct
+attempt bounded to at most 30 seconds by policy and actor expiry. This does not extend or reinterpret
+the original receipt lifetime. One candidate set contains the control Relay plus one to eight other
+data Relays, for two to nine preselection candidates total; later route selection still admits at
+most eight paths.
+
+The Permit request and Permit are endpoint-free and bind the exact attempt, candidate set, path
+ordinal, data Relay, Exit, transport, native family, policy and expiry. Exit readiness is visible
+only to the selected data Relay and contains the Relay-Exit and Exit endpoints. Client-visible Relay
+readiness contains only the Relay-Client endpoint. Start exposes the Client endpoint only to that
+data Relay. Both result messages are endpoint-free. Consequently the client/control side never
+receives Relay-Exit or Exit-underlay endpoint bytes, and the Exit never receives the Client's helper
+endpoint or prepared-lease commitment.
+
+Every endpoint binding and lease proof uses `route_context_id == scope.probe_id`; the same route
+context spans the four helper-local leases. Relay-Client and Relay-Exit must have one Relay helper
+runtime, while Client, Relay and Exit runtimes are distinct. The data-Relay affine transition sees
+all four bindings and rejects every cross-role collision in helper runtime where nodes must differ,
+WireGuard public key, exact `(underlay IP, listen port)` socket tuple, or 32-byte prepared-lease
+commitment. It alone consumes verified Exit readiness plus both local prepared bindings to sign
+Relay readiness, then consumes the verified Start, verified Exit result, both Relay lease proofs and
+forwarding proof exactly once to sign the Relay result. Phase order is established by exact hashes
+and affine states, never by ordering wall clocks owned by different nodes; each signed message still
+enforces its own bounded lifetime, expiry ceiling and the normal clock-skew policy. Replay failures
+and cross-binding substitutions roll back only the newly admitted entries and fail closed.
+
+This is deliberately a callerless contract/test foundation. It has no production runtime caller,
+typed Exit actor producer, helper provisioning, challenge delivery, live WireGuard probe, measured
+readiness/capacity, terminal helper-evidence consumer, usability promotion or route admission. The
+generic wire structs and generic envelope signer are not production authority. In particular, this
+foundation cannot set `network_address_usable = true`; the existing hard filter continues to reject
+its output.
 
 Discovery composes A1c wire protocols without changing A0 or adding a protobuf wrapper.
 `/volparossa/preselection-observation/4` carries an exact canonical Relay or forwarded
@@ -368,8 +414,10 @@ lineage; it is not an external-network measurement. This is still control-plane 
 production only: it makes no Fresh, readiness, capacity, reservation, route or datapath claim.
 
 A production discovery owner now drives the snapshot, native-agnostic sampler, exact affine
-request/bind lineage, A1a/A1c join and opaque Prepared handoff. There is still no downstream route
-orchestrator, native dataplane-usability proof, route admission, reservation, or datapath caller.
+request/bind lineage, A1a/A1c join and opaque Prepared handoff. The private callerless child and v4
+native-probe contract can consume that handoff only through a test seam; typed Exit producers, a
+production runtime caller, helper provisioning, challenge transport, live dataplane evidence,
+measured readiness/capacity, usability promotion, route admission and reservation are still absent.
 The fixed alpha score remains
 **11/100 (11%)**.
 

@@ -207,8 +207,9 @@ production deliberately publishes no usable Relay/Exit capability before datapla
 proved, so no successful production response or readiness claim follows from this lifecycle
 connection yet. The control-signed prefix wrapper, actor-owned A1a attempt, exact A1a/A1c join and
 opaque prepared-evidence handoff are implemented and driven by the production discovery actor.
-There is still no downstream route-orchestrator caller. The private Fresh batch deliberately lacks
-native dataplane-address usability and therefore grants no capacity or route authority.
+A private callerless native-preselection child can consume that exact handoff through its test seam,
+but no production runtime or route orchestrator invokes it. The private Fresh batch deliberately
+lacks native dataplane-address usability and therefore grants no capacity or route authority.
 
 The agent now contains an actor-owned A1a attempt lineage. Snapshot construction privately mints
 an endpoint-free, non-derived subject set from the exact freshly revalidated stored signed
@@ -400,7 +401,8 @@ injected public endpoint lineage and is not external-network evidence. Neither r
 claims origin, RTT, capacity, Fresh evidence, reservation, route, admission, readiness, or datapath
 authority. The production agent supplies the policy and permanent signer, and its discovery actor
 now owns the client-side sampler, exact request/bind lineage, exact-set join and private
-Fresh-evidence mint. That chain still has no downstream route-orchestrator caller.
+Fresh-evidence mint. Its callerless native-preselection child and v4 contract foundation still have
+no production runtime or route-orchestrator caller.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than
@@ -413,8 +415,9 @@ and transcript proofs, but deliberately cannot prove native dataplane usability.
 batch is still subject to the existing observed-origin diversity hard filter before route planning.
 
 An actor-invoked private boundary consumes one non-cloneable `FreshEvidenceBatch` into opaque
-`PreparedPreselectionEvidence`; the separate downstream phase-A planner can later consume that
-prepared value before it builds a `ProspectiveRoutePlan`. Its private production mint requires the
+`PreparedPreselectionEvidence`. A separate crate-private native-preselection child can consume that
+prepared value only through its test seam; the downstream phase-A planner remains unconnected. The
+private production mint requires the
 exact retained A1a candidate set and one purpose-consumed A1c transport plus cryptographic
 transcript for every request. It rejects count, order, request hash, actor, forwarded-control,
 transport, family, wall-window and monotonic-window substitution before minting. The batch has a non-zero opaque ID, contains exactly the 1-200
@@ -436,10 +439,26 @@ cannot exceed freshness, policy, advertisement or capability expiry.
 The proof mint records one successful reachability sample, no measured p25, neutral zero proximity
 and egress-quality scores, and no native dataplane-address proof. `locally_blocked = false` means
 only that this proof input supplied no local blocklist hit; it is not affirmative policy evidence.
-Consequently the existing hard filter rejects every such batch until a separate native-path
-sampler supplies the missing dataplane evidence. The discovery actor calls the bridge only through
-the opaque Prepared handoff; no downstream route-orchestrator consumes it, and it grants no
-reservation or route authority.
+Consequently the existing hard filter rejects every such batch until an actual helper-backed
+native-path sampler supplies the missing dataplane evidence. The discovery actor calls the bridge
+only through the opaque Prepared handoff; no downstream route-orchestrator consumes it, and it
+grants no reservation or route authority.
+
+The callerless child consumes Prepared evidence while its signed five-second receipts remain live,
+then discards all control-plane reachability observations and mints an independently expiring
+native attempt of at most 30 seconds. It binds an endpoint-free set of two to nine candidates—the
+control Relay plus one to eight alternatives—and one affine authority per exact Relay-to-Exit path.
+This is only a client-owner, v4 wire/verifier and data-Relay affine-producer foundation. Endpoint
+visibility stays role-separated: the client sees only Relay-Client readiness, while the selected
+data Relay alone verifies the hidden Relay-Exit and Exit endpoints and all four prepared-binding
+topology before signing its result. The terminal client state relies on that exact affine signed
+chain for hidden topology and does not itself create or independently attest helper evidence.
+
+No typed Exit producer, production caller, helper provisioning, one-shot challenge delivery, live
+WireGuard probe, measured readiness/capacity, terminal helper-evidence consumer, usability promotion
+or route admission exists. Generic wire values and the generic envelope signer are not production
+actor authority. The child therefore cannot set `network_address_usable = true`, and the reported
+usable production candidate count remains zero.
 
 Phase A still selects the exclusively forwarded exit first. It then uses only hard-filtered local
 peer evidence and the existing randomized 70/20/10 score bands to choose a seed-dependent
@@ -500,7 +519,8 @@ requires no helper, network-state or journal cleanup because reservation dispatc
 The older scalar complete-path second stage remains only as a clearly dormant test boundary; the
 new plan neither calls nor trusts it. C2c supplies the private ownership and actor-resolution link
 to the existing phase-B transaction, but no production route orchestrator consumes the new opaque
-Prepared handoff or drives the real probe verifier/handler. Consequently the real
+Prepared handoff or drives the callerless native-probe contract with real helper/Exit providers.
+Consequently the real
 resolver/transport path is not invoked by phase A in production. C2c adds no new wire,
 provider or helper implementation, so it causes no production network/host mutation, and the
 reported usable route-candidate count deliberately remains zero.

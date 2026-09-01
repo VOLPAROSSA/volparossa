@@ -6,6 +6,8 @@
 //! that independent evidence before selection can advance. Missing evidence fails closed; this
 //! module never substitutes neutral scores or advertised capacity for local observations.
 
+mod native_preselection;
+
 use std::{collections::HashSet, time::Duration};
 
 use crate::discovery::{
@@ -825,8 +827,9 @@ struct JoinedPreselectionFreshEvidence {
 /// Opaque, affine handoff from the discovery owner to the later native-path sampler.
 ///
 /// This wrapper deliberately exposes neither the retained actor snapshot nor the private Fresh
-/// batch. It grants no route, reservation, dispatch, or dataplane authority. Only this child
-/// module may consume it once native dataplane-address evidence is available.
+/// batch. It grants no route, reservation, dispatch, or dataplane authority. Only the private
+/// native-preselection child may consume it to mint a bounded probe attempt; the handoff itself
+/// never establishes dataplane-address usability.
 #[must_use = "prepared preselection evidence must remain with its route owner"]
 pub(crate) struct PreparedPreselectionEvidence {
     snapshot: RouteCandidateSnapshot,
@@ -4791,6 +4794,101 @@ mod tests {
                 .iter()
                 .all(|evidence| !evidence.network_address_usable)
         );
+    }
+
+    #[test]
+    fn native_owner_consumes_live_a1_receipts_then_mints_an_independent_bounded_attempt() {
+        let (snapshot, _) = snapshot_fixture();
+        let completed = preselection_freshness_attempt(
+            snapshot,
+            exact_preselection_freshness_records(),
+            ProtocolTransport::TcpMptcp,
+            ObservationAddressFamily::Ipv4,
+            EVIDENCE_BATCH_BYTES,
+            Bandwidth::new(80, 80).expect("configured ceiling"),
+        );
+        let Ok((prepared, _gate)) = prepare_preselection_evidence_at(completed, NOW_MS + 500)
+        else {
+            panic!("exact A1 proofs must prepare opaque evidence");
+        };
+        let minted_at_ms = NOW_MS + 4_999;
+        let minted_at = Instant::now();
+        let owner = native_preselection::begin_native_preselection_for_test(
+            prepared,
+            minted_at_ms,
+            minted_at,
+        )
+        .expect("live handoff must mint native owner");
+        let candidate_set = owner.candidate_set_for_test();
+        assert_eq!(candidate_set.preselection_batch_id, EVIDENCE_BATCH_BYTES);
+        assert_eq!(candidate_set.data_relays.len(), 3);
+        assert_eq!(
+            candidate_set.data_relays.first(),
+            candidate_set.control.as_ref()
+        );
+        assert_eq!(candidate_set.transport, ProtocolTransport::TcpMptcp as i32);
+        assert_eq!(
+            candidate_set.address_family,
+            ObservationAddressFamily::Ipv4 as i32
+        );
+        assert_eq!(candidate_set.policy_version, 7);
+        assert_eq!(candidate_set.policy_hash, POLICY_BYTES);
+
+        let expected_expiry = minted_at_ms + volparossa_protocol::MAX_NATIVE_PROBE_LIFETIME_MS;
+        let (attempt_expiry, monotonic_expiry) = owner.deadline_for_test();
+        assert_eq!(attempt_expiry, expected_expiry);
+        assert_eq!(
+            monotonic_expiry.duration_since(minted_at),
+            Duration::from_millis(volparossa_protocol::MAX_NATIVE_PROBE_LIFETIME_MS)
+        );
+        assert!(
+            attempt_expiry > NOW_MS + 5_000,
+            "the new attempt must not pretend that the five-second A1 receipt stayed live"
+        );
+
+        let mut probe_ids = HashSet::new();
+        let mut session_ids = HashSet::new();
+        for (index, pending) in owner.pending_for_test().iter().enumerate() {
+            let (ordinal, relay, exit, ceiling, encoded_request) = pending.candidate_for_test();
+            assert_eq!(ordinal, u32::try_from(index + 1).expect("bounded ordinal"));
+            assert_eq!(relay, &candidate_set.data_relays[index]);
+            assert_eq!(Some(exit), candidate_set.exit.as_ref());
+            assert_eq!(ceiling, Bandwidth::new(80, 80).expect("ceiling"));
+            let envelope: SignedEnvelope =
+                decode_canonical(encoded_request, MAX_CONTROL_MESSAGE_SIZE).expect("request");
+            let request: volparossa_protocol::NativeProbePermitRequest = decode_canonical(
+                &envelope.payload,
+                volparossa_protocol::MAX_CONTROL_PAYLOAD_SIZE,
+            )
+            .expect("permit request payload");
+            let scope = request.scope.expect("path scope");
+            assert_eq!(scope.candidate_ordinal, ordinal);
+            assert_eq!(scope.attempt_expires_at_ms, expected_expiry);
+            assert_eq!(request.expires_at_ms, expected_expiry);
+            assert!(probe_ids.insert(scope.probe_id));
+            assert!(session_ids.insert(scope.client_session_id));
+        }
+
+        let (snapshot, _) = snapshot_fixture();
+        let completed = preselection_freshness_attempt(
+            snapshot,
+            exact_preselection_freshness_records(),
+            ProtocolTransport::TcpMptcp,
+            ObservationAddressFamily::Ipv4,
+            EVIDENCE_BATCH_BYTES,
+            Bandwidth::new(80, 80).expect("configured ceiling"),
+        );
+        let Ok((expired, _gate)) = prepare_preselection_evidence_at(completed, NOW_MS + 500) else {
+            panic!("exact A1 proofs must prepare another opaque handoff");
+        };
+        assert!(matches!(
+            native_preselection::begin_native_preselection_for_test(
+                expired,
+                NOW_MS + 5_000,
+                Instant::now(),
+            ),
+            Err(native_preselection::NativePreselectionError::InvalidPreparedEvidence)
+        ));
     }
 
     #[test]

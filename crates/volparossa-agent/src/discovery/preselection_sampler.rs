@@ -995,9 +995,13 @@ mod tests {
         }
         assert!(discovery.contains("opaque prepared-evidence handoff"));
         assert!(status.contains("opaque `PreparedPreselectionEvidence` handoff"));
-        assert!(protocol.contains(
-            "`PreparedPreselectionEvidence`; no downstream route orchestrator consumes it"
-        ));
+        assert!(discovery.contains("private callerless native-preselection child"));
+        assert!(status.contains("private callerless native attempt owner"));
+        assert!(protocol.contains("crate-private, callerless native-preselection child"));
+        for document in [discovery, status, protocol] {
+            assert!(document.contains("typed Exit producer"));
+            assert!(document.contains("production runtime"));
+        }
         assert!(status.contains(
             "| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |"
         ));
