@@ -144,6 +144,8 @@ jobs:
               "native MPQUIC ready: \(.native_mpquic.ready)",
               "agents ready: \(.agents_ready)",
               "A02 transparent TCP succeeded: \(.a02_transparent_tcp.succeeded)",
+              "A03 MPTCP aggregation succeeded: \(.a03_mptcp_aggregation.succeeded)",
+              "A04 MPTCP relay failover succeeded: \(.a04_mptcp_relay_failover.succeeded)",
               "Connect succeeded: \(.client_connect.succeeded)",
               "A05 UDP echo succeeded: \(.a05_udp_echo.succeeded)",
               "observed blocker: \(.client_connect.observed_blocker)",
@@ -163,7 +165,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Require successful A02 and A05 datapaths
+      - name: Require successful A02 through A05 datapaths
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -173,6 +175,12 @@ jobs:
             .a02_transparent_tcp.succeeded == true and
             .a02_transparent_tcp.evidence.success == true and
             .a02_transparent_tcp.evidence.no_direct_client_exit.observed_packets == 0 and
+            .a03_mptcp_aggregation.succeeded == true and
+            .a03_mptcp_aggregation.evidence.success == true and
+            .a03_mptcp_aggregation.evidence.measured_throughput_gain_ratio > 1.25 and
+            .a04_mptcp_relay_failover.succeeded == true and
+            .a04_mptcp_relay_failover.evidence.success == true and
+            .a04_mptcp_relay_failover.evidence.application_flow_completed == true and
             .a05_udp_echo.succeeded == true and
             .a05_udp_echo.evidence.success == true and
             .cleanup.complete == true and

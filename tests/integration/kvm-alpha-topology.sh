@@ -39,6 +39,8 @@ print_plan() {
         '  prove GetUnitByPID, MainPID, cgroup, network namespace and FD-store binding;' \
         '  launch four real agents and exact-policy TCP/UDP echo applications;' \
         '  prove transparent TCP over Relay-only MPTCP/TLS and signed OPEN_TCP;' \
+        '  constrain each Relay path and prove aggregate MPTCP download throughput;' \
+        '  remove one data-carrying Relay during a second uninterrupted download;' \
         '  request UDP Connect, then send one non-trusted application datagram through ingress;' \
         '  prove exact replies, selected Relays and zero direct Client-Exit packets;' \
         '  retain bounded evidence, then stop units and remove namespaces.'
@@ -133,7 +135,7 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 
 for command_name in awk busctl cat chmod chown cut date grep install ip jq kill \
     mkdir mktemp python3 readlink runuser sed setpriv sha256sum sleep stat systemctl \
-    systemd-run systemd-sysusers tail tr; do
+    systemd-run systemd-sysusers tail tc tr; do
     command -v "$command_name" >/dev/null 2>&1 \
         || { printf 'required guest tool unavailable: %s\n' "$command_name" >&2; exit 69; }
 done
@@ -195,6 +197,12 @@ CONNECT_STATUS=-1
 A02_REQUESTED=false
 A02_SUCCEEDED=false
 A02_STATUS=-1
+A03_REQUESTED=false
+A03_SUCCEEDED=false
+A03_STATUS=-1
+A04_REQUESTED=false
+A04_SUCCEEDED=false
+A04_STATUS=-1
 A05_REQUESTED=false
 A05_SUCCEEDED=false
 A05_STATUS=-1
@@ -207,6 +215,7 @@ HELPER_UNITS=
 MPQUIC_UNITS=
 AGENT_UNITS=
 DESTINATION_PID=
+DOWNLOAD_CLIENT_PID=
 CLIENT_OBSERVER_PID=
 EXIT_OBSERVER_PID=
 FINALIZED=no
@@ -225,6 +234,15 @@ copy_artifacts() {
         a02-client-capture.json a02-client-capture.log a02-client-capture.err \
         a02-exit-capture.json a02-exit-capture.log a02-exit-capture.err \
         a02-evidence.json \
+        a03-single-client.json a03-single-client.err \
+        a03-single-client-capture.json a03-single-exit-capture.json \
+        a03-aggregate-client.json a03-aggregate-client.err \
+        a03-aggregate-client-capture.json a03-aggregate-exit-capture.json \
+        destination-a03-single-evidence.json destination-a03-aggregate-evidence.json \
+        a03-tc-before.json a03-tc-after.json a03-evidence.json \
+        a04-client.json a04-client.err a04-client-capture.json \
+        a04-exit-capture.json destination-a04-evidence.json \
+        a04-removal.json a04-evidence.json \
         a05-client.json a05-client.err a05-client-fallback-route.txt \
         a05-client-capture.json a05-client-capture.log a05-client-capture.err \
         a05-exit-capture.json a05-exit-capture.log a05-exit-capture.err \
@@ -275,6 +293,14 @@ write_report() {
     if [ -f "$WORK/mpquic-units.json" ]; then
         mpquic_records=$(cat "$WORK/mpquic-units.json" 2>/dev/null || printf '[]')
     fi
+    a03_evidence=null
+    if [ -f "$WORK/a03-evidence.json" ]; then
+        a03_evidence=$(cat "$WORK/a03-evidence.json" 2>/dev/null || printf 'null')
+    fi
+    a04_evidence=null
+    if [ -f "$WORK/a04-evidence.json" ]; then
+        a04_evidence=$(cat "$WORK/a04-evidence.json" 2>/dev/null || printf 'null')
+    fi
     a05_evidence=null
     if [ -f "$WORK/a05-evidence.json" ]; then
         a05_evidence=$(cat "$WORK/a05-evidence.json" 2>/dev/null || printf 'null')
@@ -296,6 +322,12 @@ write_report() {
         --argjson a02_requested "$A02_REQUESTED" \
         --argjson a02_succeeded "$A02_SUCCEEDED" \
         --argjson a02_status "$A02_STATUS" \
+        --argjson a03_requested "$A03_REQUESTED" \
+        --argjson a03_succeeded "$A03_SUCCEEDED" \
+        --argjson a03_status "$A03_STATUS" \
+        --argjson a04_requested "$A04_REQUESTED" \
+        --argjson a04_succeeded "$A04_SUCCEEDED" \
+        --argjson a04_status "$A04_STATUS" \
         --argjson a05_requested "$A05_REQUESTED" \
         --argjson a05_succeeded "$A05_SUCCEEDED" \
         --argjson a05_status "$A05_STATUS" \
@@ -306,6 +338,8 @@ write_report() {
         --argjson helper_records "$helper_records" \
         --argjson a02_evidence "$a02_evidence" \
         --argjson mpquic_records "$mpquic_records" \
+        --argjson a03_evidence "$a03_evidence" \
+        --argjson a04_evidence "$a04_evidence" \
         --argjson a05_evidence "$a05_evidence" \
         '{schema_version:1,report_kind:"volparossa-alpha-kvm-topology",
           source_revision:$commit,run_id:$run_id,last_phase:$phase,
@@ -319,6 +353,10 @@ write_report() {
             exit_status:$connect_status,observed_blocker:$blocker},
           a02_transparent_tcp:{requested:$a02_requested,succeeded:$a02_succeeded,
             exit_status:$a02_status,evidence:$a02_evidence},
+          a03_mptcp_aggregation:{requested:$a03_requested,succeeded:$a03_succeeded,
+            exit_status:$a03_status,evidence:$a03_evidence},
+          a04_mptcp_relay_failover:{requested:$a04_requested,succeeded:$a04_succeeded,
+            exit_status:$a04_status,evidence:$a04_evidence},
           a05_udp_echo:{requested:$a05_requested,succeeded:$a05_succeeded,
             exit_status:$a05_status,evidence:$a05_evidence},
           cleanup:{complete:$cleanup,remaining_namespaces:$remaining_namespaces,
@@ -334,6 +372,11 @@ cleanup() {
     FINALIZED=yes
     trap - EXIT HUP INT TERM
 
+    if [ -n "$DOWNLOAD_CLIENT_PID" ]; then
+        kill -TERM "$DOWNLOAD_CLIENT_PID" 2>/dev/null || true
+        wait "$DOWNLOAD_CLIENT_PID" 2>/dev/null || true
+        DOWNLOAD_CLIENT_PID=
+    fi
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
@@ -1017,6 +1060,7 @@ with open(output_path, "x", encoding="ascii") as output:
 PYTHON
 cat >"$WORK/bin/a02-observer.py" <<'PYTHON'
 import json
+import os
 import select
 import signal
 import socket
@@ -1024,7 +1068,7 @@ import struct
 import sys
 import time
 
-role, output_path, ready_path, *interfaces = sys.argv[1:]
+role, output_path, ready_path, marker_path, *interfaces = sys.argv[1:]
 if role not in {"client", "exit"} or not interfaces:
     raise SystemExit("invalid bounded A02 observer arguments")
 
@@ -1053,6 +1097,8 @@ open(ready_path, "x", encoding="ascii").write("ready\n")
 running = True
 truncated = False
 observed_frames = 0
+marker_observed = False
+before_marker = None
 
 
 def stop(*_unused):
@@ -1064,6 +1110,9 @@ signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 deadline = time.monotonic() + 180
 while running and time.monotonic() < deadline:
+    if marker_path != "-" and not marker_observed and os.path.exists(marker_path):
+        before_marker = dict(counters)
+        marker_observed = True
     readable, _, _ = select.select(list(sockets), [], [], 0.2)
     for capture in readable:
         while True:
@@ -1137,6 +1186,12 @@ while running and time.monotonic() < deadline:
 
 for capture in sockets:
     capture.close()
+after_marker = None
+if before_marker is not None:
+    after_marker = {
+        key: counters[key] - before_marker[key]
+        for key in counters
+    }
 with open(output_path, "x", encoding="ascii") as output:
     json.dump(
         {
@@ -1145,6 +1200,9 @@ with open(output_path, "x", encoding="ascii") as output:
             "interfaces": interfaces,
             "observed_frames": observed_frames,
             "truncated": truncated,
+            "marker_observed": marker_observed,
+            "before_marker": before_marker,
+            "after_marker": after_marker,
             **counters,
         },
         output,
@@ -1152,6 +1210,89 @@ with open(output_path, "x", encoding="ascii") as output:
         separators=(",", ":"),
     )
     output.write("\n")
+PYTHON
+cat >"$WORK/bin/mptcp-download-client.py" <<'PYTHON'
+import hashlib
+import json
+import socket
+import sys
+import time
+
+run_id = bytes.fromhex(sys.argv[1])
+case_name = sys.argv[2]
+attempt = int(sys.argv[3])
+if case_name not in {"a03-single", "a03-aggregate", "a04-failover"}:
+    raise SystemExit("invalid bounded MPTCP download case")
+if attempt < 0 or attempt >= 30:
+    raise SystemExit("invalid bounded MPTCP download attempt")
+
+request = (
+    b"volparossa-"
+    + case_name.encode("ascii")
+    + b":"
+    + run_id
+    + attempt.to_bytes(4, "big")
+)
+response_label = b"a03" if case_name.startswith("a03-") else b"a04"
+response_seed = b"volparossa-download:" + response_label + b":" + run_id
+response_bytes = 32 * 1024 * 1024
+expected_hash = hashlib.sha256()
+remaining = response_bytes
+while remaining:
+    length = min(64 * 1024, remaining)
+    expected = (response_seed * ((length + len(response_seed) - 1) // len(response_seed)))[
+        :length
+    ]
+    expected_hash.update(expected)
+    remaining -= length
+
+destination = ("47.163.4.2", 18080)
+with socket.create_connection(destination, timeout=60) as application:
+    application.settimeout(180)
+    application.sendall(request)
+    application.shutdown(socket.SHUT_WR)
+    received_hash = hashlib.sha256()
+    received_bytes = 0
+    first_byte_ns = None
+    while received_bytes <= response_bytes:
+        chunk = application.recv(min(64 * 1024, response_bytes + 1 - received_bytes))
+        if not chunk:
+            break
+        if first_byte_ns is None:
+            first_byte_ns = time.monotonic_ns()
+        received_hash.update(chunk)
+        received_bytes += len(chunk)
+    completed_ns = time.monotonic_ns()
+    local = application.getsockname()
+
+if first_byte_ns is None or received_bytes != response_bytes:
+    raise SystemExit("bounded MPTCP download was incomplete")
+if received_hash.digest() != expected_hash.digest():
+    raise SystemExit("bounded MPTCP download payload was substituted")
+duration_ns = completed_ns - first_byte_ns
+if duration_ns <= 0:
+    raise SystemExit("bounded MPTCP download duration was invalid")
+json.dump(
+    {
+        "schema_version": 1,
+        "case": case_name,
+        "attempt": attempt,
+        "application": {"ip": local[0], "port": local[1]},
+        "destination": {"ip": destination[0], "port": destination[1]},
+        "request_bytes": len(request),
+        "request_sha256": hashlib.sha256(request).hexdigest(),
+        "response_bytes": received_bytes,
+        "response_sha256": received_hash.hexdigest(),
+        "first_byte_monotonic_ns": first_byte_ns,
+        "completed_monotonic_ns": completed_ns,
+        "duration_ns": duration_ns,
+        "throughput_bits_per_second": (received_bytes * 8 * 1_000_000_000) // duration_ns,
+    },
+    sys.stdout,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+sys.stdout.write("\n")
 PYTHON
 cat >"$WORK/bin/destination.py" <<'PYTHON'
 import hashlib
@@ -1161,6 +1302,7 @@ import select
 import signal
 import socket
 import sys
+import time
 
 udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp.bind(("10.241.31.2", 18081))
@@ -1173,6 +1315,7 @@ tcp.setblocking(False)
 run_id = bytes.fromhex(sys.argv[4])
 tcp_prefix = b"volparossa-a02:" + run_id
 tcp_payload_bytes = 4 * 1024 * 1024
+download_payload_bytes = 32 * 1024 * 1024
 open(sys.argv[1], "x", encoding="ascii").write(
     "tcp=47.163.4.2:18080\nudp=10.241.31.2:18081\n"
 )
@@ -1212,36 +1355,88 @@ while running:
     if tcp in readable:
         connection, source = tcp.accept()
         try:
-            connection.settimeout(90)
+            connection.settimeout(180)
             received = bytearray()
             while len(received) < tcp_payload_bytes:
                 chunk = connection.recv(tcp_payload_bytes - len(received))
                 if not chunk:
                     break
                 received.extend(chunk)
-            if len(received) != tcp_payload_bytes or not received.startswith(tcp_prefix):
-                continue
-            attempt_offset = len(tcp_prefix)
-            attempt = int.from_bytes(received[attempt_offset : attempt_offset + 4], "big")
-            if attempt >= 30:
-                continue
-            seed = tcp_prefix + attempt.to_bytes(4, "big")
-            expected_tcp = (seed * ((tcp_payload_bytes + len(seed) - 1) // len(seed)))[
-                :tcp_payload_bytes
-            ]
-            if bytes(received) != expected_tcp:
-                continue
-            connection.sendall(expected_tcp)
-            connection.shutdown(socket.SHUT_WR)
-            evidence = {
-                "schema_version": 1,
-                "listen": {"ip": "47.163.4.2", "port": 18080},
-                "source": {"ip": source[0], "port": source[1]},
-                "attempt": attempt,
-                "bytes": len(received),
-                "sha256": hashlib.sha256(received).hexdigest(),
-            }
-            evidence_path = os.path.join(sys.argv[3], f"tcp-evidence-{attempt}.json")
+            if len(received) == tcp_payload_bytes and received.startswith(tcp_prefix):
+                attempt_offset = len(tcp_prefix)
+                attempt = int.from_bytes(received[attempt_offset : attempt_offset + 4], "big")
+                if attempt >= 30:
+                    continue
+                seed = tcp_prefix + attempt.to_bytes(4, "big")
+                expected_tcp = (seed * ((tcp_payload_bytes + len(seed) - 1) // len(seed)))[
+                    :tcp_payload_bytes
+                ]
+                if bytes(received) != expected_tcp:
+                    continue
+                connection.sendall(expected_tcp)
+                connection.shutdown(socket.SHUT_WR)
+                evidence = {
+                    "schema_version": 1,
+                    "case": "a02",
+                    "listen": {"ip": "47.163.4.2", "port": 18080},
+                    "source": {"ip": source[0], "port": source[1]},
+                    "attempt": attempt,
+                    "bytes": len(received),
+                    "sha256": hashlib.sha256(received).hexdigest(),
+                }
+                evidence_path = os.path.join(sys.argv[3], f"tcp-evidence-{attempt}.json")
+            else:
+                matched = None
+                for case_name in ("a03-single", "a03-aggregate", "a04-failover"):
+                    prefix = b"volparossa-" + case_name.encode("ascii") + b":" + run_id
+                    if len(received) == len(prefix) + 4 and received.startswith(prefix):
+                        matched = (case_name, prefix)
+                        break
+                if matched is None:
+                    continue
+                case_name, prefix = matched
+                attempt = int.from_bytes(received[len(prefix) :], "big")
+                if attempt >= 30:
+                    continue
+                ready_path = os.path.join(
+                    sys.argv[3], f"download-{case_name}-{attempt}.ready"
+                )
+                release_path = os.path.join(
+                    sys.argv[3], f"download-{case_name}-{attempt}.release"
+                )
+                open(ready_path, "x", encoding="ascii").write("ready\n")
+                release_deadline = time.monotonic() + 90
+                while not os.path.exists(release_path):
+                    if time.monotonic() >= release_deadline:
+                        raise SystemExit("bounded download release was not observed")
+                    time.sleep(0.05)
+                response_label = b"a03" if case_name.startswith("a03-") else b"a04"
+                response_seed = b"volparossa-download:" + response_label + b":" + run_id
+                response_hash = hashlib.sha256()
+                remaining = download_payload_bytes
+                while remaining:
+                    length = min(64 * 1024, remaining)
+                    response = (response_seed * ((length + len(response_seed) - 1) // len(response_seed)))[
+                        :length
+                    ]
+                    connection.sendall(response)
+                    response_hash.update(response)
+                    remaining -= length
+                connection.shutdown(socket.SHUT_WR)
+                evidence = {
+                    "schema_version": 1,
+                    "case": case_name,
+                    "listen": {"ip": "47.163.4.2", "port": 18080},
+                    "source": {"ip": source[0], "port": source[1]},
+                    "attempt": attempt,
+                    "request_bytes": len(received),
+                    "request_sha256": hashlib.sha256(received).hexdigest(),
+                    "response_bytes": download_payload_bytes,
+                    "response_sha256": response_hash.hexdigest(),
+                }
+                evidence_path = os.path.join(
+                    sys.argv[3], f"download-{case_name}-{attempt}.json"
+                )
             if not os.path.exists(evidence_path):
                 with open(evidence_path, "x", encoding="ascii") as output:
                     json.dump(evidence, output, sort_keys=True, separators=(",", ":"))
@@ -1254,6 +1449,8 @@ while running:
 PYTHON
 chown root:root "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py"
 chmod 0500 "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py"
+chown root:root "$WORK/bin/mptcp-download-client.py"
+chmod 0555 "$WORK/bin/mptcp-download-client.py"
 chown "root:$AGENT_GID" "$WORK/bin/destination.py"
 chmod 0550 "$WORK/bin/destination.py"
 ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
@@ -1356,6 +1553,113 @@ stop_observers() {
     return "$a05_observer_stop_status"
 }
 
+tc_sent_bytes() {
+    tc_namespace=$1
+    tc_interface=$2
+    tc_bytes=$(ip netns exec "$tc_namespace" tc -s qdisc show dev "$tc_interface" \
+        | awk '/ Sent [0-9]+ bytes / { print $2; exit }')
+    case $tc_bytes in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$tc_bytes"
+}
+
+start_mptcp_download() {
+    DOWNLOAD_CASE=$1
+    DOWNLOAD_PREFIX=$2
+    DOWNLOAD_ATTEMPT=$3
+    DOWNLOAD_MARKER=$4
+    DOWNLOAD_CLIENT_OUTPUT="$WORK/$DOWNLOAD_PREFIX-client-$DOWNLOAD_ATTEMPT.json"
+    DOWNLOAD_CLIENT_ERROR="$WORK/$DOWNLOAD_PREFIX-client.err"
+    DOWNLOAD_CLIENT_CAPTURE="$WORK/$DOWNLOAD_PREFIX-client-capture-$DOWNLOAD_ATTEMPT.json"
+    DOWNLOAD_CLIENT_CAPTURE_READY="$WORK/$DOWNLOAD_PREFIX-client-capture-$DOWNLOAD_ATTEMPT.ready"
+    DOWNLOAD_EXIT_CAPTURE="$WORK/$DOWNLOAD_PREFIX-exit-capture-$DOWNLOAD_ATTEMPT.json"
+    DOWNLOAD_EXIT_CAPTURE_READY="$WORK/$DOWNLOAD_PREFIX-exit-capture-$DOWNLOAD_ATTEMPT.ready"
+    DOWNLOAD_DESTINATION_READY="$WORK/destination/download-$DOWNLOAD_CASE-$DOWNLOAD_ATTEMPT.ready"
+    DOWNLOAD_DESTINATION_RELEASE="$WORK/destination/download-$DOWNLOAD_CASE-$DOWNLOAD_ATTEMPT.release"
+    DOWNLOAD_DESTINATION_EVIDENCE="$WORK/destination/download-$DOWNLOAD_CASE-$DOWNLOAD_ATTEMPT.json"
+
+    ip netns exec "$CLIENT" python3 "$WORK/bin/a02-observer.py" \
+        client "$DOWNLOAD_CLIENT_CAPTURE" "$DOWNLOAD_CLIENT_CAPTURE_READY" \
+        "$DOWNLOAD_MARKER" cr1 cr2 underlay \
+        >"$WORK/$DOWNLOAD_PREFIX-client-capture.log" \
+        2>"$WORK/$DOWNLOAD_PREFIX-client-capture.err" &
+    CLIENT_OBSERVER_PID=$!
+    ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a02-observer.py" \
+        exit "$DOWNLOAD_EXIT_CAPTURE" "$DOWNLOAD_EXIT_CAPTURE_READY" \
+        "$DOWNLOAD_MARKER" xr1 xr2 xd \
+        >"$WORK/$DOWNLOAD_PREFIX-exit-capture.log" \
+        2>"$WORK/$DOWNLOAD_PREFIX-exit-capture.err" &
+    EXIT_OBSERVER_PID=$!
+    if ! wait_observer "$CLIENT_OBSERVER_PID" "$DOWNLOAD_CLIENT_CAPTURE_READY" \
+        || ! wait_observer "$EXIT_OBSERVER_PID" "$DOWNLOAD_EXIT_CAPTURE_READY"; then
+        stop_observers || true
+        return 1
+    fi
+
+    : >"$DOWNLOAD_CLIENT_ERROR"
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+        --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+        --no-new-privs -- python3 "$WORK/bin/mptcp-download-client.py" \
+        "$RUN_ID" "$DOWNLOAD_CASE" "$DOWNLOAD_ATTEMPT" \
+        >"$DOWNLOAD_CLIENT_OUTPUT" 2>"$DOWNLOAD_CLIENT_ERROR" &
+    DOWNLOAD_CLIENT_PID=$!
+
+    download_ready_attempt=0
+    while [ "$download_ready_attempt" -lt 600 ]; do
+        [ ! -s "$DOWNLOAD_DESTINATION_READY" ] || return 0
+        kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null || break
+        sleep 0.1
+        download_ready_attempt=$((download_ready_attempt + 1))
+    done
+    set +e
+    wait "$DOWNLOAD_CLIENT_PID"
+    set -e
+    DOWNLOAD_CLIENT_PID=
+    stop_observers || true
+    return 1
+}
+
+release_mptcp_download() {
+    install -o "$AGENT_UID" -g "$AGENT_GID" -m 0600 /dev/null \
+        "$DOWNLOAD_DESTINATION_RELEASE"
+}
+
+finish_mptcp_download() {
+    download_status=0
+    set +e
+    wait "$DOWNLOAD_CLIENT_PID"
+    download_status=$?
+    set -e
+    DOWNLOAD_CLIENT_PID=
+    destination_attempt=0
+    while [ "$download_status" -eq 0 ] && [ "$destination_attempt" -lt 100 ] \
+        && [ ! -s "$DOWNLOAD_DESTINATION_EVIDENCE" ]; do
+        sleep 0.1
+        destination_attempt=$((destination_attempt + 1))
+    done
+    stop_observers || download_status=1
+    for download_evidence in "$DOWNLOAD_CLIENT_OUTPUT" \
+        "$DOWNLOAD_DESTINATION_EVIDENCE" "$DOWNLOAD_CLIENT_CAPTURE" \
+        "$DOWNLOAD_EXIT_CAPTURE"; do
+        if [ "$download_status" -eq 0 ] \
+            && { [ ! -s "$download_evidence" ] \
+                || ! jq -e . "$download_evidence" >/dev/null 2>&1; }; then
+            download_status=1
+        fi
+    done
+    if [ "$download_status" -eq 0 ]; then
+        install -o root -g root -m 0600 \
+            "$DOWNLOAD_CLIENT_OUTPUT" "$WORK/$DOWNLOAD_PREFIX-client.json"
+        install -o root -g root -m 0600 \
+            "$DOWNLOAD_DESTINATION_EVIDENCE" \
+            "$WORK/destination-$DOWNLOAD_PREFIX-evidence.json"
+        install -o root -g root -m 0600 \
+            "$DOWNLOAD_CLIENT_CAPTURE" "$WORK/$DOWNLOAD_PREFIX-client-capture.json"
+        install -o root -g root -m 0600 \
+            "$DOWNLOAD_EXIT_CAPTURE" "$WORK/$DOWNLOAD_PREFIX-exit-capture.json"
+    fi
+    return "$download_status"
+}
+
 PHASE=a02-capture
 A02_REQUESTED=true
 A02_FALLBACK_ROUTE=$(ip -n "$CLIENT" -o route get "$A02_DESTINATION_IP" | sed -n '1p')
@@ -1378,12 +1682,12 @@ while [ "$attempt" -lt 30 ]; do
     destination_evidence="$WORK/destination/tcp-evidence-$attempt.json"
 
     ip netns exec "$CLIENT" python3 "$WORK/bin/a02-observer.py" \
-        client "$client_capture" "$client_capture_ready" \
+        client "$client_capture" "$client_capture_ready" - \
         cr1 cr2 underlay >"$WORK/a02-client-capture.log" \
         2>"$WORK/a02-client-capture.err" &
     CLIENT_OBSERVER_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a02-observer.py" \
-        exit "$exit_capture" "$exit_capture_ready" \
+        exit "$exit_capture" "$exit_capture_ready" - \
         xr1 xr2 xd >"$WORK/a02-exit-capture.log" \
         2>"$WORK/a02-exit-capture.err" &
     EXIT_OBSERVER_PID=$!
@@ -1569,6 +1873,313 @@ fi
 A02_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a02-complete
+
+PHASE=a03-constrain-relay-paths
+A03_REQUESTED=true
+ip netns exec "$R1" tc qdisc replace dev r1c root tbf \
+    rate 8mbit burst 128kb latency 250ms
+ip netns exec "$R2" tc qdisc replace dev r2c root tbf \
+    rate 8mbit burst 128kb latency 250ms
+ip netns exec "$R1" tc qdisc show dev r1c | grep -F 'qdisc tbf ' >/dev/null \
+    || fail A03_RELAY1_LIMIT_UNAVAILABLE
+ip netns exec "$R2" tc qdisc show dev r2c | grep -F 'qdisc tbf ' >/dev/null \
+    || fail A03_RELAY2_LIMIT_UNAVAILABLE
+A03_STATUS=1
+
+PHASE=a03-single-path-download
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    if start_mptcp_download a03-single a03-single "$attempt" -; then
+        single_before_r1=$(tc_sent_bytes "$R1" r1c) \
+            || fail A03_RELAY1_COUNTER_UNAVAILABLE
+        single_before_r2=$(tc_sent_bytes "$R2" r2c) \
+            || fail A03_RELAY2_COUNTER_UNAVAILABLE
+        ip -n "$R2" link set r2c down
+        [ "$(ip -n "$R2" -j link show dev r2c | jq -er '.[0].operstate')" = DOWN ] \
+            || fail A03_SINGLE_PATH_NOT_ISOLATED
+        sleep 2
+        single_release_r1=$(tc_sent_bytes "$R1" r1c) \
+            || fail A03_RELAY1_COUNTER_UNAVAILABLE
+        single_release_r2=$(tc_sent_bytes "$R2" r2c) \
+            || fail A03_RELAY2_COUNTER_UNAVAILABLE
+        release_mptcp_download
+        if finish_mptcp_download; then
+            single_after_r1=$(tc_sent_bytes "$R1" r1c) \
+                || fail A03_RELAY1_COUNTER_UNAVAILABLE
+            single_after_r2=$(tc_sent_bytes "$R2" r2c) \
+                || fail A03_RELAY2_COUNTER_UNAVAILABLE
+            A03_STATUS=0
+        fi
+        ip -n "$R2" link set r2c up
+        break
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+done
+if [ "$A03_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A03_SINGLE_PATH_DOWNLOAD_UNAVAILABLE
+    PHASE=a03-blocked
+    exit 77
+fi
+sleep 2
+
+PHASE=a03-aggregate-download
+A03_STATUS=1
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    if start_mptcp_download a03-aggregate a03-aggregate "$attempt" -; then
+        aggregate_before_r1=$(tc_sent_bytes "$R1" r1c) \
+            || fail A03_RELAY1_COUNTER_UNAVAILABLE
+        aggregate_before_r2=$(tc_sent_bytes "$R2" r2c) \
+            || fail A03_RELAY2_COUNTER_UNAVAILABLE
+        release_mptcp_download
+        if finish_mptcp_download; then
+            aggregate_after_r1=$(tc_sent_bytes "$R1" r1c) \
+                || fail A03_RELAY1_COUNTER_UNAVAILABLE
+            aggregate_after_r2=$(tc_sent_bytes "$R2" r2c) \
+                || fail A03_RELAY2_COUNTER_UNAVAILABLE
+            A03_STATUS=0
+        fi
+        break
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+done
+if [ "$A03_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A03_AGGREGATE_DOWNLOAD_UNAVAILABLE
+    PHASE=a03-blocked
+    exit 77
+fi
+
+jq -S -c -n \
+    --argjson single_initial_relay1 "$single_before_r1" \
+    --argjson single_initial_relay2 "$single_before_r2" \
+    --argjson single_release_relay1 "$single_release_r1" \
+    --argjson single_release_relay2 "$single_release_r2" \
+    --argjson aggregate_relay1 "$aggregate_before_r1" \
+    --argjson aggregate_relay2 "$aggregate_before_r2" \
+    '{schema_version:1,individual_rate_bits_per_second:8000000,
+      single_path:{relay1_initial_bytes:$single_initial_relay1,
+        relay2_initial_bytes:$single_initial_relay2,
+        relay1_release_bytes:$single_release_relay1,
+        relay2_release_bytes:$single_release_relay2,relay2_operstate:"DOWN"},
+      aggregate:{relay1_bytes:$aggregate_relay1,relay2_bytes:$aggregate_relay2}}' \
+    >"$WORK/a03-tc-before.json"
+jq -S -c -n \
+    --argjson single_relay1 "$single_after_r1" \
+    --argjson single_relay2 "$single_after_r2" \
+    --argjson aggregate_relay1 "$aggregate_after_r1" \
+    --argjson aggregate_relay2 "$aggregate_after_r2" \
+    '{schema_version:1,single_path:{relay1_bytes:$single_relay1,
+      relay2_bytes:$single_relay2},aggregate:{relay1_bytes:$aggregate_relay1,
+      relay2_bytes:$aggregate_relay2}}' >"$WORK/a03-tc-after.json"
+
+jq -S -c -n \
+    --slurpfile single "$WORK/a03-single-client.json" \
+    --slurpfile single_destination "$WORK/destination-a03-single-evidence.json" \
+    --slurpfile single_client_capture "$WORK/a03-single-client-capture.json" \
+    --slurpfile single_exit_capture "$WORK/a03-single-exit-capture.json" \
+    --slurpfile aggregate "$WORK/a03-aggregate-client.json" \
+    --slurpfile aggregate_destination "$WORK/destination-a03-aggregate-evidence.json" \
+    --slurpfile aggregate_client_capture "$WORK/a03-aggregate-client-capture.json" \
+    --slurpfile aggregate_exit_capture "$WORK/a03-aggregate-exit-capture.json" \
+    --slurpfile before "$WORK/a03-tc-before.json" \
+    --slurpfile after "$WORK/a03-tc-after.json" \
+    '($single[0]) as $one | ($aggregate[0]) as $both
+    | ($single_destination[0]) as $one_destination
+    | ($aggregate_destination[0]) as $both_destination
+    | ($single_client_capture[0]) as $one_client
+    | ($single_exit_capture[0]) as $one_exit
+    | ($aggregate_client_capture[0]) as $both_client
+    | ($aggregate_exit_capture[0]) as $both_exit
+    | ($before[0]) as $tc_before | ($after[0]) as $tc_after
+    | ($tc_after.single_path.relay1_bytes
+        - $tc_before.single_path.relay1_release_bytes) as $one_relay1_bytes
+    | ($tc_after.single_path.relay2_bytes
+        - $tc_before.single_path.relay2_release_bytes) as $one_relay2_bytes
+    | ($tc_after.aggregate.relay1_bytes
+        - $tc_before.aggregate.relay1_bytes) as $both_relay1_bytes
+    | ($tc_after.aggregate.relay2_bytes
+        - $tc_before.aggregate.relay2_bytes) as $both_relay2_bytes
+    | (($one.case == "a03-single") and ($both.case == "a03-aggregate")
+        and ($one.response_bytes == 33554432)
+        and ($both.response_bytes == $one.response_bytes)
+        and ($both.response_sha256 == $one.response_sha256)
+        and ($one.response_sha256 == $one_destination.response_sha256)
+        and ($both.response_sha256 == $both_destination.response_sha256)
+        and ($one.request_sha256 == $one_destination.request_sha256)
+        and ($both.request_sha256 == $both_destination.request_sha256)
+        and ($one_destination.source.ip == "47.163.4.1")
+        and ($both_destination.source.ip == "47.163.4.1")
+        and ($one_relay1_bytes > 16777216) and ($one_relay2_bytes < 2097152)
+        and ($both_relay1_bytes > 4194304) and ($both_relay2_bytes > 4194304)
+        and ($both.throughput_bits_per_second
+          > ($one.throughput_bits_per_second * 1.25))
+        and ($one_client.direct_client_exit_packets == 0)
+        and ($both_client.direct_client_exit_packets == 0)
+        and ($one_client.truncated == false) and ($one_exit.truncated == false)
+        and ($both_client.truncated == false) and ($both_exit.truncated == false)
+        and ($both_client.relay1_wireguard_data_datagrams > 0)
+        and ($both_client.relay2_wireguard_data_datagrams > 0)
+        and ($both_exit.relay1_wireguard_data_datagrams > 0)
+        and ($both_exit.relay2_wireguard_data_datagrams > 0)) as $success
+    | {schema_version:1,acceptance_id:"A03",success:$success,
+       transport:"IPPROTO_MPTCP over two individually constrained Relay WireGuard paths",
+       payload:{bytes:$one.response_bytes,sha256:$one.response_sha256},
+       single_path:{application:$one,destination:$one_destination,
+         client_capture:$one_client,exit_capture:$one_exit,
+         relay1_outer_bytes:$one_relay1_bytes,relay2_outer_bytes:$one_relay2_bytes},
+       aggregate:{application:$both,destination:$both_destination,
+         client_capture:$both_client,exit_capture:$both_exit,
+         relay1_outer_bytes:$both_relay1_bytes,relay2_outer_bytes:$both_relay2_bytes},
+       individually_constrained_rate_bits_per_second:
+         $tc_before.individual_rate_bits_per_second,
+       measured_throughput_gain_ratio:
+         ($both.throughput_bits_per_second / $one.throughput_bits_per_second),
+       ordinary_tcp_fallback_allowed:false,direct_client_exit_packets:
+         ($one_client.direct_client_exit_packets + $both_client.direct_client_exit_packets)}' \
+    >"$WORK/a03-evidence.json"
+jq -e '.success == true' "$WORK/a03-evidence.json" >/dev/null 2>&1 \
+    || A03_STATUS=1
+if [ "$A03_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A03_MPTCP_AGGREGATION_NOT_PROVEN
+    PHASE=a03-blocked
+    exit 77
+fi
+A03_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a03-complete
+
+PHASE=a04-active-relay-removal
+A04_REQUESTED=true
+A04_STATUS=1
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    if start_mptcp_download a04-failover a04 "$attempt" \
+        "$WORK/a04-relay-removal.marker"; then
+        a04_start_r1=$(tc_sent_bytes "$R1" r1c) \
+            || fail A04_RELAY1_COUNTER_UNAVAILABLE
+        a04_start_r2=$(tc_sent_bytes "$R2" r2c) \
+            || fail A04_RELAY2_COUNTER_UNAVAILABLE
+        release_mptcp_download
+        carrying_attempt=0
+        a04_active_r1=$a04_start_r1
+        a04_active_r2=$a04_start_r2
+        while [ "$carrying_attempt" -lt 450 ]; do
+            kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null \
+                || fail A04_FLOW_ENDED_BEFORE_RELAY_REMOVAL
+            a04_active_r1=$(tc_sent_bytes "$R1" r1c) \
+                || fail A04_RELAY1_COUNTER_UNAVAILABLE
+            a04_active_r2=$(tc_sent_bytes "$R2" r2c) \
+                || fail A04_RELAY2_COUNTER_UNAVAILABLE
+            if [ $((a04_active_r1 - a04_start_r1)) -gt 2097152 ] \
+                && [ $((a04_active_r2 - a04_start_r2)) -gt 2097152 ]; then
+                break
+            fi
+            sleep 0.1
+            carrying_attempt=$((carrying_attempt + 1))
+        done
+        [ "$carrying_attempt" -lt 450 ] || fail A04_TWO_ACTIVE_PATHS_NOT_OBSERVED
+        kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null \
+            || fail A04_FLOW_ENDED_BEFORE_RELAY_REMOVAL
+        ip -n "$R1" link set r1c down
+        ip -n "$R1" link set r1x down
+        a04_r1c_state=$(ip -n "$R1" -j link show dev r1c | jq -er '.[0].operstate')
+        a04_r1x_state=$(ip -n "$R1" -j link show dev r1x | jq -er '.[0].operstate')
+        [ "$a04_r1c_state" = DOWN ] && [ "$a04_r1x_state" = DOWN ] \
+            || fail A04_RELAY_REMOVAL_FAILED
+        kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null \
+            || fail A04_FLOW_ENDED_DURING_RELAY_REMOVAL
+        install -o root -g root -m 0600 /dev/null "$WORK/a04-relay-removal.marker"
+        if finish_mptcp_download; then
+            a04_after_r1=$(tc_sent_bytes "$R1" r1c) \
+                || fail A04_RELAY1_COUNTER_UNAVAILABLE
+            a04_after_r2=$(tc_sent_bytes "$R2" r2c) \
+                || fail A04_RELAY2_COUNTER_UNAVAILABLE
+            A04_STATUS=0
+        fi
+        ip -n "$R1" link set r1x up
+        ip -n "$R1" link set r1c up
+        break
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+done
+if [ "$A04_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A04_MPTCP_FAILOVER_DOWNLOAD_UNAVAILABLE
+    PHASE=a04-blocked
+    exit 77
+fi
+
+jq -S -c -n \
+    --arg selected_relay relay1 \
+    --arg relay_client_operstate "$a04_r1c_state" \
+    --arg relay_exit_operstate "$a04_r1x_state" \
+    --argjson process_active_at_removal true \
+    --argjson relay1_bytes_before "$a04_active_r1" \
+    --argjson relay2_bytes_before "$a04_active_r2" \
+    --argjson relay1_bytes_after "$a04_after_r1" \
+    --argjson relay2_bytes_after "$a04_after_r2" \
+    --argjson relay1_start_bytes "$a04_start_r1" \
+    --argjson relay2_start_bytes "$a04_start_r2" \
+    '{schema_version:1,selected_relay:$selected_relay,
+      process_active_at_removal:$process_active_at_removal,
+      removed_links:{relay_client_operstate:$relay_client_operstate,
+        relay_exit_operstate:$relay_exit_operstate},
+      outer_bytes:{before_removal:{relay1:($relay1_bytes_before-$relay1_start_bytes),
+        relay2:($relay2_bytes_before-$relay2_start_bytes)},
+        after_removal:{relay1:($relay1_bytes_after-$relay1_bytes_before),
+          relay2:($relay2_bytes_after-$relay2_bytes_before)}}}' \
+    >"$WORK/a04-removal.json"
+
+jq -S -c -n \
+    --slurpfile application "$WORK/a04-client.json" \
+    --slurpfile destination "$WORK/destination-a04-evidence.json" \
+    --slurpfile client_capture "$WORK/a04-client-capture.json" \
+    --slurpfile exit_capture "$WORK/a04-exit-capture.json" \
+    --slurpfile removal "$WORK/a04-removal.json" \
+    '($application[0]) as $app | ($destination[0]) as $destination
+    | ($client_capture[0]) as $client | ($exit_capture[0]) as $exit
+    | ($removal[0]) as $removal
+    | (($app.case == "a04-failover") and ($app.response_bytes == 33554432)
+        and ($app.response_sha256 == $destination.response_sha256)
+        and ($app.request_sha256 == $destination.request_sha256)
+        and ($destination.source.ip == "47.163.4.1")
+        and $removal.process_active_at_removal
+        and ($removal.removed_links.relay_client_operstate == "DOWN")
+        and ($removal.removed_links.relay_exit_operstate == "DOWN")
+        and ($removal.outer_bytes.before_removal.relay1 > 2097152)
+        and ($removal.outer_bytes.before_removal.relay2 > 2097152)
+        and ($removal.outer_bytes.after_removal.relay2 > 8388608)
+        and $client.marker_observed and $exit.marker_observed
+        and ($client.before_marker.relay1_wireguard_data_datagrams > 0)
+        and ($client.before_marker.relay2_wireguard_data_datagrams > 0)
+        and ($exit.before_marker.relay1_wireguard_data_datagrams > 0)
+        and ($exit.before_marker.relay2_wireguard_data_datagrams > 0)
+        and ($client.after_marker.relay2_wireguard_data_datagrams > 0)
+        and ($exit.after_marker.relay2_wireguard_data_datagrams > 0)
+        and ($client.direct_client_exit_packets == 0)
+        and ($client.truncated == false) and ($exit.truncated == false)) as $success
+    | {schema_version:1,acceptance_id:"A04",success:$success,
+       transport:"uninterrupted IPPROTO_MPTCP/TLS download after active Relay removal",
+       application:$app,destination:$destination,relay_removal:$removal,
+       path_evidence:{client_capture:$client,exit_capture:$exit},
+       application_flow_completed:true,ordinary_tcp_fallback_allowed:false,
+       direct_client_exit_packets:$client.direct_client_exit_packets}' \
+    >"$WORK/a04-evidence.json"
+jq -e '.success == true' "$WORK/a04-evidence.json" >/dev/null 2>&1 \
+    || A04_STATUS=1
+if [ "$A04_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A04_ACTIVE_RELAY_REMOVAL_NOT_PROVEN
+    PHASE=a04-blocked
+    exit 77
+fi
+ip netns exec "$R1" tc qdisc del dev r1c root
+ip netns exec "$R2" tc qdisc del dev r2c root
+sleep 2
+A04_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a04-complete
 
 PHASE=client-connect
 CONNECT_REQUESTED=true

@@ -93,5 +93,19 @@ grep -F 'ordinary_tcp_fallback_allowed:false' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A02",success:$success' "$GUEST" >/dev/null
 grep -F 'a02_transparent_tcp:{requested:$a02_requested,succeeded:$a02_succeeded' "$GUEST" \
     >/dev/null
+grep -F 'rate 8mbit burst 128kb latency 250ms' "$GUEST" >/dev/null
+grep -F 'start_mptcp_download a03-single a03-single' "$GUEST" >/dev/null
+grep -F 'start_mptcp_download a03-aggregate a03-aggregate' "$GUEST" >/dev/null
+grep -F 'measured_throughput_gain_ratio:' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A03",success:$success' "$GUEST" >/dev/null
+grep -F 'a03_mptcp_aggregation:{requested:$a03_requested,succeeded:$a03_succeeded' "$GUEST" \
+    >/dev/null
+grep -F 'ip -n "$R1" link set r1c down' "$GUEST" >/dev/null
+grep -F 'ip -n "$R1" link set r1x down' "$GUEST" >/dev/null
+grep -F 'process_active_at_removal:$process_active_at_removal' "$GUEST" >/dev/null
+grep -F 'after_marker.relay2_wireguard_data_datagrams > 0' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A04",success:$success' "$GUEST" >/dev/null
+grep -F 'a04_mptcp_relay_failover:{requested:$a04_requested,succeeded:$a04_succeeded' "$GUEST" \
+    >/dev/null
 
 printf '%s\n' 'KVM alpha topology static contract passed'
