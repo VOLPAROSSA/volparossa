@@ -184,7 +184,13 @@ expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-benchmarks.sh" --preview
 
 expect_status 0 "$REPOSITORY_DIRECTORY/packaging/build-deb.sh" --preview
 grep -F 'PREVIEW ONLY: no build or package output was written.' "$LAST_OUTPUT" >/dev/null
-expect_status 77 "$REPOSITORY_DIRECTORY/packaging/build-deb.sh" --build
+blocked_package_root=$TEMPORARY_DIRECTORY/blocked-package
+/bin/mkdir "$blocked_package_root" "$blocked_package_root/packaging"
+/bin/cp "$REPOSITORY_DIRECTORY/Cargo.toml" "$blocked_package_root/Cargo.toml"
+/bin/cp "$REPOSITORY_DIRECTORY/packaging/build-deb.sh" \
+    "$blocked_package_root/packaging/build-deb.sh"
+expect_status 77 "$blocked_package_root/packaging/build-deb.sh" --build
+grep -F 'BLOCKED: reviewed native launcher is absent:' "$LAST_ERROR" >/dev/null
 
 /bin/mkdir "$TEMPORARY_DIRECTORY/evidence"
 printf '%s\n' 'synthetic acceptance evidence' >"$TEMPORARY_DIRECTORY/evidence/proof.txt"
