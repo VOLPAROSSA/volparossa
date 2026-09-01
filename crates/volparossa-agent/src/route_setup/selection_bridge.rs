@@ -955,7 +955,7 @@ pub(crate) enum ClientNativeProbeError {
 #[must_use = "a failed post-Prepare bind still owns one helper context cleanup"]
 pub(crate) struct ClientNativePreparedBindFailure {
     error: ClientNativeProbeError,
-    prepared_owner: RuntimeBoundPreparedLeaseBatch,
+    prepared_owner: Box<RuntimeBoundPreparedLeaseBatch>,
 }
 
 impl ClientNativePreparedBindFailure {
@@ -966,7 +966,7 @@ impl ClientNativePreparedBindFailure {
 
     /// Consume the failure into its exact same-runtime helper cleanup owner.
     pub(crate) fn into_cleanup(self) -> RuntimeBoundPreparedLeaseBatch {
-        self.prepared_owner
+        *self.prepared_owner
     }
 }
 
@@ -1049,7 +1049,7 @@ impl ClientNativeRelayReady {
             Err(error) => {
                 return Err(ClientNativePreparedBindFailure {
                     error,
-                    prepared_owner: prepared,
+                    prepared_owner: Box::new(prepared),
                 });
             }
         };
@@ -1138,7 +1138,7 @@ impl PreparedClientNativeProbe {
                 Err(error) => {
                     return Err(ClientNativePreparedBindFailure {
                         error,
-                        prepared_owner: self.prepared_owner,
+                        prepared_owner: Box::new(self.prepared_owner),
                     });
                 }
             };
