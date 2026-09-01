@@ -5383,7 +5383,10 @@ fn prepared_matches(request: &PrepareLeaseBatch, prepared: &[PreparedKernelLease
     let mut public_endpoints = BTreeSet::new();
     for (requested, lease) in request.leases.iter().zip(prepared) {
         if lease.public_key.iter().all(|byte| *byte == 0)
-            || lease.evidence != UnderlayEvidence::DirectAssigned
+            || !matches!(
+                lease.evidence,
+                UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch
+            )
             || (requested.path_id, requested.role) != (lease.path_id, lease.role)
             || !public_keys.insert(lease.public_key)
             || !public_endpoints.insert((
@@ -6350,6 +6353,7 @@ mod tests {
                 }],
                 setup_expires_at_unix: 120,
                 hard_expires_at_unix: 900,
+                traversal_hints: Vec::new(),
             }),
         )
     }
@@ -6756,6 +6760,7 @@ mod tests {
                 leases: leases.clone(),
                 setup_expires_at_unix: 120,
                 hard_expires_at_unix: 900,
+                traversal_hints: Vec::new(),
             };
             let closed_plan = ClosedPreparePlan {
                 context_role: context_role as i32,
@@ -8164,6 +8169,11 @@ mod tests {
         };
         let valid = [lease(1, 1, 51_821), lease(2, 2, 51_822)];
         assert!(prepared_matches(&request, &valid));
+        let mut punched = valid.clone();
+        punched
+            .iter_mut()
+            .for_each(|lease| lease.evidence = UnderlayEvidence::ObservedUdpPunch);
+        assert!(prepared_matches(&request, &punched));
 
         let reordered = [valid[1].clone(), valid[0].clone()];
         assert!(!prepared_matches(&request, &reordered));

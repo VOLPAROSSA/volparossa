@@ -52,7 +52,7 @@ use volparossa_config::{Config, RolesConfig};
 use volparossa_core::{
     Bandwidth, CapacitySnapshot, NetworkMetadata, NodeAdvertisement as CoreAdvertisement,
     NodeCapabilities, NodeId, NodeQuality, NodeRoles, OperatorId, PeerId as CorePeerId, PolicyHash,
-    UnixTime,
+    UnixTime, is_public_routable_ip,
 };
 use volparossa_discovery::{
     AdvertisementResponse, BehaviourEvent, BoundClientPreselectionTransport,
@@ -104,9 +104,9 @@ use volparossa_quic::NativeClient;
 use volparossa_relay::{AcceptedRelayReservation, RelayService, RelayServiceConfig};
 use volparossa_routing::{
     AcquireTransportSocket, ActivateLeaseBatch, CommitLeaseBatch, CommittedLeaseBatch, ContextRole,
-    LeaseActivation, LeaseCommit, LeasePlan, NATIVE_PROBE_CLIENT_PORT, NATIVE_PROBE_DATAGRAM_BYTES,
-    NATIVE_PROBE_EXIT_PORT, PrepareLeaseBatch, PublicUdpEndpoint, TransportSocketAddress,
-    TransportSocketKind, WireguardRole,
+    LeaseActivation, LeaseCommit, LeasePlan, MAX_HELPER_PATHS, NATIVE_PROBE_CLIENT_PORT,
+    NATIVE_PROBE_DATAGRAM_BYTES, NATIVE_PROBE_EXIT_PORT, PrepareLeaseBatch, PublicUdpEndpoint,
+    TransportSocketAddress, TransportSocketKind, TraversalEndpointHint, WireguardRole,
 };
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
 use volparossa_udp::{DatagramLimits, VerifiedSingleRelayPath};
@@ -432,6 +432,16 @@ impl DiscoveryControlHandle {
         Self::await_rpc(response, DATAPATH_RELAY_REQUEST_TIMEOUT).await
     }
 
+    pub(crate) async fn endpoint_traversal_hints(
+        &self,
+        bindings: Vec<EndpointTraversalBinding>,
+    ) -> Result<Vec<TraversalEndpointHint>, OutboundReservationError> {
+        let (reply, response) = oneshot::channel();
+        self.send_rpc(DiscoveryCommand::ResolveEndpointTraversalHints { bindings, reply })
+            .await?;
+        Self::await_rpc(response, ROLE_COMMAND_TIMEOUT).await
+    }
+
     async fn send_rpc(&self, command: DiscoveryCommand) -> Result<(), OutboundReservationError> {
         timeout(ROLE_COMMAND_TIMEOUT, self.sender.send(command))
             .await
@@ -488,6 +498,10 @@ enum DiscoveryCommand {
         exit_peer_id: Libp2pPeerId,
         reply: oneshot::Sender<Option<ForwardedExitCapability>>,
     },
+    ResolveEndpointTraversalHints {
+        bindings: Vec<EndpointTraversalBinding>,
+        reply: oneshot::Sender<Result<Vec<TraversalEndpointHint>, OutboundReservationError>>,
+    },
     RequestExitForward {
         control_relay_peer: Libp2pPeerId,
         request: ExitForwardRequest,
@@ -498,6 +512,15 @@ enum DiscoveryCommand {
         request: DatapathRelayRequest,
         reply: oneshot::Sender<Result<DatapathRelayResponse, OutboundReservationError>>,
     },
+}
+
+/// Exact authenticated control peer allowed to contribute one local endpoint observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EndpointTraversalBinding {
+    pub(crate) path_id: u32,
+    pub(crate) role: WireguardRole,
+    pub(crate) observer_id: [u8; 32],
+    pub(crate) observer_peer_id: Libp2pPeerId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1611,6 +1634,7 @@ pub struct DiscoveryRuntime {
     retry_datapath: HashMap<DatapathKey, RetryLedgerEntry>,
     candidate_limit: usize,
     observed_endpoints: HashMap<Libp2pPeerId, (String, Option<IpAddr>)>,
+    local_endpoint_observations: HashMap<Libp2pPeerId, BTreeSet<IpAddr>>,
     publisher: AdvertisementPublisher,
     served_local_advertisement: Option<Vec<u8>>,
     control_addresses: BTreeSet<String>,
@@ -1751,6 +1775,7 @@ impl DiscoveryRuntime {
             retry_datapath: HashMap::new(),
             candidate_limit: config.network.candidate_pool_size.min(PEERSTORE_LOAD_BOUND),
             observed_endpoints: HashMap::new(),
+            local_endpoint_observations: HashMap::new(),
             publisher: AdvertisementPublisher::new(
                 sequence_path,
                 config.network.advertisement_ttl_seconds,
@@ -1951,6 +1976,10 @@ impl DiscoveryRuntime {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the closed actor command set stays in one exhaustive dispatcher"
+    )]
     async fn handle_command(&mut self, command: DiscoveryCommand, state: &Arc<RwLock<AgentState>>) {
         self.maintain_client_preselection();
         match command {
@@ -1984,6 +2013,9 @@ impl DiscoveryRuntime {
             DiscoveryCommand::BeginClientPreselection { parameters, reply } => {
                 self.begin_client_preselection(parameters, reply, state)
                     .await;
+            }
+            DiscoveryCommand::ResolveEndpointTraversalHints { bindings, reply } => {
+                let _ = reply.send(self.exact_endpoint_traversal_hints(bindings));
             }
             DiscoveryCommand::ResolveDirectRelay {
                 expected_node_id,
@@ -3275,6 +3307,9 @@ impl DiscoveryRuntime {
                 DiscoveryCommand::ResolveForwardedExit { reply, .. } => {
                     let _ = reply.send(None);
                 }
+                DiscoveryCommand::ResolveEndpointTraversalHints { reply, .. } => {
+                    let _ = reply.send(Err(OutboundReservationError::Shutdown));
+                }
                 DiscoveryCommand::RouteCandidateSnapshot { reply, .. } => {
                     let _ = reply.send(Err(RouteCandidateSnapshotError::Closed));
                 }
@@ -4087,6 +4122,91 @@ impl DiscoveryRuntime {
         }
     }
 
+    fn record_local_endpoint_observation(
+        &mut self,
+        observer_peer: Libp2pPeerId,
+        observed_address: &Multiaddr,
+    ) {
+        let Some(address) =
+            multiaddr_ip(observed_address).filter(|address| is_public_routable_ip(*address))
+        else {
+            return;
+        };
+        let observations = self
+            .local_endpoint_observations
+            .entry(observer_peer)
+            .or_default();
+        // At most two distinct observations per family are useful: one is usable and two make
+        // that family ambiguous. Retaining more would only consume actor memory.
+        let same_family = observations
+            .iter()
+            .filter(|candidate| candidate.is_ipv4() == address.is_ipv4())
+            .count();
+        if same_family < 2 {
+            observations.insert(address);
+        }
+    }
+
+    fn exact_endpoint_traversal_hints(
+        &self,
+        mut bindings: Vec<EndpointTraversalBinding>,
+    ) -> Result<Vec<TraversalEndpointHint>, OutboundReservationError> {
+        if bindings.is_empty()
+            || bindings.len() > usize::try_from(MAX_HELPER_PATHS).unwrap_or(8) * 2
+        {
+            return Err(OutboundReservationError::InvalidRequest);
+        }
+        bindings.sort_by_key(|binding| (binding.path_id, binding.role as i32));
+        if bindings
+            .windows(2)
+            .any(|pair| (pair[0].path_id, pair[0].role) == (pair[1].path_id, pair[1].role))
+        {
+            return Err(OutboundReservationError::InvalidRequest);
+        }
+
+        let local_peer = *self.service.local_peer_id();
+        let mut hints = Vec::new();
+        for binding in bindings {
+            if !(1..=MAX_HELPER_PATHS).contains(&binding.path_id)
+                || binding.role == WireguardRole::Unspecified
+                || binding.observer_id == [0; 32]
+                || binding.observer_peer_id == local_peer
+                || !self
+                    .observed_endpoints
+                    .contains_key(&binding.observer_peer_id)
+            {
+                return Err(OutboundReservationError::InvalidRequest);
+            }
+            let Some(observations) = self
+                .local_endpoint_observations
+                .get(&binding.observer_peer_id)
+            else {
+                continue;
+            };
+            for ipv4 in [false, true] {
+                let candidates = observations
+                    .iter()
+                    .filter(|address| address.is_ipv4() == ipv4)
+                    .copied()
+                    .collect::<Vec<_>>();
+                let [address] = candidates.as_slice() else {
+                    continue;
+                };
+                hints.push(TraversalEndpointHint {
+                    path_id: binding.path_id,
+                    role: binding.role as i32,
+                    observer_id: binding.observer_id.to_vec(),
+                    observer_peer_id: binding.observer_peer_id.to_bytes(),
+                    observed_address: match address {
+                        IpAddr::V4(address) => address.octets().to_vec(),
+                        IpAddr::V6(address) => address.octets().to_vec(),
+                    },
+                });
+            }
+        }
+        Ok(hints)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one exhaustive v4 swarm dispatcher keeps every protocol direction fail closed"
@@ -4137,7 +4257,13 @@ impl DiscoveryRuntime {
                 ..
             } => {
                 self.observed_endpoints.remove(&peer_id);
+                self.local_endpoint_observations.remove(&peer_id);
                 state.write().await.peer_disconnected(&peer_id.to_string());
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Identify(
+                libp2p::identify::Event::Received { peer_id, info, .. },
+            )) => {
+                self.record_local_endpoint_observation(peer_id, &info.observed_addr);
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
@@ -4929,7 +5055,7 @@ impl DiscoveryRuntime {
             }
             reject!("PRODUCTION_RELAY_RESERVATION_OWNER_CONFLICT");
         }
-        let Some(prepare) = production_service_prepare_request(
+        let Some(mut prepare) = production_service_prepare_request(
             route_context_id,
             ContextRole::Relay,
             authorization.path_id,
@@ -4938,6 +5064,31 @@ impl DiscoveryRuntime {
         ) else {
             reject!("PRODUCTION_RELAY_RESERVATION_HELPER_SCOPE_REJECTED");
         };
+        let Some(client_session_id) = fixed_bytes::<32>(&authorization.client_session_id) else {
+            reject!("PRODUCTION_RELAY_RESERVATION_TRAVERSAL_SCOPE_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&authorization.exit_node_id) else {
+            reject!("PRODUCTION_RELAY_RESERVATION_TRAVERSAL_SCOPE_REJECTED");
+        };
+        let Ok(exit_peer_id) = Libp2pPeerId::from_bytes(&authorization.exit_peer_id) else {
+            reject!("PRODUCTION_RELAY_RESERVATION_TRAVERSAL_SCOPE_REJECTED");
+        };
+        prepare.traversal_hints = self
+            .exact_endpoint_traversal_hints(vec![
+                EndpointTraversalBinding {
+                    path_id: authorization.path_id,
+                    role: WireguardRole::RelayClient,
+                    observer_id: client_session_id,
+                    observer_peer_id: authenticated_client_peer,
+                },
+                EndpointTraversalBinding {
+                    path_id: authorization.path_id,
+                    role: WireguardRole::RelayExit,
+                    observer_id: exit_node_id,
+                    observer_peer_id: exit_peer_id,
+                },
+            ])
+            .unwrap_or_default();
         let Ok(mut helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
             reject!("PRODUCTION_RELAY_RESERVATION_HELPER_PREPARE_UNAVAILABLE");
         };
@@ -5927,7 +6078,7 @@ impl DiscoveryRuntime {
         {
             reject!("NATIVE_PROBE_READY_EXIT_UNAVAILABLE");
         }
-        let Some(prepare) = native_service_prepare_request(
+        let Some(mut prepare) = native_service_prepare_request(
             &scope,
             ContextRole::Relay,
             &[WireguardRole::RelayClient, WireguardRole::RelayExit],
@@ -5935,6 +6086,25 @@ impl DiscoveryRuntime {
         ) else {
             reject!("NATIVE_PROBE_READY_HELPER_SCOPE_REJECTED");
         };
+        let Some(client_session_id) = fixed_bytes::<32>(&scope.client_session_id) else {
+            reject!("NATIVE_PROBE_READY_TRAVERSAL_SCOPE_REJECTED");
+        };
+        prepare.traversal_hints = self
+            .exact_endpoint_traversal_hints(vec![
+                EndpointTraversalBinding {
+                    path_id: scope.candidate_ordinal,
+                    role: WireguardRole::RelayClient,
+                    observer_id: client_session_id,
+                    observer_peer_id: authenticated_client_peer,
+                },
+                EndpointTraversalBinding {
+                    path_id: scope.candidate_ordinal,
+                    role: WireguardRole::RelayExit,
+                    observer_id: exit_node_id,
+                    observer_peer_id: exit_peer,
+                },
+            ])
+            .unwrap_or_default();
         let Ok(helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
             reject!("NATIVE_PROBE_READY_HELPER_PREPARE_UNAVAILABLE");
         };
@@ -8299,11 +8469,26 @@ impl DiscoveryRuntime {
         } else {
             None
         };
-        let prepare = production_exit_prepare_request(
+        let mut prepare = production_exit_prepare_request(
             &finalize,
             request.deadline_unix_ms(),
             capability.expires_at_ms,
         )?;
+        let traversal_bindings = finalize
+            .relay_paths
+            .iter()
+            .map(|path| {
+                Some(EndpointTraversalBinding {
+                    path_id: path.path_id,
+                    role: WireguardRole::Exit,
+                    observer_id: fixed_bytes::<32>(&path.relay_node_id)?,
+                    observer_peer_id: Libp2pPeerId::from_bytes(&path.relay_peer_id).ok()?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        prepare.traversal_hints = self
+            .exact_endpoint_traversal_hints(traversal_bindings)
+            .unwrap_or_default();
         let helper_owner = self
             .helper
             .prepare_lease_batch(prepare.clone())
@@ -12926,6 +13111,7 @@ fn production_exit_prepare_request(
             .collect(),
         setup_expires_at_unix,
         hard_expires_at_unix,
+        traversal_hints: Vec::new(),
     })
 }
 
@@ -12969,6 +13155,7 @@ fn production_service_prepare_request(
             .collect(),
         setup_expires_at_unix,
         hard_expires_at_unix,
+        traversal_hints: Vec::new(),
     })
 }
 
@@ -13078,6 +13265,7 @@ fn native_service_prepare_request(
         leases,
         setup_expires_at_unix: expires_at_unix,
         hard_expires_at_unix: expires_at_unix,
+        traversal_hints: Vec::new(),
     })
 }
 
@@ -14322,6 +14510,55 @@ mod tests {
             role_store,
             directory,
         }
+    }
+
+    #[tokio::test]
+    async fn traversal_observations_bind_only_the_exact_active_peer_and_path() {
+        let mut fixture = fixture(RolesConfig::default());
+        let observer = Identity::generate().peer_id().to_owned();
+        fixture
+            .runtime
+            .observed_endpoints
+            .insert(observer, ("/ip4/1.1.1.1/udp/443/quic-v1".to_owned(), None));
+        fixture.runtime.record_local_endpoint_observation(
+            observer,
+            &"/ip6/2606:4700:4700::1111/udp/443/quic-v1"
+                .parse()
+                .expect("IPv6 observation"),
+        );
+        fixture.runtime.record_local_endpoint_observation(
+            observer,
+            &"/ip4/8.8.8.8/udp/443/quic-v1"
+                .parse()
+                .expect("IPv4 observation"),
+        );
+        let hints = fixture
+            .runtime
+            .exact_endpoint_traversal_hints(vec![EndpointTraversalBinding {
+                path_id: 2,
+                role: WireguardRole::Client,
+                observer_id: [7; 32],
+                observer_peer_id: observer,
+            }])
+            .expect("exact active peer");
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].path_id, 2);
+        assert_eq!(hints[0].observer_peer_id, observer.to_bytes());
+        assert_eq!(hints[0].observed_address.len(), 16);
+        assert_eq!(hints[1].observed_address, vec![8, 8, 8, 8]);
+
+        let foreign = Identity::generate().peer_id().to_owned();
+        assert_eq!(
+            fixture
+                .runtime
+                .exact_endpoint_traversal_hints(vec![EndpointTraversalBinding {
+                    path_id: 2,
+                    role: WireguardRole::Client,
+                    observer_id: [7; 32],
+                    observer_peer_id: foreign,
+                }]),
+            Err(OutboundReservationError::InvalidRequest)
+        );
     }
 
     fn local_advertisement_input(

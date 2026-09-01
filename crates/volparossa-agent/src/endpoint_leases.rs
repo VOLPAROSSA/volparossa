@@ -87,8 +87,8 @@ struct ParsedLease {
 ///
 /// Returns an error unless the request is exactly `ContextRole::Client` with one through eight
 /// unique `WireguardRole::Client` paths. Also rejects malformed or substituted responses,
-/// evidence other than `DirectAssigned`, duplicate capabilities/key material/ports, non-public
-/// addresses and role-binding failures.
+/// evidence other than a direct assignment or exact-peer UDP-punch observation, duplicate
+/// capabilities/key material/ports, non-public addresses and role-binding failures.
 pub fn bind_prepared_endpoint_leases(
     request: &PrepareLeaseBatch,
     response: PreparedLeaseBatch,
@@ -344,9 +344,10 @@ fn parse_response(
         if !expected.contains(&identity) || parsed.contains_key(&identity) {
             return Err(EndpointLeaseBindingError::IdentityMismatch);
         }
-        if UnderlayEvidence::try_from(lease.underlay_evidence)
-            != Ok(UnderlayEvidence::DirectAssigned)
-        {
+        if !matches!(
+            UnderlayEvidence::try_from(lease.underlay_evidence),
+            Ok(UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch)
+        ) {
             return Err(EndpointLeaseBindingError::InvalidPreparedOutcome);
         }
         let handle = HelperLeaseHandle::try_from(lease.lease_handle.as_slice())?;
@@ -414,6 +415,7 @@ mod tests {
                 .collect(),
             setup_expires_at_unix: 10,
             hard_expires_at_unix: 20,
+            traversal_hints: Vec::new(),
         }
     }
 

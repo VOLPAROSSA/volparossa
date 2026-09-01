@@ -98,8 +98,8 @@ use crate::{
     },
     discovery::{
         AdvertisementPayloadHash, ClientPreselectionError, ClientPreselectionParameters,
-        DirectRelayCapability, DiscoveryControlHandle, ForwardedExitCapability,
-        OutboundReservationError,
+        DirectRelayCapability, DiscoveryControlHandle, EndpointTraversalBinding,
+        ForwardedExitCapability, OutboundReservationError,
     },
     endpoint_leases::{LocalEndpointLeaseBatch, bind_prepared_endpoint_leases},
     helper::{
@@ -2707,6 +2707,7 @@ impl RouteSetupRequest {
         &self,
         selected: &[SelectedRouteSetupPath],
         active_path_count: usize,
+        traversal_hints: Vec<volparossa_routing::TraversalEndpointHint>,
     ) -> PrepareLeaseBatch {
         let path_count = u32::try_from(active_path_count).unwrap_or(MAX_HELPER_PATHS);
         PrepareLeaseBatch {
@@ -2723,6 +2724,7 @@ impl RouteSetupRequest {
                 .collect(),
             setup_expires_at_unix: self.parameters.setup_expires_at_unix,
             hard_expires_at_unix: self.parameters.hard_expires_at_unix,
+            traversal_hints,
         }
     }
 }
@@ -3127,6 +3129,11 @@ trait ReservationTransport: Send + 'static {
 
     fn ambiguous_after_dispatch(error: &Self::Error) -> bool;
 
+    fn endpoint_traversal_hints(
+        &mut self,
+        bindings: Vec<EndpointTraversalBinding>,
+    ) -> impl Future<Output = Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error>> + Send;
+
     fn exit_forward<'a>(
         &'a mut self,
         control: &'a DirectRelayCapability,
@@ -3191,6 +3198,13 @@ impl ReservationTransport for DiscoveryControlHandle {
 
     fn ambiguous_after_dispatch(error: &Self::Error) -> bool {
         *error == OutboundReservationError::AmbiguousAfterDispatch
+    }
+
+    async fn endpoint_traversal_hints(
+        &mut self,
+        bindings: Vec<EndpointTraversalBinding>,
+    ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+        DiscoveryControlHandle::endpoint_traversal_hints(self, bindings).await
     }
 
     async fn exit_forward<'a>(
@@ -5850,9 +5864,32 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         self.ensure_live(clock, cancellation, deadline)?;
 
         self.phase = RouteSetupPhase::Preparing;
-        let prepare_request = self
-            .request
-            .prepare_request(&selected_paths, active_path_count);
+        let traversal_bindings = selected_paths
+            .iter()
+            .map(|path| EndpointTraversalBinding {
+                path_id: path.path_id,
+                role: WireguardRole::Client,
+                observer_id: path.relay.identity.wire_node_id,
+                observer_peer_id: path.relay.identity.peer_id,
+            })
+            .collect();
+        let traversal_hints = match bounded_call(
+            deadline,
+            self.limits.call_timeout,
+            cancellation,
+            self.phase,
+            transport.endpoint_traversal_hints(traversal_bindings),
+        )
+        .await
+        {
+            Ok(Ok(hints)) => hints,
+            // A direct public underlay remains independently usable; the helper decides whether
+            // absent observations are fatal only after checking IPv6 and public IPv4 first.
+            Ok(Err(_)) | Err(_) => Vec::new(),
+        };
+        let prepare_request =
+            self.request
+                .prepare_request(&selected_paths, active_path_count, traversal_hints);
         let protocol = self
             .protocol
             .take()
@@ -7498,6 +7535,7 @@ mod tests {
                 .collect(),
             setup_expires_at_unix: NOW_MS / 1_000 + 20,
             hard_expires_at_unix: NOW_MS / 1_000 + 60,
+            traversal_hints: Vec::new(),
         };
         let response = PreparedLeaseBatch {
             context_handle: vec![99; HELPER_HANDLE_BYTES],
@@ -8008,6 +8046,13 @@ mod tests {
             *error == FakeTransportError::Ambiguous
         }
 
+        async fn endpoint_traversal_hints(
+            &mut self,
+            _bindings: Vec<EndpointTraversalBinding>,
+        ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+            Ok(Vec::new())
+        }
+
         async fn exit_forward(
             &mut self,
             control: &DirectRelayCapability,
@@ -8331,6 +8376,13 @@ mod tests {
 
         fn ambiguous_after_dispatch(_error: &Self::Error) -> bool {
             false
+        }
+
+        async fn endpoint_traversal_hints(
+            &mut self,
+            _bindings: Vec<EndpointTraversalBinding>,
+        ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+            Ok(Vec::new())
         }
 
         #[allow(

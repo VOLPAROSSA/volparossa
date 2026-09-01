@@ -33,6 +33,9 @@ pub const MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES: usize = MAX_HELPER_FRAME;
 pub const MAX_HELPER_SIGNED_CLIENT_RELAY_REQUEST_BYTES: usize = MAX_HELPER_FRAME;
 /// Maximum distinct paths in one route context.
 pub const MAX_HELPER_PATHS: u32 = 8;
+/// At most one IPv6 and one IPv4 observation may be attached to each lease; a Relay owns two
+/// endpoint roles per path.
+pub const MAX_HELPER_TRAVERSAL_HINTS: usize = MAX_HELPER_PATHS as usize * 4;
 /// Fixed upper bound shared with signed reservation rate fields.
 pub const MAX_HELPER_RATE_MBPS: u32 = 1_000_000;
 /// Opaque helper handle length.
@@ -157,6 +160,8 @@ pub enum UnderlayEvidence {
     Unspecified = 0,
     /// Public unicast address assigned directly to the unique selected default-route interface.
     DirectAssigned = 1,
+    /// Public address observed by the exact authenticated peer for coordinated UDP punching.
+    ObservedUdpPunch = 2,
 }
 
 /// Closed set of Linux MPTCP endpoint behaviours.
@@ -385,6 +390,29 @@ pub struct LeasePlan {
     pub role: i32,
 }
 
+/// One bounded public-address observation tied to an exact route/path/role and control peer.
+///
+/// The helper treats this only as a candidate for the already fixed `WireGuard` listen port. The
+/// final endpoint is subsequently signed into the reservation protocol before peer activation.
+#[derive(Clone, PartialEq, Message)]
+pub struct TraversalEndpointHint {
+    /// Existing path 1..=8.
+    #[prost(uint32, tag = "1")]
+    pub path_id: u32,
+    /// Exact endpoint role from the containing prepare plan.
+    #[prost(enumeration = "WireguardRole", tag = "2")]
+    pub role: i32,
+    /// Non-zero route actor identity (node ID, or ephemeral client-session ID).
+    #[prost(bytes = "vec", tag = "3")]
+    pub observer_id: Vec<u8>,
+    /// Authenticated libp2p peer that supplied the Identify observation.
+    #[prost(bytes = "vec", tag = "4")]
+    pub observer_peer_id: Vec<u8>,
+    /// Four or sixteen public-unicast address bytes, without a peer-controlled port.
+    #[prost(bytes = "vec", tag = "5")]
+    pub observed_address: Vec<u8>,
+}
+
 /// Atomically prepare all local endpoint roles for a route context.
 #[derive(Clone, PartialEq, Message)]
 pub struct PrepareLeaseBatch {
@@ -409,6 +437,9 @@ pub struct PrepareLeaseBatch {
     /// Hard context deadline, at most 15 minutes after helper receipt.
     #[prost(uint64, tag = "7")]
     pub hard_expires_at_unix: u64,
+    /// Optional exact-peer observations used only when no directly assigned public underlay exists.
+    #[prost(message, repeated, tag = "8")]
+    pub traversal_hints: Vec<TraversalEndpointHint>,
 }
 
 /// Minimal canonical topology needed to recover one possibly dispatched Prepare.
@@ -1476,7 +1507,53 @@ fn validate_prepare(value: &PrepareLeaseBatch) -> Result<(), HelperProtocolError
     {
         return Err(HelperProtocolError::Invalid("prepare bounds"));
     }
-    validate_closed_prepare_plan(value.role, &value.leases)
+    validate_closed_prepare_plan(value.role, &value.leases)?;
+    validate_traversal_hints(&value.leases, &value.traversal_hints)
+}
+
+fn validate_traversal_hints(
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
+) -> Result<(), HelperProtocolError> {
+    if hints.len() > MAX_HELPER_TRAVERSAL_HINTS {
+        return Err(HelperProtocolError::Invalid("traversal hint count"));
+    }
+    let lease_identities = leases
+        .iter()
+        .map(|lease| (lease.path_id, lease.role))
+        .collect::<BTreeSet<_>>();
+    let mut identities = BTreeSet::new();
+    let mut previous = None;
+    for hint in hints {
+        path_role(hint.path_id, hint.role)?;
+        if !lease_identities.contains(&(hint.path_id, hint.role))
+            || hint.observer_id.len() != 32
+            || hint.observer_id.iter().all(|byte| *byte == 0)
+            || hint.observer_peer_id.is_empty()
+            || hint.observer_peer_id.len() > 64
+            || hint.observer_peer_id.iter().all(|byte| *byte == 0)
+        {
+            return Err(HelperProtocolError::Invalid("traversal hint lineage"));
+        }
+        let address = parse_public_address(&hint.observed_address)?;
+        let family = u8::from(address.is_ipv4()); // IPv6 sorts before IPv4.
+        let key = (
+            hint.path_id,
+            hint.role,
+            family,
+            hint.observed_address.as_slice(),
+            hint.observer_peer_id.as_slice(),
+        );
+        if previous.as_ref().is_some_and(|previous| previous >= &key)
+            || !identities.insert((hint.path_id, hint.role, family))
+        {
+            return Err(HelperProtocolError::Invalid(
+                "non-canonical traversal hints",
+            ));
+        }
+        previous = Some(key);
+    }
+    Ok(())
 }
 
 fn validate_closed_prepare_plan(
@@ -1575,9 +1652,10 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
                         .as_ref()
                         .ok_or(HelperProtocolError::Invalid("public endpoint"))?,
                 )?;
-                if UnderlayEvidence::try_from(lease.underlay_evidence)
-                    != Ok(UnderlayEvidence::DirectAssigned)
-                {
+                if !matches!(
+                    UnderlayEvidence::try_from(lease.underlay_evidence),
+                    Ok(UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch)
+                ) {
                     return Err(HelperProtocolError::Invalid("underlay evidence"));
                 }
                 Ok((lease.path_id, lease.role))
@@ -1922,7 +2000,12 @@ fn endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
     if !(1..=65_535).contains(&value.port) {
         return Err(HelperProtocolError::Invalid("UDP port"));
     }
-    let address = match value.address.as_slice() {
+    let _address = parse_public_address(&value.address)?;
+    Ok(())
+}
+
+fn parse_public_address(bytes: &[u8]) -> Result<IpAddr, HelperProtocolError> {
+    let address = match bytes {
         bytes if bytes.len() == 4 => IpAddr::V4(Ipv4Addr::from(
             <[u8; 4]>::try_from(bytes).map_err(|_| HelperProtocolError::Invalid("IPv4"))?,
         )),
@@ -1935,7 +2018,7 @@ fn endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
     if !safe {
         return Err(HelperProtocolError::Invalid("public IP address"));
     }
-    Ok(())
+    Ok(address)
 }
 
 fn validate_transport_tuple(
@@ -2086,6 +2169,7 @@ mod tests {
                     leases,
                     setup_expires_at_unix: 120,
                     hard_expires_at_unix: 900,
+                    traversal_hints: Vec::new(),
                 },
             )),
         }
@@ -2344,6 +2428,70 @@ mod tests {
     }
 
     #[test]
+    fn traversal_hints_are_exact_bounded_and_canonical() {
+        let mut request = prepare(ContextRole::Client, vec![plan(1, WireguardRole::Client)]);
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) = request.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        let ipv6 = TraversalEndpointHint {
+            path_id: 1,
+            role: WireguardRole::Client as i32,
+            observer_id: vec![7; 32],
+            observer_peer_id: vec![8; 38],
+            observed_address: "2606:4700:4700::1111"
+                .parse::<Ipv6Addr>()
+                .expect("IPv6")
+                .octets()
+                .to_vec(),
+        };
+        let ipv4 = TraversalEndpointHint {
+            observed_address: vec![8, 8, 8, 8],
+            ..ipv6.clone()
+        };
+        batch.traversal_hints = vec![ipv6.clone(), ipv4.clone()];
+        assert!(encode_request(&request).is_ok());
+
+        let mut noncanonical = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            noncanonical.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints.reverse();
+        assert!(encode_request(&noncanonical).is_err());
+
+        let mut duplicate_family = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            duplicate_family.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints = vec![ipv4.clone(), ipv4.clone()];
+        assert!(encode_request(&duplicate_family).is_err());
+
+        let mut foreign_path = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            foreign_path.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints[0].path_id = 2;
+        assert!(encode_request(&foreign_path).is_err());
+
+        let mut private = request;
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) = private.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints = vec![TraversalEndpointHint {
+            observed_address: vec![192, 168, 1, 1],
+            ..ipv4
+        }];
+        assert!(encode_request(&private).is_err());
+    }
+
+    #[test]
     fn external_wire_has_no_private_key_or_free_overlay_fields() {
         let value = prepare(ContextRole::Client, vec![plan(1, WireguardRole::Client)]);
         let encoded = encode_request(&value).expect("encode");
@@ -2465,7 +2613,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_endpoint_requires_direct_assigned_evidence_and_nonzero_port() {
+    fn prepared_endpoint_requires_known_underlay_evidence_and_nonzero_port() {
         let response = HelperResponse {
             protocol_version: HELPER_PROTOCOL_VERSION,
             request_id: vec![8; 16],
@@ -2490,6 +2638,13 @@ mod tests {
             )),
         };
         assert!(encode_response(&response).is_ok());
+        let mut punch = response.clone();
+        let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = punch.outcome.as_mut()
+        else {
+            panic!("prepared");
+        };
+        batch.leases[0].underlay_evidence = UnderlayEvidence::ObservedUdpPunch as i32;
+        assert!(encode_response(&punch).is_ok());
         let mut wrong = response;
         let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = wrong.outcome.as_mut()
         else {

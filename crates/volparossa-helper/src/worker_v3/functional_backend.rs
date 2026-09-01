@@ -87,7 +87,7 @@ use crate::{
         DurableManagerAbsentOutcome, DurableOwnershipPrepareHandle, DurablePrepareSettlement,
         DurableWireguardResource,
     },
-    underlay::{UnderlayCandidate, collect_consistent_direct_underlay},
+    underlay::{UnderlayCandidate, collect_consistent_underlay},
 };
 
 use super::{
@@ -116,7 +116,7 @@ const STAGE_ACQUIRE_INGRESS: u8 = 11;
 const STAGE_ACTIVATE_INGRESS: u8 = 12;
 const STAGE_DESTROY_INGRESS: u8 = 13;
 const STAGE_ACQUIRE_INGRESS_REPLY: u8 = 14;
-const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
+const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 5;
 const NATIVE_PROBE_AUTHORIZED_RATE_MBPS: u64 = 1;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
@@ -528,8 +528,9 @@ impl FunctionalAlphaLeaseBackend {
         let registration =
             DurableIntentRegistration::try_from_wire(binding.lineage.helper_runtime_id, &intent)
                 .map_err(|_| BackendError::Invalid)?;
-        let underlay = collect_consistent_direct_underlay(operation_deadline)
-            .map_err(|_| BackendError::Unavailable)?;
+        let underlay =
+            collect_consistent_underlay(operation_deadline, &value.leases, &value.traversal_hints)
+                .map_err(|_| BackendError::Unavailable)?;
         self.reserve_entry(key, context_role, underlay)?;
         {
             let mut state = lock_state(&self.state);
@@ -675,7 +676,14 @@ impl FunctionalAlphaLeaseBackend {
                     address: ip_bytes(underlay.address),
                     port: u32::from(lease.listen_port),
                 },
-                evidence: RoutingUnderlayEvidence::DirectAssigned,
+                evidence: match underlay.evidence {
+                    crate::underlay::UnderlayEvidence::DirectAssigned => {
+                        RoutingUnderlayEvidence::DirectAssigned
+                    }
+                    crate::underlay::UnderlayEvidence::ObservedUdpPunch => {
+                        RoutingUnderlayEvidence::ObservedUdpPunch
+                    }
+                },
             })
             .collect())
     }
@@ -5566,6 +5574,7 @@ mod tests {
             }],
             setup_expires_at_unix: open_key.setup_expires_at_unix,
             hard_expires_at_unix: open_key.hard_expires_at_unix,
+            traversal_hints: Vec::new(),
         }
     }
 
@@ -6694,6 +6703,7 @@ mod tests {
             }],
             setup_expires_at_unix: key.setup_expires_at_unix,
             hard_expires_at_unix: key.hard_expires_at_unix,
+            traversal_hints: Vec::new(),
         };
         (binding, value)
     }

@@ -6,16 +6,18 @@
 
 mod netlink;
 
-pub(crate) use netlink::collect_consistent_direct_underlay;
+pub(crate) use netlink::collect_consistent_underlay;
 
 use std::net::IpAddr;
-use volparossa_routing::is_public_routable_ip;
+use volparossa_routing::{LeasePlan, TraversalEndpointHint, is_public_routable_ip};
 
 /// Evidence attached to an address selected without NAT or reachability inference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnderlayEvidence {
     /// The address is a public unicast address assigned to the selected local interface.
     DirectAssigned,
+    /// A public IPv4 address observed by every exact control peer in the prepare lineage.
+    ObservedUdpPunch,
 }
 
 /// Minimal read-only link facts obtained from rtnetlink.
@@ -82,7 +84,7 @@ pub(crate) enum UnderlaySelectionError {
     Ambiguous,
 }
 
-/// Select exactly one public address attached to the only usable default route.
+/// Select the preferred directly assigned public address.
 ///
 /// An operator-selected numeric address can be supported later by a root-owned configuration
 /// path. This automatic policy deliberately rejects zero or multiple candidates.
@@ -96,7 +98,8 @@ pub(crate) fn select_direct_underlay(
     addresses: &[UnderlayAddress],
     routes: &[UnderlayRoute],
 ) -> Result<UnderlayCandidate, UnderlaySelectionError> {
-    let mut selected = None;
+    let mut ipv6 = Vec::new();
+    let mut ipv4 = Vec::new();
     for address in addresses {
         let eligible_links = links
             .iter()
@@ -133,11 +136,108 @@ pub(crate) fn select_direct_underlay(
             address: address.address,
             evidence: UnderlayEvidence::DirectAssigned,
         };
-        if selected.replace(candidate).is_some() {
-            return Err(UnderlaySelectionError::Ambiguous);
+        match candidate.address {
+            IpAddr::V6(_) => ipv6.push(candidate),
+            IpAddr::V4(_) => ipv4.push(candidate),
         }
     }
-    selected.ok_or(UnderlaySelectionError::NoCandidate)
+    match (ipv6.as_slice(), ipv4.as_slice()) {
+        ([candidate], _) | ([], [candidate]) => Ok(*candidate),
+        ([], []) => Err(UnderlaySelectionError::NoCandidate),
+        _ => Err(UnderlaySelectionError::Ambiguous),
+    }
+}
+
+/// Select an observed public IPv4 only when every exact lease peer reported the same address and
+/// the host has one usable private/default IPv4 underlay on which `WireGuard` can punch.
+pub(crate) fn select_observed_punch_underlay(
+    links: &[UnderlayLink],
+    addresses: &[UnderlayAddress],
+    routes: &[UnderlayRoute],
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
+) -> Result<UnderlayCandidate, UnderlaySelectionError> {
+    if leases.is_empty() || hints.is_empty() {
+        return Err(UnderlaySelectionError::NoCandidate);
+    }
+    let expected = leases
+        .iter()
+        .map(|lease| (lease.path_id, lease.role))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut common = None;
+    for identity in expected {
+        let mut observed = hints.iter().filter_map(|hint| {
+            (hint.path_id == identity.0 && hint.role == identity.1)
+                .then(|| observed_ipv4(&hint.observed_address))
+                .flatten()
+        });
+        let Some(address) = observed.next() else {
+            return Err(UnderlaySelectionError::NoCandidate);
+        };
+        if observed.next().is_some() || common.is_some_and(|common| common != address) {
+            return Err(UnderlaySelectionError::Ambiguous);
+        }
+        common = Some(address);
+    }
+    let public = common.ok_or(UnderlaySelectionError::NoCandidate)?;
+
+    let mut defaults = routes.iter().filter(|route| {
+        route.family == UnderlayFamily::Ipv4
+            && route.default
+            && route.unicast
+            && route.main_table
+            && route.universe_scope
+            && route.ifindex != 0
+    });
+    let default = defaults.next().ok_or(UnderlaySelectionError::NoCandidate)?;
+    if defaults.next().is_some() {
+        return Err(UnderlaySelectionError::Ambiguous);
+    }
+    let mut locals = addresses.iter().filter(|address| {
+        address.ifindex == default.ifindex
+            && links
+                .iter()
+                .filter(|link| {
+                    link.ifindex == address.ifindex
+                        && link.ifindex != 0
+                        && link.up
+                        && !link.loopback
+                        && !link.helper_owned
+                })
+                .count()
+                == 1
+            && eligible_punch_address(address)
+    });
+    let local = locals.next().ok_or(UnderlaySelectionError::NoCandidate)?;
+    if locals.next().is_some() {
+        return Err(UnderlaySelectionError::Ambiguous);
+    }
+    Ok(UnderlayCandidate {
+        ifindex: local.ifindex,
+        address: IpAddr::V4(public),
+        evidence: UnderlayEvidence::ObservedUdpPunch,
+    })
+}
+
+fn observed_ipv4(bytes: &[u8]) -> Option<std::net::Ipv4Addr> {
+    let address = std::net::Ipv4Addr::from(<[u8; 4]>::try_from(bytes).ok()?);
+    is_public_routable_ip(IpAddr::V4(address)).then_some(address)
+}
+
+fn eligible_punch_address(value: &UnderlayAddress) -> bool {
+    if value.ifindex == 0
+        || value.tentative
+        || value.dad_failed
+        || value.deprecated
+        || value.broadcast
+    {
+        return false;
+    }
+    matches!(value.address, IpAddr::V4(address) if !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_link_local()
+        && !address.is_multicast()
+        && !address.is_broadcast())
 }
 
 fn eligible_address(value: &UnderlayAddress) -> bool {
@@ -155,6 +255,7 @@ fn eligible_address(value: &UnderlayAddress) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use volparossa_routing::WireguardRole;
 
     fn link(ifindex: u32) -> UnderlayLink {
         UnderlayLink {
@@ -382,7 +483,24 @@ mod tests {
     }
 
     #[test]
-    fn multiple_addresses_or_families_are_ambiguous() {
+    fn ipv6_is_preferred_before_public_ipv4() {
+        let selected = select_direct_underlay(
+            &[link(7)],
+            &[address(7, "8.8.8.8"), address(7, "2606:4700:4700::1111")],
+            &[
+                route(7, UnderlayFamily::Ipv4),
+                route(7, UnderlayFamily::Ipv6),
+            ],
+        )
+        .expect("IPv6 candidate");
+        assert_eq!(
+            selected.address,
+            "2606:4700:4700::1111".parse::<IpAddr>().expect("IPv6")
+        );
+    }
+
+    #[test]
+    fn multiple_same_family_addresses_are_ambiguous() {
         assert_eq!(
             select_direct_underlay(
                 &[link(7)],
@@ -391,14 +509,90 @@ mod tests {
             ),
             Err(UnderlaySelectionError::Ambiguous)
         );
+    }
+
+    fn lease(path_id: u32, role: WireguardRole) -> LeasePlan {
+        LeasePlan {
+            path_id,
+            role: role as i32,
+        }
+    }
+
+    fn hint(path_id: u32, role: WireguardRole, address: [u8; 4]) -> TraversalEndpointHint {
+        TraversalEndpointHint {
+            path_id,
+            role: role as i32,
+            observer_id: vec![u8::try_from(path_id).expect("path"); 32],
+            observer_peer_id: vec![u8::try_from(path_id + 16).expect("path"); 38],
+            observed_address: address.to_vec(),
+        }
+    }
+
+    #[test]
+    fn exact_peer_observations_enable_bounded_ipv4_punch_fallback() {
+        let leases = [
+            lease(1, WireguardRole::RelayClient),
+            lease(1, WireguardRole::RelayExit),
+        ];
+        let hints = [
+            hint(1, WireguardRole::RelayClient, [8, 8, 8, 8]),
+            hint(1, WireguardRole::RelayExit, [8, 8, 8, 8]),
+        ];
+        let selected = select_observed_punch_underlay(
+            &[link(7)],
+            &[address(7, "192.168.1.40")],
+            &[route(7, UnderlayFamily::Ipv4)],
+            &leases,
+            &hints,
+        )
+        .expect("punch candidate");
         assert_eq!(
-            select_direct_underlay(
+            selected,
+            UnderlayCandidate {
+                ifindex: 7,
+                address: "8.8.8.8".parse().expect("public IPv4"),
+                evidence: UnderlayEvidence::ObservedUdpPunch,
+            }
+        );
+    }
+
+    #[test]
+    fn punch_fallback_fails_closed_on_incomplete_or_inconsistent_lineage() {
+        let leases = [
+            lease(1, WireguardRole::RelayClient),
+            lease(1, WireguardRole::RelayExit),
+        ];
+        let local = [address(7, "10.0.0.7")];
+        let routes = [route(7, UnderlayFamily::Ipv4)];
+        let first = hint(1, WireguardRole::RelayClient, [8, 8, 8, 8]);
+        assert_eq!(
+            select_observed_punch_underlay(&[link(7)], &local, &routes, &leases, &[first.clone()]),
+            Err(UnderlaySelectionError::NoCandidate)
+        );
+        assert_eq!(
+            select_observed_punch_underlay(
                 &[link(7)],
-                &[address(7, "8.8.8.8"), address(7, "2606:4700:4700::1111"),],
+                &local,
+                &routes,
+                &leases,
+                &[first, hint(1, WireguardRole::RelayExit, [1, 1, 1, 1]),],
+            ),
+            Err(UnderlaySelectionError::Ambiguous)
+        );
+    }
+
+    #[test]
+    fn punch_fallback_requires_one_exact_ipv4_default_route() {
+        assert_eq!(
+            select_observed_punch_underlay(
+                &[link(7), link(8)],
+                &[address(7, "10.0.0.7")],
                 &[
                     route(7, UnderlayFamily::Ipv4),
-                    route(7, UnderlayFamily::Ipv6),
+                    route(8, UnderlayFamily::Ipv4),
                 ],
+                &[lease(1, WireguardRole::Client)],
+                &[hint(1, WireguardRole::Client, [8, 8, 8, 8])],
             ),
             Err(UnderlaySelectionError::Ambiguous)
         );

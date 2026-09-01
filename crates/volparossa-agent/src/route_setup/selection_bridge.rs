@@ -1234,6 +1234,7 @@ impl ClientNativeRelayReady {
             leases,
             setup_expires_at_unix: expires_at_unix,
             hard_expires_at_unix: expires_at_unix,
+            traversal_hints: Vec::new(),
         })
     }
 
@@ -6669,6 +6670,13 @@ mod tests {
 
         fn ambiguous_after_dispatch(_error: &Self::Error) -> bool {
             false
+        }
+
+        async fn endpoint_traversal_hints(
+            &mut self,
+            _bindings: Vec<crate::discovery::EndpointTraversalBinding>,
+        ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+            Ok(Vec::new())
         }
 
         async fn exit_forward<'a>(

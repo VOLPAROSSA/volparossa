@@ -2056,6 +2056,7 @@ mod tests {
             }],
             setup_expires_at_unix: 120,
             hard_expires_at_unix: 900,
+            traversal_hints: Vec::new(),
         }
     }
 
@@ -2086,6 +2087,7 @@ mod tests {
             ],
             setup_expires_at_unix: 120,
             hard_expires_at_unix: 900,
+            traversal_hints: Vec::new(),
         };
         let prepare = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -2523,6 +2525,7 @@ mod tests {
                     }],
                     setup_expires_at_unix: 120,
                     hard_expires_at_unix: 900,
+                    traversal_hints: Vec::new(),
                 })
                 .await
                 .expect("prepared");

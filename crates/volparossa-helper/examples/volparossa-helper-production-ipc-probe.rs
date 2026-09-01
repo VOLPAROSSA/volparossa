@@ -502,6 +502,7 @@ impl FunctionalCyclePlan {
             leases: leases.clone(),
             setup_expires_at_unix,
             hard_expires_at_unix,
+            traversal_hints: Vec::new(),
         };
         let prepare_request = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -616,6 +617,7 @@ impl FunctionalRelayPairPlan {
             leases: leases.clone(),
             setup_expires_at_unix,
             hard_expires_at_unix,
+            traversal_hints: Vec::new(),
         };
         let prepare_request = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,

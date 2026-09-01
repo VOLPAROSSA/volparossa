@@ -13,12 +13,13 @@ use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_ROUTE};
 use nix::poll::PollFlags;
 use thiserror::Error;
 use volparossa_routing::is_public_routable_ip;
+use volparossa_routing::{LeasePlan, TraversalEndpointHint};
 
 use crate::deadline::{HardDeadline, wait_for_fd};
 
 use super::{
     UnderlayAddress, UnderlayCandidate, UnderlayFamily, UnderlayLink, UnderlayRoute,
-    UnderlaySelectionError, select_direct_underlay,
+    UnderlaySelectionError, select_direct_underlay, select_observed_punch_underlay,
 };
 
 const MAX_DATAGRAM_BYTES: usize = 64 * 1024;
@@ -422,8 +423,10 @@ impl NetlinkCollector {
 /// only `NETLINK_ROUTE`, and uses one deadline for all six dumps. Its result proves only local
 /// assignment plus an unambiguous main-table default route; it never infers NAT behaviour or global
 /// reachability.
-pub(crate) fn collect_consistent_direct_underlay(
+pub(crate) fn collect_consistent_underlay(
     deadline: HardDeadline,
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
 ) -> Result<UnderlayCandidate, UnderlayNetlinkError> {
     deadline.ensure_remaining()?;
     let mut collector = NetlinkCollector::connect(deadline)?;
@@ -431,7 +434,7 @@ pub(crate) fn collect_consistent_direct_underlay(
     let first = collector.collect_snapshot(deadline, &mut budget)?;
     let second = collector.collect_snapshot(deadline, &mut budget)?;
     deadline.ensure_remaining()?;
-    let selected = select_consistent(&first, &second)?;
+    let selected = select_consistent(&first, &second, leases, hints)?;
     let selected = deadline.complete(selected)?;
     Ok(selected)
 }
@@ -439,16 +442,31 @@ pub(crate) fn collect_consistent_direct_underlay(
 fn select_consistent(
     first: &UnderlaySnapshot,
     second: &UnderlaySnapshot,
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
 ) -> Result<UnderlayCandidate, UnderlayNetlinkError> {
     if first != second {
         return Err(UnderlayNetlinkError::Inconsistent);
     }
-    select_direct_underlay(&first.links, &first.addresses, &first.routes).map_err(|error| {
-        match error {
-            UnderlaySelectionError::NoCandidate => UnderlayNetlinkError::NoCandidate,
-            UnderlaySelectionError::Ambiguous => UnderlayNetlinkError::Ambiguous,
-        }
-    })
+    match select_direct_underlay(&first.links, &first.addresses, &first.routes) {
+        Ok(candidate) => Ok(candidate),
+        Err(UnderlaySelectionError::NoCandidate) => select_observed_punch_underlay(
+            &first.links,
+            &first.addresses,
+            &first.routes,
+            leases,
+            hints,
+        )
+        .map_err(map_selection_error),
+        Err(error) => Err(map_selection_error(error)),
+    }
+}
+
+const fn map_selection_error(error: UnderlaySelectionError) -> UnderlayNetlinkError {
+    match error {
+        UnderlaySelectionError::NoCandidate => UnderlayNetlinkError::NoCandidate,
+        UnderlaySelectionError::Ambiguous => UnderlayNetlinkError::Ambiguous,
+    }
 }
 
 fn send_bounded(
@@ -1517,19 +1535,19 @@ mod tests {
     fn double_snapshot_policy_is_exact() {
         let first = stable("8.8.8.8", UnderlayFamily::Ipv4);
         assert_eq!(
-            select_consistent(&first, &first)
+            select_consistent(&first, &first, &[], &[])
                 .expect("candidate")
                 .address,
             "8.8.8.8".parse::<IpAddr>().expect("IP")
         );
         let changed = stable("1.1.1.1", UnderlayFamily::Ipv4);
         assert!(matches!(
-            select_consistent(&first, &changed),
+            select_consistent(&first, &changed, &[], &[]),
             Err(UnderlayNetlinkError::Inconsistent)
         ));
         let empty = UnderlaySnapshot::default();
         assert!(matches!(
-            select_consistent(&empty, &empty),
+            select_consistent(&empty, &empty, &[], &[]),
             Err(UnderlayNetlinkError::NoCandidate)
         ));
         let mut ambiguous = first.clone();
@@ -1538,7 +1556,7 @@ mod tests {
             ..ambiguous.addresses[0]
         });
         assert!(matches!(
-            select_consistent(&ambiguous, &ambiguous),
+            select_consistent(&ambiguous, &ambiguous, &[], &[]),
             Err(UnderlayNetlinkError::Ambiguous)
         ));
     }
