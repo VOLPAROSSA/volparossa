@@ -65,6 +65,7 @@ pub use paths::{
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 const INGRESS_POLICY_BACKOFF: Duration = Duration::from_millis(50);
+const BROWSER_QUIC_REVERSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Fully loaded unprivileged service.
 pub struct Agent {
@@ -274,6 +275,9 @@ fn spawn_client_ingress_tasks(
     udp_routes: ClientRouteControl,
     shutdown: &watch::Sender<bool>,
 ) -> (JoinHandle<()>, JoinHandle<()>) {
+    let udp_config = Arc::clone(&config);
+    let udp_discovery = discovery.clone();
+    let udp_helper = helper.clone();
     let tcp = tokio::spawn(run_client_tcp_ingress(
         runtime.clone(),
         Arc::clone(&state),
@@ -286,6 +290,9 @@ fn spawn_client_ingress_tasks(
     let udp = tokio::spawn(run_client_udp_ingress(
         runtime,
         state,
+        udp_config,
+        udp_discovery,
+        udp_helper,
         udp_routes,
         shutdown.subscribe(),
     ));
@@ -407,6 +414,9 @@ async fn run_client_tcp_ingress(
 async fn run_client_udp_ingress(
     runtime: Option<Arc<ClientIngressRuntime>>,
     state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
     routes: ClientRouteControl,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -429,10 +439,47 @@ async fn run_client_udp_ingress(
         return;
     };
     loop {
+        let browser_flow_active = routes.browser_quic_flow_active().await;
         let mut ready = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     return;
+                }
+                continue;
+            }
+            () = tokio::time::sleep(BROWSER_QUIC_REVERSE_POLL_INTERVAL), if browser_flow_active => {
+                let now_ms = unix_millis();
+                let Some(policy) = state.read().await.active_policy(now_ms) else {
+                    routes.disconnect().await;
+                    continue;
+                };
+                match routes.receive_browser_quic_response(&policy, now_ms).await {
+                    Ok(Some(response)) => {
+                        if runtime
+                            .send_ipv4_udp_response(
+                                response.application(),
+                                response.remote(),
+                                response.payload(),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            state.write().await.log(
+                                LogLevel::Warn,
+                                "INGRESS_MPQUIC_REPLY_FAILED",
+                                unix_millis(),
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        routes.disconnect().await;
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "INGRESS_MPQUIC_RESPONSE_UNAVAILABLE",
+                            unix_millis(),
+                        );
+                    }
                 }
                 continue;
             }
@@ -490,6 +537,32 @@ async fn run_client_udp_ingress(
             }
         };
         ready.clear_ready();
+        if ingress.is_browser_quic() {
+            if Box::pin(routes.ensure_browser_quic(&config, &discovery, &helper))
+                .await
+                .is_err()
+            {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_MPQUIC_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                continue;
+            }
+            if routes
+                .send_browser_quic_ingress(ingress, &policy, now_ms)
+                .await
+                .is_err()
+            {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_MPQUIC_DATAGRAM_REJECTED",
+                    unix_millis(),
+                );
+            }
+            continue;
+        }
         if Box::pin(routes.activate_udp_ingress(ingress, &policy, now_ms))
             .await
             .is_err()

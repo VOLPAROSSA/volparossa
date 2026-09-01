@@ -7,7 +7,7 @@
 
 use std::{
     io,
-    net::{IpAddr, SocketAddr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     os::fd::OwnedFd,
 };
 
@@ -42,6 +42,10 @@ const INGRESS_HARD_TTL_SECONDS: u64 = 15 * 60;
 const INGRESS_UDP_IDLE_TIMEOUT_MS: u32 = 30_000;
 const INGRESS_UDP_FLOW_TTL_MS: u64 = 60_000;
 const INGRESS_TCP_FLOW_TTL_MS: u64 = 60_000;
+const BROWSER_QUIC_PORT: u16 = 443;
+const IPV4_HEADER_BYTES: usize = 20;
+const UDP_HEADER_BYTES: usize = 8;
+const MAX_BROWSER_QUIC_DATAGRAMS_PER_FLOW: u32 = 65_536;
 
 const IPV4_TRANSPARENT_TCP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
     ClientIngressSocketKind::TransparentTcpListener,
@@ -392,6 +396,111 @@ impl PolicyAuthorizedUdpIngress {
         })
     }
 
+    /// Return whether this policy-approved datagram must use genuine Multipath QUIC.
+    #[must_use]
+    pub(crate) const fn is_browser_quic(&self) -> bool {
+        self.destination.port() == BROWSER_QUIC_PORT
+    }
+
+    /// Sign and bind the first browser-QUIC datagram to one retained multipath route.
+    #[allow(clippy::too_many_arguments)] // Every argument is a separate immutable security scope.
+    pub(crate) fn bind_to_multipath_route(
+        self,
+        route_context_id: [u8; 16],
+        client_ephemeral_id: [u8; 32],
+        route_expires_at_ms: u64,
+        coordinator: &ReservationCoordinator,
+        policy: &VerifiedManifest,
+        tunnel_source: Ipv4Addr,
+        maximum_packet_bytes: usize,
+        now_ms: u64,
+    ) -> Result<(BrowserQuicFlowBinding, Vec<u8>), ClientIngressUdpError> {
+        if !self.is_browser_quic()
+            || now_ms >= self.expires_at_ms
+            || self.policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() != 1
+        {
+            return Err(ClientIngressUdpError::PolicyBinding);
+        }
+        let expires_at_ms = self.expires_at_ms.min(route_expires_at_ms);
+        let signed_authorization = coordinator
+            .sign_udp_ip(
+                route_context_id,
+                self.policy_hash,
+                IpAddr::V4(*self.destination.ip()),
+                self.destination.port(),
+                INGRESS_UDP_IDLE_TIMEOUT_MS,
+                now_ms,
+                expires_at_ms,
+            )
+            .map_err(ClientIngressUdpError::Sign)?;
+        self.bind_signed_to_multipath_route(
+            route_context_id,
+            client_ephemeral_id,
+            route_expires_at_ms,
+            policy,
+            tunnel_source,
+            maximum_packet_bytes,
+            &signed_authorization,
+            now_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Testable signed-flow verification boundary.
+    fn bind_signed_to_multipath_route(
+        self,
+        route_context_id: [u8; 16],
+        client_ephemeral_id: [u8; 32],
+        route_expires_at_ms: u64,
+        policy: &VerifiedManifest,
+        tunnel_source: Ipv4Addr,
+        maximum_packet_bytes: usize,
+        signed_authorization: &[u8],
+        now_ms: u64,
+    ) -> Result<(BrowserQuicFlowBinding, Vec<u8>), ClientIngressUdpError> {
+        let mut replay = ReplayCache::new(1)
+            .map_err(|error| ClientIngressUdpError::Authorization(error.into()))?;
+        let flow = UdpAuthorizationScope::new_multipath(
+            route_context_id,
+            client_ephemeral_id,
+            route_expires_at_ms,
+            policy,
+        )
+        .map_err(ClientIngressUdpError::Authorization)?
+        .verify(
+            signed_authorization,
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .map_err(ClientIngressUdpError::Authorization)?;
+        if !self.is_browser_quic()
+            || self.source.port() == 0
+            || self.source.ip().is_unspecified()
+            || tunnel_source.is_unspecified()
+            || !flow.matches_exact_ip_destination(SocketAddr::V4(self.destination))
+        {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        let packet = build_ipv4_udp_packet(
+            SocketAddrV4::new(tunnel_source, self.source.port()),
+            self.destination,
+            &self.payload,
+            maximum_packet_bytes,
+        )?;
+        Ok((
+            BrowserQuicFlowBinding {
+                flow,
+                application: self.source,
+                remote: self.destination,
+                tunnel_source,
+                policy_hash: self.policy_hash,
+                last_activity_ms: now_ms,
+                datagrams: 0,
+            },
+            packet,
+        ))
+    }
+
     /// Sign and locally verify the exact ingress tuple against one committed single-relay path.
     ///
     /// The returned flow is the same typed [`AuthorizedUdpFlow`] consumed by the production QUIC
@@ -450,6 +559,214 @@ impl PolicyAuthorizedUdpIngress {
             payload: self.payload,
         })
     }
+}
+
+/// One policy- and route-bound transparent browser-QUIC flow retained across datagrams.
+#[must_use = "an active browser QUIC flow must stay attached to its native MPQUIC session"]
+pub(crate) struct BrowserQuicFlowBinding {
+    flow: AuthorizedUdpFlow,
+    application: SocketAddrV4,
+    remote: SocketAddrV4,
+    tunnel_source: Ipv4Addr,
+    policy_hash: [u8; 32],
+    last_activity_ms: u64,
+    datagrams: u32,
+}
+
+impl BrowserQuicFlowBinding {
+    /// Borrow the exact signed flow consumed by the native MPQUIC boundary.
+    pub(crate) const fn flow(&self) -> &AuthorizedUdpFlow {
+        &self.flow
+    }
+
+    /// Bind another intercepted datagram to the same application/remote tuple and flow.
+    pub(crate) fn bind_next(
+        &self,
+        ingress: &PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        maximum_packet_bytes: usize,
+        now_ms: u64,
+    ) -> Result<Vec<u8>, ClientIngressUdpError> {
+        self.ensure_live(policy, now_ms)?;
+        if !ingress.is_browser_quic()
+            || ingress.source != self.application
+            || ingress.destination != self.remote
+            || ingress.policy_hash.ct_eq(&self.policy_hash).unwrap_u8() != 1
+            || now_ms >= ingress.expires_at_ms
+        {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        build_ipv4_udp_packet(
+            SocketAddrV4::new(self.tunnel_source, self.application.port()),
+            self.remote,
+            &ingress.payload,
+            maximum_packet_bytes,
+        )
+    }
+
+    /// Mark one successfully handed-off datagram without extending signed expiry.
+    pub(crate) fn record_sent(&mut self, now_ms: u64) -> Result<(), ClientIngressUdpError> {
+        self.ensure_activity_bound(now_ms)?;
+        self.last_activity_ms = now_ms;
+        self.datagrams = self
+            .datagrams
+            .checked_add(1)
+            .ok_or(ClientIngressUdpError::FlowBound)?;
+        Ok(())
+    }
+
+    /// Validate one full reverse inner IPv4/UDP packet and recover only its UDP payload.
+    pub(crate) fn accept_response<'a>(
+        &mut self,
+        packet: &'a [u8],
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<&'a [u8], ClientIngressUdpError> {
+        self.ensure_live(policy, now_ms)?;
+        let (source, destination, payload) = parse_ipv4_udp_packet(packet)?;
+        let expected_destination = SocketAddrV4::new(self.tunnel_source, self.application.port());
+        if source != self.remote || destination != expected_destination {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        self.last_activity_ms = now_ms;
+        self.datagrams = self
+            .datagrams
+            .checked_add(1)
+            .ok_or(ClientIngressUdpError::FlowBound)?;
+        Ok(payload)
+    }
+
+    pub(crate) const fn application(&self) -> SocketAddrV4 {
+        self.application
+    }
+
+    pub(crate) const fn remote(&self) -> SocketAddrV4 {
+        self.remote
+    }
+
+    fn ensure_live(
+        &self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<(), ClientIngressUdpError> {
+        if self.policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() != 1 {
+            return Err(ClientIngressUdpError::PolicyBinding);
+        }
+        self.flow
+            .ensure_active_at(now_ms)
+            .map_err(ClientIngressUdpError::Authorization)?;
+        self.ensure_activity_bound(now_ms)
+    }
+
+    fn ensure_activity_bound(&self, now_ms: u64) -> Result<(), ClientIngressUdpError> {
+        let idle_timeout_ms = u64::try_from(self.flow.idle_timeout().as_millis())
+            .map_err(|_| ClientIngressUdpError::FlowBound)?;
+        if now_ms < self.last_activity_ms
+            || now_ms.saturating_sub(self.last_activity_ms) >= idle_timeout_ms
+            || self.datagrams >= MAX_BROWSER_QUIC_DATAGRAMS_PER_FLOW
+        {
+            return Err(ClientIngressUdpError::FlowBound);
+        }
+        Ok(())
+    }
+}
+
+fn build_ipv4_udp_packet(
+    source: SocketAddrV4,
+    destination: SocketAddrV4,
+    payload: &[u8],
+    maximum_packet_bytes: usize,
+) -> Result<Vec<u8>, ClientIngressUdpError> {
+    let udp_length = UDP_HEADER_BYTES
+        .checked_add(payload.len())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or(ClientIngressUdpError::PacketBinding)?;
+    let packet_length = IPV4_HEADER_BYTES
+        .checked_add(usize::from(udp_length))
+        .filter(|length| *length <= maximum_packet_bytes)
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or(ClientIngressUdpError::PacketBinding)?;
+    let mut packet = vec![0_u8; usize::from(packet_length)];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&packet_length.to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&source.ip().octets());
+    packet[16..20].copy_from_slice(&destination.ip().octets());
+    let header_checksum = internet_checksum(&packet[..IPV4_HEADER_BYTES]);
+    packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+
+    packet[20..22].copy_from_slice(&source.port().to_be_bytes());
+    packet[22..24].copy_from_slice(&destination.port().to_be_bytes());
+    packet[24..26].copy_from_slice(&udp_length.to_be_bytes());
+    packet[28..].copy_from_slice(payload);
+    let mut pseudo_datagram = Vec::with_capacity(12 + usize::from(udp_length));
+    pseudo_datagram.extend_from_slice(&source.ip().octets());
+    pseudo_datagram.extend_from_slice(&destination.ip().octets());
+    pseudo_datagram.extend_from_slice(&[0, 17]);
+    pseudo_datagram.extend_from_slice(&udp_length.to_be_bytes());
+    pseudo_datagram.extend_from_slice(&packet[IPV4_HEADER_BYTES..]);
+    let mut udp_checksum = internet_checksum(&pseudo_datagram);
+    if udp_checksum == 0 {
+        udp_checksum = u16::MAX;
+    }
+    packet[26..28].copy_from_slice(&udp_checksum.to_be_bytes());
+    Ok(packet)
+}
+
+fn parse_ipv4_udp_packet(
+    packet: &[u8],
+) -> Result<(SocketAddrV4, SocketAddrV4, &[u8]), ClientIngressUdpError> {
+    if packet.len() < IPV4_HEADER_BYTES + UDP_HEADER_BYTES
+        || packet[0] != 0x45
+        || usize::from(u16::from_be_bytes([packet[2], packet[3]])) != packet.len()
+        || packet[9] != 17
+        || u16::from_be_bytes([packet[6], packet[7]]) & 0x3fff != 0
+        || internet_checksum(&packet[..IPV4_HEADER_BYTES]) != 0
+    {
+        return Err(ClientIngressUdpError::PacketBinding);
+    }
+    let udp_length = usize::from(u16::from_be_bytes([packet[24], packet[25]]));
+    if udp_length < UDP_HEADER_BYTES
+        || IPV4_HEADER_BYTES.checked_add(udp_length) != Some(packet.len())
+        || packet[26..28] == [0, 0]
+    {
+        return Err(ClientIngressUdpError::PacketBinding);
+    }
+    let source_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+    let destination_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+    let source = SocketAddrV4::new(source_ip, u16::from_be_bytes([packet[20], packet[21]]));
+    let destination =
+        SocketAddrV4::new(destination_ip, u16::from_be_bytes([packet[22], packet[23]]));
+    if source.port() == 0 || destination.port() == 0 {
+        return Err(ClientIngressUdpError::PacketBinding);
+    }
+    let mut pseudo_datagram = Vec::with_capacity(12 + udp_length);
+    pseudo_datagram.extend_from_slice(&source_ip.octets());
+    pseudo_datagram.extend_from_slice(&destination_ip.octets());
+    pseudo_datagram.extend_from_slice(&[0, 17]);
+    pseudo_datagram.extend_from_slice(&(u16::try_from(udp_length).unwrap_or(0)).to_be_bytes());
+    pseudo_datagram.extend_from_slice(&packet[IPV4_HEADER_BYTES..]);
+    if internet_checksum(&pseudo_datagram) != 0 {
+        return Err(ClientIngressUdpError::PacketBinding);
+    }
+    Ok((source, destination, &packet[28..]))
+}
+
+fn internet_checksum(bytes: &[u8]) -> u16 {
+    let mut sum = 0_u32;
+    let mut chunks = bytes.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([chunk[0], chunk[1]])));
+    }
+    if let [tail] = chunks.remainder() {
+        sum = sum.wrapping_add(u32::from(*tail) << 8);
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    let folded = sum.to_be_bytes();
+    !u16::from_be_bytes([folded[2], folded[3]])
 }
 
 /// Exact inputs needed to activate and seed one production single-relay UDP association.
@@ -566,6 +883,10 @@ pub(crate) enum ClientIngressUdpError {
     Authorization(#[source] UdpError),
     #[error("signed UDP destination did not match kernel ingress evidence")]
     DestinationBinding,
+    #[error("browser QUIC inner IPv4/UDP packet binding is invalid")]
+    PacketBinding,
+    #[error("browser QUIC flow exceeded its idle, lifetime, or datagram bound")]
+    FlowBound,
     #[error("UDP reply payload exceeded the fixed datagram bound")]
     ReplyPayload,
     #[error("connected UDP reply descriptor acquisition failed")]
@@ -586,7 +907,10 @@ mod tests {
     use volparossa_test_support::{SignedRouteFixture, verified_development_manifest};
     use volparossa_udp::VerifiedSingleRelayPath;
 
-    use super::{PolicyAuthorizedUdpIngress, authorize_tcp_destination};
+    use super::{
+        PolicyAuthorizedUdpIngress, authorize_tcp_destination, build_ipv4_udp_packet,
+        parse_ipv4_udp_packet,
+    };
 
     #[test]
     fn transparent_tcp_destination_is_bound_to_exact_raw_ip_policy() {
@@ -674,5 +998,108 @@ mod tests {
         assert_eq!(bound.source(), "10.0.0.2:52000".parse().expect("source"));
         assert_eq!(SocketAddr::V4(bound.destination()), destination);
         assert_eq!(bound.payload(), b"alpha-datagram");
+    }
+
+    #[test]
+    fn browser_quic_reuses_multipath_flow_with_tunnel_source_and_exact_reverse_packet() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        let application = SocketAddr::from((Ipv4Addr::new(43, 159, 1, 9), 52_000));
+        let remote = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 443));
+        let permission =
+            ProtocolPort::new(TransportProtocol::Udp, remote.port()).expect("UDP permission");
+        let rule = DestinationRule::exact_ip(remote.ip(), [permission]).expect("IP rule");
+        let policy = verified_development_manifest(NOW_MS, vec![rule]).expect("policy");
+        let fixture = SignedRouteFixture::new(2, &[Transport::MultipathQuic], NOW_MS)
+            .expect("multipath route");
+        let nonce = generate_nonce();
+        let signed = sign_control_message(
+            &UdpFlowAuthorization {
+                route_context_id: fixture.route_context_id().to_vec(),
+                flow_id: vec![9; 16],
+                client_ephemeral_id: fixture.client_session_id().to_vec(),
+                hostname: String::new(),
+                destination_ip: match remote.ip() {
+                    IpAddr::V4(address) => address.octets().to_vec(),
+                    IpAddr::V6(_) => unreachable!("IPv4 fixture"),
+                },
+                port: u32::from(remote.port()),
+                policy_hash: policy.policy_hash().to_vec(),
+                idle_timeout_ms: 30_000,
+                timestamp_ms: NOW_MS,
+                expires_at_ms: NOW_MS + 60_000,
+                nonce: nonce.to_vec(),
+            },
+            fixture.client_key(),
+            NOW_MS,
+            NOW_MS + 60_000,
+            nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed browser flow");
+        let ingress = PolicyAuthorizedUdpIngress::authorize(
+            application,
+            remote,
+            b"quic-one".to_vec(),
+            &policy,
+            NOW_MS,
+        )
+        .expect("first ingress");
+        let tunnel_source = Ipv4Addr::new(10, 76, 0, 2);
+        let (mut binding, first_packet) = ingress
+            .bind_signed_to_multipath_route(
+                *fixture.route_context_id(),
+                fixture.client_session_id(),
+                NOW_MS + 60_000,
+                &policy,
+                tunnel_source,
+                1_280,
+                &signed,
+                NOW_MS,
+            )
+            .expect("multipath-bound browser flow");
+        let (first_source, first_remote, first_payload) =
+            parse_ipv4_udp_packet(&first_packet).expect("valid full inner packet");
+        assert_eq!(first_source, "10.76.0.2:52000".parse().expect("source"));
+        assert_eq!(SocketAddr::V4(first_remote), remote);
+        assert_eq!(first_payload, b"quic-one");
+        binding.record_sent(NOW_MS).expect("first handoff");
+
+        let next = PolicyAuthorizedUdpIngress::authorize(
+            application,
+            remote,
+            b"quic-two".to_vec(),
+            &policy,
+            NOW_MS + 1,
+        )
+        .expect("next ingress");
+        let next_packet = binding
+            .bind_next(&next, &policy, 1_280, NOW_MS + 1)
+            .expect("same active flow");
+        assert_eq!(
+            parse_ipv4_udp_packet(&next_packet)
+                .expect("next full inner packet")
+                .2,
+            b"quic-two"
+        );
+        binding.record_sent(NOW_MS + 1).expect("next handoff");
+
+        let reverse_packet =
+            build_ipv4_udp_packet(first_remote, first_source, b"server-quic", 1_280)
+                .expect("reverse inner packet");
+        assert_eq!(
+            binding
+                .accept_response(&reverse_packet, &policy, NOW_MS + 2)
+                .expect("exact reverse tuple"),
+            b"server-quic"
+        );
+
+        let mut corrupted = reverse_packet;
+        *corrupted.last_mut().expect("payload") ^= 1;
+        assert!(
+            binding
+                .accept_response(&corrupted, &policy, NOW_MS + 3)
+                .is_err()
+        );
+        assert!(build_ipv4_udp_packet(first_source, first_remote, &[0; 1_253], 1_280).is_err());
     }
 }

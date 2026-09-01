@@ -23,7 +23,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
-    net::{IpAddr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddrV4},
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -91,7 +91,8 @@ use volparossa_wireguard::{HELPER_HANDLE_BYTES, HelperContextHandle, PublicWireG
 
 use crate::{
     client_ingress::{
-        PolicyAuthorizedTcpIngress, PolicyAuthorizedUdpIngress, RouteAuthorizedUdpIngress,
+        BrowserQuicFlowBinding, PolicyAuthorizedTcpIngress, PolicyAuthorizedUdpIngress,
+        RouteAuthorizedUdpIngress,
     },
     discovery::{
         AdvertisementPayloadHash, ClientPreselectionError, ClientPreselectionParameters,
@@ -157,7 +158,12 @@ enum ClientTransportState {
     TcpActive(ActiveProductionMptcpClientFlow),
     UdpReady(CertificateBoundProductionUdpRoute),
     UdpActive(ActiveProductionUdpRoute),
-    Mpquic(Box<ProductionMpquicSession>),
+    Mpquic(Box<ActiveProductionMpquicRoute>),
+}
+
+struct ActiveProductionMpquicRoute {
+    session: ProductionMpquicSession,
+    browser_flow: Option<BrowserQuicFlowBinding>,
 }
 
 impl EstablishedClientRoute {
@@ -185,8 +191,8 @@ impl EstablishedClientRoute {
             ClientTransportState::UdpActive(route) => {
                 let _ = route.shutdown().await;
             }
-            ClientTransportState::Mpquic(session) => {
-                let _ = session.shutdown().await;
+            ClientTransportState::Mpquic(active) => {
+                let _ = active.session.shutdown().await;
             }
         }
         if let Some(route) = self.route {
@@ -276,6 +282,40 @@ impl ClientRouteControl {
         tcp_profile.udp.enabled = false;
         tcp_profile.quic.enabled = false;
         Box::pin(self.connect(&tcp_profile, discovery, helper)).await
+    }
+
+    /// Ensure UDP/443 uses one genuine multipath-only route, never general UDP fallback.
+    pub(crate) async fn ensure_browser_quic(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !config.quic.enabled
+            || !config.quic.require_multipath
+            || config.quic.allow_degraded_single_path
+            || config.quic.minimum_paths < 2
+        {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        {
+            let state = self.state.lock().await;
+            match &*state {
+                ClientRouteControlState::Established(established)
+                    if matches!(established.transport, ClientTransportState::Mpquic(_)) =>
+                {
+                    return Ok(ClientRouteProgress::TransportActive);
+                }
+                ClientRouteControlState::Idle => {}
+                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
+                    return Err(ClientRouteConnectError::Busy);
+                }
+            }
+        }
+        let mut profile = config.clone();
+        profile.tcp.enabled = false;
+        profile.udp.enabled = false;
+        Box::pin(self.connect(&profile, discovery, helper)).await
     }
 
     /// Starts exactly one config-bound preselection and retains its affine continuation.
@@ -671,6 +711,136 @@ impl ClientRouteControl {
         })
     }
 
+    /// Hand one policy-approved UDP/443 datagram to the retained native MPQUIC session.
+    pub(crate) async fn send_browser_quic_ingress(
+        &self,
+        ingress: PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !ingress.is_browser_quic() {
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        }
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let ClientTransportState::Mpquic(active) = &mut established.transport else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let route = established
+            .route
+            .as_ref()
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let (tunnel_source, maximum_packet_bytes) = mpquic_tunnel_packet_scope(&active.session)?;
+
+        let (packet, pending_binding) = if let Some(binding) = active.browser_flow.as_ref() {
+            (
+                binding
+                    .bind_next(&ingress, policy, maximum_packet_bytes, now_ms)
+                    .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?,
+                None,
+            )
+        } else {
+            let protocol = route
+                .established
+                .owner
+                .as_ref()
+                .and_then(PreparedContextOwner::protocol)
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let route_expires_at_ms = route
+                .established
+                .relay_grants
+                .iter()
+                .map(VerifiedRelayGrant::expires_at_ms)
+                .min()
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let (binding, packet) = ingress
+                .bind_to_multipath_route(
+                    route.established.request.parameters.route_context_id,
+                    *protocol.coordinator.client_session_id(),
+                    route_expires_at_ms,
+                    &protocol.coordinator,
+                    policy,
+                    tunnel_source,
+                    maximum_packet_bytes,
+                    now_ms,
+                )
+                .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
+            (packet, Some(binding))
+        };
+
+        let flow = pending_binding
+            .as_ref()
+            .or(active.browser_flow.as_ref())
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        active
+            .session
+            .send_browser_quic(flow.flow(), packet, now_ms)
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        if let Some(binding) = pending_binding {
+            active.browser_flow = Some(binding);
+        }
+        active
+            .browser_flow
+            .as_mut()
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .record_sent(now_ms)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        Ok(ClientRouteProgress::TransportActive)
+    }
+
+    /// Poll one native reverse inner-IP packet and recover its transparent application reply.
+    pub(crate) async fn receive_browser_quic_response(
+        &self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<Option<ClientUdpResponse>, ClientRouteConnectError> {
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Ok(None);
+        };
+        let ClientTransportState::Mpquic(active) = &mut established.transport else {
+            return Ok(None);
+        };
+        let Some(flow) = active.browser_flow.as_mut() else {
+            return Ok(None);
+        };
+        let packet = active
+            .session
+            .receive_browser_quic(flow.flow(), now_ms)
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let Some(packet) = packet else {
+            return Ok(None);
+        };
+        let application = flow.application();
+        let remote = flow.remote();
+        let payload = flow
+            .accept_response(&packet, policy, now_ms)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .to_vec();
+        Ok(Some(ClientUdpResponse {
+            application,
+            remote,
+            payload,
+        }))
+    }
+
+    /// Whether periodic reverse polling is meaningful for the current route owner.
+    pub(crate) async fn browser_quic_flow_active(&self) -> bool {
+        let state = self.state.lock().await;
+        matches!(
+            &*state,
+            ClientRouteControlState::Established(established)
+                if matches!(
+                    &established.transport,
+                    ClientTransportState::Mpquic(active) if active.browser_flow.is_some()
+                )
+        )
+    }
+
     /// Cancels any pre-route affine ownership; helper cleanup remains a separate fail-closed step.
     pub(crate) async fn disconnect(&self) {
         let previous = {
@@ -693,6 +863,26 @@ struct ClientOpenTcpMaterial {
 enum ClientTcpDestination {
     Hostname(String),
     Ip(IpAddr),
+}
+
+fn mpquic_tunnel_packet_scope(
+    session: &ProductionMpquicSession,
+) -> Result<(Ipv4Addr, usize), ClientRouteConnectError> {
+    let assigned_ipv4: [u8; 4] = session
+        .assignment()
+        .assigned_ipv4
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let assigned_ipv4 = Ipv4Addr::from(assigned_ipv4);
+    let maximum_packet_bytes = usize::try_from(session.assignment().mtu)
+        .ok()
+        .filter(|mtu| *mtu >= 28 && u16::try_from(*mtu).is_ok())
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    if assigned_ipv4.is_unspecified() || assigned_ipv4.is_multicast() {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    Ok((assigned_ipv4, maximum_packet_bytes))
 }
 
 fn client_open_tcp_material(
@@ -910,7 +1100,12 @@ async fn admit_completed_native_route(
                 .await;
             if let Ok(session) = session {
                 Ok(EstablishedClientRoute {
-                    transport: ClientTransportState::Mpquic(Box::new(session)),
+                    transport: ClientTransportState::Mpquic(Box::new(
+                        ActiveProductionMpquicRoute {
+                            session,
+                            browser_flow: None,
+                        },
+                    )),
                     route: Some(route),
                     orchestrator,
                     helper: helper.clone(),

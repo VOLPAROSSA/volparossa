@@ -38,6 +38,36 @@ impl<'a> UdpAuthorizationScope<'a> {
         }
     }
 
+    /// Bind authorization to a previously verified multipath route and active policy.
+    ///
+    /// This constructor exists for CONNECT-IP transports whose route proof is an exact set of
+    /// relay grants rather than a [`VerifiedSingleRelayPath`]. Callers must derive all three
+    /// values from the same retained verified route owner; the signed flow is still checked
+    /// against the ephemeral Client identity, route context, expiry and policy below.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero identities or a zero route expiry.
+    pub fn new_multipath(
+        route_context_id: [u8; ROUTE_CONTEXT_BYTES],
+        client_ephemeral_id: [u8; CLIENT_ID_BYTES],
+        route_expires_at_ms: u64,
+        policy: &'a VerifiedManifest,
+    ) -> Result<Self, UdpError> {
+        if route_context_id.iter().all(|byte| *byte == 0)
+            || client_ephemeral_id.iter().all(|byte| *byte == 0)
+            || route_expires_at_ms == 0
+        {
+            return Err(UdpError::InvalidBinding("multipath route scope"));
+        }
+        Ok(Self {
+            route_context_id,
+            client_ephemeral_id,
+            route_expires_at_ms,
+            policy,
+        })
+    }
+
     /// Verify a signed, replay-protected flow and its exact policy hash and
     /// domain-or-IP/UDP/port tuple.
     ///
