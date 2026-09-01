@@ -214,6 +214,16 @@ pub struct KernelMptcpPathManager {
     kernel: Arc<dyn MptcpKernelBackend>,
 }
 
+/// Kernel path-manager facade for an externally serialized, single-threaded worker.
+///
+/// Unlike [`KernelMptcpPathManager`]'s async implementation, these operations execute generic
+/// netlink on the calling thread. This is intended for the privileged helper child, whose seccomp
+/// policy deliberately forbids creating threads after sandbox installation. The same namespace
+/// ownership registry and rollback states are retained; only the execution mechanism differs.
+pub struct SynchronousKernelMptcpPathManager {
+    backend: KernelMptcpPathManager,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ManagedEndpoint {
     Adding(MptcpEndpoint),
@@ -351,6 +361,331 @@ impl KernelMptcpPathManager {
             contexts: contexts_for_namespace(registry, namespace, maximum_namespaces)?,
             kernel,
         })
+    }
+}
+
+impl SynchronousKernelMptcpPathManager {
+    /// Creates a synchronous backend bound to the calling thread's current network namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the namespace cannot be identified or the bounded namespace registry
+    /// cannot admit it.
+    pub fn new() -> Result<Self, MptcpError> {
+        Ok(Self {
+            backend: KernelMptcpPathManager::new()?,
+        })
+    }
+
+    #[cfg(test)]
+    fn with_kernel(kernel: Arc<dyn MptcpKernelBackend>) -> Self {
+        Self {
+            backend: KernelMptcpPathManager::with_kernel(kernel),
+        }
+    }
+
+    /// Reserves namespace-global limits and applies them without creating an executor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid or conflicting ownership and for kernel netlink failures.
+    pub fn prepare_context(
+        &self,
+        route_context_id: &str,
+        limits: MptcpLimits,
+    ) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        limits.validate()?;
+        {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            if !contexts.is_empty() {
+                return Err(MptcpError::Invalid(
+                    "backend already owns its namespace context".into(),
+                ));
+            }
+            contexts.insert(
+                route_context_id.to_owned(),
+                ManagedContext::Preparing(limits),
+            );
+        }
+
+        let result = self.backend.kernel.set_limits(limits);
+        let mut contexts = self.backend.contexts.blocking_lock();
+        match result {
+            Ok(())
+                if matches!(
+                    contexts.get(route_context_id),
+                    Some(ManagedContext::Preparing(current)) if *current == limits
+                ) =>
+            {
+                contexts.insert(
+                    route_context_id.to_owned(),
+                    ManagedContext::Active(HashMap::new()),
+                );
+                Ok(())
+            }
+            Ok(()) => Err(MptcpError::CleanupIncomplete(
+                "prepared context state changed before limits commit",
+            )),
+            Err(error) => {
+                if matches!(contexts.get(route_context_id), Some(ManagedContext::Preparing(current)) if *current == limits)
+                {
+                    contexts.remove(route_context_id);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Adds one selected WireGuard-bound endpoint without creating an executor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid ownership, kernel mutation failure, or incomplete rollback.
+    pub fn add_path(
+        &self,
+        route_context_id: &str,
+        endpoint: MptcpEndpoint,
+    ) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        endpoint.validate()?;
+        {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id) else {
+                return Err(MptcpError::Invalid(
+                    "route context is absent or busy".into(),
+                ));
+            };
+            if let Some(current) = endpoints.get(&endpoint.id) {
+                return if matches!(current, ManagedEndpoint::Active(_))
+                    && current.endpoint() == &endpoint
+                {
+                    Ok(())
+                } else {
+                    Err(MptcpError::Invalid(
+                        "endpoint id has a conflicting or pending owner".into(),
+                    ))
+                };
+            }
+            if endpoints.len() >= usize::from(MAX_PATHS) {
+                return Err(MptcpError::Invalid(
+                    "route context path limit reached".into(),
+                ));
+            }
+            endpoints.insert(endpoint.id, ManagedEndpoint::Adding(endpoint.clone()));
+        }
+
+        if let Err(error) = self.backend.kernel.add_endpoint(&endpoint) {
+            if is_errno(&error, libc::EEXIST) {
+                let mut contexts = self.backend.contexts.blocking_lock();
+                if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
+                {
+                    if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
+                    {
+                        endpoints.remove(&endpoint.id);
+                    }
+                }
+                return Err(error);
+            }
+            if self.backend.kernel.delete_endpoint(&endpoint).is_ok() {
+                let mut contexts = self.backend.contexts.blocking_lock();
+                if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
+                {
+                    if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
+                    {
+                        endpoints.remove(&endpoint.id);
+                    }
+                }
+                return Err(error);
+            }
+            let _cleanup_state = self.mark_add_cleanup_required(route_context_id, endpoint);
+            return Err(MptcpError::CleanupIncomplete(
+                "failed endpoint add could not be rolled back",
+            ));
+        }
+
+        let committed = {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            match contexts.get_mut(route_context_id) {
+                Some(ManagedContext::Active(endpoints)) if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint) =>
+                {
+                    endpoints.insert(endpoint.id, ManagedEndpoint::Active(endpoint.clone()));
+                    true
+                }
+                Some(_) | None => false,
+            }
+        };
+        if committed {
+            return Ok(());
+        }
+        if self.backend.kernel.delete_endpoint(&endpoint).is_ok() {
+            return Err(MptcpError::Worker(
+                "endpoint state commit failed; exact kernel rollback completed".into(),
+            ));
+        }
+        let _cleanup_state = self.mark_add_cleanup_required(route_context_id, endpoint);
+        Err(MptcpError::CleanupIncomplete(
+            "endpoint state commit and exact rollback failed",
+        ))
+    }
+
+    fn mark_add_cleanup_required(
+        &self,
+        route_context_id: &str,
+        endpoint: MptcpEndpoint,
+    ) -> Result<(), MptcpError> {
+        let mut contexts = self.backend.contexts.blocking_lock();
+        match contexts.get_mut(route_context_id) {
+            Some(ManagedContext::Active(endpoints)) => {
+                endpoints.insert(endpoint.id, ManagedEndpoint::CleanupRequired(endpoint));
+            }
+            Some(ManagedContext::Cleaning(endpoints)) => {
+                endpoints.insert(endpoint.id, endpoint);
+            }
+            Some(ManagedContext::Preparing(_)) | None => {
+                return Err(MptcpError::CleanupIncomplete(
+                    "route context vanished while retaining endpoint ownership",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes one owned endpoint without creating an executor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid ownership or when exact endpoint cleanup remains pending.
+    pub fn remove_path(&self, route_context_id: &str, endpoint_id: u8) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        if endpoint_id == 0 || endpoint_id > MAX_PATHS {
+            return Err(MptcpError::Invalid("invalid endpoint id".into()));
+        }
+        let endpoint = {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id) else {
+                return Err(MptcpError::Invalid(
+                    "route context is absent or busy".into(),
+                ));
+            };
+            let Some(current) = endpoints.get(&endpoint_id).cloned() else {
+                return Ok(());
+            };
+            let endpoint = match current {
+                ManagedEndpoint::Active(endpoint) | ManagedEndpoint::CleanupRequired(endpoint) => {
+                    endpoint
+                }
+                ManagedEndpoint::Adding(_) | ManagedEndpoint::Removing(_) => {
+                    return Err(MptcpError::Invalid(
+                        "endpoint mutation is already pending".into(),
+                    ));
+                }
+            };
+            endpoints.insert(endpoint_id, ManagedEndpoint::Removing(endpoint.clone()));
+            endpoint
+        };
+        let result = self.backend.kernel.delete_endpoint(&endpoint);
+        let mut contexts = self.backend.contexts.blocking_lock();
+        let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id) else {
+            return Err(MptcpError::CleanupIncomplete(
+                "context state changed during endpoint removal",
+            ));
+        };
+        if !matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Removing(current)) if current == &endpoint)
+        {
+            return Err(MptcpError::CleanupIncomplete(
+                "endpoint state changed during removal",
+            ));
+        }
+        match result {
+            Ok(()) => {
+                endpoints.remove(&endpoint.id);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(endpoint_id, %error, "MPTCP endpoint removal will be retried");
+                endpoints.insert(endpoint.id, ManagedEndpoint::CleanupRequired(endpoint));
+                Err(MptcpError::CleanupIncomplete(
+                    "endpoint removal failed and remains owned",
+                ))
+            }
+        }
+    }
+
+    /// Removes all endpoints owned by one context without creating an executor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error while any exact endpoint cleanup remains pending.
+    pub fn cleanup_context(&self, route_context_id: &str) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        let endpoints = {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            let Some(context) = contexts.get_mut(route_context_id) else {
+                return Ok(());
+            };
+            match context {
+                ManagedContext::Preparing(_) => {
+                    return Err(MptcpError::Invalid(
+                        "context preparation is still pending".into(),
+                    ));
+                }
+                ManagedContext::Active(endpoints) => {
+                    if endpoints.values().any(|state| {
+                        matches!(
+                            state,
+                            ManagedEndpoint::Adding(_) | ManagedEndpoint::Removing(_)
+                        )
+                    }) {
+                        return Err(MptcpError::Invalid(
+                            "endpoint mutation is still pending".into(),
+                        ));
+                    }
+                    let owned = endpoints
+                        .values()
+                        .map(|state| (state.endpoint().id, state.endpoint().clone()))
+                        .collect::<HashMap<_, _>>();
+                    *context = ManagedContext::Cleaning(owned.clone());
+                    owned
+                }
+                ManagedContext::Cleaning(endpoints) => endpoints.clone(),
+            }
+        };
+
+        let mut endpoints = endpoints.into_values().collect::<Vec<_>>();
+        endpoints.sort_unstable_by_key(|endpoint| endpoint.id);
+        for endpoint in endpoints {
+            let endpoint_id = endpoint.id;
+            if let Err(error) = self.backend.kernel.delete_endpoint(&endpoint) {
+                tracing::warn!(endpoint_id, %error, "MPTCP cleanup will be retried");
+                return Err(MptcpError::CleanupIncomplete(
+                    "context endpoint cleanup failed",
+                ));
+            }
+            let mut contexts = self.backend.contexts.blocking_lock();
+            let Some(ManagedContext::Cleaning(remaining)) = contexts.get_mut(route_context_id)
+            else {
+                return Err(MptcpError::CleanupIncomplete(
+                    "context cleanup state changed unexpectedly",
+                ));
+            };
+            if remaining.get(&endpoint_id) != Some(&endpoint) {
+                return Err(MptcpError::CleanupIncomplete(
+                    "owned endpoint changed during cleanup",
+                ));
+            }
+            remaining.remove(&endpoint_id);
+        }
+        let mut contexts = self.backend.contexts.blocking_lock();
+        if matches!(contexts.get(route_context_id), Some(ManagedContext::Cleaning(remaining)) if remaining.is_empty())
+        {
+            contexts.remove(route_context_id);
+            Ok(())
+        } else {
+            Err(MptcpError::CleanupIncomplete(
+                "context retained endpoint ownership after cleanup",
+            ))
+        }
     }
 }
 
@@ -1617,6 +1952,50 @@ mod tests {
         let second = current_network_namespace_key().expect("network namespace");
         assert_eq!(first, second);
         assert_ne!(first.inode, 0);
+    }
+
+    #[test]
+    fn synchronous_backend_needs_no_runtime_and_preserves_exact_cleanup_ownership() {
+        let kernel = Arc::new(FakeKernel::default());
+        let manager = SynchronousKernelMptcpPathManager::with_kernel(kernel.clone());
+        manager
+            .prepare_context("worker-route", limits())
+            .expect("prepare synchronously");
+
+        let first = selected_endpoint(1);
+        manager
+            .add_path("worker-route", first.clone())
+            .expect("add synchronously");
+        manager
+            .remove_path("worker-route", first.id)
+            .expect("remove synchronously");
+
+        let retained = selected_endpoint(2);
+        kernel.fail_next_add();
+        kernel.fail_next_delete();
+        assert!(matches!(
+            manager.add_path("worker-route", retained.clone()),
+            Err(MptcpError::CleanupIncomplete(_))
+        ));
+        assert_eq!(
+            kernel.state.lock().expect("state").active.get(&retained.id),
+            None
+        );
+        assert!(matches!(
+            manager
+                .backend
+                .contexts
+                .blocking_lock()
+                .get("worker-route"),
+            Some(ManagedContext::Active(endpoints))
+                if matches!(endpoints.get(&retained.id), Some(ManagedEndpoint::CleanupRequired(endpoint)) if endpoint == &retained)
+        ));
+
+        manager
+            .cleanup_context("worker-route")
+            .expect("retry retained cleanup synchronously");
+        assert!(manager.backend.contexts.blocking_lock().is_empty());
+        assert!(kernel.state.lock().expect("state").active.is_empty());
     }
 
     #[tokio::test]

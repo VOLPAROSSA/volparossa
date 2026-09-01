@@ -56,7 +56,7 @@ use tokio::{
     task::JoinHandle,
 };
 use volparossa_mptcp::{
-    EndpointFlags, KernelMptcpPathManager, MptcpEndpoint, MptcpLimits, MptcpPathManagerBackend,
+    EndpointFlags, MptcpEndpoint, MptcpLimits, SynchronousKernelMptcpPathManager,
 };
 
 use crate::{
@@ -2083,8 +2083,7 @@ impl WorkerClientIngress {
 }
 
 struct WorkerMptcpPathManager {
-    backend: KernelMptcpPathManager,
-    runtime: tokio::runtime::Runtime,
+    backend: SynchronousKernelMptcpPathManager,
     route_context_id: String,
 }
 
@@ -2094,46 +2093,38 @@ impl WorkerMptcpPathManager {
         accepted_addrs: u32,
         subflows: u32,
     ) -> Result<Self, ()> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| ())?;
-        let backend = KernelMptcpPathManager::new().map_err(|_| ())?;
+        let backend = SynchronousKernelMptcpPathManager::new().map_err(|_| ())?;
         let route_context_id = format!("vp{:032x}", u128::from_be_bytes(route_context_id));
-        runtime
-            .block_on(backend.prepare_context(
+        backend
+            .prepare_context(
                 &route_context_id,
                 MptcpLimits {
                     accepted_addrs,
                     subflows,
                 },
-            ))
+            )
             .map_err(|_| ())?;
         Ok(Self {
             backend,
-            runtime,
             route_context_id,
         })
     }
 
     fn add(&self, endpoint: MptcpEndpoint) -> Result<(), ()> {
-        self.runtime
-            .block_on(self.backend.add_path(&self.route_context_id, endpoint))
+        self.backend
+            .add_path(&self.route_context_id, endpoint)
             .map_err(|_| ())
     }
 
     fn remove(&self, endpoint_id: u8) -> Result<(), ()> {
-        self.runtime
-            .block_on(
-                self.backend
-                    .remove_path(&self.route_context_id, endpoint_id),
-            )
+        self.backend
+            .remove_path(&self.route_context_id, endpoint_id)
             .map_err(|_| ())
     }
 
     fn cleanup(&self) -> Result<(), ()> {
-        self.runtime
-            .block_on(self.backend.cleanup_context(&self.route_context_id))
+        self.backend
+            .cleanup_context(&self.route_context_id)
             .map_err(|_| ())
     }
 }
