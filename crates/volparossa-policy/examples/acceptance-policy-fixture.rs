@@ -1,6 +1,7 @@
 //! Generate one short-lived, threshold-signed development policy for the disposable acceptance
-//! topology. It permits only the topology's exact A02 TCP, A05 UDP echo and A06/A07 HTTP/3
-//! tuples. The fixed keys are test material and are never accepted in production.
+//! topology. It permits only the topology's exact A02 TCP, A05 UDP echo, A06/A07 HTTP/3 and
+//! A08 visible-name TLS destinations. The fixed keys are test material and are never accepted in
+//! production.
 
 use std::{
     env, fs,
@@ -53,6 +54,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ProtocolPort::new(TransportProtocol::Tcp, 18_080)?,
             ProtocolPort::new(TransportProtocol::Udp, 443)?,
         ],
+    )?)?;
+    specification.add_rule(DestinationRule::exact_domain(
+        "destination.volparossa.test",
+        [ProtocolPort::new(TransportProtocol::Tcp, 443)?],
     )?)?;
     let signers = keys.iter().collect::<Vec<_>>();
     let manifest = sign_manifest(&specification, &trust, &signers)?;

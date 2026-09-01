@@ -150,6 +150,9 @@ jobs:
               "A05 UDP echo succeeded: \(.a05_udp_echo.succeeded)",
               "A06 HTTP/3 MPQUIC succeeded: \(.a06_http3_mpquic.succeeded)",
               "A07 HTTP/3 Relay failover succeeded: \(.a07_http3_relay_failover.succeeded)",
+              "A08 allowed TLS domain succeeded: \(.a08_allowed_destination.succeeded)",
+              "A09 forbidden destinations denied: \(.a09_forbidden_destinations.succeeded)",
+              "A10 ECH and unverifiable TLS denied: \(.a10_unverifiable_ech.succeeded)",
               "A11 Relay outer privacy succeeded: \(.a11_relay_outer_privacy.succeeded)",
               "A12 Exit source privacy succeeded: \(.a12_exit_source_privacy.succeeded)",
               "A13 No direct Client-Exit succeeded: \(.a13_no_direct_client_exit.succeeded)",
@@ -172,7 +175,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Require successful A02-A07 and A11-A15 evidence
+      - name: Require successful A02-A15 evidence
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -211,6 +214,19 @@ jobs:
             .a07_http3_relay_failover.evidence.path_evidence.exit_capture.before_marker.relay1_wireguard_data_bytes > 1048576 and
             .a07_http3_relay_failover.evidence.path_evidence.exit_capture.before_marker.relay2_wireguard_data_bytes > 1048576 and
             .a07_http3_relay_failover.evidence.path_evidence.exit_capture.after_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a08_allowed_destination.succeeded == true and
+            .a08_allowed_destination.evidence.success == true and
+            .a08_allowed_destination.evidence.protected_flow.transparent_client_hello_forwarded_unchanged == true and
+            .a08_allowed_destination.evidence.protected_flow.tls_handshake_and_payload_completed == true and
+            .a08_allowed_destination.evidence.destination.accepted_connections == 1 and
+            .a09_forbidden_destinations.succeeded == true and
+            .a09_forbidden_destinations.evidence.success == true and
+            (.a09_forbidden_destinations.evidence.denied_cases | length) == 5 and
+            .a09_forbidden_destinations.evidence.destination_egress_connections_for_denials == 0 and
+            .a10_unverifiable_ech.succeeded == true and
+            .a10_unverifiable_ech.evidence.success == true and
+            (.a10_unverifiable_ech.evidence.denied_cases | length) == 2 and
+            .a10_unverifiable_ech.evidence.destination_egress_connections_for_denials == 0 and
             .a11_relay_outer_privacy.succeeded == true and
             .a11_relay_outer_privacy.evidence.success == true and
             .a11_relay_outer_privacy.evidence.relay1.internet_destination_outer_packets == 0 and

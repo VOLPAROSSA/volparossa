@@ -38,6 +38,8 @@ grep -F 'scp_to "$mpquic_path" /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
 grep -F -- '--mpquic /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
 grep -F -- '-p volparossa-test-support --example http3-acceptance-fixture' "$HOST" \
     >/dev/null
+grep -F -- '-p volparossa-test-support --example tls-policy-acceptance-fixture' "$HOST" \
+    >/dev/null
 
 [ "$(grep -Fc 'launch_helper client "$CLIENT"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay0 "$R0"' "$GUEST")" -eq 1 ]
@@ -146,6 +148,7 @@ grep -F 'destination == "47.163.4.2" and destination_port == 443' "$GUEST" \
 grep -F 'capture_native_mpquic_paths()' "$GUEST" >/dev/null
 grep -F 'native daemon exposes an ACK/accounting counter' "$GUEST" >/dev/null
 grep -F '"native_acked_bytes": int(user_bytes)' "$GUEST" >/dev/null
+grep -F 'agent local-control native MPQUIC status' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A06",success:$success' "$GUEST" >/dev/null
 grep -F 'a06_http3_mpquic:{requested:$a06_requested,succeeded:$a06_succeeded' "$GUEST" \
     >/dev/null
@@ -155,11 +158,33 @@ grep -F 'ordinary_quic_fallback_allowed:false' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A07",success:$success' "$GUEST" >/dev/null
 grep -F 'a07_http3_relay_failover:{requested:$a07_requested,succeeded:$a07_succeeded' "$GUEST" \
     >/dev/null
-grep -F 'Require successful A02-A07 and A11-A15 evidence' "$WORKFLOW" >/dev/null
+grep -F 'tls-policy-acceptance-fixture" allowed' "$GUEST" >/dev/null
+grep -F 'tls-policy-acceptance-fixture" denied' "$GUEST" >/dev/null
+grep -F 'destination.volparossa.test' "$GUEST" >/dev/null
+grep -F 'INGRESS_TCP_POLICY_DENIED' "$GUEST" >/dev/null
+grep -F 'INGRESS_TCP_ECH_DENIED' "$GUEST" >/dev/null
+grep -F 'INGRESS_TCP_CLIENT_HELLO_DENIED' "$GUEST" >/dev/null
+grep -F 'INGRESS_TCP_STREAM_FAILED' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A08",success:$success' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A09",success:$success' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A10",success:$success' "$GUEST" >/dev/null
+grep -F 'a08_allowed_destination:{requested:$a08_requested,succeeded:$a08_succeeded' \
+    "$GUEST" >/dev/null
+grep -F 'a09_forbidden_destinations:{requested:$a09_requested,succeeded:$a09_succeeded' \
+    "$GUEST" >/dev/null
+grep -F 'a10_unverifiable_ech:{requested:$a10_requested,succeeded:$a10_succeeded' \
+    "$GUEST" >/dev/null
+grep -F 'Require successful A02-A15 evidence' "$WORKFLOW" >/dev/null
 grep -F '.a06_http3_mpquic.evidence.native_mpquic.required_path_count == 2' "$WORKFLOW" \
     >/dev/null
 grep -F '.a07_http3_relay_failover.evidence.application_flow_completed == true' "$WORKFLOW" \
     >/dev/null
+grep -F '.a08_allowed_destination.evidence.protected_flow.tls_handshake_and_payload_completed == true' \
+    "$WORKFLOW" >/dev/null
+grep -F '.a09_forbidden_destinations.evidence.destination_egress_connections_for_denials == 0' \
+    "$WORKFLOW" >/dev/null
+grep -F '.a10_unverifiable_ech.evidence.destination_egress_connections_for_denials == 0' \
+    "$WORKFLOW" >/dev/null
 grep -F 'relay1_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
 grep -F 'after_marker.relay2_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A11",success:$success' "$GUEST" >/dev/null

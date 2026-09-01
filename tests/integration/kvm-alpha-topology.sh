@@ -44,6 +44,7 @@ print_plan() {
         '  request UDP Connect, then send one non-trusted application datagram through ingress;' \
         '  send two deterministic real HTTP/3 transfers over the native MPQUIC route;' \
         '  remove one MPQUIC Relay while the second HTTP/3 transfer remains active;' \
+        '  prove allowed visible-name TLS and deny forbidden SNI, ECH, IP and port flows;' \
         '  prove exact replies, selected Relays and zero direct Client-Exit packets;' \
         '  prove Relay/Exit/Client packet-metadata privacy without retaining payloads;' \
         '  SIGKILL agent, native and helper units, then remove every owned object;' \
@@ -138,7 +139,7 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(systemd-detect-virt)" = kvm ] \
     || { printf '%s\n' 'execution requires a KVM guest' >&2; exit 77; }
 
-for command_name in awk busctl cat chmod chown cut date find grep install ip jq kill \
+for command_name in awk busctl cat chmod chown cut date find getent grep install ip jq kill \
     mkdir mktemp nft python3 readlink rm runuser sed setpriv sha256sum sleep sort stat \
     systemctl systemd-run systemd-sysusers tail tc timeout tr wg; do
     command -v "$command_name" >/dev/null 2>&1 \
@@ -152,6 +153,8 @@ done
     || { printf '%s\n' 'acceptance policy fixture unavailable' >&2; exit 69; }
 [ -x "$binary_directory/examples/http3-acceptance-fixture" ] \
     || { printf '%s\n' 'HTTP/3 acceptance fixture unavailable' >&2; exit 69; }
+[ -x "$binary_directory/examples/tls-policy-acceptance-fixture" ] \
+    || { printf '%s\n' 'TLS policy acceptance fixture unavailable' >&2; exit 69; }
 if [ ! -f "$mpquic_binary" ] || [ ! -x "$mpquic_binary" ] \
     || [ -L "$mpquic_binary" ]; then
     printf '%s\n' 'pinned native MPQUIC executable unavailable' >&2
@@ -220,6 +223,15 @@ A06_STATUS=-1
 A07_REQUESTED=false
 A07_SUCCEEDED=false
 A07_STATUS=-1
+A08_REQUESTED=false
+A08_SUCCEEDED=false
+A08_STATUS=-1
+A09_REQUESTED=false
+A09_SUCCEEDED=false
+A09_STATUS=-1
+A10_REQUESTED=false
+A10_SUCCEEDED=false
+A10_STATUS=-1
 A11_REQUESTED=false
 A11_SUCCEEDED=false
 A11_STATUS=-1
@@ -247,6 +259,8 @@ AGENT_UNITS=
 DESTINATION_PID=
 HTTP3_SERVER_PID=
 HTTP3_CLIENT_PID=
+TLS_POLICY_SERVER_PID=
+HOSTS_BACKUP=
 DOWNLOAD_CLIENT_PID=
 CLIENT_OBSERVER_PID=
 EXIT_OBSERVER_PID=
@@ -349,6 +363,15 @@ copy_artifacts() {
         a07-native-before.txt a07-native-before.json \
         a07-native-after.txt a07-native-after.json \
         a07-removal.json a07-evidence.json \
+        tls-policy-server.log a08-exit-host-lookup.txt \
+        a08-client.json a08-client.err a08-destination.json a08-evidence.json \
+        a09-unlisted-domain.json a09-unlisted-domain.err \
+        a09-raw-ip-server-name.json a09-raw-ip-server-name.err \
+        a09-missing-server-name.json a09-missing-server-name.err \
+        a09-mismatched-destination.json a09-mismatched-destination.err \
+        a09-forbidden-port.json a09-forbidden-port.err a09-evidence.json \
+        a10-ech.json a10-ech.err a10-unverifiable.json a10-unverifiable.err \
+        a10-evidence.json tls-policy-destination-final.json \
         privacy-client.json privacy-relay1.json privacy-relay2.json privacy-exit.json \
         privacy-client.log privacy-relay1.log privacy-relay2.log privacy-exit.log \
         a11-evidence.json a12-evidence.json a13-evidence.json \
@@ -423,6 +446,18 @@ write_report() {
     if [ -f "$WORK/a07-evidence.json" ]; then
         a07_evidence=$(cat "$WORK/a07-evidence.json" 2>/dev/null || printf 'null')
     fi
+    a08_evidence=null
+    if [ -f "$WORK/a08-evidence.json" ]; then
+        a08_evidence=$(cat "$WORK/a08-evidence.json" 2>/dev/null || printf 'null')
+    fi
+    a09_evidence=null
+    if [ -f "$WORK/a09-evidence.json" ]; then
+        a09_evidence=$(cat "$WORK/a09-evidence.json" 2>/dev/null || printf 'null')
+    fi
+    a10_evidence=null
+    if [ -f "$WORK/a10-evidence.json" ]; then
+        a10_evidence=$(cat "$WORK/a10-evidence.json" 2>/dev/null || printf 'null')
+    fi
     a11_evidence=null
     if [ -f "$WORK/a11-evidence.json" ]; then
         a11_evidence=$(cat "$WORK/a11-evidence.json" 2>/dev/null || printf 'null')
@@ -475,6 +510,15 @@ write_report() {
         --argjson a07_requested "$A07_REQUESTED" \
         --argjson a07_succeeded "$A07_SUCCEEDED" \
         --argjson a07_status "$A07_STATUS" \
+        --argjson a08_requested "$A08_REQUESTED" \
+        --argjson a08_succeeded "$A08_SUCCEEDED" \
+        --argjson a08_status "$A08_STATUS" \
+        --argjson a09_requested "$A09_REQUESTED" \
+        --argjson a09_succeeded "$A09_SUCCEEDED" \
+        --argjson a09_status "$A09_STATUS" \
+        --argjson a10_requested "$A10_REQUESTED" \
+        --argjson a10_succeeded "$A10_SUCCEEDED" \
+        --argjson a10_status "$A10_STATUS" \
         --argjson a11_requested "$A11_REQUESTED" \
         --argjson a11_succeeded "$A11_SUCCEEDED" \
         --argjson a11_status "$A11_STATUS" \
@@ -503,6 +547,9 @@ write_report() {
         --argjson a05_evidence "$a05_evidence" \
         --argjson a06_evidence "$a06_evidence" \
         --argjson a07_evidence "$a07_evidence" \
+        --argjson a08_evidence "$a08_evidence" \
+        --argjson a09_evidence "$a09_evidence" \
+        --argjson a10_evidence "$a10_evidence" \
         --argjson a11_evidence "$a11_evidence" \
         --argjson a12_evidence "$a12_evidence" \
         --argjson a13_evidence "$a13_evidence" \
@@ -531,6 +578,12 @@ write_report() {
             exit_status:$a06_status,evidence:$a06_evidence},
           a07_http3_relay_failover:{requested:$a07_requested,succeeded:$a07_succeeded,
             exit_status:$a07_status,evidence:$a07_evidence},
+          a08_allowed_destination:{requested:$a08_requested,succeeded:$a08_succeeded,
+            exit_status:$a08_status,evidence:$a08_evidence},
+          a09_forbidden_destinations:{requested:$a09_requested,succeeded:$a09_succeeded,
+            exit_status:$a09_status,evidence:$a09_evidence},
+          a10_unverifiable_ech:{requested:$a10_requested,succeeded:$a10_succeeded,
+            exit_status:$a10_status,evidence:$a10_evidence},
           a11_relay_outer_privacy:{requested:$a11_requested,succeeded:$a11_succeeded,
             exit_status:$a11_status,evidence:$a11_evidence},
           a12_exit_source_privacy:{requested:$a12_requested,succeeded:$a12_succeeded,
@@ -555,6 +608,12 @@ cleanup() {
     [ "$FINALIZED" = no ] || exit "$original_status"
     FINALIZED=yes
     trap - EXIT HUP INT TERM
+
+    if [ -n "$TLS_POLICY_SERVER_PID" ]; then
+        kill -TERM "$TLS_POLICY_SERVER_PID" 2>/dev/null || true
+        wait "$TLS_POLICY_SERVER_PID" 2>/dev/null || true
+        TLS_POLICY_SERVER_PID=
+    fi
 
     if [ -n "$DOWNLOAD_CLIENT_PID" ]; then
         kill -TERM "$DOWNLOAD_CLIENT_PID" 2>/dev/null || true
@@ -613,6 +672,10 @@ cleanup() {
     for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$CLIENT"; do
         ip netns del "$cleanup_ns" 2>/dev/null || true
     done
+    if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
+        cat "$HOSTS_BACKUP" >/etc/hosts || original_status=1
+        HOSTS_BACKUP=
+    fi
     for cleanup_node in client relay0 relay1 relay2 exit; do
         rm -f -- "$WORK/runtime-$cleanup_node/helper.sock" \
             "$WORK/runtime-$cleanup_node/control/agent.sock" \
@@ -762,6 +825,16 @@ A15_REQUESTED=true
 capture_host_state "$WORK/host-state-before.json" \
     || fail A15_HOST_STATE_BEFORE_UNAVAILABLE
 
+# This mapping exists only inside the disposable KVM guest. Both the Client and Exit resolve the
+# policy hostname to the one destination address, while cleanup restores the exact guest file.
+install -o root -g root -m 0600 /etc/hosts "$WORK/hosts.before"
+HOSTS_BACKUP=$WORK/hosts.before
+printf '%s\n' '47.163.4.2 destination.volparossa.test' >>/etc/hosts
+getent ahostsv4 destination.volparossa.test | awk '{print $1}' | sort -u \
+    >"$WORK/a08-exit-host-lookup.txt"
+[ "$(cat "$WORK/a08-exit-host-lookup.txt")" = 47.163.4.2 ] \
+    || fail A08_DESTINATION_LOOKUP_NOT_PINNED
+
 # This creates only the package-declared identities inside the disposable VM.
 systemd-sysusers "$source_directory/packaging/systemd/volparossa.sysusers"
 AGENT_UID=$(id -u volparossa)
@@ -795,6 +868,9 @@ install -o root -g "$AGENT_GID" -m 0555 \
 install -o root -g "$AGENT_GID" -m 0555 \
     "$binary_directory/examples/http3-acceptance-fixture" \
     "$WORK/bin/examples/http3-acceptance-fixture"
+install -o root -g "$AGENT_GID" -m 0555 \
+    "$binary_directory/examples/tls-policy-acceptance-fixture" \
+    "$WORK/bin/examples/tls-policy-acceptance-fixture"
 binary_directory=$WORK/bin
 mpquic_binary=$WORK/bin/volparossa-mpquic
 
@@ -3655,6 +3731,309 @@ fi
 A07_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a07-complete
+
+PHASE=a08-reset-mpquic-route
+"$binary_directory/volparossa" \
+    --control-socket "$WORK/runtime-client/control/agent.sock" disconnect \
+    >"$WORK/a08-disconnect.out" 2>"$WORK/a08-disconnect.err" \
+    || fail A08_MPQUIC_ROUTE_DISCONNECT_FAILED
+attempt=0
+while [ "$attempt" -lt 300 ]; do
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" status \
+        >"$WORK/status-client.txt" || true
+    if grep -Fx 'connected: false' "$WORK/status-client.txt" >/dev/null \
+        && grep -Fx 'active contexts: 0' "$WORK/status-client.txt" >/dev/null; then
+        break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ "$attempt" -lt 300 ] || fail A08_PREVIOUS_ROUTE_NOT_IDLE
+
+install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/tls-policy"
+timeout --signal=TERM --kill-after=5s 330s \
+    ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+    --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --no-new-privs -- \
+    "$WORK/bin/examples/tls-policy-acceptance-fixture" server \
+    47.163.4.2:443 "$WORK/destination/tls-policy-cert.der" \
+    "$WORK/destination/tls-policy.ready" "$WORK/destination/tls-policy.json" \
+    "$WORK/destination/tls-policy.stop" "$RUN_ID" \
+    >"$WORK/tls-policy-server.log" 2>&1 &
+TLS_POLICY_SERVER_PID=$!
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    [ -s "$WORK/destination/tls-policy.ready" ] \
+        && [ -s "$WORK/destination/tls-policy.json" ] && break
+    kill -0 "$TLS_POLICY_SERVER_PID" 2>/dev/null || break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ -s "$WORK/destination/tls-policy.ready" ] \
+    || fail A08_TLS_DESTINATION_UNAVAILABLE
+
+capture_product_logs
+A08_COMPLETION_BEFORE=$(grep -Fc 'event=INGRESS_TCP_STREAM_COMPLETED' \
+    "$WORK/logs-client.txt" 2>/dev/null || true)
+PHASE=a08-allowed-visible-name-tls
+A08_REQUESTED=true
+A08_STATUS=1
+set +e
+timeout --signal=TERM --kill-after=5s 180s \
+    ip netns exec "$CLIENT" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+    --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --no-new-privs -- \
+    "$WORK/bin/examples/tls-policy-acceptance-fixture" allowed \
+    47.163.4.2:443 "$WORK/destination/tls-policy-cert.der" \
+    "$RUN_ID" "$WORK/tls-policy/a08-client.json" \
+    >"$WORK/tls-policy/a08-client.out" 2>"$WORK/tls-policy/a08-client.err"
+A08_STATUS=$?
+set -e
+attempt=0
+while [ "$A08_STATUS" -eq 0 ] && [ "$attempt" -lt 300 ]; do
+    capture_product_logs
+    A08_COMPLETION_AFTER=$(grep -Fc 'event=INGRESS_TCP_STREAM_COMPLETED' \
+        "$WORK/logs-client.txt" 2>/dev/null || true)
+    A08_DESTINATION_SUCCESSES=$(jq -er '.successful_exchanges' \
+        "$WORK/destination/tls-policy.json" 2>/dev/null || printf 0)
+    if [ "$A08_COMPLETION_AFTER" -gt "$A08_COMPLETION_BEFORE" ] \
+        && [ "$A08_DESTINATION_SUCCESSES" -eq 1 ]; then
+        break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+if [ "$A08_STATUS" -eq 0 ]; then
+    install -o root -g root -m 0600 "$WORK/tls-policy/a08-client.json" \
+        "$WORK/a08-client.json"
+    install -o root -g root -m 0600 "$WORK/tls-policy/a08-client.err" \
+        "$WORK/a08-client.err"
+    install -o root -g root -m 0600 "$WORK/destination/tls-policy.json" \
+        "$WORK/a08-destination.json"
+    jq -S -c -n \
+        --slurpfile application "$WORK/a08-client.json" \
+        --slurpfile destination "$WORK/a08-destination.json" \
+        --rawfile lookup "$WORK/a08-exit-host-lookup.txt" \
+        --argjson completion_before "$A08_COMPLETION_BEFORE" \
+        --argjson completion_after "$A08_COMPLETION_AFTER" \
+        '($application[0]) as $app | ($destination[0]) as $destination
+        | (($app.case == "allowed-domain")
+            and ($app.hostname == "destination.volparossa.test")
+            and ($app.destination == {ip:"47.163.4.2",port:443})
+            and ($app.tls_version == "TLSv1.3")
+            and ($app.negotiated_alpn == "volparossa-a08/1")
+            and ($app.request_bytes == 1048576)
+            and ($app.request_sha256 == $app.response_sha256)
+            and ($destination.listen == $app.destination)
+            and ($destination.hostname == $app.hostname)
+            and ($destination.accepted_connections == 1)
+            and ($destination.successful_exchanges == 1)
+            and ($destination.failed_connections == 0)
+            and ($destination.last_source.ip == "47.163.4.1")
+            and ($destination.request_bytes == $app.request_bytes)
+            and ($destination.request_sha256 == $app.request_sha256)
+            and ($destination.response_sha256 == $app.response_sha256)
+            and ($lookup == "47.163.4.2\n")
+            and ($completion_after > $completion_before)) as $success
+        | {schema_version:1,acceptance_id:"A08",success:$success,
+           request:{hostname:$app.hostname,original_destination:$app.destination},
+           application:$app,destination:$destination,
+           exit_resolution:{hostname:$app.hostname,addresses:["47.163.4.2"],
+             exact_original_destination_match:true},
+           protected_flow:{transparent_client_hello_forwarded_unchanged:true,
+             tls_handshake_and_payload_completed:true,
+             ingress_completion_events_before:$completion_before,
+             ingress_completion_events_after:$completion_after}}' \
+        >"$WORK/a08-evidence.json"
+    jq -e '.success == true' "$WORK/a08-evidence.json" >/dev/null 2>&1 \
+        || A08_STATUS=1
+fi
+if [ "$A08_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A08_ALLOWED_TLS_DESTINATION_NOT_PROVEN
+    PHASE=a08-blocked
+    exit 77
+fi
+A08_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a08-complete
+
+tls_policy_accept_count() {
+    jq -er '.accepted_connections' "$WORK/destination/tls-policy.json" 2>/dev/null \
+        || printf '%s\n' -1
+}
+
+tls_policy_event_count() {
+    tls_event=$1
+    grep -Fc "event=$tls_event" "$WORK/logs-client.txt" 2>/dev/null || true
+}
+
+run_tls_policy_denial() {
+    denial_case=$1
+    denial_remote=$2
+    denial_event=$3
+    denial_output=$4
+    capture_product_logs
+    denial_accepts_before=$(tls_policy_accept_count)
+    denial_events_before=$(tls_policy_event_count "$denial_event")
+    case $denial_accepts_before:$denial_events_before in
+        *[!0-9:]*) return 1 ;;
+    esac
+    set +e
+    timeout --signal=TERM --kill-after=5s 45s \
+        ip netns exec "$CLIENT" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+        --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+        --no-new-privs -- \
+        "$WORK/bin/examples/tls-policy-acceptance-fixture" denied \
+        "$denial_case" "$denial_remote" "$RUN_ID" \
+        "$WORK/tls-policy/$denial_output.json" \
+        >"$WORK/tls-policy/$denial_output.out" \
+        2>"$WORK/tls-policy/$denial_output.err"
+    denial_status=$?
+    set -e
+    [ "$denial_status" -eq 0 ] || return 1
+    denial_attempt=0
+    denial_event_seen=false
+    while [ "$denial_attempt" -lt 200 ]; do
+        capture_product_logs
+        denial_events_after=$(tls_policy_event_count "$denial_event")
+        if [ "$denial_events_after" -gt "$denial_events_before" ]; then
+            denial_event_seen=true
+            break
+        fi
+        sleep 0.1
+        denial_attempt=$((denial_attempt + 1))
+    done
+    denial_accepts_after=$(tls_policy_accept_count)
+    [ "$denial_event_seen" = true ] \
+        && [ "$denial_accepts_after" -eq "$denial_accepts_before" ] \
+        && jq -e '
+            .connected_to_ingress == true
+            and .client_hello_bytes > 0
+            and .peer_closed_without_payload == true
+            and .destination_response_bytes == 0' \
+            "$WORK/tls-policy/$denial_output.json" >/dev/null 2>&1 \
+        || return 1
+    jq -S -c --arg expected_event "$denial_event" \
+        --argjson accepts_before "$denial_accepts_before" \
+        --argjson accepts_after "$denial_accepts_after" \
+        '. + {expected_rejection_event:$expected_event,
+          destination_accepts_before:$accepts_before,
+          destination_accepts_after:$accepts_after,
+          destination_egress_connections:($accepts_after - $accepts_before)}' \
+        "$WORK/tls-policy/$denial_output.json" >"$WORK/$denial_output.json"
+    chmod 0600 "$WORK/$denial_output.json"
+    install -o root -g root -m 0600 "$WORK/tls-policy/$denial_output.err" \
+        "$WORK/$denial_output.err"
+}
+
+PHASE=a09-forbidden-destinations
+A09_REQUESTED=true
+A09_STATUS=1
+if run_tls_policy_denial unlisted-domain 47.163.4.2:443 \
+    INGRESS_TCP_POLICY_DENIED a09-unlisted-domain \
+    && run_tls_policy_denial raw-ip-server-name 47.163.4.2:443 \
+        INGRESS_TCP_CLIENT_HELLO_DENIED a09-raw-ip-server-name \
+    && run_tls_policy_denial missing-server-name 47.163.4.2:443 \
+        INGRESS_TCP_CLIENT_HELLO_DENIED a09-missing-server-name \
+    && run_tls_policy_denial mismatched-destination 47.163.4.3:443 \
+        INGRESS_TCP_STREAM_FAILED a09-mismatched-destination \
+    && run_tls_policy_denial forbidden-port 47.163.4.2:444 \
+        INGRESS_TCP_POLICY_DENIED a09-forbidden-port; then
+    A09_STATUS=0
+fi
+if [ "$A09_STATUS" -eq 0 ]; then
+    jq -S -c -n \
+        --slurpfile unlisted "$WORK/a09-unlisted-domain.json" \
+        --slurpfile raw_ip "$WORK/a09-raw-ip-server-name.json" \
+        --slurpfile missing "$WORK/a09-missing-server-name.json" \
+        --slurpfile mismatched "$WORK/a09-mismatched-destination.json" \
+        --slurpfile port "$WORK/a09-forbidden-port.json" \
+        --slurpfile destination "$WORK/destination/tls-policy.json" \
+        '[$unlisted[0],$raw_ip[0],$missing[0],$mismatched[0],$port[0]] as $denials
+        | (($denials | length) == 5
+            and ($denials | all(.connected_to_ingress == true
+                and .peer_closed_without_payload == true
+                and .destination_response_bytes == 0
+                and .destination_accepts_after == .destination_accepts_before
+                and .destination_egress_connections == 0))
+            and ($destination[0].accepted_connections == 1)
+            and ($destination[0].successful_exchanges == 1)
+            and ($destination[0].failed_connections == 0)) as $success
+        | {schema_version:1,acceptance_id:"A09",success:$success,
+           denied_cases:$denials,
+           expected_rejection_events:["INGRESS_TCP_POLICY_DENIED",
+             "INGRESS_TCP_CLIENT_HELLO_DENIED","INGRESS_TCP_STREAM_FAILED"],
+           destination_accepts_before:1,
+           destination_accepts_after:$destination[0].accepted_connections,
+           destination_egress_connections_for_denials:0}' \
+        >"$WORK/a09-evidence.json"
+    jq -e '.success == true' "$WORK/a09-evidence.json" >/dev/null 2>&1 \
+        || A09_STATUS=1
+fi
+if [ "$A09_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A09_FORBIDDEN_TLS_FLOW_ESCAPED_OR_UNOBSERVED
+    PHASE=a09-blocked
+    exit 77
+fi
+A09_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a09-complete
+
+PHASE=a10-ech-and-unverifiable
+A10_REQUESTED=true
+A10_STATUS=1
+if run_tls_policy_denial ech 47.163.4.2:443 \
+    INGRESS_TCP_ECH_DENIED a10-ech \
+    && run_tls_policy_denial unverifiable 47.163.4.2:443 \
+        INGRESS_TCP_CLIENT_HELLO_DENIED a10-unverifiable; then
+    A10_STATUS=0
+fi
+if [ "$A10_STATUS" -eq 0 ]; then
+    jq -S -c -n \
+        --slurpfile ech "$WORK/a10-ech.json" \
+        --slurpfile unverifiable "$WORK/a10-unverifiable.json" \
+        --slurpfile destination "$WORK/destination/tls-policy.json" \
+        '[$ech[0],$unverifiable[0]] as $denials
+        | (($denials | length) == 2
+            and ($denials | all(.connected_to_ingress == true
+                and .peer_closed_without_payload == true
+                and .destination_response_bytes == 0
+                and .destination_accepts_after == .destination_accepts_before
+                and .destination_egress_connections == 0))
+            and ($destination[0].accepted_connections == 1)
+            and ($destination[0].successful_exchanges == 1)
+            and ($destination[0].failed_connections == 0)) as $success
+        | {schema_version:1,acceptance_id:"A10",success:$success,
+           denied_cases:$denials,
+           expected_rejection_events:["INGRESS_TCP_ECH_DENIED",
+             "INGRESS_TCP_CLIENT_HELLO_DENIED"],
+           destination_accepts_before:1,
+           destination_accepts_after:$destination[0].accepted_connections,
+           destination_egress_connections_for_denials:0}' \
+        >"$WORK/a10-evidence.json"
+    jq -e '.success == true' "$WORK/a10-evidence.json" >/dev/null 2>&1 \
+        || A10_STATUS=1
+fi
+if [ "$A10_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A10_ECH_OR_UNVERIFIABLE_TLS_NOT_CLOSED
+    PHASE=a10-blocked
+    exit 77
+fi
+A10_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a10-complete
+
+install -o "$AGENT_UID" -g "$AGENT_GID" -m 0600 /dev/null \
+    "$WORK/destination/tls-policy.stop"
+set +e
+wait "$TLS_POLICY_SERVER_PID"
+TLS_POLICY_SERVER_STATUS=$?
+set -e
+TLS_POLICY_SERVER_PID=
+[ "$TLS_POLICY_SERVER_STATUS" -eq 0 ] || fail A10_TLS_DESTINATION_SHUTDOWN_FAILED
+install -o root -g root -m 0600 "$WORK/destination/tls-policy.json" \
+    "$WORK/tls-policy-destination-final.json"
 
 PHASE=a11-a13-privacy-evidence
 stop_privacy_observers || fail PRIVACY_CAPTURE_INCOMPLETE

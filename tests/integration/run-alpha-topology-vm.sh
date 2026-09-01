@@ -272,6 +272,7 @@ CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
     -p volparossa-helper-entry --bin volparossa-helper \
     -p volparossa-policy --example acceptance-policy-fixture \
     -p volparossa-test-support --example http3-acceptance-fixture \
+    -p volparossa-test-support --example tls-policy-acceptance-fixture \
     >/home/vpci/cargo-build.log 2>&1 || {
         tail -c 131072 /home/vpci/cargo-build.log >&2
         exit 1
