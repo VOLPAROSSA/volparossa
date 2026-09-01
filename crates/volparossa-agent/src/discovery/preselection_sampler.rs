@@ -10,12 +10,13 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
 };
 
+use libp2p::{PeerId as Libp2pPeerId, identity};
 use rand_core::{OsRng, RngCore};
 use volparossa_core::{
     Bandwidth, IpFamily, NodeAdvertisement, ObservedNetworkPrefix, OperatorId, PolicyHash,
     ServiceRole, Transport as CoreTransport, UnixTime,
 };
-use volparossa_protocol::{ObservationAddressFamily, Transport};
+use volparossa_protocol::{ObservationAddressFamily, Transport, node_id_from_public_key};
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
 
 use super::{
@@ -398,6 +399,11 @@ fn direct_binding_is_valid(
     let capability = candidate.capability();
     advertisement_projection_is_valid(advertisement, sampled_at_ms)
         && body.roles.relay
+        && identity_binding_is_valid(
+            capability.node_id,
+            &capability.peer_id,
+            capability.public_key,
+        )
         && body.node_id.as_str() == hex::encode(capability.node_id)
         && body.peer_id.as_str() == capability.peer_id.to_string()
         && body.sequence_number == capability.advertisement_sequence
@@ -430,6 +436,11 @@ fn forwarded_binding_is_valid(
         .min(control_capability.expires_at_ms);
     advertisement_projection_is_valid(advertisement, sampled_at_ms)
         && body.roles.exit
+        && identity_binding_is_valid(
+            capability.exit_node_id,
+            &capability.exit_peer_id,
+            capability.exit_public_key,
+        )
         && body.node_id.as_str() == hex::encode(capability.exit_node_id)
         && body.peer_id.as_str() == capability.exit_peer_id.to_string()
         && body.sequence_number == capability.exit_advertisement_sequence
@@ -453,6 +464,18 @@ fn forwarded_binding_is_valid(
         && capability.control_relay_node_id != capability.exit_node_id
         && capability.control_relay_peer_id != capability.exit_peer_id
         && capability.control_relay_public_key != capability.exit_public_key
+}
+
+fn identity_binding_is_valid(
+    node_id: [u8; 32],
+    peer_id: &Libp2pPeerId,
+    public_key: [u8; 32],
+) -> bool {
+    let Ok(public_key) = identity::ed25519::PublicKey::try_from_bytes(&public_key) else {
+        return false;
+    };
+    node_id_from_public_key(&public_key.to_bytes()) == node_id
+        && identity::PublicKey::from(public_key).to_peer_id() == *peer_id
 }
 
 fn advertisement_projection_is_valid(
@@ -914,7 +937,7 @@ fn materialize_narrowed_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{cell::Cell, collections::VecDeque};
 
     use rand_core::Error as RandError;
 
@@ -993,6 +1016,163 @@ mod tests {
         }
     }
 
+    struct ScriptedRng {
+        words: VecDeque<Option<u64>>,
+        calls: usize,
+    }
+
+    impl ScriptedRng {
+        fn new(words: impl IntoIterator<Item = Option<u64>>) -> Self {
+            Self {
+                words: words.into_iter().collect(),
+                calls: 0,
+            }
+        }
+
+        fn scripted_word(&mut self) -> Result<u64, RandError> {
+            self.calls = self.calls.saturating_add(1);
+            self.words
+                .pop_front()
+                .expect("one scripted entropy result per sampler draw")
+                .ok_or_else(|| RandError::new(std::io::Error::other("scripted entropy failure")))
+        }
+    }
+
+    impl RngCore for ScriptedRng {
+        fn next_u32(&mut self) -> u32 {
+            let bytes = self
+                .scripted_word()
+                .expect("infallible scripted next_u32")
+                .to_le_bytes();
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.scripted_word().expect("infallible scripted next_u64")
+        }
+
+        fn fill_bytes(&mut self, destination: &mut [u8]) {
+            self.try_fill_bytes(destination)
+                .expect("infallible scripted fill_bytes");
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandError> {
+            assert_eq!(destination.len(), 8, "sampler requests one u64 per draw");
+            destination.copy_from_slice(&self.scripted_word()?.to_le_bytes());
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct BandFixture {
+        marker: u8,
+        band: SamplingBand,
+        weight: u64,
+    }
+
+    struct SnapshotStorageIdentity {
+        direct_ptr: *const (),
+        direct_capacity: usize,
+        exit_ptr: *const (),
+        exit_capacity: usize,
+        subject_ptr: *const (),
+        subject_capacity: usize,
+        pair_ptr: *const (),
+        pair_capacity: usize,
+    }
+
+    struct SnapshotValueIdentity {
+        captured_at_ms: u64,
+        policy: super::super::RouteCandidatePolicySnapshot,
+        direct_relays: Vec<DirectRelayCandidateSnapshot>,
+        forwarded_exits: Vec<ForwardedExitCandidateSnapshot>,
+        subjects_available: bool,
+        subject_count: usize,
+        forwarded_pairs: Vec<(usize, usize)>,
+    }
+
+    fn snapshot_storage_identity(snapshot: &RouteCandidateSnapshot) -> SnapshotStorageIdentity {
+        SnapshotStorageIdentity {
+            direct_ptr: snapshot.direct_relays.as_ptr().cast(),
+            direct_capacity: snapshot.direct_relays.capacity(),
+            exit_ptr: snapshot.forwarded_exits.as_ptr().cast(),
+            exit_capacity: snapshot.forwarded_exits.capacity(),
+            subject_ptr: snapshot.preselection_subjects.entries.as_ptr().cast(),
+            subject_capacity: snapshot.preselection_subjects.entries.capacity(),
+            pair_ptr: snapshot
+                .preselection_subjects
+                .forwarded_pairs
+                .as_ptr()
+                .cast(),
+            pair_capacity: snapshot.preselection_subjects.forwarded_pairs.capacity(),
+        }
+    }
+
+    fn snapshot_value_identity(snapshot: &RouteCandidateSnapshot) -> SnapshotValueIdentity {
+        SnapshotValueIdentity {
+            captured_at_ms: snapshot.captured_at_ms,
+            policy: snapshot.policy,
+            direct_relays: snapshot.direct_relays.clone(),
+            forwarded_exits: snapshot.forwarded_exits.clone(),
+            subjects_available: snapshot.preselection_subjects.available,
+            subject_count: snapshot.preselection_subjects.entries.len(),
+            forwarded_pairs: snapshot.preselection_subjects.forwarded_pairs.clone(),
+        }
+    }
+
+    fn assert_snapshot_identity(
+        snapshot: &RouteCandidateSnapshot,
+        storage: &SnapshotStorageIdentity,
+        value: &SnapshotValueIdentity,
+    ) {
+        assert!(std::ptr::eq(
+            snapshot.direct_relays.as_ptr().cast::<()>(),
+            storage.direct_ptr
+        ));
+        assert_eq!(snapshot.direct_relays.capacity(), storage.direct_capacity);
+        assert!(std::ptr::eq(
+            snapshot.forwarded_exits.as_ptr().cast::<()>(),
+            storage.exit_ptr
+        ));
+        assert_eq!(snapshot.forwarded_exits.capacity(), storage.exit_capacity);
+        assert!(std::ptr::eq(
+            snapshot.preselection_subjects.entries.as_ptr().cast::<()>(),
+            storage.subject_ptr
+        ));
+        assert_eq!(
+            snapshot.preselection_subjects.entries.capacity(),
+            storage.subject_capacity
+        );
+        assert!(std::ptr::eq(
+            snapshot
+                .preselection_subjects
+                .forwarded_pairs
+                .as_ptr()
+                .cast::<()>(),
+            storage.pair_ptr
+        ));
+        assert_eq!(
+            snapshot.preselection_subjects.forwarded_pairs.capacity(),
+            storage.pair_capacity
+        );
+        assert_eq!(snapshot.captured_at_ms, value.captured_at_ms);
+        assert_eq!(snapshot.policy, value.policy);
+        assert!(snapshot.direct_relays == value.direct_relays);
+        assert!(snapshot.forwarded_exits == value.forwarded_exits);
+        assert_eq!(
+            snapshot.preselection_subjects.available,
+            value.subjects_available
+        );
+        assert_eq!(
+            snapshot.preselection_subjects.entries.len(),
+            value.subject_count
+        );
+        assert_eq!(
+            snapshot.preselection_subjects.forwarded_pairs,
+            value.forwarded_pairs
+        );
+    }
+
     fn bandwidth(value: u32) -> Bandwidth {
         Bandwidth::new(value, value).expect("valid test bandwidth")
     }
@@ -1029,6 +1209,37 @@ mod tests {
             Ok(_) => panic!("{context}: unexpectedly succeeded"),
             Err(failure) => failure,
         }
+    }
+
+    fn reject_before_entropy(
+        snapshot: RouteCandidateSnapshot,
+        scope: PreselectionSamplingScope,
+        sampled_at_ms: u64,
+        expected: PreselectionSamplingError,
+        calls: &Cell<usize>,
+        context: &str,
+    ) -> RouteCandidateSnapshot {
+        let calls_before = calls.get();
+        let failure = expect_sampling_failure(
+            narrow_route_candidate_snapshot_at(
+                snapshot,
+                scope,
+                sampled_at_ms,
+                &mut CountingRng { calls },
+            ),
+            context,
+        );
+        assert_eq!(failure.error, expected, "{context}");
+        assert_eq!(calls.get(), calls_before, "{context} must precede entropy");
+        *failure.snapshot
+    }
+
+    fn synchronize_only_forwarded_control(
+        snapshot: &mut RouteCandidateSnapshot,
+        control_index: usize,
+    ) {
+        assert_eq!(snapshot.forwarded_exits.len(), 1);
+        snapshot.forwarded_exits[0].control = snapshot.direct_relays[control_index].clone();
     }
 
     fn output_diversity_is_strict(snapshot: &RouteCandidateSnapshot, family: IpFamily) -> bool {
@@ -1099,6 +1310,494 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stratified_sampling_proves_exact_70_20_10_boundaries_and_empty_band_fallback() {
+        let candidates = [
+            BandFixture {
+                marker: 1,
+                band: SamplingBand::High,
+                weight: 1,
+            },
+            BandFixture {
+                marker: 2,
+                band: SamplingBand::DiverseMiddle,
+                weight: 1,
+            },
+            BandFixture {
+                marker: 3,
+                band: SamplingBand::Exploration,
+                weight: 1,
+            },
+        ];
+        for (roll, expected_marker) in [(69, 1), (70, 2), (89, 2), (90, 3)] {
+            let selected = choose_stratified(
+                &candidates,
+                |candidate| candidate.band,
+                |candidate| candidate.weight,
+                &mut ScriptedRng::new([Some(roll), Some(0)]),
+            )
+            .expect("scripted entropy")
+            .expect("one candidate in the exact requested band");
+            assert_eq!(selected.marker, expected_marker, "roll {roll}");
+        }
+
+        let only_middle = [BandFixture {
+            marker: 7,
+            band: SamplingBand::DiverseMiddle,
+            weight: 1,
+        }];
+        let fallback = choose_stratified(
+            &only_middle,
+            |candidate| candidate.band,
+            |candidate| candidate.weight,
+            &mut ScriptedRng::new([Some(69), Some(0)]),
+        )
+        .expect("scripted fallback entropy")
+        .expect("empty requested band falls back to all eligible candidates");
+        assert_eq!(fallback.marker, 7);
+    }
+
+    #[tokio::test]
+    async fn score_factors_have_exact_independent_weight_and_exploration_influence() {
+        let snapshot = preselection_snapshot_fixture(1, false).await.snapshot;
+        let scope = sampling_scope(ObservationAddressFamily::Ipv4, 1, 1)
+            .validated()
+            .expect("scope");
+        let mut baseline = snapshot.direct_relays[0].advertisement.clone();
+        baseline.advertisement.capacity.relay_limit = bandwidth(1_000);
+        baseline.advertisement.capacity.estimated_free = bandwidth(100);
+        baseline.advertisement.capacity.active_relay_sessions = 0;
+        baseline.advertisement.capacity.free_relay_slots = 10;
+        baseline.advertisement.quality.historical_uptime_score = 0.5;
+        baseline.advertisement.quality.historical_delivery_ratio_p25 = 0.5;
+        baseline.historical_reputation_score = 0.5;
+        baseline.local_measurement_count = 3;
+
+        let baseline_score = static_candidate(&baseline, ServiceRole::Relay, scope)
+            .expect("baseline candidate")
+            .weight;
+        assert_eq!(baseline_score, 38_550);
+
+        let mut changed = baseline.clone();
+        changed.advertisement.capacity.estimated_free = bandwidth(101);
+        assert_eq!(
+            static_candidate(&changed, ServiceRole::Relay, scope)
+                .expect("capacity candidate")
+                .weight,
+            baseline_score + 35
+        );
+
+        changed = baseline.clone();
+        changed.advertisement.quality.historical_uptime_score = 0.501;
+        assert_eq!(
+            static_candidate(&changed, ServiceRole::Relay, scope)
+                .expect("uptime candidate")
+                .weight,
+            baseline_score + 20
+        );
+
+        changed = baseline.clone();
+        changed.advertisement.quality.historical_delivery_ratio_p25 = 0.501;
+        assert_eq!(
+            static_candidate(&changed, ServiceRole::Relay, scope)
+                .expect("delivery candidate")
+                .weight,
+            baseline_score + 15
+        );
+
+        changed = baseline.clone();
+        changed.historical_reputation_score = 0.501;
+        assert_eq!(
+            static_candidate(&changed, ServiceRole::Relay, scope)
+                .expect("reputation candidate")
+                .weight,
+            baseline_score + 15
+        );
+
+        changed = baseline.clone();
+        changed.advertisement.capacity.active_relay_sessions = 1;
+        assert_eq!(
+            static_candidate(&changed, ServiceRole::Relay, scope)
+                .expect("balance candidate")
+                .weight,
+            baseline_score - 5_000
+        );
+
+        changed = baseline.clone();
+        changed.advertisement.capacity.free_relay_slots = 11;
+        assert_eq!(
+            static_candidate(&changed, ServiceRole::Relay, scope)
+                .expect("slot candidate")
+                .weight,
+            baseline_score + 5
+        );
+
+        changed = baseline.clone();
+        changed.local_measurement_count = 2;
+        assert!(
+            static_candidate(&changed, ServiceRole::Relay, scope)
+                .expect("exploration candidate")
+                .exploration
+        );
+        assert!(
+            !static_candidate(&baseline, ServiceRole::Relay, scope)
+                .expect("measured candidate")
+                .exploration
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_entropy_failure_after_exit_choice_returns_the_exact_unmaterialized_snapshot() {
+        let snapshot = preselection_multi_exit_snapshot_fixture(
+            2,
+            4,
+            None,
+            PreselectionTestCapabilities::default(),
+        )
+        .await;
+        let sampled_at_ms = snapshot.captured_at_ms;
+        let storage = snapshot_storage_identity(&snapshot);
+        let value = snapshot_value_identity(&snapshot);
+        let mut rng = ScriptedRng::new([Some(0), Some(0), None]);
+        let failure = expect_sampling_failure(
+            narrow_route_candidate_snapshot_at(
+                snapshot,
+                sampling_scope(ObservationAddressFamily::Ipv4, 1, 2),
+                sampled_at_ms,
+                &mut rng,
+            ),
+            "relay entropy after one selected exit",
+        );
+        assert_eq!(failure.error, PreselectionSamplingError::Entropy);
+        assert_eq!(
+            rng.calls, 3,
+            "exit band and weight succeeded before relay entropy"
+        );
+        assert_snapshot_identity(&failure.snapshot, &storage, &value);
+    }
+
+    #[tokio::test]
+    async fn every_sampling_scope_and_relay_count_bound_rejects_before_entropy() {
+        let snapshot = preselection_snapshot_fixture(2, false).await.snapshot;
+        let sampled_at_ms = snapshot.captured_at_ms;
+        let calls = Cell::new(0);
+        let invalid_scopes = [
+            PreselectionSamplingScope::new(
+                Transport::Unspecified,
+                ObservationAddressFamily::Ipv4,
+                bandwidth(10),
+                1,
+                2,
+            ),
+            PreselectionSamplingScope::new(
+                Transport::UdpSinglePath,
+                ObservationAddressFamily::Unspecified,
+                bandwidth(10),
+                1,
+                2,
+            ),
+            PreselectionSamplingScope::new(
+                Transport::UdpSinglePath,
+                ObservationAddressFamily::Ipv4,
+                Bandwidth::new(0, 10).expect("bounded zero component"),
+                1,
+                2,
+            ),
+            sampling_scope(ObservationAddressFamily::Ipv4, 0, 2),
+            sampling_scope(ObservationAddressFamily::Ipv4, 2, 1),
+            sampling_scope(ObservationAddressFamily::Ipv4, 1, 9),
+        ];
+        let mut snapshot = snapshot;
+        for (index, scope) in invalid_scopes.into_iter().enumerate() {
+            snapshot = reject_before_entropy(
+                snapshot,
+                scope,
+                sampled_at_ms,
+                PreselectionSamplingError::InvalidPolicy,
+                &calls,
+                &format!("invalid sampling scope {index}"),
+            );
+        }
+        snapshot = reject_before_entropy(
+            snapshot,
+            sampling_scope(ObservationAddressFamily::Ipv4, 8, 8),
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "too few direct relays for the requested lower bound",
+        );
+        assert_eq!(snapshot.forwarded_exits.len(), 1);
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one linear mutation matrix restores and reuses the exact affine snapshot"
+    )]
+    async fn policy_capability_identity_role_scope_and_pairing_mutants_all_fail_closed() {
+        let mut snapshot = preselection_snapshot_fixture(2, false).await.snapshot;
+        let sampled_at_ms = snapshot.captured_at_ms;
+        let scope = sampling_scope(ObservationAddressFamily::Ipv4, 1, 2);
+        let calls = Cell::new(0);
+
+        let original_policy = snapshot.policy;
+        snapshot.policy.version = 0;
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "zero active policy version",
+        );
+        snapshot.policy = original_policy;
+        snapshot.policy.hash = [0; 32];
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "zero active policy hash",
+        );
+        snapshot.policy = original_policy;
+        snapshot.policy.expires_at_ms = sampled_at_ms;
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "expired active policy",
+        );
+        snapshot.policy = original_policy;
+
+        let control_index = snapshot.preselection_subjects.forwarded_pairs[0].0;
+        let other_index = (0..snapshot.direct_relays.len())
+            .find(|index| *index != control_index)
+            .expect("one non-control relay");
+        let original_control = snapshot.direct_relays[control_index].clone();
+
+        snapshot.direct_relays[control_index].capability.node_id[0] ^= 1;
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "relay node identity substitution",
+        );
+        snapshot.direct_relays[control_index] = original_control.clone();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot.direct_relays[control_index].capability.peer_id =
+            snapshot.direct_relays[other_index].capability.peer_id;
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "relay peer identity substitution",
+        );
+        snapshot.direct_relays[control_index] = original_control.clone();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot.direct_relays[control_index].capability.public_key[0] ^= 1;
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "relay public-key identity substitution",
+        );
+        snapshot.direct_relays[control_index] = original_control.clone();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot.direct_relays[control_index]
+            .capability
+            .advertisement_payload_hash = snapshot.direct_relays[control_index]
+            .capability
+            .advertisement_payload_hash
+            .xor_for_test();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "relay payload capability substitution",
+        );
+        snapshot.direct_relays[control_index] = original_control.clone();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot.direct_relays[control_index].capability.policy_hash[0] ^= 1;
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "relay policy capability substitution",
+        );
+        snapshot.direct_relays[control_index] = original_control.clone();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot.direct_relays[control_index]
+            .advertisement
+            .advertisement
+            .roles
+            .relay = false;
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "control relay role withdrawal",
+        );
+        snapshot.direct_relays[control_index] = original_control.clone();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot.direct_relays[control_index]
+            .advertisement
+            .advertisement
+            .capabilities
+            .udp_single_path = false;
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::NoEligibleForwardedExit,
+            &calls,
+            "control relay transport mismatch",
+        );
+        snapshot.direct_relays[control_index] = original_control.clone();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot.direct_relays[control_index]
+            .advertisement
+            .advertisement
+            .capabilities
+            .ipv4 = false;
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::NoEligibleForwardedExit,
+            &calls,
+            "control relay family mismatch",
+        );
+        snapshot.direct_relays[control_index] = original_control.clone();
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot.direct_relays[control_index]
+            .advertisement
+            .serious_protocol_fault_until = Some(UnixTime::from_secs(sampled_at_ms / 1_000 + 60));
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "active serious-fault cooldown",
+        );
+        snapshot.direct_relays[control_index] = original_control;
+        synchronize_only_forwarded_control(&mut snapshot, control_index);
+
+        let original_exit = snapshot.forwarded_exits[0].clone();
+        snapshot.forwarded_exits[0].capability.exit_public_key[0] ^= 1;
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "exit public-key identity substitution",
+        );
+        snapshot.forwarded_exits[0] = original_exit.clone();
+        snapshot.forwarded_exits[0]
+            .advertisement
+            .advertisement
+            .roles
+            .exit = false;
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "exit role withdrawal",
+        );
+        snapshot.forwarded_exits[0] = original_exit.clone();
+        snapshot.forwarded_exits[0]
+            .advertisement
+            .advertisement
+            .capacity
+            .free_exit_slots = 0;
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::NoEligibleForwardedExit,
+            &calls,
+            "exit has no advertised free slot",
+        );
+        snapshot.forwarded_exits[0] = original_exit;
+
+        let original_pair = snapshot.preselection_subjects.forwarded_pairs[0];
+        snapshot.preselection_subjects.forwarded_pairs[0].0 = other_index;
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "forwarded exit paired to the wrong exact control",
+        );
+        snapshot.preselection_subjects.forwarded_pairs[0] = original_pair;
+        snapshot.preselection_subjects.forwarded_pairs[0].1 = 0;
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "forwarded exit subject outside the exit suffix",
+        );
+        snapshot.preselection_subjects.forwarded_pairs[0] = original_pair;
+        snapshot.preselection_subjects.available = false;
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "missing affine subject bindings",
+        );
+        snapshot.preselection_subjects.available = true;
+
+        snapshot = reject_before_entropy(
+            snapshot,
+            PreselectionSamplingScope::new(
+                Transport::UdpSinglePath,
+                ObservationAddressFamily::Ipv4,
+                bandwidth(101),
+                1,
+                2,
+            ),
+            sampled_at_ms,
+            PreselectionSamplingError::NoEligibleForwardedExit,
+            &calls,
+            "advertised capacity below the requested scope",
+        );
+        assert_eq!(snapshot.forwarded_exits.len(), 1);
+        assert_eq!(calls.get(), 0);
+    }
+
     #[tokio::test]
     async fn production_entropy_entrypoint_preserves_the_exact_slate_shape() {
         let snapshot = preselection_snapshot_fixture(1, false).await.snapshot;
@@ -1157,6 +1856,36 @@ mod tests {
             bandwidth(80),
         );
         assert!(begin.is_ok(), "narrowed snapshot remains exact A1a input");
+    }
+
+    #[tokio::test]
+    async fn maximum_bound_materializes_one_control_eight_other_relays_and_one_forwarded_exit() {
+        let snapshot = preselection_multi_exit_snapshot_fixture(
+            2,
+            12,
+            None,
+            PreselectionTestCapabilities::default(),
+        )
+        .await;
+        let sampled_at_ms = snapshot.captured_at_ms;
+        let narrowed = expect_narrowed(
+            narrow_route_candidate_snapshot_at(
+                snapshot,
+                sampling_scope(ObservationAddressFamily::Ipv4, 8, 8),
+                sampled_at_ms,
+                &mut SeededRng::new(0x8172_6354),
+            ),
+            "maximum bounded slate",
+        );
+        assert_eq!(narrowed.direct_relays.len(), 9);
+        assert_eq!(narrowed.forwarded_exits.len(), 1);
+        assert_eq!(narrowed.preselection_subjects.entries.len(), 10);
+        assert_eq!(narrowed.preselection_subjects.forwarded_pairs, [(0, 9)]);
+        assert_eq!(
+            narrowed.forwarded_exits[0].control(),
+            &narrowed.direct_relays[0]
+        );
+        assert!(output_diversity_is_strict(&narrowed, IpFamily::Ipv4));
     }
 
     #[tokio::test]
