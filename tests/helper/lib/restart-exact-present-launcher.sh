@@ -55,8 +55,11 @@ case ${VOLPAROSSA_HELPER_PREEXEC_MODE:-restart} in
         mv -T "$may_own_ready_next" "$may_own_ready_record"
         [ "$(stat -Lc '%F:%u:%a:%h' "$may_own_ready_record" \
             2>/dev/null || true)" = 'regular file:0:600:1' ] || exit 65
-        dd if="$may_own_release_fifo" of="$may_own_release_capture" \
-            iflag=fullblock bs=2 count=1 status=none || exit 65
+        may_own_release_value=
+        IFS= read -r may_own_release_value <"$may_own_release_fifo" || exit 65
+        [ "$may_own_release_value" = G ] || exit 65
+        printf '%s' "$may_own_release_value" >"$may_own_release_capture" \
+            || exit 65
         [ "$(stat -Lc '%F:%u:%g:%a:%h:%s' "$may_own_release_capture" \
             2>/dev/null || true)" = 'regular file:0:0:600:1:1' ] || exit 65
         [ "$(cat "$may_own_release_capture")" = G ] || exit 65

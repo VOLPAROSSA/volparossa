@@ -71,9 +71,16 @@ if ! awk '
     /VOLPAROSSA_HELPER_MAY_OWN_PRE_EXEC_BARRIER_V1=ready/ {
         may_record = NR; may_record_count++
     }
-    /dd if="\$may_own_release_fifo" of="\$may_own_release_capture"/ {
+    $0 == "        IFS= read -r may_own_release_value <\"$may_own_release_fifo\" || exit 65" {
         may_read = NR; may_read_count++
     }
+    $0 == "        [ \"$may_own_release_value\" = G ] || exit 65" {
+        may_gate = NR; may_gate_count++
+    }
+    /printf .*"\$may_own_release_value" >"\$may_own_release_capture"/ {
+        may_capture = NR; may_capture_count++
+    }
+    /dd if="\$may_own_release_fifo"/ { invalid_may_own_child++ }
     /^[[:space:]]*restart\)$/ { restart = NR; restart_count++ }
     /if \[ ! -e "\$crash_record" \] && \[ ! -L "\$crash_record" \]; then/ {
         absent = NR; absent_count++
@@ -93,23 +100,31 @@ if ! awk '
         read = NR; read_count++
     }
     /bs=2 count=1 status=none/ { bound = NR; bound_count++ }
-    /regular file:0:0:600:1:1/ { exact = NR; exact_count++ }
+    /regular file:0:0:600:1:1/ {
+        exact_count++
+        if (exact_count == 1) may_exact = NR
+        if (exact_count == 2) exact = NR
+    }
     /^[[:space:]]*\[ "\$\(cat "\$release_capture"\)" = G \] \|\| exit 65$/ {
         gate = NR; gate_count++
     }
     END {
         valid = argc_count == 1 && mode_count == 1 && may_own_count == 1
         valid = valid && may_ready_count == 1 && may_record_count == 1
-        valid = valid && may_read_count == 1 && restart_count == 1
+        valid = valid && may_read_count == 1 && may_gate_count == 1
+        valid = valid && may_capture_count == 1 && invalid_may_own_child == 0
+        valid = valid && restart_count == 1
         valid = valid && absent_count == 1 && execs == 2
         valid = valid && invocation_count == 1 && ready_count == 1
         valid = valid && fifo_count == 1
         valid = valid && publish_count == 1 && read_count == 1
-        valid = valid && bound_count == 2
+        valid = valid && bound_count == 1
         valid = valid && exact_count == 2 && gate_count == 1
         valid = valid && argc < mode && mode < may_own
         valid = valid && may_own < may_ready && may_ready < may_record
-        valid = valid && may_record < may_read && may_read < restart
+        valid = valid && may_record < may_read && may_read < may_gate
+        valid = valid && may_gate < may_capture && may_capture < may_exact
+        valid = valid && may_exact < restart
         valid = valid && restart < absent && absent < first_exec
         valid = valid && first_exec < invocation && invocation < fifo
         valid = valid && fifo < ready && ready < publish && publish < read

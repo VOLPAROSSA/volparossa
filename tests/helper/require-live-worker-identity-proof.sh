@@ -3853,9 +3853,30 @@ may_own_preexec_barrier_is_exact() {
         || return 1
     may_own_preexec_barrier_failure_stage=lineage-marker
     unit_description_matches_marker || return 1
-    may_own_service_shape_is_exact "$may_own_barrier_main_pid" \
+    while ! may_own_service_shape_is_exact "$may_own_barrier_main_pid" \
         "$may_own_barrier_invocation" "$may_own_barrier_restarts" \
-        "$may_own_barrier_fdstore" || return 1
+        "$may_own_barrier_fdstore"
+    do
+        [ "$may_own_preexec_barrier_failure_stage" = shape-cgroup-members ] \
+            || return 1
+        may_own_preexec_barrier_failure_stage=lineage-mainpid
+        [ "$(systemctl show --property=MainPID --value "$unit_name" \
+            2>/dev/null || true)" = "$may_own_barrier_main_pid" ] \
+            || return 1
+        may_own_preexec_barrier_failure_stage=lineage-invocation
+        [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+            "$may_own_barrier_invocation" ] || return 1
+        may_own_preexec_barrier_failure_stage=lineage-starttime
+        [ "$(capture_process_starttime "$may_own_barrier_main_pid" \
+            2>/dev/null || true)" = "$may_own_barrier_starttime" ] \
+            || return 1
+        may_own_preexec_barrier_failure_stage=lineage-marker
+        unit_description_matches_marker || return 1
+        may_own_barrier_wait=$((may_own_barrier_wait + 1))
+        may_own_preexec_barrier_failure_stage=shape-cgroup-members
+        [ "$may_own_barrier_wait" -lt 600 ] || return 1
+        sleep 0.05
+    done
     # shellcheck disable=SC2100
     may_own_preexec_barrier_failure_stage=record-size
     [ "$(stat -Lc '%s' "$may_own_barrier_record")" -le 256 ] || return 1
@@ -3891,8 +3912,12 @@ release_may_own_preexec_barrier() {
         || return 1
     [ "$(stat -Lc '%F:%u:%g:%a:%h' "$may_own_preexec_release_fifo" \
         2>/dev/null || true)" = 'fifo:0:0:600:1' ] || return 1
+    # The newline lets the fixed launcher's shell-builtin read hold MainPID at
+    # the barrier without adding a second process to the service cgroup.
+    # shellcheck disable=SC2016
     timeout --preserve-status --signal=TERM --kill-after=1s 5s \
-        /bin/sh -c "printf %s G >\"\$1\"" sh "$may_own_preexec_release_fifo" \
+        /bin/sh -c 'printf "%s\n" G >"$1"' sh \
+        "$may_own_preexec_release_fifo" \
         || return 1
     [ "$(stat -Lc '%F:%u:%g:%a:%h' "$may_own_preexec_release_fifo" \
         2>/dev/null || true)" = 'fifo:0:0:600:1' ]

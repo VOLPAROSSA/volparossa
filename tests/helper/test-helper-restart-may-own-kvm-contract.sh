@@ -319,6 +319,30 @@ grep -F '/run/volparossa-helper-restart-launcher \' "$gate" >/dev/null
 [ "$(grep -Fc 'start_may_own_preexec_observer ' "$gate")" -eq 3 ]
 [ "$(grep -Fc 'release_may_own_preexec_barrier "$may_own_pid_' "$gate")" -eq 3 ]
 [ "$(grep -Fc 'release_may_own_preexec_observer ' "$gate")" -eq 3 ]
+preexec_release_contract=$tmp/preexec-release-contract
+sed -n '/^release_may_own_preexec_barrier() {$/,/^}$/p' \
+    "$gate" >"$preexec_release_contract"
+if ! awk '
+    /timeout --preserve-status --signal=TERM --kill-after=1s 5s/ {
+        timeout_line = NR; timeout_count++
+    }
+    $0 == "        /bin/sh -c \047printf \"%s\\n\" G >\"$1\"\047 sh \\" {
+        writer = NR; writer_count++
+    }
+    $0 == "        \"$may_own_preexec_release_fifo\" \\" {
+        fifo = NR; fifo_count++
+    }
+    /printf %s G/ { unterminated_writer++ }
+    END {
+        valid = timeout_count == 1 && writer_count == 1 && fifo_count == 1
+        valid = valid && unterminated_writer == 0
+        valid = valid && timeout_line < writer && writer < fifo
+        if (!valid) exit 1
+    }
+' "$preexec_release_contract"; then
+    printf '%s\n' 'MayOwn pre-exec release is not newline-exact and bounded' >&2
+    exit 1
+fi
 preexec_contract=$tmp/preexec-contract
 sed -n '/^may_own_preexec_barrier_is_exact() {$/,/^}$/p' \
     "$gate" >"$preexec_contract"
@@ -356,15 +380,22 @@ may_own_preexec_wait_contract_is_exact() {
             marker[++marker_count] = NR
         }
         index($0, "may_own_barrier_wait=$((may_own_barrier_wait + 1))") {
-            increment = NR; increment_count++
+            increment[++increment_count] = NR
         }
         /\[ "\$may_own_barrier_wait" -lt 600 \] \|\| return 1/ {
-            bound = NR; bound_count++
+            bound[++bound_count] = NR
         }
-        /^        sleep 0\.05$/ { sleep_line = NR; sleep_count++ }
-        /^    done$/ { wait_done = NR; wait_done_count++ }
+        /^        sleep 0\.05$/ { sleep_line[++sleep_count] = NR }
+        /^    done$/ { loop_done[++loop_done_count] = NR }
         /may_own_service_shape_is_exact "\$may_own_barrier_main_pid"/ {
             shape = NR; shape_count++
+        }
+        /^    do$/ { shape_do = NR; shape_do_count++ }
+        /"\$may_own_preexec_barrier_failure_stage" = shape-cgroup-members/ {
+            shape_guard = NR; shape_guard_count++
+        }
+        /may_own_preexec_barrier_failure_stage=shape-cgroup-members/ {
+            shape_stage = NR; shape_stage_count++
         }
         /stat -Lc '\''%s'\'' "\$may_own_barrier_record"/ {
             size = NR; size_count++
@@ -382,12 +413,14 @@ may_own_preexec_wait_contract_is_exact() {
             valid = valid && publication_recheck_count == 1
             valid = valid && publication_break_count == 1
             valid = valid && publication_fi_count == 1
-            valid = valid && main_pid_count == 2 && invocation_count == 2
+            valid = valid && main_pid_count == 3 && invocation_count == 3
             valid = valid && starttime_count == 1
-            valid = valid && process_starttime_count == 2 && marker_count == 2
-            valid = valid && increment_count == 1 && bound_count == 1
-            valid = valid && sleep_count == 1 && wait_done_count == 1
+            valid = valid && process_starttime_count == 3 && marker_count == 3
+            valid = valid && increment_count == 2 && bound_count == 2
+            valid = valid && sleep_count == 2 && loop_done_count == 2
             valid = valid && shape_count == 1 && size_count == 1
+            valid = valid && shape_do_count == 1 && shape_guard_count == 1
+            valid = valid && shape_stage_count == 1
             valid = valid && content_count == 1 && executable_count == 1
             valid = valid && freezer_count == 1
             valid = valid && starttime[1] < wait_loop
@@ -400,13 +433,26 @@ may_own_preexec_wait_contract_is_exact() {
             valid = valid && main_pid[1] < invocation[1]
             valid = valid && invocation[1] < process_starttime[1]
             valid = valid && process_starttime[1] < marker[1]
-            valid = valid && marker[1] < increment && increment < bound
-            valid = valid && bound < sleep_line && sleep_line < wait_done
-            valid = valid && wait_done < main_pid[2]
+            valid = valid && marker[1] < increment[1]
+            valid = valid && increment[1] < bound[1]
+            valid = valid && bound[1] < sleep_line[1]
+            valid = valid && sleep_line[1] < loop_done[1]
+            valid = valid && loop_done[1] < main_pid[2]
             valid = valid && main_pid[2] < invocation[2]
             valid = valid && invocation[2] < process_starttime[2]
             valid = valid && process_starttime[2] < marker[2]
-            valid = valid && marker[2] < shape && shape < size
+            valid = valid && marker[2] < shape && shape < shape_do
+            valid = valid && shape_do < shape_guard
+            valid = valid && shape_guard < main_pid[3]
+            valid = valid && main_pid[3] < invocation[3]
+            valid = valid && invocation[3] < process_starttime[3]
+            valid = valid && process_starttime[3] < marker[3]
+            valid = valid && marker[3] < increment[2]
+            valid = valid && increment[2] < shape_stage
+            valid = valid && shape_stage < bound[2]
+            valid = valid && bound[2] < sleep_line[2]
+            valid = valid && sleep_line[2] < loop_done[2]
+            valid = valid && loop_done[2] < size
             valid = valid && size < content && content < executable
             valid = valid && executable < freezer
             if (!valid) exit 1
@@ -430,7 +476,7 @@ done
 preexec_single_shot_mutant=$tmp/preexec-single-shot-mutant
 sed \
     -e 's/while ! vp_capture_file_is_safe "$may_own_barrier_record"; do/if ! vp_capture_file_is_safe "$may_own_barrier_record"; then/' \
-    -e 's/^    done$/    fi/' \
+    -e '0,/^    done$/s//    fi/' \
     "$preexec_contract" >"$preexec_single_shot_mutant"
 preexec_main_pid_mutant=$tmp/preexec-main-pid-mutant
 sed '0,/--property=MainPID/s//--property=MainPID_REMOVED/' \
@@ -446,6 +492,9 @@ sed '0,/capture_process_starttime/s//capture_removed_process_starttime/' \
     "$preexec_contract" >"$preexec_starttime_mutant"
 preexec_bound_mutant=$tmp/preexec-bound-mutant
 sed 's/-lt 600/-lt 6000/' "$preexec_contract" >"$preexec_bound_mutant"
+preexec_shape_guard_mutant=$tmp/preexec-shape-guard-mutant
+sed 's/= shape-cgroup-members ]/= shape-cgroup-stat ]/' \
+    "$preexec_contract" >"$preexec_shape_guard_mutant"
 preexec_shape_order_mutant=$tmp/preexec-shape-order-mutant
 awk '
     { source[NR] = $0 }
@@ -454,7 +503,7 @@ awk '
     }
     /may_own_service_shape_is_exact "\$may_own_barrier_main_pid"/ {
         shape_start = NR
-        shape_end = NR + 2
+        shape_end = NR + 3
     }
     END {
         if (!wait_loop || !shape_start) exit 1
@@ -472,7 +521,8 @@ for preexec_mutant in \
     "$preexec_single_shot_mutant" "$preexec_publication_recheck_mutant" \
     "$preexec_main_pid_mutant" \
     "$preexec_invocation_mutant" "$preexec_starttime_mutant" \
-    "$preexec_bound_mutant" "$preexec_shape_order_mutant"
+    "$preexec_bound_mutant" "$preexec_shape_guard_mutant" \
+    "$preexec_shape_order_mutant"
 do
     sh -n "$preexec_mutant"
     if may_own_preexec_wait_contract_is_exact "$preexec_mutant"; then
