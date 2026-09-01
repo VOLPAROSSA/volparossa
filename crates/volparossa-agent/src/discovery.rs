@@ -22,7 +22,7 @@ use preselection_sampler::{
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt,
-    net::IpAddr,
+    net::{IpAddr, UdpSocket as StdUdpSocket},
     path::PathBuf,
     str::FromStr,
     sync::Arc,
@@ -41,7 +41,9 @@ use std::cell::Cell;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 use tokio::{
+    net::UdpSocket,
     sync::{RwLock, mpsc, oneshot, watch},
+    task::JoinHandle,
     time::{Instant, MissedTickBehavior, timeout},
 };
 
@@ -77,23 +79,28 @@ use volparossa_protocol::{
     ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
     ExitReservationConfirmation, ExitReservationFinalizeRequest, IssuedNativeProbeRelayReady,
     MAX_CONTROL_PAYLOAD_SIZE, MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding,
-    NativeProbePathScope, NativeProbePermitRequest, NativeProbeStart,
-    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, PreselectionActorBinding,
-    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservationRequest,
-    ReplayCache, SignedEnvelope, TimePolicy, Transport, VerifiedNativeProbePermit,
-    VerifiedNativeProbeStartForRelay, decode_canonical, encode_canonical, generate_nonce,
-    native_probe_prepared_lease_commitment, node_id_from_public_key,
-    sign_native_probe_relay_ready_with, verify_control_message,
+    NativeProbeForwardingProof, NativeProbeLeaseProof, NativeProbePathScope,
+    NativeProbePermitRequest, NativeProbeRelayLocalProofs, NativeProbeStart,
+    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, ObservationNetworkPrefix,
+    PreselectionActorBinding, RelayAuthorization, RelayProbePermit, RelayProbePermitRequest,
+    RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
+    VerifiedNativeProbePermit, VerifiedNativeProbeStartForRelay, decode_canonical,
+    encode_canonical, generate_nonce, native_probe_prepared_lease_commitment,
+    node_id_from_public_key, sign_native_probe_relay_ready_with,
+    sign_native_probe_relay_result_with, verify_control_message,
     verify_native_probe_authorization_chain, verify_native_probe_exit_ready,
-    verify_native_probe_permit, verify_native_probe_start_for_relay,
+    verify_native_probe_exit_result_for_relay, verify_native_probe_permit,
+    verify_native_probe_start_for_relay,
 };
 use volparossa_relay::{RelayService, RelayServiceConfig};
 use volparossa_routing::{
-    ActivateLeaseBatch, ContextRole, LeaseActivation, LeasePlan, PrepareLeaseBatch,
-    PublicUdpEndpoint, WireguardRole,
+    AcquireTransportSocket, ActivateLeaseBatch, CommitLeaseBatch, CommittedLeaseBatch, ContextRole,
+    LeaseActivation, LeaseCommit, LeasePlan, NATIVE_PROBE_CLIENT_PORT, NATIVE_PROBE_DATAGRAM_BYTES,
+    NATIVE_PROBE_EXIT_PORT, PrepareLeaseBatch, PublicUdpEndpoint, TransportSocketAddress,
+    TransportSocketKind, WireguardRole,
 };
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
-use volparossa_wireguard::{ExitEndpointLease, RelayEndpointLease};
+use volparossa_wireguard::{ExitEndpointLease, RelayEndpointLease, overlay_addresses};
 
 use crate::{
     advertisement::{AdvertisementPublisher, LocalAdvertisementInput},
@@ -566,6 +573,7 @@ struct PendingRelayForward {
     client_channels: Vec<request_response::ResponseChannel<ExitForwardResponse>>,
     native_ready: Option<PendingNativeProbeReady>,
     native_authorization: Option<PendingNativeProbeAuthorization>,
+    native_result: Option<PendingNativeProbeResult>,
 }
 
 struct PendingNativeProbeReady {
@@ -591,8 +599,21 @@ struct ExitNativeReadyAttempt {
     ready_paths: HashSet<u32>,
     pending_activations: HashMap<u32, LeaseActivation>,
     activated: bool,
+    probe_tasks: HashMap<u32, JoinHandle<Result<[u8; NATIVE_PROBE_DATAGRAM_BYTES], ()>>>,
+    pending_results: HashMap<u32, PendingExitNativeProbeResult>,
     candidate_set_hash: [u8; 32],
     expires_at_ms: u64,
+}
+
+struct PendingExitNativeProbeResult {
+    connection: BoundNativeProbeDataRelayConnection,
+    authenticated_data_relay: Libp2pPeerId,
+    authenticated_data_relay_node_id: [u8; 32],
+    probe_id: [u8; FORWARD_ID_BYTES],
+    forward_id: [u8; FORWARD_ID_BYTES],
+    path_id: u32,
+    observed_network_prefix: ObservationNetworkPrefix,
+    channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
 }
 
 /// Relay-owned affine Start plus the exact already-prepared helper endpoint pair.
@@ -611,6 +632,21 @@ struct PendingNativeProbeAuthorization {
     channel: request_response::ResponseChannel<DatapathRelayResponse>,
     start: VerifiedNativeProbeStartForRelay,
     endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+struct ActiveNativeRelayProbe {
+    authenticated_client_peer: Libp2pPeerId,
+    endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+struct PendingNativeProbeResult {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    channel: request_response::ResponseChannel<DatapathRelayResponse>,
+    start: VerifiedNativeProbeStartForRelay,
+    endpoint: RelayEndpointLease,
+    committed: CommittedLeaseBatch,
     helper_owner: RuntimeBoundPreparedLeaseBatch,
 }
 
@@ -1318,7 +1354,7 @@ pub struct DiscoveryRuntime {
         HashMap<[u8; FORWARD_ID_BYTES], PreparedNativeProbeAuthorization>,
     prepared_native_authorization_helpers:
         HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
-    active_native_relay_helpers: HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
+    active_native_relay_helpers: HashMap<[u8; FORWARD_ID_BYTES], ActiveNativeRelayProbe>,
     exit_native_ready_attempts: HashMap<[u8; FORWARD_ID_BYTES], ExitNativeReadyAttempt>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
     datapath_index: HashMap<DatapathKey, request_response::OutboundRequestId>,
@@ -4125,6 +4161,16 @@ impl DiscoveryRuntime {
                         .await;
                         return;
                     }
+                    Ok(DatapathRelayOperation::NativeProbeStart) => {
+                        self.begin_native_probe_result(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
                     _ => {}
                 }
                 let local_peer = *self.service.local_peer_id();
@@ -4354,6 +4400,7 @@ impl DiscoveryRuntime {
                     helper_owner,
                 }),
                 native_authorization: None,
+                native_result: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_DISPATCHED");
@@ -4666,9 +4713,209 @@ impl DiscoveryRuntime {
                     endpoint: prepared.endpoint,
                     helper_owner: cleanup_owner.take().expect("validated native helper owner"),
                 }),
+                native_result: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_AUTHORIZATION_DISPATCHED");
+    }
+
+    /// Commit the activated Relay pair and forward its exact Start chain for an Exit result.
+    async fn begin_native_probe_result(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::NativeProbeStart,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let Some(datapath_request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id())
+        else {
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let Some(probe_id) = native_start_probe_id(request.client_signed_request()) else {
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let local_peer = *self.service.local_peer_id();
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::NativeProbeStart,
+                now_ms,
+            )
+            || !self.roles.relay
+            || fixed_bytes::<32>(request.relay_node_id()) != Some(self.local_node_id)
+            || Libp2pPeerId::from_bytes(request.relay_peer_id()).ok() != Some(local_peer)
+            || authenticated_client_peer == local_peer
+        {
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        }
+        let Some(start) = self
+            .relay_service
+            .as_mut()
+            .and_then(|service| service.take_native_probe_start(&probe_id))
+        else {
+            reject!("NATIVE_PROBE_RESULT_OWNER_UNAVAILABLE");
+        };
+        let Some(attempt_id) = fixed_bytes::<FORWARD_ID_BYTES>(&start.scope().attempt_id) else {
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Some(mut active) = self.active_native_relay_helpers.remove(&attempt_id) else {
+            reject!("NATIVE_PROBE_RESULT_OWNER_UNAVAILABLE");
+        };
+        if active.authenticated_client_peer != authenticated_client_peer
+            || start.encoded_start() != request.client_signed_request()
+            || start.scope().attempt_expires_at_ms != request.deadline_unix_ms()
+            || active.endpoint.route_context_id() != &attempt_id
+            || active.endpoint.path_id() != start.scope().candidate_ordinal
+        {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_OWNER_MISMATCH");
+        }
+        let commit = CommitLeaseBatch {
+            route_context_id: attempt_id.to_vec(),
+            context_handle: active.endpoint.context_handle().as_bytes().to_vec(),
+            leases: vec![
+                LeaseCommit {
+                    lease_handle: active.endpoint.client_facing_handle().as_bytes().to_vec(),
+                    path_id: active.endpoint.path_id(),
+                    role: WireguardRole::RelayClient as i32,
+                },
+                LeaseCommit {
+                    lease_handle: active.endpoint.exit_facing_handle().as_bytes().to_vec(),
+                    path_id: active.endpoint.path_id(),
+                    role: WireguardRole::RelayExit as i32,
+                },
+            ],
+        };
+        let Ok(committed) = self
+            .helper
+            .commit_lease_batch(&mut active.helper_owner, commit)
+            .await
+        else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_HELPER_COMMIT_REJECTED");
+        };
+        let scope = start.scope();
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&exit.peer_id) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&exit.node_id) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        if !native_probe_data_relay_capability_matches(
+            &authorized_control,
+            data_relay,
+            scope,
+            local_peer,
+            request.deadline_unix_ms(),
+        ) {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_RELAY_AUTHORITY_UNAVAILABLE");
+        }
+        let Ok(chain) = start.authorization_chain() else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            datapath_request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::NativeProbeResult,
+            chain,
+        ) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: datapath_request_id,
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
+        {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_CAPACITY");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_TRANSPORT_UNAVAILABLE");
+        };
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::NativeProbeResult,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: None,
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: Some(PendingNativeProbeResult {
+                    datapath_request_id,
+                    channel,
+                    start,
+                    endpoint: active.endpoint,
+                    committed,
+                    helper_owner: active.helper_owner,
+                }),
+            },
+        );
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_DISPATCHED");
     }
 
     fn begin_relay_forward_observed(
@@ -4856,6 +5103,7 @@ impl DiscoveryRuntime {
                 client_channels: vec![channel],
                 native_ready: None,
                 native_authorization: None,
+                native_result: None,
             },
         );
         log_relay_forward_admission(state, "EXIT_FORWARD_RELAY_DISPATCHED");
@@ -5087,7 +5335,11 @@ impl DiscoveryRuntime {
                         if let std::collections::hash_map::Entry::Vacant(entry) =
                             self.active_native_relay_helpers.entry(route_id)
                         {
-                            entry.insert(native.helper_owner);
+                            entry.insert(ActiveNativeRelayProbe {
+                                authenticated_client_peer: pending.key.authenticated_client_peer,
+                                endpoint,
+                                helper_owner: native.helper_owner,
+                            });
                             if self
                                 .service
                                 .send_datapath_relay_response(native.channel, response)
@@ -5096,7 +5348,7 @@ impl DiscoveryRuntime {
                                 if let Some(owner) =
                                     self.active_native_relay_helpers.remove(&route_id)
                                 {
-                                    self.destroy_helper_owner(owner);
+                                    self.destroy_helper_owner(owner.helper_owner);
                                 }
                                 return OutboundEventOutcome::Failed;
                             }
@@ -5119,6 +5371,132 @@ impl DiscoveryRuntime {
                     .send_datapath_relay_response(native.channel, response);
             }
             return OutboundEventOutcome::Failed;
+        }
+        if let Some(native) = pending.native_result.take() {
+            if response.validated_status() != Ok(ForwardStatus::Granted) {
+                let _ = self.helper.destroy_context(&native.helper_owner).await;
+                if let Ok(unavailable) = DatapathRelayResponse::unavailable(
+                    native.datapath_request_id.to_vec(),
+                    DatapathRelayOperation::NativeProbeStart,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self
+                        .service
+                        .send_datapath_relay_response(native.channel, unavailable);
+                }
+                return OutboundEventOutcome::Failed;
+            }
+            let Some(signed_exit_result) = response.signed_responses().first().cloned() else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let Ok(exit_result) = verify_native_probe_exit_result_for_relay(
+                native.start,
+                signed_exit_result,
+                now_ms,
+                &mut self.replay,
+            ) else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let runtime_id = native.helper_owner.helper_runtime_id();
+            let route_context_id = *native.endpoint.route_context_id();
+            let relay_client_binding = native_endpoint_binding(
+                runtime_id,
+                &route_context_id,
+                native.endpoint.client_facing_handle().as_bytes(),
+                native.endpoint.path_id(),
+                native.endpoint.client_facing_endpoint(),
+            );
+            let relay_exit_binding = native_endpoint_binding(
+                runtime_id,
+                &route_context_id,
+                native.endpoint.exit_facing_handle().as_bytes(),
+                native.endpoint.path_id(),
+                native.endpoint.exit_facing_endpoint(),
+            );
+            let relay_client_committed = native.committed.leases.iter().find(|lease| {
+                lease.lease_handle == native.endpoint.client_facing_handle().as_bytes()
+            });
+            let relay_exit_committed = native.committed.leases.iter().find(|lease| {
+                lease.lease_handle == native.endpoint.exit_facing_handle().as_bytes()
+            });
+            let (
+                Some(relay_client_binding),
+                Some(relay_exit_binding),
+                Some(relay_client),
+                Some(relay_exit),
+            ) = (
+                relay_client_binding,
+                relay_exit_binding,
+                relay_client_committed,
+                relay_exit_committed,
+            )
+            else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::Failed;
+            };
+            let local_proofs = NativeProbeRelayLocalProofs {
+                relay_client_lease: NativeProbeLeaseProof {
+                    helper_runtime_id: runtime_id.to_vec(),
+                    route_context_id: route_context_id.to_vec(),
+                    prepared_lease_commitment: relay_client_binding
+                        .prepared_lease_commitment
+                        .clone(),
+                    latest_handshake_unix: relay_client.latest_handshake_unix,
+                    received_bytes_after_baseline: relay_client.received_bytes,
+                    transmitted_bytes_after_baseline: relay_client.transmitted_bytes,
+                },
+                relay_exit_lease: NativeProbeLeaseProof {
+                    helper_runtime_id: runtime_id.to_vec(),
+                    route_context_id: route_context_id.to_vec(),
+                    prepared_lease_commitment: relay_exit_binding.prepared_lease_commitment.clone(),
+                    latest_handshake_unix: relay_exit.latest_handshake_unix,
+                    received_bytes_after_baseline: relay_exit.received_bytes,
+                    transmitted_bytes_after_baseline: relay_exit.transmitted_bytes,
+                },
+                forwarding: NativeProbeForwardingProof {
+                    client_to_exit_packets_after_baseline: 1,
+                    client_to_exit_bytes_after_baseline: NATIVE_PROBE_DATAGRAM_BYTES as u64,
+                    exit_to_client_packets_after_baseline: 1,
+                    exit_to_client_bytes_after_baseline: NATIVE_PROBE_DATAGRAM_BYTES as u64,
+                    terminal_drop_packets_after_baseline: 0,
+                    terminal_drop_bytes_after_baseline: 0,
+                },
+            };
+            let Ok(_destroyed) = self.helper.destroy_context(&native.helper_owner).await else {
+                return OutboundEventOutcome::Failed;
+            };
+            let identity = &self.identity;
+            let Ok(result) = sign_native_probe_relay_result_with(
+                exit_result,
+                local_proofs,
+                self.local_public_key,
+                unix_millis(),
+                generate_nonce(),
+                |message| identity.sign(message).ok(),
+            ) else {
+                return OutboundEventOutcome::Failed;
+            };
+            let Ok(result_response) = DatapathRelayResponse::granted(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                result.encoded_relay_result().to_vec(),
+            ) else {
+                return OutboundEventOutcome::Failed;
+            };
+            if self
+                .service
+                .send_datapath_relay_response(native.channel, result_response)
+                .is_err()
+            {
+                return OutboundEventOutcome::Failed;
+            }
+            log_reservation_event(state, "NATIVE_PROBE_RESULT_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
         }
         let mut commit = None;
         if pending.operation == ExitForwardOperation::FetchExitAdvertisement
@@ -5209,6 +5587,7 @@ impl DiscoveryRuntime {
                 ExitForwardOperation::FetchExitAdvertisement
                     | ExitForwardOperation::NativeProbeReady
                     | ExitForwardOperation::NativeProbeAuthorize
+                    | ExitForwardOperation::NativeProbeResult
             ),
         }
     }
@@ -5272,6 +5651,20 @@ impl DiscoveryRuntime {
             self.destroy_helper_owner(native.helper_owner);
             return;
         }
+        if let Some(native) = pending.native_result.take() {
+            if let Ok(response) = DatapathRelayResponse::unavailable(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+            ) {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(native.channel, response);
+            }
+            self.destroy_helper_owner(native.helper_owner);
+            return;
+        }
         let response = Self::unavailable_for_pending_relay(&pending);
         self.cache_relay_result(&pending, response.clone());
         if let Some(response) = response {
@@ -5286,6 +5679,7 @@ impl DiscoveryRuntime {
     fn finish_relay_ambiguity(&mut self, pending: PendingRelayForward) {
         if pending.native_ready.is_none()
             && pending.native_authorization.is_none()
+            && pending.native_result.is_none()
             && pending.dispatch_attempts < MAX_DISPATCH_ATTEMPTS
             && pending.operation_expires_at_ms > unix_millis()
         {
@@ -5431,6 +5825,17 @@ impl DiscoveryRuntime {
                     "NATIVE_PROBE_AUTHORIZATION_EXIT_REJECTED",
                 );
             }
+            return;
+        }
+        if operation == ExitForwardOperation::NativeProbeResult {
+            self.answer_native_probe_result_upstream(
+                authenticated_control_relay,
+                connection_id,
+                &request,
+                channel,
+                state,
+            )
+            .await;
             return;
         }
         if operation == ExitForwardOperation::NativeProbePermit {
@@ -5808,9 +6213,72 @@ impl DiscoveryRuntime {
                 }
                 return None;
             }
-            self.exit_native_ready_attempts
-                .get_mut(&attempt_id)?
-                .activated = true;
+            let socket_requests = {
+                let attempt = self.exit_native_ready_attempts.get(&attempt_id)?;
+                attempt
+                    .exit_leases
+                    .iter()
+                    .map(|lease| {
+                        native_probe_exit_socket_request(
+                            attempt_id,
+                            &attempt.helper_owner.prepared().context_handle,
+                            lease.path_id(),
+                        )
+                        .map(|request| (lease.path_id(), request))
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            };
+            let mut probe_tasks: HashMap<
+                u32,
+                JoinHandle<Result<[u8; NATIVE_PROBE_DATAGRAM_BYTES], ()>>,
+            > = HashMap::with_capacity(socket_requests.len());
+            for (path_id, socket_request) in socket_requests {
+                let Ok(acquired) = self.helper.acquire_transport_socket(socket_request).await
+                else {
+                    for task in probe_tasks.into_values() {
+                        task.abort();
+                    }
+                    if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                        let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+                    }
+                    return None;
+                };
+                let (descriptor, _) = acquired.into_parts();
+                let socket = StdUdpSocket::from(descriptor);
+                if socket.set_nonblocking(true).is_err() {
+                    if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                        let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+                    }
+                    return None;
+                }
+                let Ok(socket) = UdpSocket::from_std(socket) else {
+                    if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                        let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+                    }
+                    return None;
+                };
+                probe_tasks.insert(
+                    path_id,
+                    tokio::spawn(async move {
+                        let mut challenge = [0_u8; NATIVE_PROBE_DATAGRAM_BYTES];
+                        let received =
+                            timeout(EXIT_FORWARD_UPSTREAM_TIMEOUT, socket.recv(&mut challenge))
+                                .await
+                                .map_err(|_| ())?
+                                .map_err(|_| ())?;
+                        if received != NATIVE_PROBE_DATAGRAM_BYTES {
+                            return Err(());
+                        }
+                        let sent = socket.send(&challenge).await.map_err(|_| ())?;
+                        (sent == NATIVE_PROBE_DATAGRAM_BYTES)
+                            .then_some(challenge)
+                            .ok_or(())
+                    }),
+                );
+            }
+            let attempt = self.exit_native_ready_attempts.get_mut(&attempt_id)?;
+            attempt.probe_tasks = probe_tasks;
+            attempt.activated = true;
         }
         let response = ExitForwardResponse::granted(
             request.forward_id().to_vec(),
@@ -5821,6 +6289,273 @@ impl DiscoveryRuntime {
         )
         .ok()?;
         Some((connection, authenticated_data_relay, response.into()))
+    }
+
+    /// Join every exact path result, commit and destroy the shared Exit sampler, then respond.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exact-set Exit observation, commit, cleanup and signed responses are one transaction"
+    )]
+    async fn answer_native_probe_result_upstream(
+        &mut self,
+        authenticated_data_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Ok(response) = ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    ExitForwardOperation::NativeProbeResult,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self
+                        .service
+                        .send_exit_forward_upstream_response(channel, response.into());
+                }
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        if request.validate().is_err() || !self.roles.exit {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        }
+        let Some(scope) = verified_native_probe_result_forward_scope(request, now_ms) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Ok(chain) =
+            verify_native_probe_authorization_chain(request.canonical_request(), now_ms)
+        else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_CHAIN_REJECTED");
+        };
+        if chain.scope() != &scope {
+            reject!("NATIVE_PROBE_RESULT_EXIT_CHAIN_REJECTED");
+        }
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(data_relay_node_id) = fixed_bytes::<32>(request.control_relay_node_id()) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(attempt_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(probe_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.probe_id) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(forward_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.forward_id()) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(relay_wire_endpoint) = chain.relay_exit_endpoint().endpoint.as_ref() else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(observed_network_prefix) =
+            native_probe_observed_relay_prefix(&relay_wire_endpoint.underlay_ip)
+        else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let local_peer = *self.service.local_peer_id();
+        let Some(current_data_relay) = self.direct_relays.get(&authenticated_data_relay) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_RELAY_REJECTED");
+        };
+        if request.control_relay_peer_id() != authenticated_data_relay.to_bytes()
+            || request.control_relay_public_key() != current_data_relay.public_key
+            || request.exit_node_id() != self.local_node_id
+            || request.exit_peer_id() != local_peer.to_bytes()
+            || exit.node_id != self.local_node_id
+            || exit.peer_id != local_peer.to_bytes()
+            || !native_probe_data_relay_capability_matches(
+                current_data_relay,
+                data_relay,
+                &scope,
+                authenticated_data_relay,
+                request.deadline_unix_ms(),
+            )
+        {
+            reject!("NATIVE_PROBE_RESULT_EXIT_RELAY_REJECTED");
+        }
+        let Some(connection) = self
+            .service
+            .bind_native_probe_data_relay_connection(authenticated_data_relay, connection_id)
+            .ok()
+        else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_CONNECTION_REJECTED");
+        };
+        let Some(attempt) = self.exit_native_ready_attempts.get_mut(&attempt_id) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_OWNER_UNAVAILABLE");
+        };
+        let path_id = scope.candidate_ordinal;
+        if !attempt.activated
+            || !attempt.ready_paths.contains(&path_id)
+            || !attempt.probe_tasks.contains_key(&path_id)
+            || attempt.pending_results.contains_key(&path_id)
+            || attempt
+                .exit_leases
+                .iter()
+                .all(|lease| lease.path_id() != path_id)
+        {
+            reject!("NATIVE_PROBE_RESULT_EXIT_OWNER_MISMATCH");
+        }
+        attempt.pending_results.insert(
+            path_id,
+            PendingExitNativeProbeResult {
+                connection,
+                authenticated_data_relay,
+                authenticated_data_relay_node_id: data_relay_node_id,
+                probe_id,
+                forward_id,
+                path_id,
+                observed_network_prefix,
+                channel,
+            },
+        );
+        if attempt.pending_results.len() != attempt.exit_leases.len() {
+            log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_EXIT_RETAINED");
+            return;
+        }
+        let Some(mut attempt) = self.exit_native_ready_attempts.remove(&attempt_id) else {
+            return;
+        };
+        if attempt.probe_tasks.len() != attempt.exit_leases.len()
+            || attempt.pending_results.len() != attempt.exit_leases.len()
+        {
+            self.fail_exit_native_result_attempt(attempt).await;
+            return;
+        }
+        let tasks = attempt.probe_tasks.drain().collect::<Vec<_>>();
+        let mut challenges = HashMap::with_capacity(tasks.len());
+        for (path_id, task) in tasks {
+            let Ok(Ok(challenge)) = task.await else {
+                self.fail_exit_native_result_attempt(attempt).await;
+                return;
+            };
+            challenges.insert(path_id, challenge);
+        }
+        let mut lease_commits = attempt
+            .exit_leases
+            .iter()
+            .map(|lease| LeaseCommit {
+                lease_handle: lease.lease_handle().as_bytes().to_vec(),
+                path_id: lease.path_id(),
+                role: WireguardRole::Exit as i32,
+            })
+            .collect::<Vec<_>>();
+        lease_commits.sort_unstable_by_key(|lease| lease.path_id);
+        let commit_request = CommitLeaseBatch {
+            route_context_id: attempt_id.to_vec(),
+            context_handle: attempt.helper_owner.prepared().context_handle.clone(),
+            leases: lease_commits,
+        };
+        let Ok(committed) = self
+            .helper
+            .commit_lease_batch(&mut attempt.helper_owner, commit_request)
+            .await
+        else {
+            self.fail_exit_native_result_attempt(attempt).await;
+            return;
+        };
+        if committed.leases.len() != attempt.exit_leases.len() {
+            self.fail_exit_native_result_attempt(attempt).await;
+            return;
+        }
+        let helper_runtime_id = attempt.helper_owner.helper_runtime_id();
+        let Ok(_destroyed) = self.helper.destroy_context(&attempt.helper_owner).await else {
+            self.fail_exit_native_result_attempt(attempt).await;
+            return;
+        };
+        let mut responses = Vec::with_capacity(attempt.pending_results.len());
+        let mut pending_results = attempt.pending_results.into_values().collect::<Vec<_>>();
+        pending_results.sort_unstable_by_key(|pending| pending.path_id);
+        for pending in pending_results {
+            let Some(exit_lease) = attempt
+                .exit_leases
+                .iter()
+                .find(|lease| lease.path_id() == pending.path_id)
+            else {
+                return;
+            };
+            let Some(lease) = committed
+                .leases
+                .iter()
+                .find(|lease| lease.lease_handle == exit_lease.lease_handle().as_bytes())
+            else {
+                return;
+            };
+            let Some(challenge) = challenges.remove(&pending.path_id) else {
+                return;
+            };
+            let identity = &self.identity;
+            let accepted = self.exit_service.as_mut().and_then(|service| {
+                service
+                    .issue_native_probe_result_from_observation_with(
+                        pending.probe_id,
+                        &pending.authenticated_data_relay_node_id,
+                        &pending.authenticated_data_relay.to_bytes(),
+                        helper_runtime_id,
+                        attempt_id,
+                        challenge,
+                        pending.observed_network_prefix.clone(),
+                        lease.latest_handshake_unix,
+                        lease.received_bytes,
+                        lease.transmitted_bytes,
+                        unix_millis(),
+                        self.local_public_key,
+                        |message| identity.sign(message).ok(),
+                    )
+                    .ok()
+            });
+            let Some(accepted) = accepted else {
+                return;
+            };
+            let Ok(response) = ExitForwardResponse::granted(
+                pending.forward_id.to_vec(),
+                ExitForwardOperation::NativeProbeResult,
+                self.local_node_id.to_vec(),
+                local_peer.to_bytes(),
+                vec![accepted.encoded().to_vec()],
+            ) else {
+                return;
+            };
+            responses.push((pending, response.into()));
+        }
+        for (pending, response) in responses {
+            let _ = self.service.send_native_probe_result_response(
+                pending.connection,
+                pending.authenticated_data_relay,
+                pending.channel,
+                response,
+            );
+        }
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_EXIT_RESPONDED");
+    }
+
+    async fn fail_exit_native_result_attempt(&mut self, mut attempt: ExitNativeReadyAttempt) {
+        for task in attempt.probe_tasks.drain().map(|(_, task)| task) {
+            task.abort();
+        }
+        let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+        for pending in attempt.pending_results.into_values() {
+            if let Ok(response) = ExitForwardResponse::unavailable(
+                pending.forward_id.to_vec(),
+                ExitForwardOperation::NativeProbeResult,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+            ) {
+                let _ = self.service.send_native_probe_result_response(
+                    pending.connection,
+                    pending.authenticated_data_relay,
+                    pending.channel,
+                    response.into(),
+                );
+            }
+        }
     }
 
     #[allow(
@@ -5973,6 +6708,12 @@ impl DiscoveryRuntime {
                         usize::try_from(scope.required_path_count).unwrap_or(0),
                     ),
                     activated: false,
+                    probe_tasks: HashMap::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
+                    pending_results: HashMap::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
                     candidate_set_hash,
                     expires_at_ms: scope.attempt_expires_at_ms,
                 },
@@ -7607,6 +8348,44 @@ fn fixed_bytes<const N: usize>(bytes: &[u8]) -> Option<[u8; N]> {
     bytes.try_into().ok()
 }
 
+fn native_probe_exit_socket_request(
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    context_handle: &[u8],
+    path_id: u32,
+) -> Option<AcquireTransportSocket> {
+    let path_number = u8::try_from(path_id).ok()?;
+    let addresses = overlay_addresses(route_context_id, path_number).ok()?;
+    Some(AcquireTransportSocket {
+        route_context_id: route_context_id.to_vec(),
+        context_handle: context_handle.to_vec(),
+        path_id,
+        role: WireguardRole::Exit as i32,
+        descriptor_kind: TransportSocketKind::NativeProbeUdpConnected as i32,
+        expected_local: Some(TransportSocketAddress {
+            address: addresses.exit.octets().to_vec(),
+            port: u32::from(NATIVE_PROBE_EXIT_PORT),
+        }),
+        expected_remote: Some(TransportSocketAddress {
+            address: addresses.client.octets().to_vec(),
+            port: u32::from(NATIVE_PROBE_CLIENT_PORT),
+        }),
+    })
+}
+
+fn native_probe_observed_relay_prefix(underlay_ip: &[u8]) -> Option<ObservationNetworkPrefix> {
+    match underlay_ip {
+        [a, b, c, _] => Some(ObservationNetworkPrefix {
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            network_prefix: vec![*a, *b, *c],
+        }),
+        [a, b, c, d, e, f, ..] if underlay_ip.len() == 16 => Some(ObservationNetworkPrefix {
+            address_family: ObservationAddressFamily::Ipv6 as i32,
+            network_prefix: vec![*a, *b, *c, *d, *e, *f],
+        }),
+        _ => None,
+    }
+}
+
 fn optional_fixed_bytes<const N: usize>(bytes: &[u8]) -> Option<[u8; N]> {
     (!bytes.is_empty()).then(|| fixed_bytes(bytes)).flatten()
 }
@@ -8130,6 +8909,36 @@ fn verified_native_probe_authorization_forward_scope(
         .then(|| scope.clone())
 }
 
+fn verified_native_probe_result_forward_scope(
+    request: &ExitForwardRequest,
+    now_ms: u64,
+) -> Option<NativeProbePathScope> {
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbeResult
+        || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+    {
+        return None;
+    }
+    let verified =
+        verify_native_probe_authorization_chain(request.canonical_request(), now_ms).ok()?;
+    let scope = verified.scope();
+    let data_relay = scope.data_relay.as_ref()?;
+    let exit = scope.exit.as_ref()?;
+    let start_envelope = decode_canonical::<SignedEnvelope>(
+        verified.encoded_start(),
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .ok()?;
+    let request_id = start_envelope.nonce.get(..FORWARD_ID_BYTES)?;
+    (request.forward_id() == request_id
+        && request.deadline_unix_ms() == verified.expires_at_ms()
+        && request.control_relay_node_id() == data_relay.node_id
+        && request.control_relay_peer_id() == data_relay.peer_id
+        && request.control_relay_public_key() == data_relay.public_key
+        && request.exit_node_id() == exit.node_id
+        && request.exit_peer_id() == exit.peer_id)
+        .then(|| scope.clone())
+}
+
 fn verified_native_probe_ready_forward_scope(
     request: &ExitForwardRequest,
     now_ms: u64,
@@ -8528,6 +9337,9 @@ fn forward_request_scope_matches(
         }
         ExitForwardOperation::NativeProbeReady => {
             verified_native_probe_ready_forward_scope(request, now_ms).is_some()
+        }
+        ExitForwardOperation::NativeProbeResult => {
+            verified_native_probe_result_forward_scope(request, now_ms).is_some()
         }
         ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
     }
@@ -12404,6 +13216,7 @@ mod tests {
                 client_channels: Vec::new(),
                 native_ready: None,
                 native_authorization: None,
+                native_result: None,
             },
         );
 
@@ -14920,6 +15733,7 @@ mod tests {
                 client_channels: Vec::new(),
                 native_ready: None,
                 native_authorization: None,
+                native_result: None,
             },
         );
         fixture.runtime.forwarded_exits.insert(
@@ -15193,6 +16007,7 @@ mod tests {
                 client_channels: Vec::new(),
                 native_ready: None,
                 native_authorization: None,
+                native_result: None,
             },
         );
         let advertisement = service_advertisement(

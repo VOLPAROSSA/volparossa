@@ -448,6 +448,20 @@ impl IssuedNativeProbeExitResult {
     }
 }
 
+/// Transport-safe terminal native-probe result signed only after helper-backed observation.
+#[must_use = "a native-probe Exit result must be delivered to its authenticated data Relay"]
+pub struct AcceptedNativeProbeExitResult {
+    encoded: Vec<u8>,
+}
+
+impl AcceptedNativeProbeExitResult {
+    /// Borrow the exact Exit-signed terminal result.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+}
+
 impl ExitService {
     /// Verify, sign and retain one native-probe Permit before returning transport-only bytes.
     ///
@@ -619,6 +633,69 @@ impl ExitService {
         };
         self.native_probe_ready_owners.insert(probe_id, issued);
         Ok(accepted)
+    }
+
+    /// Consume one retained Ready owner and exact helper/datapath facts into a terminal result.
+    ///
+    /// The agent calls this only after the shared sampler helper context has been committed and
+    /// confirmed destroyed. The retained projection supplies the prepared-lease commitment; the
+    /// caller cannot substitute it while reporting the exact runtime, context and observed path.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "authenticated Relay, helper observation and signer remain explicit"
+    )]
+    pub fn issue_native_probe_result_from_observation_with<F>(
+        &mut self,
+        probe_id: [u8; ID_BYTES],
+        authenticated_data_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_data_relay_peer_id: &[u8],
+        helper_runtime_id: [u8; NODE_ID_BYTES],
+        route_context_id: [u8; ID_BYTES],
+        challenge_response: [u8; NONCE_BYTES],
+        observed_network_prefix: ObservationNetworkPrefix,
+        latest_handshake_unix: u64,
+        received_bytes_after_baseline: u64,
+        transmitted_bytes_after_baseline: u64,
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        signer: F,
+    ) -> Result<AcceptedNativeProbeExitResult, ExitError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        let ready = self
+            .native_probe_ready_owners
+            .remove(&probe_id)
+            .ok_or(ExitError::LeaseInvariant)?;
+        let prepared_lease_commitment = ready
+            .prepared_exit
+            .binding
+            .prepared_lease_commitment
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::LeaseInvariant)?;
+        let observation = NativeProbeExitObservation {
+            helper_runtime_id,
+            route_context_id,
+            prepared_lease_commitment,
+            challenge_response: Zeroizing::new(challenge_response),
+            observed_network_prefix,
+            latest_handshake_unix,
+            received_bytes_after_baseline,
+            transmitted_bytes_after_baseline,
+        };
+        let issued = self.issue_native_probe_result_with(
+            ready,
+            observation,
+            authenticated_data_relay_node_id,
+            authenticated_data_relay_peer_id,
+            now_ms,
+            local_public_key,
+            signer,
+        )?;
+        Ok(AcceptedNativeProbeExitResult {
+            encoded: issued.signed_result().to_vec(),
+        })
     }
 
     /// Independently verify one data-Relay-forwarded native Start chain and issue the standard

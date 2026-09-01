@@ -56,6 +56,8 @@ pub enum ExitForwardOperation {
     NativeProbeAuthorize = 7,
     /// Data-Relay-to-Exit readiness request carrying its exact helper-prepared Exit-facing endpoint.
     NativeProbeReady = 8,
+    /// Data-Relay-to-Exit terminal Start chain requesting one helper-proven Exit result.
+    NativeProbeResult = 9,
 }
 
 /// Endpoint-bearing data-Relay request for the selected Exit's private readiness phase.
@@ -276,7 +278,8 @@ impl ExitForwardRequest {
                 }
                 validate_signed_type(&self.canonical_request, request_type(operation)?)?;
             }
-            ExitForwardOperation::NativeProbeAuthorize => {
+            ExitForwardOperation::NativeProbeAuthorize
+            | ExitForwardOperation::NativeProbeResult => {
                 validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
                 if self.exit_node_id == self.control_relay_node_id {
                     return Err(ForwardingRpcError::InvalidFrame);
@@ -882,6 +885,9 @@ fn validate_granted_responses(
         ExitForwardOperation::NativeProbeReady => {
             validate_exact_types(responses, &[ControlMessageType::NativeProbeExitReady])
         }
+        ExitForwardOperation::NativeProbeResult => {
+            validate_exact_types(responses, &[ControlMessageType::NativeProbeExitResult])
+        }
         ExitForwardOperation::Unspecified => Err(ForwardingRpcError::InvalidOperation(0)),
     }
 }
@@ -958,6 +964,7 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
         ExitForwardOperation::FetchExitAdvertisement
         | ExitForwardOperation::NativeProbeAuthorize
         | ExitForwardOperation::NativeProbeReady
+        | ExitForwardOperation::NativeProbeResult
         | ExitForwardOperation::Unspecified => {
             Err(ForwardingRpcError::InvalidOperation(operation as i32))
         }

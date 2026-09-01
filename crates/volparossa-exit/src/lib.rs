@@ -20,7 +20,8 @@ mod native_preselection;
 mod reservation_v4;
 
 pub use native_preselection::{
-    AcceptedNativeProbeExitReady, AcceptedNativeProbeRelayAuthorization,
+    AcceptedNativeProbeExitReady, AcceptedNativeProbeExitResult,
+    AcceptedNativeProbeRelayAuthorization,
 };
 pub use reservation_v4::{
     AcceptedExitCapacityHold, AcceptedExitConfirmation, AcceptedRelayProbePermit, ProbeEvidence,
