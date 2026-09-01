@@ -846,17 +846,6 @@ struct ActorFreshnessProjection {
     signed_valid_until_ms: u64,
 }
 
-/// Consume one exact proof batch into the private selection evidence representation.
-#[allow(
-    clippy::result_large_err,
-    reason = "the terminal error must retain the non-cloneable cooldown owner affinely"
-)]
-fn join_preselection_fresh_evidence(
-    completed: CompletedPreselectionFreshnessAttempt,
-) -> Result<JoinedPreselectionFreshEvidence, PreselectionEvidenceJoinFailure> {
-    join_preselection_fresh_evidence_at(completed, crate::unix_millis())
-}
-
 /// Consume the complete discovery proof chain into one opaque selection-child handoff.
 ///
 /// The discovery actor retains the returned cooldown gate. On failure it receives only that gate;
@@ -867,7 +856,17 @@ pub(crate) fn prepare_preselection_evidence(
     (PreparedPreselectionEvidence, CoolingPreselectionAttemptGate),
     CoolingPreselectionAttemptGate,
 > {
-    match join_preselection_fresh_evidence(completed) {
+    prepare_preselection_evidence_at(completed, crate::unix_millis())
+}
+
+fn prepare_preselection_evidence_at(
+    completed: CompletedPreselectionFreshnessAttempt,
+    trusted_now_ms: u64,
+) -> Result<
+    (PreparedPreselectionEvidence, CoolingPreselectionAttemptGate),
+    CoolingPreselectionAttemptGate,
+> {
+    match join_preselection_fresh_evidence_at(completed, trusted_now_ms) {
         Ok(JoinedPreselectionFreshEvidence {
             snapshot,
             evidence_batch,
@@ -4421,14 +4420,14 @@ mod tests {
         assert!(!batch_impl.contains("fn new("));
         assert!(!batch_impl.contains("\n    pub "));
 
-        let prepared_start = observation
+        let prepared_start = product
             .find("/// Opaque, affine handoff from the discovery owner")
             .expect("prepared evidence documentation");
-        let prepared_end = observation[prepared_start..]
+        let prepared_end = product[prepared_start..]
             .find("/// Terminal proof-to-evidence rejection")
             .map(|offset| prepared_start + offset)
             .expect("prepared evidence section end");
-        let prepared = &observation[prepared_start..prepared_end];
+        let prepared = &product[prepared_start..prepared_end];
         assert!(prepared.contains("pub(crate) struct PreparedPreselectionEvidence {"));
         assert!(!prepared.contains("#[derive"));
         assert!(!prepared.contains("\n    pub"));
@@ -4438,6 +4437,20 @@ mod tests {
             2,
             "only the declaration and exact proof-consumer may open the handoff"
         );
+        assert_eq!(
+            product
+                .matches("prepare_preselection_evidence_at(completed, crate::unix_millis())")
+                .count(),
+            1,
+            "the production handoff must obtain its trusted wall clock internally"
+        );
+        assert_eq!(
+            product
+                .matches("fn prepare_preselection_evidence_at(")
+                .count(),
+            1
+        );
+        assert!(!product.contains("pub(crate) fn prepare_preselection_evidence_at("));
     }
 
     fn assert_phase_a_planner_is_dormant(product: &str) {
@@ -4765,7 +4778,7 @@ mod tests {
             EVIDENCE_BATCH_BYTES,
             Bandwidth::new(80, 80).expect("configured ceiling"),
         );
-        let Ok((prepared, gate)) = prepare_preselection_evidence(completed) else {
+        let Ok((prepared, gate)) = prepare_preselection_evidence_at(completed, NOW_MS + 500) else {
             panic!("exact A1 proofs must prepare opaque evidence");
         };
         assert_ne!(size_of_val(&gate), 0);
