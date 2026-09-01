@@ -13,8 +13,10 @@ use rand_core::{OsRng, RngCore};
 use tokio::time::Instant;
 use volparossa_core::{Bandwidth, IpFamily, ObservedNetworkPrefix};
 use volparossa_discovery::{
-    BoundClientPreselectionTransport, ClientPreselectionTransportFreshnessProof,
-    consume_bound_client_preselection_transport_for_freshness,
+    BoundClientPreselectionTransport, ClientPreselectionBindFailure,
+    ClientPreselectionObservationRequest, ClientPreselectionResponseArrival,
+    ClientPreselectionTransaction, ClientPreselectionTransportFreshnessProof, DiscoveryService,
+    PreselectionDispatchError, consume_bound_client_preselection_transport_for_freshness,
 };
 use volparossa_protocol::{
     BoundDirectPreselectionTranscript, BoundForwardedPreselectionTranscript,
@@ -461,7 +463,7 @@ struct MintedAttemptEntropy {
         reason = "callerless A1a prerequisite; no production caller"
     )
 )]
-pub(super) struct ObservationDispatchId {
+struct ObservationDispatchId {
     batch_id: [u8; BATCH_ID_LENGTH],
     ordinal: u8,
 }
@@ -564,6 +566,23 @@ pub(super) struct PendingPreselectionAttempt {
     pending: PendingRequest,
     remaining: VecDeque<RequestPlan>,
     bound: Vec<BoundTranscriptRecord>,
+}
+
+/// Opaque affine owner of one exact service dispatch and its unchanged A1a attempt.
+///
+/// Only this child can construct or consume the wrapper. The parent actor can move it between
+/// events, bind a service-sealed arrival, or cancel it through the originating service; it cannot
+/// inspect or replace the target, request, deadline, dispatch identity, or retained attempt.
+#[must_use = "a dispatched preselection attempt must be bound or cancelled"]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "owner-only A1a dispatch transition awaits DiscoveryRuntime integration"
+    )
+)]
+pub(super) struct DispatchedPreselectionAttempt {
+    transaction: ClientPreselectionTransaction<PendingPreselectionAttempt>,
 }
 
 #[cfg_attr(
@@ -1010,6 +1029,24 @@ pub(super) struct PreselectionAttemptFailure {
     error: PreselectionAttemptError,
 }
 
+/// Fail-closed result of an owner-only dispatch, bind, or cancellation transition.
+///
+/// A foreign service cannot consume the transaction, so the exact opaque owner is retained for
+/// cancellation through its origin. Every terminal path yields only cooling authority, or closes
+/// permanently if a backwards clock makes even that authority unsafe to mint.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "owner-only A1a dispatch transition awaits DiscoveryRuntime integration"
+    )
+)]
+pub(super) enum PreselectionOwnerTransitionFailure {
+    Retained(Box<DispatchedPreselectionAttempt>),
+    Cooling(CoolingPreselectionAttemptGate),
+    Closed,
+}
+
 #[cfg_attr(
     not(test),
     allow(
@@ -1252,23 +1289,58 @@ impl CoolingPreselectionAttemptGate {
     )
 )]
 impl PendingPreselectionAttempt {
-    pub(super) fn verify_response(
+    /// Consume this exact attempt into one request-derived service dispatch.
+    ///
+    /// The parent supplies only its owning service. Canonical bytes and the monotonic deadline are
+    /// copied from the private pending request, while `self` moves unchanged into the discovery
+    /// transaction context. No target, family, request, deadline, or dispatch identity is accepted
+    /// from the caller.
+    pub(super) fn dispatch(
         self,
-        dispatch_id: &ObservationDispatchId,
+        service: &mut DiscoveryService,
+    ) -> Result<DispatchedPreselectionAttempt, PreselectionOwnerTransitionFailure> {
+        let absolute_deadline = self.pending.expires_at_mono;
+        let Ok(request) = ClientPreselectionObservationRequest::from_canonical(Vec::from(
+            self.pending.expected_request.as_slice(),
+        )) else {
+            return Err(self.terminal_owner_failure(PreselectionAttemptError::Request));
+        };
+        match service.dispatch_preselection_observation_with_context(
+            request,
+            absolute_deadline,
+            self,
+        ) {
+            Ok(transaction) => Ok(DispatchedPreselectionAttempt { transaction }),
+            Err(failure) => {
+                let error = preselection_attempt_error(failure.error());
+                Err(failure.into_context().terminal_owner_failure(error))
+            }
+        }
+    }
+
+    fn verify_response_from_exact_dispatch(
+        self,
         encoded_response: &[u8],
     ) -> Result<PreselectionResponseOutcome, PreselectionAttemptFailure> {
         let transcript_verified_at_ms = crate::unix_millis();
         let transcript_verified_at_mono = Instant::now();
-        self.verify_response_at(
-            dispatch_id,
+        if self.response_time_is_invalid(transcript_verified_at_ms, transcript_verified_at_mono) {
+            return Err(self.fail(
+                PreselectionAttemptError::InvalidTime,
+                transcript_verified_at_ms,
+                transcript_verified_at_mono,
+            ));
+        }
+        self.verify_authenticated_response_at(
             encoded_response,
             transcript_verified_at_ms,
             transcript_verified_at_mono,
         )
     }
 
+    #[cfg(test)]
     fn verify_response_at(
-        mut self,
+        self,
         dispatch_id: &ObservationDispatchId,
         encoded_response: &[u8],
         transcript_verified_at_ms: u64,
@@ -1290,6 +1362,19 @@ impl PendingPreselectionAttempt {
                 transcript_verified_at_mono,
             ));
         }
+        self.verify_authenticated_response_at(
+            encoded_response,
+            transcript_verified_at_ms,
+            transcript_verified_at_mono,
+        )
+    }
+
+    fn verify_authenticated_response_at(
+        mut self,
+        encoded_response: &[u8],
+        transcript_verified_at_ms: u64,
+        transcript_verified_at_mono: Instant,
+    ) -> Result<PreselectionResponseOutcome, PreselectionAttemptFailure> {
         let Some(bound) = verify_and_bind_response(
             &self.pending,
             encoded_response,
@@ -1429,6 +1514,95 @@ impl PendingPreselectionAttempt {
             ),
             error,
         }
+    }
+
+    fn terminal_owner_failure(
+        self,
+        error: PreselectionAttemptError,
+    ) -> PreselectionOwnerTransitionFailure {
+        let terminal_ms = crate::unix_millis();
+        let terminal_mono = Instant::now();
+        into_owner_transition_failure(self.fail(error, terminal_ms, terminal_mono))
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "owner-only A1a dispatch transition awaits DiscoveryRuntime integration"
+    )
+)]
+impl DispatchedPreselectionAttempt {
+    /// Bind one service-sealed arrival and verify it against the exact retained attempt context.
+    ///
+    /// The discovery transaction first proves the opaque dispatch identity and returns the same
+    /// non-cloned attempt that was dispatched. Only then does this owner verify the signed response
+    /// against that attempt's private canonical request and advance it affinely.
+    pub(super) fn bind_response(
+        self,
+        service: &mut DiscoveryService,
+        arrival: ClientPreselectionResponseArrival,
+    ) -> Result<
+        (
+            PreselectionResponseOutcome,
+            BoundClientPreselectionTransport,
+        ),
+        PreselectionOwnerTransitionFailure,
+    > {
+        match service.bind_preselection_observation_response_with_context(self.transaction, arrival)
+        {
+            Ok((attempt, transport, response)) => attempt
+                .verify_response_from_exact_dispatch(response.as_encoded())
+                .map(|outcome| (outcome, transport))
+                .map_err(into_owner_transition_failure),
+            Err(ClientPreselectionBindFailure::Retained {
+                transaction,
+                error: _,
+            }) => Err(PreselectionOwnerTransitionFailure::Retained(Box::new(
+                Self {
+                    transaction: *transaction,
+                },
+            ))),
+            Err(ClientPreselectionBindFailure::Released { context, error }) => {
+                Err(context.terminal_owner_failure(preselection_attempt_error(error)))
+            }
+        }
+    }
+
+    /// Cancel through the originating service and cool the exact retained attempt authority.
+    pub(super) fn cancel(
+        self,
+        service: &mut DiscoveryService,
+    ) -> Result<CoolingPreselectionAttemptGate, PreselectionOwnerTransitionFailure> {
+        match service.cancel_preselection_observation_transaction(self.transaction) {
+            Ok(attempt) => attempt.cancel().map_err(into_owner_transition_failure),
+            Err(failure) => Err(PreselectionOwnerTransitionFailure::Retained(Box::new(
+                Self {
+                    transaction: failure.into_transaction(),
+                },
+            ))),
+        }
+    }
+}
+
+fn preselection_attempt_error(error: PreselectionDispatchError) -> PreselectionAttemptError {
+    match error {
+        PreselectionDispatchError::Role | PreselectionDispatchError::Request => {
+            PreselectionAttemptError::Request
+        }
+        PreselectionDispatchError::Correlation => PreselectionAttemptError::UnknownDispatch,
+        PreselectionDispatchError::Time => PreselectionAttemptError::InvalidTime,
+        _ => PreselectionAttemptError::Transport,
+    }
+}
+
+fn into_owner_transition_failure(
+    failure: PreselectionAttemptFailure,
+) -> PreselectionOwnerTransitionFailure {
+    match failure.gate {
+        Some(gate) => PreselectionOwnerTransitionFailure::Cooling(gate),
+        None => PreselectionOwnerTransitionFailure::Closed,
     }
 }
 
@@ -2536,6 +2710,8 @@ mod tests {
         preselection_snapshot_fixture_with_capabilities,
     };
     use super::*;
+    use libp2p::identity;
+    use volparossa_discovery::DiscoveryProtocolRoles;
     use volparossa_identity::Identity;
     use volparossa_protocol::{
         ControlPayload, ForwardedPreselectionAttestation, ObservationNetworkPrefix,
@@ -2830,6 +3006,115 @@ mod tests {
                 .expect("canonical request hash"),
             pending.pending.request_hash
         );
+    }
+
+    #[tokio::test]
+    async fn owner_dispatch_fails_closed_and_cools_when_connection_provenance_is_absent() {
+        let fixture = preselection_snapshot_fixture(1, false).await;
+        let started_at_mono = Instant::now();
+        let pending = PreselectionAttemptGate::new()
+            .expect("gate")
+            .begin_at_with_entropy_for_test(
+                fixture.snapshot,
+                attempt_start_at(
+                    Transport::UdpSinglePath,
+                    ObservationAddressFamily::Ipv4,
+                    bandwidth(10),
+                    bandwidth(100),
+                    bandwidth(80),
+                    fixture.now_ms,
+                    started_at_mono,
+                ),
+                |request_count| Ok(minted_entropy(request_count, 63)),
+            )
+            .unwrap_or_else(|_| panic!("valid attempt"));
+        let mut service = DiscoveryService::new_with_protocol_roles(
+            identity::Keypair::generate_ed25519(),
+            DiscoveryProtocolRoles::new(true, false, false),
+        )
+        .expect("client discovery service");
+
+        let failure = match pending.dispatch(&mut service) {
+            Ok(_) => panic!("a request-derived target without live provenance must not dispatch"),
+            Err(failure) => failure,
+        };
+        let PreselectionOwnerTransitionFailure::Cooling(cooling) = failure else {
+            panic!("terminal dispatch rejection must retain only cooling authority");
+        };
+        assert_eq!(cooling.gate.tombstones.len(), 1);
+        assert_eq!(cooling.gate.batch_tombstones.len(), 1);
+        assert!(cooling.gate.replay.is_empty());
+        assert!(cooling.ready_at_ms >= crate::unix_millis());
+        assert!(cooling.ready_at >= Instant::now());
+    }
+
+    #[tokio::test]
+    async fn exact_dispatch_response_transition_advances_the_unchanged_affine_attempt() {
+        let fixture = preselection_snapshot_fixture(1, false).await;
+        let signers = fixture.signers;
+        let original = snapshot_candidate_union_identity(&fixture.snapshot);
+        let pending = PreselectionAttemptGate::new()
+            .expect("gate")
+            .begin_at_with_entropy_for_test(
+                fixture.snapshot,
+                attempt_start_at(
+                    Transport::UdpSinglePath,
+                    ObservationAddressFamily::Ipv4,
+                    bandwidth(10),
+                    bandwidth(100),
+                    bandwidth(80),
+                    fixture.now_ms,
+                    Instant::now(),
+                ),
+                |request_count| Ok(minted_entropy(request_count, 64)),
+            )
+            .unwrap_or_else(|_| panic!("valid attempt"));
+        let verified_at_ms = crate::unix_millis();
+        let expected_request_hash = pending.pending.request_hash;
+        let response = signed_response(&pending, &signers, verified_at_ms, 65);
+
+        let Ok(PreselectionResponseOutcome::Pending(next)) =
+            pending.verify_response_from_exact_dispatch(&response)
+        else {
+            panic!("the exact retained dispatch context must advance without an external ID");
+        };
+        assert_eq!(snapshot_candidate_union_identity(&next.snapshot), original);
+        assert_eq!(next.bound.len(), 1);
+        assert_eq!(next.bound[0].request_hash, expected_request_hash);
+        assert_eq!(next.pending.dispatch_id.ordinal, 2);
+        assert_eq!(next.gate.replay.len(), 2);
+    }
+
+    #[test]
+    fn every_discovery_transition_rejection_maps_to_one_fail_closed_attempt_class() {
+        for (error, expected) in [
+            (
+                PreselectionDispatchError::Role,
+                PreselectionAttemptError::Request,
+            ),
+            (
+                PreselectionDispatchError::Request,
+                PreselectionAttemptError::Request,
+            ),
+            (
+                PreselectionDispatchError::Provenance,
+                PreselectionAttemptError::Transport,
+            ),
+            (
+                PreselectionDispatchError::Correlation,
+                PreselectionAttemptError::UnknownDispatch,
+            ),
+            (
+                PreselectionDispatchError::Time,
+                PreselectionAttemptError::InvalidTime,
+            ),
+            (
+                PreselectionDispatchError::Busy,
+                PreselectionAttemptError::Transport,
+            ),
+        ] {
+            assert_eq!(preselection_attempt_error(error), expected);
+        }
     }
 
     #[tokio::test]
@@ -4430,17 +4715,29 @@ mod tests {
 
     #[test]
     fn clock_sampling_entrypoints_remain_inside_the_affine_owner_module() {
+        fn consume_owner_transition_for_test(failure: PreselectionOwnerTransitionFailure) {
+            match failure {
+                PreselectionOwnerTransitionFailure::Retained(owner) => drop(owner),
+                PreselectionOwnerTransitionFailure::Cooling(gate) => drop(gate),
+                PreselectionOwnerTransitionFailure::Closed => {}
+            }
+        }
+
         std::hint::black_box(PreselectionAttemptGate::begin);
         std::hint::black_box(PreselectionAttemptGate::begin_at);
         std::hint::black_box(PreselectionAttemptGate::begin_validated);
         std::hint::black_box(CoolingPreselectionAttemptGate::resume);
-        std::hint::black_box(PendingPreselectionAttempt::verify_response);
+        std::hint::black_box(PendingPreselectionAttempt::dispatch);
+        std::hint::black_box(PendingPreselectionAttempt::verify_response_from_exact_dispatch);
         std::hint::black_box(PendingPreselectionAttempt::cancel);
+        std::hint::black_box(DispatchedPreselectionAttempt::bind_response);
+        std::hint::black_box(DispatchedPreselectionAttempt::cancel);
         std::hint::black_box(ReadyPreselectionAttempt::finish);
         std::hint::black_box(ReadyPreselectionAttempt::cancel);
         std::hint::black_box(ReadyPreselectionAttempt::cancel_at);
         std::hint::black_box(CompletedPreselectionAttempt::join_transport_proofs);
         std::hint::black_box(mint_attempt_entropy);
+        std::hint::black_box(consume_owner_transition_for_test);
     }
 
     fn assert_a1a_subject_and_transcript_fields(product: &str) {
@@ -4474,7 +4771,7 @@ mod tests {
         );
         assert_source_fields(
             product,
-            "pub(super) struct ObservationDispatchId {",
+            "struct ObservationDispatchId {",
             &["batch_id: [u8; BATCH_ID_LENGTH],", "ordinal: u8,"],
         );
         assert_source_fields(
@@ -4553,6 +4850,11 @@ mod tests {
                 "remaining: VecDeque<RequestPlan>,",
                 "bound: Vec<BoundTranscriptRecord>,",
             ],
+        );
+        assert_source_fields(
+            product,
+            "pub(super) struct DispatchedPreselectionAttempt {",
+            &["transaction: ClientPreselectionTransaction<PendingPreselectionAttempt>,"],
         );
         assert_source_fields(
             product,
@@ -4658,6 +4960,15 @@ mod tests {
             &[
                 "gate: Option<CoolingPreselectionAttemptGate>,",
                 "error: PreselectionAttemptError,",
+            ],
+        );
+        assert_source_fields(
+            product,
+            "pub(super) enum PreselectionOwnerTransitionFailure {",
+            &[
+                "Retained(Box<DispatchedPreselectionAttempt>),",
+                "Cooling(CoolingPreselectionAttemptGate),",
+                "Closed,",
             ],
         );
     }
@@ -4804,8 +5115,8 @@ mod tests {
             1
         );
         assert_eq!(product.matches("pub(super) struct ").count(), 9);
-        assert_eq!(product.matches("pub(super) enum ").count(), 2);
-        assert_eq!(product.matches("pub(super) fn ").count(), 9);
+        assert_eq!(product.matches("pub(super) enum ").count(), 3);
+        assert_eq!(product.matches("pub(super) fn ").count(), 11);
         assert_eq!(product.matches("pub(crate) struct ").count(), 7);
         assert_eq!(product.matches("pub(crate) enum ").count(), 1);
         assert_eq!(product.matches("pub(crate) fn ").count(), 6);
@@ -4832,6 +5143,122 @@ mod tests {
             "fn admitted_failure(",
         ] {
             assert_eq!(gate_impl.matches(method).count(), 1, "gate method {method}");
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one source contract keeps the complete opaque owner transition boundary together"
+    )]
+    fn assert_owner_only_dispatch_transitions(product: &str) {
+        assert_eq!(
+            product
+                .matches("ClientPreselectionObservationRequest::from_canonical(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            product
+                .matches("dispatch_preselection_observation_with_context(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            product
+                .matches("bind_preselection_observation_response_with_context(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            product
+                .matches("cancel_preselection_observation_transaction(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            product
+                .matches(".verify_response_from_exact_dispatch(response.as_encoded())")
+                .count(),
+            1
+        );
+        assert_eq!(
+            product
+                .matches("#[cfg(test)]\n    fn verify_response_at(")
+                .count(),
+            1
+        );
+        assert!(!product.contains("pub(super) struct ObservationDispatchId"));
+        assert!(!product.contains("pub(super) fn verify_response"));
+        assert!(!product.contains("dispatch_preselection_observation("));
+
+        let pending_impl = product
+            .split_once("impl PendingPreselectionAttempt {")
+            .expect("pending owner implementation")
+            .1
+            .split_once("impl DispatchedPreselectionAttempt {")
+            .expect("dispatched owner implementation")
+            .0;
+        let dispatch = pending_impl
+            .split_once("pub(super) fn dispatch(")
+            .expect("owner dispatch")
+            .1
+            .split_once("\n    fn verify_response_from_exact_dispatch(")
+            .expect("owner dispatch end")
+            .0;
+        let dispatch_arguments = dispatch
+            .split_once(") ->")
+            .expect("owner dispatch arguments")
+            .0;
+        assert!(dispatch_arguments.contains("self,"));
+        assert!(dispatch_arguments.contains("service: &mut DiscoveryService,"));
+        for forbidden in [
+            "request",
+            "target",
+            "peer",
+            "family",
+            "deadline",
+            "dispatch_id",
+            "Instant",
+            "now_ms",
+            "entropy",
+        ] {
+            assert!(
+                !dispatch_arguments.contains(forbidden),
+                "external owner dispatch input: {forbidden}"
+            );
+        }
+        assert!(dispatch.contains(
+            "Vec::from(\n            self.pending.expected_request.as_slice(),\n        )"
+        ));
+        assert!(dispatch.contains("let absolute_deadline = self.pending.expires_at_mono;"));
+        assert!(dispatch.contains("request,\n            absolute_deadline,\n            self,"));
+
+        let dispatched_impl = product
+            .split_once("impl DispatchedPreselectionAttempt {")
+            .expect("dispatched owner implementation")
+            .1
+            .split_once("\n}\n\nfn preselection_attempt_error(")
+            .expect("dispatched owner implementation end")
+            .0;
+        assert_eq!(dispatched_impl.matches("pub(super) fn ").count(), 2);
+        assert!(dispatched_impl.contains("self.transaction, arrival"));
+        assert!(dispatched_impl.contains("transaction: *transaction,"));
+        assert!(dispatched_impl.contains("failure.into_transaction()"));
+        for forbidden in [
+            "impl Clone",
+            "impl Debug",
+            "Serialize",
+            "Deserialize",
+            "fn request(",
+            "fn target(",
+            "fn deadline(",
+            "fn dispatch_id(",
+            "fn transaction(",
+        ] {
+            assert!(
+                !dispatched_impl.contains(forbidden),
+                "opaque dispatch escape: {forbidden}"
+            );
         }
     }
 
@@ -4938,7 +5365,7 @@ mod tests {
         let transitive = [
             source_fields(product, "pub(super) struct PreselectionSubjectBinding {").join("\n"),
             source_fields(product, "pub(super) struct PreselectionSubjectSet {").join("\n"),
-            source_fields(product, "pub(super) struct ObservationDispatchId {").join("\n"),
+            source_fields(product, "struct ObservationDispatchId {").join("\n"),
             source_fields(product, "enum BoundTranscript {").join("\n"),
             final_batch,
             final_record,
@@ -5383,9 +5810,11 @@ mod tests {
         for symbol in [
             "PreselectionAttemptGate",
             "PendingPreselectionAttempt",
+            "DispatchedPreselectionAttempt",
             "ReadyPreselectionAttempt",
             "BoundPreselectionTranscriptBatch",
             "PreselectionResponseOutcome",
+            "PreselectionOwnerTransitionFailure",
         ] {
             assert_eq!(
                 outside_owner
@@ -5411,6 +5840,7 @@ mod tests {
         assert_a1a_terminal_owner_fields(product);
         assert_a1c_exact_fresh_join_fields(product);
         assert_a1a_affine_surface(product);
+        assert_owner_only_dispatch_transitions(product);
         assert_a1a_bounds_entropy_and_no_producer(product);
         assert_a1a_transcript_only(product);
         assert_a1a_parent_snapshot_and_callerlessness(product);
