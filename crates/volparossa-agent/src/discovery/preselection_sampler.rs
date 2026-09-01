@@ -26,7 +26,7 @@ use super::{
     RouteCandidateSnapshot, preselection_observation::PreselectionSubjectSet,
 };
 
-const MAXIMUM_OTHER_RELAYS: usize = 8;
+pub(super) const MAXIMUM_OTHER_RELAYS: usize = 8;
 const MAXIMUM_LOCAL_MEASUREMENTS: usize = 64;
 const HIGH_BAND_PERCENT: u64 = 70;
 const MIDDLE_BAND_PERCENT: u64 = 20;
@@ -70,6 +70,10 @@ impl PreselectionSamplingScope {
             minimum_other_relays,
             maximum_other_relays,
         }
+    }
+
+    pub(super) fn is_valid(self) -> bool {
+        self.validated().is_some()
     }
 
     fn validated(self) -> Option<ValidatedSamplingScope> {

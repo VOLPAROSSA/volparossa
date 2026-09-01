@@ -6,6 +6,11 @@ use std::{
 };
 
 use libp2p::{PeerId, request_response::OutboundRequestId, swarm::ConnectionId};
+#[cfg(any(test, feature = "internal-test-hooks"))]
+use libp2p::{
+    core::ConnectedPoint,
+    swarm::{AddressChange, FromSwarm, NetworkBehaviour},
+};
 use thiserror::Error;
 use tokio::time::Instant;
 use volparossa_core::{IpFamily, ObservedNetworkPrefix};
@@ -354,6 +359,39 @@ pub(super) fn consume_bound_upstream_for_forwarded_attestation(
 }
 
 impl DiscoveryService {
+    /// Reclassify one exact live connection endpoint for cross-crate MemoryTransport tests.
+    ///
+    /// Memory transports have no native IP family. The internal test feature uses the same
+    /// production `AddressChange` path as libp2p to attach a public test prefix to an already
+    /// established connection. This hook is absent from normal builds.
+    #[cfg(any(test, feature = "internal-test-hooks"))]
+    #[doc(hidden)]
+    pub fn install_test_connection_address_change(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        old: &ConnectedPoint,
+        new: &ConnectedPoint,
+    ) {
+        self.swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::AddressChange(AddressChange {
+                peer_id,
+                connection_id,
+                old,
+                new,
+            }));
+    }
+
+    /// Return whether the exact client preselection service slot is occupied in tests.
+    #[cfg(any(test, feature = "internal-test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn client_preselection_slot_active_for_test(&self) -> bool {
+        self.preselection_transaction.client_active.is_some()
+    }
+
     /// Read-only admission check for a forwarded request before shared replay capacity is spent.
     ///
     /// This deliberately proves only that the request is currently dispatchable over one unique

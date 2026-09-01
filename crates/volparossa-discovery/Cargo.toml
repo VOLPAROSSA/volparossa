@@ -8,6 +8,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+internal-test-hooks = []
+
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true

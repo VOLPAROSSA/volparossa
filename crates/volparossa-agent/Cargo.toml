@@ -43,6 +43,7 @@ volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
 
 [dev-dependencies]
 tempfile.workspace = true
+volparossa-discovery = { path = "../volparossa-discovery", version = "=0.1.0", features = ["internal-test-hooks"] }
 volparossa-test-support = { path = "../volparossa-test-support", version = "=0.1.0" }
 
 [lints]

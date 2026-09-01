@@ -13,6 +13,8 @@ use preselection_observation::{
     PreselectionLocalRecovery, PreselectionOwnerTransitionFailure, PreselectionResponseOutcome,
     consume_local_preselection_attempt_failure, consume_preselection_begin_failure,
 };
+#[cfg(test)]
+use preselection_sampler::MAXIMUM_OTHER_RELAYS;
 use preselection_sampler::{
     PreselectionSamplingError, PreselectionSamplingScope, narrow_route_candidate_snapshot,
 };
@@ -1587,6 +1589,11 @@ impl DiscoveryRuntime {
             }
         }
 
+        if !client_preselection_parameters_are_valid(&parameters) {
+            let _ = reply.send(Err(ClientPreselectionError::InvalidParameters));
+            return;
+        }
+
         let ClientPreselectionParameters {
             transport,
             address_family,
@@ -1597,14 +1604,6 @@ impl DiscoveryRuntime {
             maximum_other_relays,
             requested_candidate_bound,
         } = parameters;
-        if !client_preselection_capacities_are_valid(
-            minimum_capacity,
-            local_profile_capacity,
-            conservative_capacity_ceiling,
-        ) {
-            let _ = reply.send(Err(ClientPreselectionError::InvalidParameters));
-            return;
-        }
 
         let captured_at_ms = unix_millis();
         self.purge_completed_at(captured_at_ms);
@@ -5574,6 +5573,22 @@ fn client_preselection_capacities_are_valid(
         && local_profile.satisfies(conservative_ceiling)
 }
 
+fn client_preselection_parameters_are_valid(parameters: &ClientPreselectionParameters) -> bool {
+    client_preselection_capacities_are_valid(
+        parameters.minimum_capacity,
+        parameters.local_profile_capacity,
+        parameters.conservative_capacity_ceiling,
+    ) && PreselectionSamplingScope::new(
+        parameters.transport,
+        parameters.address_family,
+        parameters.minimum_capacity,
+        parameters.minimum_other_relays,
+        parameters.maximum_other_relays,
+    )
+    .is_valid()
+        && (1..=MAXIMUM_SELECTION_CANDIDATES).contains(&parameters.requested_candidate_bound)
+}
+
 fn fixed_bytes<const N: usize>(bytes: &[u8]) -> Option<[u8; N]> {
     bytes.try_into().ok()
 }
@@ -6519,7 +6534,11 @@ mod tests {
         time::Duration,
     };
 
-    use libp2p::Multiaddr;
+    use libp2p::{
+        Multiaddr,
+        core::{ConnectedPoint, Endpoint, transport::PortUse},
+        swarm::SwarmEvent,
+    };
     use tempfile::TempDir;
     use tokio::sync::{RwLock, oneshot};
     use volparossa_protocol::{
@@ -6611,6 +6630,86 @@ mod tests {
             1,
             10,
         )
+    }
+
+    async fn next_service_other(service: &mut DiscoveryService) -> SwarmEvent<BehaviourEvent> {
+        loop {
+            if let DiscoveryEvent::Other(event) = service.next_event().await {
+                return event;
+            }
+        }
+    }
+
+    async fn connect_runtime_client_to_control(
+        runtime: &mut DiscoveryRuntime,
+        control: &mut DiscoveryService,
+    ) {
+        let memory_id = NEXT_MEMORY_ADDRESS.fetch_add(1, Ordering::Relaxed);
+        let address = format!("/memory/{memory_id}")
+            .parse::<Multiaddr>()
+            .expect("control memory address");
+        control.listen_on(address).expect("control memory listener");
+        let address = timeout(Duration::from_secs(10), async {
+            loop {
+                if let SwarmEvent::NewListenAddr { address, .. } = next_service_other(control).await
+                {
+                    break address;
+                }
+            }
+        })
+        .await
+        .expect("control listener timeout");
+
+        let control_peer = *control.local_peer_id();
+        let client_peer = *runtime.service.local_peer_id();
+        runtime
+            .service
+            .dial_peerlink(&PeerLink::new(control_peer, address).expect("control memory peerlink"))
+            .expect("client-control memory dial");
+        let (connection_id, old_endpoint) = timeout(Duration::from_secs(10), async {
+            let mut client_lineage = None;
+            let mut control_connected = false;
+            while client_lineage.is_none() || !control_connected {
+                tokio::select! {
+                    event = next_service_other(&mut runtime.service) => {
+                        if let SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } = event
+                        {
+                            if peer_id == control_peer {
+                                client_lineage = Some((connection_id, endpoint));
+                            }
+                        }
+                    }
+                    event = next_service_other(control) => {
+                        control_connected |= matches!(
+                            event,
+                            SwarmEvent::ConnectionEstablished { peer_id, .. }
+                                if peer_id == client_peer
+                        );
+                    }
+                }
+            }
+            client_lineage.expect("client connection lineage")
+        })
+        .await
+        .expect("client-control connection timeout");
+        let public_endpoint = ConnectedPoint::Dialer {
+            address: "/ip4/44.160.1.8/tcp/443"
+                .parse()
+                .expect("public test endpoint"),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        };
+        runtime.service.install_test_connection_address_change(
+            control_peer,
+            connection_id,
+            &old_endpoint,
+            &public_endpoint,
+        );
     }
 
     fn direct_capability(
@@ -9590,10 +9689,22 @@ mod tests {
         now_ms: u64,
     ) -> (DirectRelayCapability, Libp2pPeerId) {
         let control_identity = Identity::generate();
+        let valid_exit = Identity::generate();
+        let control =
+            install_valid_snapshot_route_for(fixture, &control_identity, &valid_exit, now_ms).await;
+        (control, valid_exit.peer_id().to_owned())
+    }
+
+    async fn install_valid_snapshot_route_for(
+        fixture: &mut RuntimeFixture,
+        control_identity: &Identity,
+        valid_exit: &Identity,
+        now_ms: u64,
+    ) -> DirectRelayCapability {
         assert!(
             ingest_direct_snapshot_advertisement(
                 fixture,
-                &control_identity,
+                control_identity,
                 RolesConfig {
                     client: false,
                     relay: true,
@@ -9612,46 +9723,495 @@ mod tests {
             .get(control_identity.peer_id())
             .expect("stored control capability")
             .clone();
-        let valid_exit = Identity::generate();
         assert!(
-            ingest_forwarded_snapshot_exit(fixture, &control, &valid_exit, 1, [161; 32], now_ms,)
+            ingest_forwarded_snapshot_exit(fixture, &control, valid_exit, 1, [161; 32], now_ms,)
                 .await
                 .is_some()
         );
-        (control, valid_exit.peer_id().to_owned())
+        control
     }
 
-    #[tokio::test]
-    async fn client_preselection_rejects_invalid_input_before_moving_the_gate() {
+    struct ActiveClientPreselectionFixture {
+        fixture: RuntimeFixture,
+        control_service: DiscoveryService,
+        response: oneshot::Receiver<Result<PreparedPreselectionEvidence, ClientPreselectionError>>,
+        began_before: Instant,
+        began_after: Instant,
+    }
+
+    async fn active_client_preselection_fixture() -> ActiveClientPreselectionFixture {
         let mut fixture = fixture(RolesConfig {
             client: true,
             relay: false,
             exit: false,
         });
-        let invalid = ClientPreselectionParameters::new(
-            Transport::UdpSinglePath,
-            ObservationAddressFamily::Ipv4,
-            Bandwidth::new(10, 10).expect("minimum capacity"),
-            Bandwidth::new(50, 50).expect("local capacity"),
-            Bandwidth::new(80, 80).expect("conservative ceiling"),
-            1,
-            1,
-            10,
+        let now_ms = unix_millis();
+        let control_identity = Identity::generate();
+        let valid_exit = Identity::generate();
+        let _control =
+            install_valid_snapshot_route_for(&mut fixture, &control_identity, &valid_exit, now_ms)
+                .await;
+        let other_relay = Identity::generate();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &other_relay,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                1,
+                [162; 32],
+                now_ms,
+            )
+            .await
+            .is_some()
         );
+
+        let mut control_service = DiscoveryService::new_with_protocol_roles(
+            control_identity.keypair().clone(),
+            DiscoveryProtocolRoles::new(false, true, false),
+        )
+        .expect("control discovery service");
+        connect_runtime_client_to_control(&mut fixture.runtime, &mut control_service).await;
+
         let (reply, response) = oneshot::channel();
+        let began_before = Instant::now();
         fixture
             .runtime
-            .begin_client_preselection(invalid, reply, &fixture.state)
+            .begin_client_preselection(
+                valid_client_preselection_parameters(),
+                reply,
+                &fixture.state,
+            )
             .await;
-        assert!(matches!(
-            response.await.expect("typed rejection"),
-            Err(ClientPreselectionError::InvalidParameters)
-        ));
+        let began_after = Instant::now();
         assert!(matches!(
             fixture.runtime.client_preselection,
-            ClientPreselectionOwner::Available(_)
+            ClientPreselectionOwner::Active(_)
         ));
-        assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 0);
+        assert!(
+            fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 1);
+
+        ActiveClientPreselectionFixture {
+            fixture,
+            control_service,
+            response,
+            began_before,
+            began_after,
+        }
+    }
+
+    async fn next_client_preselection_outbound_failure(
+        runtime: &mut DiscoveryRuntime,
+        control: &mut DiscoveryService,
+    ) -> DiscoveryEvent {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = runtime.service.next_event() => {
+                        if matches!(
+                            &event,
+                            DiscoveryEvent::Other(SwarmEvent::Behaviour(
+                                BehaviourEvent::PreselectionObservation(
+                                    request_response::Event::OutboundFailure { .. },
+                                ),
+                            ))
+                        ) {
+                            break event;
+                        }
+                    }
+                    _ = control.next_event() => {}
+                }
+            }
+        })
+        .await
+        .expect("preselection outbound failure timeout")
+    }
+
+    #[tokio::test]
+    async fn client_preselection_rejects_every_invalid_parameter_before_snapshot_or_gate() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        });
+
+        let mut unspecified_transport = valid_client_preselection_parameters();
+        unspecified_transport.transport = Transport::Unspecified;
+        let mut unspecified_family = valid_client_preselection_parameters();
+        unspecified_family.address_family = ObservationAddressFamily::Unspecified;
+        let mut zero_minimum_relays = valid_client_preselection_parameters();
+        zero_minimum_relays.minimum_other_relays = 0;
+        let mut inverted_relay_range = valid_client_preselection_parameters();
+        inverted_relay_range.minimum_other_relays = 2;
+        inverted_relay_range.maximum_other_relays = 1;
+        let mut excessive_relays = valid_client_preselection_parameters();
+        excessive_relays.maximum_other_relays = MAXIMUM_OTHER_RELAYS.saturating_add(1);
+        let mut zero_candidate_bound = valid_client_preselection_parameters();
+        zero_candidate_bound.requested_candidate_bound = 0;
+        let mut excessive_candidate_bound = valid_client_preselection_parameters();
+        excessive_candidate_bound.requested_candidate_bound =
+            MAXIMUM_SELECTION_CANDIDATES.saturating_add(1);
+        let mut zero_minimum_capacity = valid_client_preselection_parameters();
+        zero_minimum_capacity.minimum_capacity =
+            Bandwidth::new(0, 10).expect("bounded zero minimum capacity");
+        let mut ceiling_below_minimum = valid_client_preselection_parameters();
+        ceiling_below_minimum.conservative_capacity_ceiling =
+            Bandwidth::new(5, 5).expect("bounded low ceiling");
+        let mut local_below_ceiling = valid_client_preselection_parameters();
+        local_below_ceiling.local_profile_capacity =
+            Bandwidth::new(50, 50).expect("bounded low local capacity");
+
+        for (case, invalid) in [
+            ("unspecified transport", unspecified_transport),
+            ("unspecified family", unspecified_family),
+            ("zero minimum relay count", zero_minimum_relays),
+            ("inverted relay range", inverted_relay_range),
+            ("excessive relay bound", excessive_relays),
+            ("zero candidate bound", zero_candidate_bound),
+            ("excessive candidate bound", excessive_candidate_bound),
+            ("zero minimum capacity", zero_minimum_capacity),
+            ("ceiling below minimum capacity", ceiling_below_minimum),
+            ("local profile below ceiling", local_below_ceiling),
+        ] {
+            let (reply, response) = oneshot::channel();
+            fixture
+                .runtime
+                .begin_client_preselection(invalid, reply, &fixture.state)
+                .await;
+            assert!(
+                matches!(
+                    response.await.expect("typed rejection"),
+                    Err(ClientPreselectionError::InvalidParameters)
+                ),
+                "case: {case}"
+            );
+            assert!(
+                matches!(
+                    fixture.runtime.client_preselection,
+                    ClientPreselectionOwner::Available(_)
+                ),
+                "case: {case}"
+            );
+            assert_eq!(
+                fixture.runtime.route_snapshot_build_attempts.get(),
+                0,
+                "case: {case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connected_client_preselection_installs_active_slot_with_exact_owner_clocks() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            control_service: _control_service,
+            response,
+            began_before,
+            began_after,
+        } = Box::pin(active_client_preselection_fixture()).await;
+        let ClientPreselectionOwner::Active(active) = &fixture.runtime.client_preselection else {
+            panic!("connected dispatch must remain active");
+        };
+        let earliest_request_deadline = began_before
+            .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)
+            .expect("request clock");
+        let latest_request_deadline = began_after
+            .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)
+            .expect("request clock");
+        let earliest_attempt_deadline = began_before
+            .checked_add(CLIENT_PRESELECTION_TIMEOUT)
+            .expect("attempt clock");
+        let latest_attempt_deadline = began_after
+            .checked_add(CLIENT_PRESELECTION_TIMEOUT)
+            .expect("attempt clock");
+        assert!(active.request_deadline >= earliest_request_deadline);
+        assert!(active.request_deadline <= latest_request_deadline);
+        assert!(active.attempt_deadline >= earliest_attempt_deadline);
+        assert!(active.attempt_deadline <= latest_attempt_deadline);
+        assert!(active.request_deadline < active.attempt_deadline);
+
+        fixture
+            .runtime
+            .cancel_client_preselection(ClientPreselectionError::Closed);
+        assert!(matches!(
+            response.await.expect("terminal cancellation"),
+            Err(ClientPreselectionError::Closed)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_client_preselection_caller_drop_vacates_exact_slot_and_cools() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            control_service: _control_service,
+            response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        drop(response);
+
+        fixture.runtime.maintain_client_preselection();
+
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn either_active_client_preselection_deadline_vacates_exact_slot_and_times_out() {
+        for deadline in ["request", "attempt"] {
+            let ActiveClientPreselectionFixture {
+                mut fixture,
+                control_service: _control_service,
+                response,
+                ..
+            } = Box::pin(active_client_preselection_fixture()).await;
+            let ClientPreselectionOwner::Active(active) = &mut fixture.runtime.client_preselection
+            else {
+                panic!("connected dispatch must remain active");
+            };
+            if deadline == "request" {
+                active.request_deadline = Instant::now();
+            } else {
+                active.request_deadline = Instant::now()
+                    .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)
+                    .expect("future request deadline");
+                active.attempt_deadline = Instant::now();
+            }
+
+            fixture.runtime.maintain_client_preselection();
+
+            assert!(
+                matches!(
+                    response.await.expect("terminal deadline"),
+                    Err(ClientPreselectionError::Timeout)
+                ),
+                "deadline: {deadline}"
+            );
+            assert!(
+                !fixture
+                    .runtime
+                    .service
+                    .client_preselection_slot_active_for_test(),
+                "deadline: {deadline}"
+            );
+            assert!(
+                matches!(
+                    fixture.runtime.client_preselection,
+                    ClientPreselectionOwner::Cooling(_)
+                ),
+                "deadline: {deadline}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_revocation_cancels_active_client_preselection_and_vacates_slot() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            control_service: _control_service,
+            response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        assert!(fixture.state.read().await.policy_active(unix_millis()));
+        let (reply, applied) = oneshot::channel();
+
+        fixture
+            .runtime
+            .handle_command(
+                DiscoveryCommand::ApplyPolicy {
+                    policy: None,
+                    reply,
+                },
+                &fixture.state,
+            )
+            .await;
+
+        applied.await.expect("policy reply");
+        assert!(matches!(
+            response.await.expect("policy cancellation"),
+            Err(ClientPreselectionError::Invalidated)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+        assert!(!fixture.state.read().await.policy_active(unix_millis()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_active_client_preselection_with_closed_result() {
+        let ActiveClientPreselectionFixture {
+            fixture,
+            control_service: _control_service,
+            response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        let RuntimeFixture {
+            runtime,
+            state,
+            control: _control,
+            policy: _policy,
+            role_store: _role_store,
+            directory: _directory,
+        } = fixture;
+        let (shutdown, shutdown_signal) = watch::channel(false);
+        shutdown.send(true).expect("shutdown receiver");
+
+        Box::pin(timeout(
+            Duration::from_secs(2),
+            runtime.run(state, shutdown_signal),
+        ))
+        .await
+        .expect("runtime shutdown");
+
+        assert!(matches!(
+            response.await.expect("shutdown cancellation"),
+            Err(ClientPreselectionError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_outbound_failure_retains_active_slot_until_owner_timeout() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            mut control_service,
+            mut response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        let failure =
+            next_client_preselection_outbound_failure(&mut fixture.runtime, &mut control_service)
+                .await;
+
+        fixture
+            .runtime
+            .handle_sanitized_event(failure, &fixture.state)
+            .await;
+
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Active(_)
+        ));
+        assert!(
+            fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let ClientPreselectionOwner::Active(active) = &mut fixture.runtime.client_preselection
+        else {
+            panic!("raw failure must retain active owner");
+        };
+        active.request_deadline = Instant::now();
+        fixture.runtime.maintain_client_preselection();
+        assert!(matches!(
+            response.await.expect("owner timeout"),
+            Err(ClientPreselectionError::Timeout)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn foreign_service_cancel_retains_owner_until_originating_service_recovers_it() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            control_service: _control_service,
+            mut response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        let foreign_identity = Identity::generate();
+        let foreign_service = DiscoveryService::new_with_protocol_roles(
+            foreign_identity.keypair().clone(),
+            DiscoveryProtocolRoles::new(true, false, false),
+        )
+        .expect("foreign client service");
+        let originating_service = std::mem::replace(&mut fixture.runtime.service, foreign_service);
+
+        fixture
+            .runtime
+            .cancel_client_preselection(ClientPreselectionError::Invalidated);
+
+        let ClientPreselectionOwner::Active(active) = &fixture.runtime.client_preselection else {
+            panic!("foreign service must retain affine owner");
+        };
+        assert_eq!(
+            active.terminal_error,
+            Some(ClientPreselectionError::Invalidated)
+        );
+        assert!(originating_service.client_preselection_slot_active_for_test());
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let foreign_service = std::mem::replace(&mut fixture.runtime.service, originating_service);
+        drop(foreign_service);
+        fixture.runtime.maintain_client_preselection();
+
+        assert!(matches!(
+            response.await.expect("retained terminal result"),
+            Err(ClientPreselectionError::Invalidated)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
     }
 
     #[tokio::test]
