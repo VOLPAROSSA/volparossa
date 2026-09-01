@@ -542,7 +542,7 @@ struct PlannedProspectivePath {
 /// This continuation deliberately has no `Clone`, `Copy`, `Debug`, serialization, getter or
 /// decomposition API. Dropping it before dispatch is cancellation by abandonment: no external
 /// state exists yet and no rollback or journal mutation is required.
-struct PreProbeContinuation {
+pub(crate) struct PreProbeContinuation {
     batch_id: EvidenceBatchId,
     selected_at_ms: u64,
     attempt_started_at_ms: u64,
@@ -2479,7 +2479,7 @@ impl<L> RouteSetupManager<ReservationSession, L>
 where
     L: LocalRouteBackend,
 {
-    fn spawn_preprobe<R, C>(
+    pub(super) fn spawn_preprobe<R, C>(
         &self,
         continuation: PreProbeContinuation,
         resolver_and_transport: R,
@@ -6675,7 +6675,7 @@ mod tests {
     }
 
     #[test]
-    fn preprobe_continuation_source_has_no_clone_debug_serde_decomposition_or_caller() {
+    fn preprobe_continuation_is_affine_and_exposes_only_the_orchestrator_handoff() {
         let source = include_str!("selection_bridge.rs");
         for type_name in ["PreProbeContinuation", "PendingPreProbeResolve"] {
             let declaration = source
@@ -6688,10 +6688,11 @@ mod tests {
                 .map(|offset| declaration + offset)
                 .expect("affine handoff body");
             assert!(!source[declaration..body_end].contains("\n    pub "));
-            for visibility in ["pub ", "pub(crate) ", "pub(super) "] {
-                assert!(!source.contains(&format!("{visibility}struct {type_name}")));
-            }
             assert!(!source.contains(&format!(" for {type_name}")));
+        }
+        assert!(source.contains("pub(crate) struct PreProbeContinuation"));
+        for visibility in ["pub ", "pub(crate) ", "pub(super) "] {
+            assert!(!source.contains(&format!("{visibility}struct PendingPreProbeResolve")));
         }
         for forbidden in [
             ["fn into_", "parts"].concat(),

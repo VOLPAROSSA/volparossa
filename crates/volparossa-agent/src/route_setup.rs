@@ -13,7 +13,9 @@
 mod retirement;
 mod selection_bridge;
 
-pub(crate) use selection_bridge::{PreparedPreselectionEvidence, prepare_preselection_evidence};
+pub(crate) use selection_bridge::{
+    PreProbeContinuation, PreparedPreselectionEvidence, prepare_preselection_evidence,
+};
 
 use std::{
     cmp::Reverse,
@@ -1834,6 +1836,140 @@ where
 struct RouteSetupManager<P, L> {
     context: RouteSetupExecutionContext<P, L>,
     retirement: RetirementSupervisor<P>,
+}
+
+/// Callable production owner for route setup and bounded helper-context retirement.
+///
+/// Connect supplies one already validated affine `PreProbeContinuation`; this orchestrator owns
+/// the real discovery/reservation/helper lifecycle without interpreting command input.
+pub(crate) struct ProductionRouteOrchestrator {
+    manager: RouteSetupManager<ReservationSession, HelperClient>,
+}
+
+/// One cancellable production route attempt.
+#[must_use = "a production route attempt must be awaited or cancelled"]
+pub(crate) struct ProductionRouteAttempt {
+    handle: RouteSetupHandle<ReservationSession>,
+}
+
+/// Affine owner of one established production route.
+///
+/// Dropping this value delegates Destroy-first retirement to the existing owner RAII. Prefer
+/// `disconnect` to wait for the exact cleanup result.
+#[must_use = "an established route must remain owned until disconnect"]
+pub(crate) struct ProductionRoute {
+    established: EstablishedRoute<ReservationSession>,
+}
+
+/// Compact failure returned to the Connect/runtime seam.
+#[derive(Debug, Error)]
+pub(crate) enum ProductionRouteError {
+    /// Setup failed; `cleanup_pending` means retirement remains quarantined and owned.
+    #[error("production route setup failed")]
+    Setup {
+        /// Whether exact helper cleanup remains pending in the retirement worker.
+        cleanup_pending: bool,
+    },
+    /// Exact Destroy is still quarantined and owned for retry.
+    #[error("production route cleanup remains pending")]
+    CleanupPending,
+    /// The route orchestrator or its retirement worker was unavailable.
+    #[error("production route orchestrator is unavailable")]
+    Unavailable,
+}
+
+impl ProductionRouteError {
+    /// Whether helper-side state remains owned for retry.
+    #[must_use]
+    pub(crate) const fn cleanup_pending(&self) -> bool {
+        matches!(
+            self,
+            Self::Setup {
+                cleanup_pending: true
+            } | Self::CleanupPending
+        )
+    }
+}
+
+impl ProductionRouteOrchestrator {
+    /// Start the long-lived production route and retirement owner.
+    pub(crate) fn start(helper: HelperClient) -> Result<Self, ProductionRouteError> {
+        RouteSetupManager::start(
+            helper,
+            MAXIMUM_RETIREMENT_OWNERS,
+            MAXIMUM_CALL_DURATION,
+            MAXIMUM_CALL_DURATION,
+        )
+        .map(|manager| Self { manager })
+        .map_err(|_| ProductionRouteError::Unavailable)
+    }
+
+    /// Start one real selected route attempt over the existing discovery actor.
+    pub(crate) fn connect(
+        &self,
+        selected: PreProbeContinuation,
+        discovery: DiscoveryControlHandle,
+    ) -> ProductionRouteAttempt {
+        ProductionRouteAttempt {
+            handle: self
+                .manager
+                .spawn_preprobe(selected, discovery, SystemRouteSetupClock),
+        }
+    }
+
+    /// Report whether this orchestrator still owns helper-side network state.
+    #[must_use]
+    pub(crate) fn has_network_state(&self) -> bool {
+        self.manager.has_network_state()
+    }
+
+    /// Stop only after all established or quarantined route owners settle.
+    pub(crate) async fn shutdown(self) -> Result<(), ProductionRouteError> {
+        self.manager
+            .shutdown()
+            .await
+            .map_err(|_| ProductionRouteError::Unavailable)
+    }
+}
+
+impl ProductionRouteAttempt {
+    /// Request cancellation; the owned task still waits for any dispatched helper phase to settle.
+    pub(crate) fn cancel(&self) {
+        self.handle.cancel();
+    }
+
+    /// Wait for an established affine route owner or fully classified cleanup failure.
+    pub(crate) async fn wait(self) -> Result<ProductionRoute, ProductionRouteError> {
+        self.handle
+            .wait()
+            .await
+            .map(|established| ProductionRoute { established })
+            .map_err(|failure| ProductionRouteError::Setup {
+                cleanup_pending: failure.cleanup == CleanupStatus::Quarantined,
+            })
+    }
+}
+
+impl ProductionRoute {
+    /// Borrow the selected active path IDs without exposing helper handles.
+    #[must_use]
+    pub(crate) fn active_path_ids(&self) -> &[u32] {
+        &self.established.active_path_ids
+    }
+
+    /// Borrow the selected warm path IDs without exposing helper handles.
+    #[must_use]
+    pub(crate) fn warm_path_ids(&self) -> &[u32] {
+        &self.established.warm_path_ids
+    }
+
+    /// Run exact Destroy-first teardown and wait for its retirement result.
+    pub(crate) async fn disconnect(self) -> Result<(), ProductionRouteError> {
+        match self.established.teardown().await {
+            RetirementOutcome::Destroyed { .. } => Ok(()),
+            RetirementOutcome::Quarantined => Err(ProductionRouteError::CleanupPending),
+        }
+    }
 }
 
 impl<P, L> RouteSetupManager<P, L>
@@ -7119,7 +7255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_v4_services_and_scope_validators_complete_udp_with_exact_test_probe_evidence() {
+    async fn production_route_owner_completes_and_disconnects_one_real_v4_lifecycle() {
         // The exact-match verifier below is test-only. Production intentionally remains
         // ProbeEvidenceUnavailable until helper-proven, exit-participating probes are wired.
         let fixture = real_service_fixture();
@@ -7168,13 +7304,11 @@ mod tests {
                 "the real verified relay envelope must reach helper activation byte-for-byte"
             );
         }
+        let route = ProductionRoute { established };
+        assert_eq!(route.active_path_ids(), [1]);
+        assert!(route.warm_path_ids().is_empty());
         assert_eq!(retirement_state.outstanding(), 1);
-        assert_eq!(
-            established.teardown().await,
-            RetirementOutcome::Destroyed {
-                released_local_leases: 1,
-            }
-        );
+        route.disconnect().await.expect("production disconnect");
         assert_eq!(retirement_state.outstanding(), 0);
         fixture
             .manager
