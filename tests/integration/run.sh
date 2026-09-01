@@ -55,7 +55,8 @@ RUN_ID=$(tr -d -- - </proc/sys/kernel/random/uuid)
 START=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 REVISION=$(git -C "$REPO" rev-parse HEAD)
 HOST_NET=$(readlink /proc/self/ns/net); HOST_MNT=$(readlink /proc/self/ns/mnt)
-TARGET=$REPO/target/acceptance-build
+TARGET=${CARGO_TARGET_DIR:-$REPO/target/acceptance-build}
+case $TARGET in /*) ;; *) TARGET=$REPO/$TARGET;; esac
 snapshot() {
  out=$1
  {
