@@ -3467,6 +3467,77 @@ capture_process_starttime() {
     process_starttime_from_stat "$retired_starttime_line" "$retired_starttime_pid"
 }
 
+tracing_stop_process_starttime_from_stat() {
+    [ "$#" -eq 2 ] || return 1
+    traced_starttime_line=$1
+    traced_starttime_pid=$2
+    case $traced_starttime_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#traced_starttime_pid}" -le 10 ] \
+        && [ "$traced_starttime_pid" -le 4194304 ] || return 1
+    [ "${#traced_starttime_line}" -le 4096 ] || return 1
+    printf '%s\n' "$traced_starttime_line" | /usr/bin/awk \
+        -v expected_pid="$traced_starttime_pid" '
+        NR != 1 { invalid = 1; next }
+        {
+            prefix = expected_pid " ("
+            if (index($0, prefix) != 1) {
+                invalid = 1
+                next
+            }
+            close_offset = 0
+            for (offset = length($0) - 1; offset >= length(prefix); offset--) {
+                if (substr($0, offset, 2) == ") ") {
+                    close_offset = offset
+                    break
+                }
+            }
+            if (close_offset == 0) {
+                invalid = 1
+                next
+            }
+            remainder = substr($0, close_offset + 2)
+            if (remainder == "" || substr(remainder, 1, 1) == " " \
+                || substr(remainder, length(remainder), 1) == " " \
+                || index(remainder, "  ") != 0 \
+                || remainder ~ /[\t\r\n]/) {
+                invalid = 1
+                next
+            }
+            fields = split(remainder, value, " ")
+            starttime = value[20]
+            if (fields < 20 || value[1] != "t" \
+                || starttime !~ /^[1-9][0-9]*$/ \
+                || length(starttime) > 20) {
+                invalid = 1
+                next
+            }
+            accepted++
+        }
+        END {
+            if (invalid || NR != 1 || accepted != 1) exit 1
+            print starttime
+        }
+    '
+}
+
+capture_tracing_stop_process_starttime() {
+    [ "$#" -eq 1 ] || return 1
+    traced_starttime_pid=$1
+    case $traced_starttime_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#traced_starttime_pid}" -le 10 ] \
+        && [ "$traced_starttime_pid" -le 4194304 ] || return 1
+    traced_starttime_path=/proc/$traced_starttime_pid/stat
+    [ -f "$traced_starttime_path" ] \
+        && [ ! -L "$traced_starttime_path" ] || return 1
+    traced_starttime_line=$(cat "$traced_starttime_path") || return 1
+    tracing_stop_process_starttime_from_stat \
+        "$traced_starttime_line" "$traced_starttime_pid"
+}
+
 retired_runtime_is_absent() {
     [ "$#" -eq 4 ] || return 1
     retired_unit_name=$1
@@ -4089,7 +4160,8 @@ may_own_active_custody_worker_is_exact() {
     [ "$(may_own_direct_helper_child "$may_own_active_main_pid")" = \
         "$may_own_active_worker_pid" ] || return 1
     may_own_preexec_barrier_failure_stage=shape-worker-starttime
-    [ "$(capture_process_starttime "$may_own_active_worker_pid")" = \
+    [ "$(capture_tracing_stop_process_starttime \
+        "$may_own_active_worker_pid")" = \
         "$may_own_active_worker_starttime" ] || return 1
     may_own_preexec_barrier_failure_stage=shape-worker-parent
     may_own_worker_status_is_exact \
@@ -4106,7 +4178,8 @@ may_own_active_custody_worker_is_exact() {
     may_own_preexec_barrier_failure_stage=shape-worker-stability
     [ "$(may_own_direct_helper_child "$may_own_active_main_pid")" = \
         "$may_own_active_worker_pid" ] \
-        && [ "$(capture_process_starttime "$may_own_active_worker_pid")" = \
+        && [ "$(capture_tracing_stop_process_starttime \
+            "$may_own_active_worker_pid")" = \
             "$may_own_active_worker_starttime" ] \
         && may_own_worker_status_is_exact \
             "$may_own_active_worker_pid" "$may_own_active_main_pid" \
@@ -7786,7 +7859,7 @@ if [ "$proof_ok" = yes ]; then
         [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
             "$may_own_invocation_one" ] \
             || failed 'MayOwn first invocation changed before active custody'
-        [ "$(capture_process_starttime "$may_own_pid_one" \
+        [ "$(capture_tracing_stop_process_starttime "$may_own_pid_one" \
             2>/dev/null || true)" = "$may_own_pid_one_starttime" ] \
             || failed 'MayOwn first MainPID changed before active custody'
         may_own_wait=$((may_own_wait + 1))

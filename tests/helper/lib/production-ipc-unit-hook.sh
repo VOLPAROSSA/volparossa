@@ -1929,6 +1929,19 @@ capture_process_starttime_from_fd() {
     process_starttime_from_stat "$hook_worker_stat_line" "$hook_worker_pid"
 }
 
+capture_traced_process_starttime_from_fd() {
+    [ "$#" -eq 2 ] || return 1
+    hook_worker_process_fd=$1
+    hook_worker_pid=$2
+    fd_number_is_safe "$hook_worker_process_fd" || return 1
+    number_is_safe "$hook_worker_pid" || return 1
+    hook_worker_stat=/proc/self/fd/$hook_worker_process_fd/stat
+    [ -f "$hook_worker_stat" ] && [ ! -L "$hook_worker_stat" ] || return 1
+    hook_worker_stat_line=$(cat "$hook_worker_stat") || return 1
+    process_starttime_from_stat \
+        "$hook_worker_stat_line" "$hook_worker_pid" traced
+}
+
 traced_worker_identity_from_process_fd() {
     # At the MayOwn crash boundary GDB owns the inferior and has not yet
     # consumed the outer driver's release marker. The worker must therefore be
@@ -1941,13 +1954,13 @@ traced_worker_identity_from_process_fd() {
     hook_worker_uid=$4
     hook_worker_gid=$5
     hook_worker_parent_filters=$6
-    hook_worker_starttime=$(capture_process_starttime_from_fd \
+    hook_worker_starttime=$(capture_traced_process_starttime_from_fd \
         "$hook_worker_process_fd" "$hook_worker_pid") || return 1
     worker_status_from_process_fd_is_exact \
         "$hook_worker_process_fd" "$hook_worker_pid" "$hook_parent_pid" \
         "$hook_worker_uid" "$hook_worker_gid" \
         "$hook_worker_parent_filters" tracing-stop || return 1
-    [ "$(capture_process_starttime_from_fd \
+    [ "$(capture_traced_process_starttime_from_fd \
         "$hook_worker_process_fd" "$hook_worker_pid")" = \
         "$hook_worker_starttime" ] || return 1
     worker_status_from_process_fd_is_exact \

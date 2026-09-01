@@ -7441,6 +7441,7 @@ for required_hook_contract in \
     'process_contract_filter_count() {' \
     'fd_number_is_safe() {' \
     'worker_status_from_process_fd_is_exact() {' \
+    'capture_traced_process_starttime_from_fd() {' \
     'traced_worker_identity_from_process_fd() {' \
     'worker_identity_from_process_fd() {' \
     'capture_process_starttime_from_fd() {' \

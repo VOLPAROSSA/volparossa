@@ -191,7 +191,60 @@ done
 # The active worker is held at GDB's publication breakpoint while both the
 # hook-side and outer predicates run. Linux reports that ptrace boundary as
 # lowercase `t`; runnable, sleeping, uninterruptible, job-control-stopped, or
-# uppercase tracing variants are not phase-equivalent.
+# uppercase tracing variants are not phase-equivalent. Its birth token is
+# parsed with a separate tracing-stop parser, never by widening the generic
+# R/S/D process parser.
+active_starttime_contract=$tmp/active-starttime-function
+sed -n '/^tracing_stop_process_starttime_from_stat() {$/,/^}$/p' \
+    "$gate" >"$active_starttime_contract"
+active_starttime_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'value[1] != "t"' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '/^(R|S|D)$/' "$1")" -eq 0 ] \
+        && [ "$(grep -Fc 'starttime = value[20]' "$1")" -eq 1 ]
+}
+active_starttime_source_is_exact "$active_starttime_contract" || exit 1
+sh -n "$active_starttime_contract"
+# shellcheck disable=SC1090
+. "$active_starttime_contract"
+write_active_stat_fixture() {
+    [ "$#" -eq 2 ] || return 1
+    active_stat_fixture=$1
+    active_stat_state=$2
+    {
+        printf '202 (contract fixture) %s' "$active_stat_state"
+        active_stat_field=2
+        while [ "$active_stat_field" -le 19 ]; do
+            printf ' 0'
+            active_stat_field=$((active_stat_field + 1))
+        done
+        printf ' 777\n'
+    } >"$active_stat_fixture"
+}
+active_starttime_exact=$tmp/active-starttime.t
+write_active_stat_fixture "$active_starttime_exact" t
+[ "$(tracing_stop_process_starttime_from_stat \
+    "$(cat "$active_starttime_exact")" 202)" = 777 ]
+for active_starttime_state in R S D T; do
+    active_starttime_mutant=$tmp/active-starttime.$active_starttime_state
+    write_active_stat_fixture \
+        "$active_starttime_mutant" "$active_starttime_state"
+    if tracing_stop_process_starttime_from_stat \
+        "$(cat "$active_starttime_mutant")" 202 >/dev/null 2>&1; then
+        printf 'active custody accepted non-tracing starttime state: %s\n' \
+            "$active_starttime_state" >&2
+        exit 1
+    fi
+done
+active_starttime_state_mutant=$tmp/active-starttime-state-mutant
+sed 's/value\[1\] != "t"/value[1] != "R"/' \
+    "$active_starttime_contract" >"$active_starttime_state_mutant"
+sh -n "$active_starttime_state_mutant"
+if active_starttime_source_is_exact "$active_starttime_state_mutant"; then
+    printf '%s\n' 'active starttime source accepted state mutant' >&2
+    exit 1
+fi
+
 active_status_contract=$tmp/active-status-function
 sed -n '/^may_own_worker_status_record_is_exact() {$/,/^}$/p' \
     "$gate" >"$active_status_contract"
@@ -245,7 +298,7 @@ sed -n '/^may_own_active_custody_worker_is_exact() {$/,/^}$/p' \
 for active_worker_predicate in \
     'may_own_active_custody_boundary_is_exact' \
     'may_own_direct_helper_child "$may_own_active_main_pid"' \
-    'capture_process_starttime "$may_own_active_worker_pid"' \
+    'capture_tracing_stop_process_starttime' \
     'may_own_worker_status_is_exact' \
     'may_own_worker_cgroup_is_exact' \
     'may_own_active_cgroup_members_are_exact'
@@ -254,7 +307,7 @@ do
 done
 [ "$(grep -Fc 'may_own_direct_helper_child "$may_own_active_main_pid"' \
     "$active_worker_contract")" -eq 2 ]
-[ "$(grep -Fc 'capture_process_starttime "$may_own_active_worker_pid"' \
+[ "$(grep -Fc 'capture_tracing_stop_process_starttime' \
     "$active_worker_contract")" -eq 2 ]
 [ "$(grep -Fc 'may_own_active_cgroup_members_are_exact' \
     "$active_worker_contract")" -eq 2 ]

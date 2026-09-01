@@ -295,7 +295,8 @@ sed -n '/^traced_worker_identity_from_process_fd() {$/,/^}$/p' \
     "$hook" >"$may_own_traced_identity_contract"
 may_own_traced_identity_contract_is_exact() {
     [ "$#" -eq 1 ] || return 1
-    [ "$(grep -Fc 'capture_process_starttime_from_fd' "$1")" -eq 2 ] \
+    [ "$(grep -Fc 'capture_traced_process_starttime_from_fd' "$1")" -eq 2 ] \
+        && [ "$(grep -Fc 'capture_process_starttime_from_fd' "$1")" -eq 0 ] \
         && [ "$(grep -Fc 'worker_status_from_process_fd_is_exact' "$1")" -eq 2 ] \
         && [ "$(grep -Fc '"$hook_worker_parent_filters" tracing-stop' "$1")" -eq 2 ]
 }
@@ -313,6 +314,16 @@ if may_own_traced_identity_contract_is_exact \
     printf '%s\n' 'MayOwn traced identity accepted running-state mutant' >&2
     exit 1
 fi
+
+may_own_traced_starttime_contract=$tmp/may-own-traced-starttime-contract.sh
+sed -n '/^capture_traced_process_starttime_from_fd() {$/,/^}$/p' \
+    "$hook" >"$may_own_traced_starttime_contract"
+[ "$(grep -Fc 'process_starttime_from_stat \' \
+    "$may_own_traced_starttime_contract")" -eq 1 ]
+[ "$(grep -Fc '"$hook_worker_stat_line" "$hook_worker_pid" traced' \
+    "$may_own_traced_starttime_contract")" -eq 1 ]
+[ "$(grep -Fc 'capture_process_starttime_from_fd' \
+    "$may_own_traced_starttime_contract")" -eq 0 ]
 
 may_own_worker_status_contract=$tmp/may-own-worker-status-contract.sh
 sed -n '/^worker_status_from_process_fd_is_exact() {$/,/^}$/p' \
@@ -1473,7 +1484,8 @@ may_own_first_active_wait_is_exact() {
         "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc 'unit_current_invocation_id' \
         "$may_own_first_active_source")" -eq 1 ] || return 1
-    [ "$(grep -Fc 'capture_process_starttime "$may_own_pid_one"' \
+    [ "$(grep -Fc \
+        'capture_tracing_stop_process_starttime "$may_own_pid_one"' \
         "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc '"$may_own_wait" -ge 600' \
         "$may_own_first_active_source")" -eq 1 ] || return 1
@@ -1532,6 +1544,9 @@ sed 's/0 2 active-custody/0 2 main-only/' \
 may_own_first_active_worker_mutant=$tmp/may-own-first-active-worker-mutant.sh
 sed "s/sed -n '8p'/sed -n '10p'/" \
     "$may_own_first_active_wait" >"$may_own_first_active_worker_mutant"
+may_own_first_active_main_state_mutant=$tmp/may-own-first-active-main-state-mutant.sh
+sed 's/capture_tracing_stop_process_starttime/capture_process_starttime/' \
+    "$may_own_first_active_wait" >"$may_own_first_active_main_state_mutant"
 may_own_first_active_observer_identity_mutant=$tmp/may-own-first-active-observer-identity-mutant.sh
 sed 's/"$may_own_driver_observer_starttime"/"$may_own_debugger_starttime"/' \
     "$may_own_first_active_wait" >"$may_own_first_active_observer_identity_mutant"
@@ -1542,6 +1557,7 @@ for may_own_first_active_mutant in \
     "$may_own_first_active_stage_mutant" \
     "$may_own_first_active_mode_mutant" \
     "$may_own_first_active_worker_mutant" \
+    "$may_own_first_active_main_state_mutant" \
     "$may_own_first_active_observer_identity_mutant" \
     "$may_own_first_active_debugger_identity_mutant"
 do
