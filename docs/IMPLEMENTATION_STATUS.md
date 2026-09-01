@@ -1074,10 +1074,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   normalized prefix for the Relay-signed upstream wrapper; only signed validity for a direct
   transcript; or the earlier joint signed validity and control-signed normalized prefix for a
   forwarded transcript. No projection contains a request, identity, signature, nonce, full
-  endpoint, connection, dispatch capability or other reusable authority. No production outbound
-  client attempt actor/owner or exact-set `FreshEvidenceBatch` join consumes these values,
-  and they make no Fresh-evidence or route-readiness claim. The
-  swarm pump rejects a still-current client-hop request unless it targets the local relay/control
+  endpoint, connection, dispatch capability or other reusable authority. The dormant exact-set
+  `FreshEvidenceBatch` join can consume these values, but no production outbound client attempt
+  actor/owner invokes it and its false native-address-usability result grants no route readiness.
+  The swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to
   `forwarded_control` and the actor to the local exit. These request predicates and raw response

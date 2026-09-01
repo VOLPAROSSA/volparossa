@@ -201,10 +201,10 @@ uses the same actor-owned permanent identity, and a policy command cancels the p
 the replacement. A response still requires an exact currently served role advertisement;
 production deliberately publishes no usable Relay/Exit capability before dataplane readiness is
 proved, so no successful production response or readiness claim follows from this lifecycle
-connection yet. The control-signed prefix wrapper is now implemented, while the outbound attempt
-owner and the A0 response-verification/A1a exact-set join owner remain absent. Dormant A1a
-remains only a static consumer of verifier/consume functions. The opaque transcripts, transport
-proof and wire wrappers are not yet local freshness, capacity, or route authority.
+connection yet. The control-signed prefix wrapper, dormant A1a owner and dormant exact A1a/A1c
+join are implemented, while the production outbound attempt owner remains absent. No runtime
+caller drives that chain. Its private Fresh batch deliberately lacks native dataplane-address
+usability and therefore grants no capacity or route authority.
 
 The agent now contains a dormant A1a ownership prerequisite. Snapshot construction privately mints
 an endpoint-free, non-derived subject set from the exact freshly revalidated stored signed
@@ -257,23 +257,24 @@ verified transcript against the exact canonical request bytes. Its final
 sanitized subject/request bindings, process-local dispatch ID/request hash, opaque transcript
 tokens and attempt ceilings. It deliberately records no authenticated connection, local send or
 arrival event, socket origin, RTT, reachability, usable address, or Fresh-evidence validity. It
-has no production client root, transport-join owner, or conversion into phase-A evidence,
-and creates no `RouteSessionAuthority` or `ReservationSession`. The production request-response
-responders and forwarding wrapper do not consume this A1a value. The completed
+has no production client root or runtime transport-join owner and creates no
+`RouteSessionAuthority` or `ReservationSession`. The dormant exact-set join can consume it into
+private phase-A evidence, but the production request-response responders and forwarding wrapper do
+not consume this A1a value. The completed
 affine A1a owner retains the original, non-cloned `RouteCandidateSnapshot` beside—not inside—the
 endpoint-free transcript batch. This preserves the exact candidate-union allocation for a later
 owner without exposing a getter or reconstructing candidate state. That sibling is the existing
 actor-private selection snapshot and can contain advertised control endpoints; those never enter
 the transcript batch or the opaque transport proof.
 
-A later A1c transport-provenance owner must exact-set join that batch to the authenticated Peer ID,
+The dormant A1c transport-provenance join exact-set joins that batch to the authenticated Peer ID,
 libp2p `ConnectionId`, local request ID and request hash, and local monotonic send/arrival events.
 For a direct relay, both RTT and the normalized public IPv4 /24 or IPv6 /48 must come from that same
 authenticated remote socket. For a forwarded exit, the control-attested upstream /24 or /48 stays
 native; it must never be widened into a fabricated full representative IP. An
 `observed_endpoints[PeerId]` mutable cache, advertised endpoint, stored Ping/history, the control's
-own origin, or a direct client-to-exit connection are forbidden substitutes. Only A1c may impose
-the local-arrival freshness ceiling and aggregate it with the unchanged absolute attempt deadline,
+own origin, or a direct client-to-exit connection are forbidden substitutes. Only that join imposes
+the local-arrival freshness ceiling and aggregates it with the unchanged absolute attempt deadline,
 every applicable signed receipt/attestation window, actor advertisement/capability expiries, and
 policy expiry before minting a verified observation.
 
@@ -292,8 +293,8 @@ affine witness can be minted only for exactly one total connection to that peer 
 native family, and binding consumes it while rechecking peer, connection, generation and prefix.
 There is deliberately no generic `DiscoveryService` registry, address, prefix, witness, or bound-
 observation accessor. The only consumers are the purpose-specific client and upstream transaction
-seams described below; there is still no A1a join or Fresh-evidence mint, so the rest of A1c
-remains required.
+seams plus the dormant exact A1a/A1c join described below. No production owner invokes them, and
+native dataplane usability remains unproved.
 
 A second A1c wire component consists of two strictly separate libp2p request-response
 behaviours and event variants. The client-facing protocol is outbound for Client and inbound for
@@ -333,15 +334,16 @@ binding rechecks the exact service instance, private request ID, authenticated p
 `ConnectionId`, deadline, uniqueness, generation and native prefix. The bound authority tokens
 themselves expose no address, peer, connection, ID/hash/time getter, equality oracle, clone or
 decomposition. Purpose-specific terminal consumers destroy those tokens and expose only the facts
-needed by a future private freshness owner: the client transport yields an endpoint-free normalized
-public IPv4 `/24` or IPv6 `/48`, its sealed local wall-observation time and monotonic round trip; the
+needed by the dormant private freshness join: the client transport yields an endpoint-free
+normalized public IPv4 `/24` or IPv6 `/48`, its sealed local wall-observation time and monotonic
+round trip; the
 upstream connection may yield only the normalized prefix for the Relay-signed wrapper; and verified
 direct or forwarded transcripts yield only their signed validity ceiling, or the earlier joint
 signed ceiling plus the control-signed normalized prefix. None exposes a request, identity,
 signature, nonce, full endpoint, connection, dispatch capability or other reusable authority. No
-production outbound client attempt actor/owner yet exact-set joins these projections and
-the retained A1a set into a `FreshEvidenceBatch`, so they establish neither Fresh evidence nor route
-readiness. The swarm pump drops a
+production outbound client attempt actor/owner invokes this exact-set join. Its private
+`FreshEvidenceBatch` deliberately leaves native dataplane-address usability false, so the existing
+hard filter rejects it before route planning. The swarm pump drops a
 still-current client-hop request unless it targets the local relay/control and its authenticated
 remote sender differs from both that local peer and the challenged actor. A0 deliberately contains
 no client identity, so this is not a claim that the sender is request-bound. Upstream, the pump
@@ -491,11 +493,11 @@ requires no helper, network-state or journal cleanup because reservation dispatc
 
 The older scalar complete-path second stage remains only as a clearly dormant test boundary; the
 new plan neither calls nor trusts it. C2c supplies the private ownership and actor-resolution link
-to the existing phase-B transaction, but there is still no production fresh-evidence producer,
-real probe verifier/handler, production orchestration or production caller. Consequently the real
-resolver/transport path is not invoked by phase A in production. C2c adds no new wire, provider or
-helper implementation, so it causes no production network/host mutation, and the reported usable
-route-candidate count deliberately remains zero.
+to the existing phase-B transaction, but there is still no production owner feeding the dormant
+Fresh-evidence producer, real probe verifier/handler or production orchestration. Consequently the
+real resolver/transport path is not invoked by phase A in production. C2c adds no new wire,
+provider or helper implementation, so it causes no production network/host mutation, and the
+reported usable route-candidate count deliberately remains zero.
 
 These are wire and control-service foundations only. They do not prove the production agent route
 state machine, a real two-leg probe producer, helper-backed endpoints, client ingress, Internet
