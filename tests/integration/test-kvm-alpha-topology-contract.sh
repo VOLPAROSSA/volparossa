@@ -42,13 +42,17 @@ grep -F -- '-p volparossa-test-support --example tls-policy-acceptance-fixture' 
     >/dev/null
 
 [ "$(grep -Fc 'launch_helper client "$CLIENT"' "$GUEST")" -eq 1 ]
+[ "$(grep -Fc 'launch_helper bootstrap1 "$B1"' "$GUEST")" -eq 1 ]
+[ "$(grep -Fc 'launch_helper bootstrap2 "$B2"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay0 "$R0"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay1 "$R1"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay2 "$R2"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper exit "$EXIT_NODE"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_agent relay0 "$R0"' "$GUEST")" -eq 1 ]
+grep -F 'launch_agent bootstrap1 "$B1"' "$GUEST" >/dev/null
+grep -F 'launch_agent bootstrap2 "$B2"' "$GUEST" >/dev/null
 grep -F 'verify_helper relay0 "$R0"' "$GUEST" >/dev/null
-grep -F 'for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$CLIENT"' \
+grep -F 'for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$B2" "$B1"' \
     "$GUEST" >/dev/null
 grep -F 'helper_unit=volparossa-alpha-helper@$node.service' "$GUEST" >/dev/null
 grep -F 'agent_unit=volparossa-alpha-agent@$node.service' "$GUEST" >/dev/null
@@ -68,23 +72,30 @@ grep -F 'native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records}' 
 grep -F 'DIRECT_CLIENT_EXIT_REACHABLE' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" link add underlay type dummy' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" route add default dev underlay scope global' "$GUEST" >/dev/null
-[ "$(grep -Fc 'add_public_underlay ' "$GUEST")" -eq 5 ]
+[ "$(grep -Fc 'add_public_underlay ' "$GUEST")" -eq 7 ]
 grep -F 'ip -n "$CLIENT" route add unreachable "$forbidden/32"' "$GUEST" >/dev/null
 grep -F '10.241.20.2 10.241.21.2 10.241.22.2 10.241.31.1' "$GUEST" >/dev/null
 grep -F 'link_nodes "$CLIENT" cr0 10.241.10.1/30 "$R0" r0c 10.241.10.2/30' \
     "$GUEST" >/dev/null
 grep -F 'link_nodes "$R0" r0x 10.241.20.1/30 "$EXIT_NODE" xr0 10.241.20.2/30' \
     "$GUEST" >/dev/null
-grep -F 'write_config relay0 acceptance-relay-zero true false 42.158.0.1 none none none' \
+grep -F 'write_config bootstrap1 null false false 40.156.1.1 none none none' \
+    "$GUEST" >/dev/null
+grep -F 'write_config bootstrap2 null false false 41.157.2.1 none none none' \
+    "$GUEST" >/dev/null
+grep -F 'write_config relay0 acceptance-relay-zero true false 42.158.0.1' \
     "$GUEST" >/dev/null
 grep -F 'relay0) advertised_asn=64511; advertised_prefix=42.158.0.0/24' \
     "$GUEST" >/dev/null
 grep -F '/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER' "$GUEST" >/dev/null
+grep -F '/ip4/40.156.1.1/udp/41000/quic-v1/p2p/$B1_PEER' "$GUEST" >/dev/null
+grep -F '/ip4/41.157.2.1/udp/41000/quic-v1/p2p/$B2_PEER' "$GUEST" >/dev/null
 grep -F 'write_config exit acceptance-exit false true 46.162.3.1' "$GUEST" >/dev/null
 grep -F 'exit_control_relay:"relay0",data_relays:["relay1","relay2"]' \
     "$GUEST" >/dev/null
-grep -F 'relay0) required_active_peers=2' "$GUEST" >/dev/null
-grep -F 'relay1|relay2|exit) required_active_peers=1' "$GUEST" >/dev/null
+grep -F 'bootstrap1|bootstrap2) required_active_peers=4' "$GUEST" >/dev/null
+grep -F 'relay0) required_active_peers=3' "$GUEST" >/dev/null
+grep -F 'relay1|relay2) required_active_peers=2' "$GUEST" >/dev/null
 if grep -E 'ip -n "\$CLIENT" route add (unicast )?46\.162\.3\.1' "$GUEST"; then exit 1; fi
 if grep -F 'link_nodes "$CLIENT"' "$GUEST" | grep -F '"$EXIT_NODE"'; then
     exit 1
@@ -174,7 +185,19 @@ grep -F 'a09_forbidden_destinations:{requested:$a09_requested,succeeded:$a09_suc
     "$GUEST" >/dev/null
 grep -F 'a10_unverifiable_ech:{requested:$a10_requested,succeeded:$a10_succeeded' \
     "$GUEST" >/dev/null
-grep -F 'Require successful A02-A15 evidence' "$WORKFLOW" >/dev/null
+grep -F 'block_bootstrap_contact "$B1"' "$GUEST" >/dev/null
+grep -F 'block_bootstrap_contact "$B2"' "$GUEST" >/dev/null
+grep -F 'restart_advertiser relay2' "$GUEST" >/dev/null
+grep -F 'restart_advertiser relay1' "$GUEST" >/dev/null
+grep -F 'wait_fresh_advertisement "$R2_PEER"' "$GUEST" >/dev/null
+grep -F 'wait_fresh_advertisement "$R1_PEER"' "$GUEST" >/dev/null
+grep -F 'a01_select_route bootstrap1' "$GUEST" >/dev/null
+grep -F 'a01_select_route bootstrap2' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A01",success:$success' "$GUEST" >/dev/null
+grep -F 'a01_bootstrap_resilience:{requested:$a01_requested' "$GUEST" >/dev/null
+grep -F 'Require successful A01-A15 evidence' "$WORKFLOW" >/dev/null
+grep -F '.a01_bootstrap_resilience.evidence.bootstrap1_removed.fresh_advertisement.sequence_after' \
+    "$WORKFLOW" >/dev/null
 grep -F '.a06_http3_mpquic.evidence.native_mpquic.required_path_count == 2' "$WORKFLOW" \
     >/dev/null
 grep -F '.a07_http3_relay_failover.evidence.application_flow_completed == true' "$WORKFLOW" \

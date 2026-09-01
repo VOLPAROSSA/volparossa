@@ -19,7 +19,7 @@ defaults:
 
 jobs:
   alpha-topology:
-    name: Debian 13 KVM five-node smoke
+    name: Debian 13 KVM eight-node smoke
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
@@ -143,6 +143,7 @@ jobs:
               "helpers ready: \(.production_helpers.ready)",
               "native MPQUIC ready: \(.native_mpquic.ready)",
               "agents ready: \(.agents_ready)",
+              "A01 bootstrap resilience succeeded: \(.a01_bootstrap_resilience.succeeded)",
               "A02 transparent TCP succeeded: \(.a02_transparent_tcp.succeeded)",
               "A03 MPTCP aggregation succeeded: \(.a03_mptcp_aggregation.succeeded)",
               "A04 MPTCP relay failover succeeded: \(.a04_mptcp_relay_failover.succeeded)",
@@ -175,13 +176,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Require successful A02-A15 evidence
+      - name: Require successful A01-A15 evidence
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
           jq -e '
+            .a01_bootstrap_resilience.succeeded == true and
+            .a01_bootstrap_resilience.evidence.success == true and
+            .a01_bootstrap_resilience.evidence.topology.independently_removed == true and
+            .a01_bootstrap_resilience.evidence.bootstrap1_removed.fresh_advertisement.sequence_after >
+              .a01_bootstrap_resilience.evidence.bootstrap1_removed.fresh_advertisement.sequence_before and
+            .a01_bootstrap_resilience.evidence.bootstrap2_removed.fresh_advertisement.sequence_after >
+              .a01_bootstrap_resilience.evidence.bootstrap2_removed.fresh_advertisement.sequence_before and
+            .a01_bootstrap_resilience.evidence.bootstrap1_removed.remaining_contact_link_bytes_delta > 0 and
+            .a01_bootstrap_resilience.evidence.bootstrap2_removed.remaining_contact_link_bytes_delta > 0 and
+            (.a01_bootstrap_resilience.evidence.bootstrap1_removed.selection.paths | length) == 2 and
+            (.a01_bootstrap_resilience.evidence.bootstrap2_removed.selection.paths | length) == 2 and
             .a02_transparent_tcp.succeeded == true and
             .a02_transparent_tcp.evidence.success == true and
             .a02_transparent_tcp.evidence.no_direct_client_exit.observed_packets == 0 and

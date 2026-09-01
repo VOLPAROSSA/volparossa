@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Run the six-node development-alpha topology with one real production helper per agent.
+# Run the eight-node development-alpha topology with one real production helper per agent.
 # This script is intentionally restricted to a disposable Debian 13 KVM guest.
 # shellcheck disable=SC2317
 set -eu
@@ -30,14 +30,15 @@ print_plan() {
     printf '%s\n' \
         'VOLPAROSSA production-helper alpha topology plan:' \
         '  require one disposable Debian 13 amd64 KVM guest with systemd v257 as PID 1;' \
-        '  create Client, control Relay 0, data Relays 1/2, Exit and destination namespaces;' \
+        '  create Client, two replaceable bootstrap contacts, control Relay 0, data Relays 1/2, Exit and destination namespaces;' \
         '  give each product node one disposable public underlay and fail-closed default;' \
-        '  create only Client-Relay, Relay-Exit and Exit-destination underlay links;' \
-        '  launch five distinct transient production-helper service instances;' \
+        '  create only bootstrap-contact, Client-Relay, Relay-Exit and Exit-destination underlay links;' \
+        '  launch seven distinct transient production-helper service instances;' \
         '  launch real pinned mqvpn/xquic processes for the Client and Exit;' \
         '  bind each helper and agent privately to its node-owned /run/volparossa;' \
         '  prove GetUnitByPID, MainPID, cgroup, network namespace and FD-store binding;' \
-        '  launch five real agents and exact-policy TCP/UDP echo applications;' \
+        '  launch seven real agents and exact-policy TCP/UDP echo applications;' \
+        '  remove each bootstrap contact independently and prove fresh advertisements plus route selection;' \
         '  prove transparent TCP over Relay-only MPTCP/TLS and signed OPEN_TCP;' \
         '  constrain each Relay path and prove aggregate MPTCP download throughput;' \
         '  remove one data-carrying Relay during a second uninterrupted download;' \
@@ -182,6 +183,8 @@ case $RUN_ID in ''|*[!0-9a-f]*) exit 69 ;; esac
 [ "${#RUN_ID}" -eq 32 ] || exit 69
 PREFIX=va-$(printf '%.8s' "$RUN_ID")
 CLIENT=$PREFIX-c
+B1=$PREFIX-b1
+B2=$PREFIX-b2
 R0=$PREFIX-r0
 R1=$PREFIX-r1
 R2=$PREFIX-r2
@@ -205,6 +208,9 @@ DESTINATION_READY=false
 CONNECT_REQUESTED=false
 CONNECT_SUCCEEDED=false
 CONNECT_STATUS=-1
+A01_REQUESTED=false
+A01_SUCCEEDED=false
+A01_STATUS=-1
 A02_REQUESTED=false
 A02_SUCCEEDED=false
 A02_STATUS=-1
@@ -332,7 +338,24 @@ copy_artifacts() {
         roles-client.txt roles-relay0.txt roles-relay1.txt roles-relay2.txt roles-exit.txt \
         helper-client.log helper-relay0.log helper-relay1.log helper-relay2.log helper-exit.log \
         mpquic-client.log mpquic-exit.log mpquic-units.json \
-        agent-client.log agent-relay0.log agent-relay1.log agent-relay2.log agent-exit.log \
+        agent-client.log agent-bootstrap1.log agent-bootstrap2.log \
+        agent-relay0.log agent-relay1.log agent-relay2.log agent-exit.log \
+        helper-bootstrap1.log helper-bootstrap2.log \
+        status-bootstrap1.txt status-bootstrap2.txt \
+        roles-bootstrap1.txt roles-bootstrap2.txt \
+        a01-bootstrap1-blocked.json a01-bootstrap2-blocked.json \
+        a01-bootstrap1-remaining-link-before.json \
+        a01-bootstrap1-remaining-link-after.json \
+        a01-bootstrap2-remaining-link-before.json \
+        a01-bootstrap2-remaining-link-after.json \
+        a01-initial-peers.txt \
+        a01-bootstrap1-connect.out a01-bootstrap1-connect.err \
+        a01-bootstrap1-paths.txt a01-bootstrap1-selection.json \
+        a01-bootstrap1-disconnect.out a01-bootstrap1-disconnect.err \
+        a01-bootstrap2-connect.out a01-bootstrap2-connect.err \
+        a01-bootstrap2-paths.txt a01-bootstrap2-selection.json \
+        a01-bootstrap2-disconnect.out a01-bootstrap2-disconnect.err \
+        a01-evidence.json \
         destination.log destination-tcp-evidence.json destination-udp-evidence.json \
         helper-units.json a02-client.json a02-client.err a02-client-fallback-route.txt \
         a02-client-capture.json a02-client-capture.log a02-client-capture.err \
@@ -418,6 +441,10 @@ write_report() {
     if [ -f "$WORK/helper-units.json" ]; then
         helper_records=$(cat "$WORK/helper-units.json" 2>/dev/null || printf '[]')
     fi
+    a01_evidence=null
+    if [ -f "$WORK/a01-evidence.json" ]; then
+        a01_evidence=$(cat "$WORK/a01-evidence.json" 2>/dev/null || printf 'null')
+    fi
     a02_evidence=null
     if [ -f "$WORK/a02-evidence.json" ]; then
         a02_evidence=$(cat "$WORK/a02-evidence.json" 2>/dev/null || printf 'null')
@@ -492,6 +519,9 @@ write_report() {
         --argjson requested "$CONNECT_REQUESTED" \
         --argjson connected "$CONNECT_SUCCEEDED" \
         --argjson connect_status "$CONNECT_STATUS" \
+        --argjson a01_requested "$A01_REQUESTED" \
+        --argjson a01_succeeded "$A01_SUCCEEDED" \
+        --argjson a01_status "$A01_STATUS" \
         --argjson a02_requested "$A02_REQUESTED" \
         --argjson a02_succeeded "$A02_SUCCEEDED" \
         --argjson a02_status "$A02_STATUS" \
@@ -540,6 +570,7 @@ write_report() {
         --argjson remaining_owned_objects "$REMAINING_OWNED_OBJECTS" \
         --argjson exit_status "$report_status" \
         --argjson helper_records "$helper_records" \
+        --argjson a01_evidence "$a01_evidence" \
         --argjson a02_evidence "$a02_evidence" \
         --argjson mpquic_records "$mpquic_records" \
         --argjson a03_evidence "$a03_evidence" \
@@ -560,12 +591,17 @@ write_report() {
           topology:{ready:$topology,direct_client_exit_adjacency:false,
             client_exit_route_absent:$client_exit_route_absent,
             exit_control_relay:"relay0",data_relays:["relay1","relay2"],
-            roles:["client","relay0","relay1","relay2","exit","destination"]},
+            bootstrap_contacts:["bootstrap1","bootstrap2"],
+            roles:["client","bootstrap1","bootstrap2","relay0","relay1",
+              "relay2","exit","destination"]},
           production_helpers:{ready:$helpers,instances:$helper_records},
           native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records},
           agents_ready:$agents,destination_ready:$destination,
           client_connect:{requested:$requested,succeeded:$connected,
             exit_status:$connect_status,observed_blocker:$blocker},
+          a01_bootstrap_resilience:{requested:$a01_requested,
+            succeeded:$a01_succeeded,exit_status:$a01_status,
+            evidence:$a01_evidence},
           a02_transparent_tcp:{requested:$a02_requested,succeeded:$a02_succeeded,
             exit_status:$a02_status,evidence:$a02_evidence},
           a03_mptcp_aggregation:{requested:$a03_requested,succeeded:$a03_succeeded,
@@ -669,14 +705,15 @@ cleanup() {
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_unit in $MPQUIC_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_unit in $HELPER_UNITS; do retire_unit "$cleanup_unit" || true; done
-    for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$CLIENT"; do
+    for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$B2" "$B1" \
+        "$CLIENT"; do
         ip netns del "$cleanup_ns" 2>/dev/null || true
     done
     if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
         cat "$HOSTS_BACKUP" >/etc/hosts || original_status=1
         HOSTS_BACKUP=
     fi
-    for cleanup_node in client relay0 relay1 relay2 exit; do
+    for cleanup_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
         rm -f -- "$WORK/runtime-$cleanup_node/helper.sock" \
             "$WORK/runtime-$cleanup_node/control/agent.sock" \
             "$WORK/runtime-$cleanup_node/native/mpquic.sock"
@@ -875,7 +912,7 @@ binary_directory=$WORK/bin
 mpquic_binary=$WORK/bin/volparossa-mpquic
 
 PHASE=network-topology
-for namespace in "$CLIENT" "$R0" "$R1" "$R2" "$EXIT_NODE" "$DEST"; do
+for namespace in "$CLIENT" "$B1" "$B2" "$R0" "$R1" "$R2" "$EXIT_NODE" "$DEST"; do
     [ -z "$(ip netns list | awk -v name="$namespace" '$1 == name { print $1 }')" ] \
         || fail NAMESPACE_COLLISION
     ip netns add "$namespace"
@@ -914,6 +951,14 @@ add_public_underlay() {
 link_nodes "$CLIENT" cr0 10.241.10.1/30 "$R0" r0c 10.241.10.2/30
 link_nodes "$CLIENT" cr1 10.241.11.1/30 "$R1" r1c 10.241.11.2/30
 link_nodes "$CLIENT" cr2 10.241.12.1/30 "$R2" r2c 10.241.12.2/30
+link_nodes "$CLIENT" cb1 10.241.40.1/30 "$B1" b1c 10.241.40.2/30
+link_nodes "$CLIENT" cb2 10.241.41.1/30 "$B2" b2c 10.241.41.2/30
+link_nodes "$R0" r0b1 10.241.42.1/30 "$B1" b1r0 10.241.42.2/30
+link_nodes "$R0" r0b2 10.241.43.1/30 "$B2" b2r0 10.241.43.2/30
+link_nodes "$R1" r1b1 10.241.44.1/30 "$B1" b1r1 10.241.44.2/30
+link_nodes "$R1" r1b2 10.241.45.1/30 "$B2" b2r1 10.241.45.2/30
+link_nodes "$R2" r2b1 10.241.46.1/30 "$B1" b1r2 10.241.46.2/30
+link_nodes "$R2" r2b2 10.241.47.1/30 "$B2" b2r2 10.241.47.2/30
 link_nodes "$R0" r0x 10.241.20.1/30 "$EXIT_NODE" xr0 10.241.20.2/30
 link_nodes "$R1" r1x 10.241.21.1/30 "$EXIT_NODE" xr1 10.241.21.2/30
 link_nodes "$R2" r2x 10.241.22.1/30 "$EXIT_NODE" xr2 10.241.22.2/30
@@ -921,6 +966,8 @@ link_nodes "$EXIT_NODE" xd 10.241.31.1/30 "$DEST" dx 10.241.31.2/30
 ip -n "$EXIT_NODE" address add 47.163.4.1/30 dev xd
 ip -n "$DEST" address add 47.163.4.2/30 dev dx
 add_public_underlay "$CLIENT" 43.159.1.1
+add_public_underlay "$B1" 40.156.1.1
+add_public_underlay "$B2" 41.157.2.1
 add_public_underlay "$R0" 42.158.0.1
 add_public_underlay "$R1" 44.160.1.1
 add_public_underlay "$R2" 45.161.2.1
@@ -928,12 +975,28 @@ add_public_underlay "$EXIT_NODE" 46.162.3.1
 ip -n "$CLIENT" route add 42.158.0.1/32 via 10.241.10.2 dev cr0 src 43.159.1.1
 ip -n "$CLIENT" route add 44.160.1.1/32 via 10.241.11.2 dev cr1 src 43.159.1.1
 ip -n "$CLIENT" route add 45.161.2.1/32 via 10.241.12.2 dev cr2 src 43.159.1.1
+ip -n "$CLIENT" route add 40.156.1.1/32 via 10.241.40.2 dev cb1 src 43.159.1.1
+ip -n "$CLIENT" route add 41.157.2.1/32 via 10.241.41.2 dev cb2 src 43.159.1.1
+ip -n "$R0" route add 40.156.1.1/32 via 10.241.42.2 dev r0b1 src 42.158.0.1
+ip -n "$R0" route add 41.157.2.1/32 via 10.241.43.2 dev r0b2 src 42.158.0.1
 ip -n "$R0" route add 43.159.1.1/32 via 10.241.10.1 dev r0c src 42.158.0.1
 ip -n "$R0" route add 46.162.3.1/32 via 10.241.20.2 dev r0x src 42.158.0.1
 ip -n "$R1" route add 43.159.1.1/32 via 10.241.11.1 dev r1c src 44.160.1.1
+ip -n "$R1" route add 40.156.1.1/32 via 10.241.44.2 dev r1b1 src 44.160.1.1
+ip -n "$R1" route add 41.157.2.1/32 via 10.241.45.2 dev r1b2 src 44.160.1.1
 ip -n "$R1" route add 46.162.3.1/32 via 10.241.21.2 dev r1x src 44.160.1.1
 ip -n "$R2" route add 43.159.1.1/32 via 10.241.12.1 dev r2c src 45.161.2.1
+ip -n "$R2" route add 40.156.1.1/32 via 10.241.46.2 dev r2b1 src 45.161.2.1
+ip -n "$R2" route add 41.157.2.1/32 via 10.241.47.2 dev r2b2 src 45.161.2.1
 ip -n "$R2" route add 46.162.3.1/32 via 10.241.22.2 dev r2x src 45.161.2.1
+ip -n "$B1" route add 43.159.1.1/32 via 10.241.40.1 dev b1c src 40.156.1.1
+ip -n "$B1" route add 42.158.0.1/32 via 10.241.42.1 dev b1r0 src 40.156.1.1
+ip -n "$B1" route add 44.160.1.1/32 via 10.241.44.1 dev b1r1 src 40.156.1.1
+ip -n "$B1" route add 45.161.2.1/32 via 10.241.46.1 dev b1r2 src 40.156.1.1
+ip -n "$B2" route add 43.159.1.1/32 via 10.241.41.1 dev b2c src 41.157.2.1
+ip -n "$B2" route add 42.158.0.1/32 via 10.241.43.1 dev b2r0 src 41.157.2.1
+ip -n "$B2" route add 44.160.1.1/32 via 10.241.45.1 dev b2r1 src 41.157.2.1
+ip -n "$B2" route add 45.161.2.1/32 via 10.241.47.1 dev b2r2 src 41.157.2.1
 ip -n "$EXIT_NODE" route add 42.158.0.1/32 via 10.241.20.1 dev xr0 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 44.160.1.1/32 via 10.241.21.1 dev xr1 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 45.161.2.1/32 via 10.241.22.1 dev xr2 src 46.162.3.1
@@ -948,7 +1011,7 @@ CLIENT_EXIT_ROUTE_ABSENT=true
 TOPOLOGY_READY=true
 
 PHASE=configuration
-for node in client relay0 relay1 relay2 exit; do
+for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
     install -d -o root -g "$AGENT_GID" -m 0750 "$WORK/runtime-$node"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0750 \
         "$WORK/runtime-$node/control"
@@ -964,18 +1027,19 @@ for node in client relay0 relay1 relay2 exit; do
         >"$WORK/init-$node.log"
 done
 CLIENT_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-client.log")
+B1_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-bootstrap1.log")
+B2_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-bootstrap2.log")
 R0_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-relay0.log")
 R1_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-relay1.log")
 R2_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-relay2.log")
 EXIT_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-exit.log")
-for peer in "$CLIENT_PEER" "$R0_PEER" "$R1_PEER" "$R2_PEER" "$EXIT_PEER"; do
+for peer in "$CLIENT_PEER" "$B1_PEER" "$B2_PEER" "$R0_PEER" "$R1_PEER" \
+    "$R2_PEER" "$EXIT_PEER"; do
     [ -n "$peer" ] || fail IDENTITY_INITIALISATION_FAILED
 done
-if [ "$CLIENT_PEER" = "$R0_PEER" ] || [ "$CLIENT_PEER" = "$R1_PEER" ] \
-    || [ "$CLIENT_PEER" = "$R2_PEER" ] || [ "$CLIENT_PEER" = "$EXIT_PEER" ] \
-    || [ "$R0_PEER" = "$R1_PEER" ] || [ "$R0_PEER" = "$R2_PEER" ] \
-    || [ "$R0_PEER" = "$EXIT_PEER" ] || [ "$R1_PEER" = "$R2_PEER" ] \
-    || [ "$R1_PEER" = "$EXIT_PEER" ] || [ "$R2_PEER" = "$EXIT_PEER" ]; then
+printf '%s\n' "$CLIENT_PEER" "$B1_PEER" "$B2_PEER" "$R0_PEER" "$R1_PEER" \
+    "$R2_PEER" "$EXIT_PEER" | sort -u >"$WORK/peer-identities.txt"
+if [ "$(awk 'END { print NR + 0 }' "$WORK/peer-identities.txt")" -ne 7 ]; then
     fail IDENTITY_INITIALISATION_FAILED
 fi
 
@@ -1032,12 +1096,19 @@ write_config() {
 }
 
 write_config client null false false 43.159.1.1 \
-    "/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER" \
-    "/ip4/44.160.1.1/udp/41000/quic-v1/p2p/$R1_PEER" \
-    "/ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER"
-write_config relay0 acceptance-relay-zero true false 42.158.0.1 none none none
-write_config relay1 acceptance-relay-one true false 44.160.1.1 none none none
-write_config relay2 acceptance-relay-two true false 45.161.2.1 none none none
+    "/ip4/40.156.1.1/udp/41000/quic-v1/p2p/$B1_PEER" \
+    "/ip4/41.157.2.1/udp/41000/quic-v1/p2p/$B2_PEER" none
+write_config bootstrap1 null false false 40.156.1.1 none none none
+write_config bootstrap2 null false false 41.157.2.1 none none none
+write_config relay0 acceptance-relay-zero true false 42.158.0.1 \
+    "/ip4/40.156.1.1/udp/41000/quic-v1/p2p/$B1_PEER" \
+    "/ip4/41.157.2.1/udp/41000/quic-v1/p2p/$B2_PEER" none
+write_config relay1 acceptance-relay-one true false 44.160.1.1 \
+    "/ip4/40.156.1.1/udp/41000/quic-v1/p2p/$B1_PEER" \
+    "/ip4/41.157.2.1/udp/41000/quic-v1/p2p/$B2_PEER" none
+write_config relay2 acceptance-relay-two true false 45.161.2.1 \
+    "/ip4/40.156.1.1/udp/41000/quic-v1/p2p/$B1_PEER" \
+    "/ip4/41.157.2.1/udp/41000/quic-v1/p2p/$B2_PEER" none
 write_config exit acceptance-exit false true 46.162.3.1 \
     "/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER" none none
 
@@ -1113,6 +1184,8 @@ launch_helper() {
 }
 
 launch_helper client "$CLIENT"
+launch_helper bootstrap1 "$B1"
+launch_helper bootstrap2 "$B2"
 launch_helper relay0 "$R0"
 launch_helper relay1 "$R1"
 launch_helper relay2 "$R2"
@@ -1177,6 +1250,8 @@ verify_helper() {
 }
 
 verify_helper client "$CLIENT"
+verify_helper bootstrap1 "$B1"
+verify_helper bootstrap2 "$B2"
 verify_helper relay0 "$R0"
 verify_helper relay1 "$R1"
 verify_helper relay2 "$R2"
@@ -1353,6 +1428,8 @@ launch_agent() {
 }
 
 launch_agent client "$CLIENT"
+launch_agent bootstrap1 "$B1"
+launch_agent bootstrap2 "$B2"
 launch_agent relay0 "$R0"
 launch_agent relay1 "$R1"
 launch_agent relay2 "$R2"
@@ -2265,7 +2342,7 @@ PHASE=agent-readiness
 attempt=0
 while [ "$attempt" -lt 300 ]; do
     agents_running=yes
-    for node in client relay0 relay1 relay2 exit; do
+    for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
         agent_unit=volparossa-alpha-agent@$node.service
         [ "$(systemctl show --property=ActiveState --value "$agent_unit" 2>/dev/null || true)" = active ] \
             || agents_running=no
@@ -2280,7 +2357,7 @@ done
 AGENTS_READY=true
 DESTINATION_READY=true
 
-for node in client relay0 relay1 relay2 exit; do
+for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
         >"$WORK/status-$node.txt"
@@ -2289,6 +2366,18 @@ for node in client relay0 relay1 relay2 exit; do
         >"$WORK/roles-$node.txt"
 done
 grep -Fx 'client: true' "$WORK/roles-client.txt" >/dev/null || fail CLIENT_ROLE_INVALID
+grep -Fx 'client: false' "$WORK/roles-bootstrap1.txt" >/dev/null \
+    || fail BOOTSTRAP1_CLIENT_ROLE_INVALID
+grep -Fx 'client: false' "$WORK/roles-bootstrap2.txt" >/dev/null \
+    || fail BOOTSTRAP2_CLIENT_ROLE_INVALID
+grep -Fx 'relay: false' "$WORK/roles-bootstrap1.txt" >/dev/null \
+    || fail BOOTSTRAP1_RELAY_ROLE_INVALID
+grep -Fx 'relay: false' "$WORK/roles-bootstrap2.txt" >/dev/null \
+    || fail BOOTSTRAP2_RELAY_ROLE_INVALID
+grep -Fx 'exit: false' "$WORK/roles-bootstrap1.txt" >/dev/null \
+    || fail BOOTSTRAP1_EXIT_ROLE_INVALID
+grep -Fx 'exit: false' "$WORK/roles-bootstrap2.txt" >/dev/null \
+    || fail BOOTSTRAP2_EXIT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay0.txt" >/dev/null || fail RELAY0_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay1.txt" >/dev/null || fail RELAY1_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay2.txt" >/dev/null || fail RELAY2_CLIENT_ROLE_INVALID
@@ -2302,7 +2391,7 @@ PHASE=discovery
 attempt=0
 while [ "$attempt" -lt 300 ]; do
     control_ready=yes
-    for node in client relay0 relay1 relay2 exit; do
+    for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
         if ! "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-$node/control/agent.sock" status \
             >"$WORK/status-$node.txt"; then
@@ -2311,9 +2400,11 @@ while [ "$attempt" -lt 300 ]; do
         fi
         active_peers=$(awk '/^active peers: / { print $3 }' "$WORK/status-$node.txt")
         case $node in
-            client) required_active_peers=3 ;;
-            relay0) required_active_peers=2 ;;
-            relay1|relay2|exit) required_active_peers=1 ;;
+            client) required_active_peers=2 ;;
+            bootstrap1|bootstrap2) required_active_peers=4 ;;
+            relay0) required_active_peers=3 ;;
+            relay1|relay2) required_active_peers=2 ;;
+            exit) required_active_peers=1 ;;
         esac
         [ -n "$active_peers" ] \
             && [ "$active_peers" -ge "$required_active_peers" ] || control_ready=no
@@ -2324,8 +2415,365 @@ while [ "$attempt" -lt 300 ]; do
 done
 [ "$control_ready" = yes ] || fail DISCOVERY_NOT_READY
 
+peer_advertisement_sequence() {
+    sequence_peer=$1
+    python3 - "$WORK/state-client/peers.sqlite3" "$sequence_peer" <<'PYTHON'
+import sqlite3
+import sys
+
+database, peer_id = sys.argv[1:]
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
+try:
+    row = connection.execute(
+        "SELECT sequence_number FROM advertisements WHERE peer_id = ?",
+        (peer_id,),
+    ).fetchone()
+finally:
+    connection.close()
+if row is None or not isinstance(row[0], int) or row[0] < 1:
+    raise SystemExit(1)
+print(row[0])
+PYTHON
+}
+
+capture_link_bytes() {
+    link_namespace=$1
+    link_interface=$2
+    link_output=$3
+    ip -n "$link_namespace" -s -j link show dev "$link_interface" \
+        | jq -S -c --arg interface "$link_interface" '
+            .[0] as $link | ($link.stats64 // $link.stats) as $stats
+            | {interface:$interface,rx_bytes:$stats.rx.bytes,tx_bytes:$stats.tx.bytes}' \
+        >"$link_output"
+    jq -e '.rx_bytes >= 0 and .tx_bytes >= 0' "$link_output" >/dev/null
+}
+
+block_bootstrap_contact() {
+    blocked_namespace=$1
+    ip netns exec "$blocked_namespace" nft add table inet vp_a01_block
+    ip netns exec "$blocked_namespace" nft \
+        'add chain inet vp_a01_block input { type filter hook input priority -300; policy accept; }'
+    ip netns exec "$blocked_namespace" nft \
+        'add chain inet vp_a01_block output { type filter hook output priority -300; policy accept; }'
+    ip netns exec "$blocked_namespace" nft add rule inet vp_a01_block input \
+        meta l4proto udp counter drop
+    ip netns exec "$blocked_namespace" nft add rule inet vp_a01_block output \
+        meta l4proto udp counter drop
+}
+
+capture_blocked_contact() {
+    blocked_label=$1
+    blocked_namespace=$2
+    blocked_peer=$3
+    blocked_output=$4
+    blocked_unit=volparossa-alpha-agent@$blocked_label.service
+    blocked_pid=$(systemctl show --property=MainPID --value "$blocked_unit")
+    blocked_state=$(systemctl show --property=ActiveState --value "$blocked_unit")
+    case $blocked_pid in ''|0|*[!0-9]*) return 1 ;; esac
+    [ "$blocked_state" = active ] || return 1
+    ip netns exec "$blocked_namespace" nft -j list table inet vp_a01_block \
+        | jq -S -c --arg label "$blocked_label" --arg peer "$blocked_peer" \
+            --argjson pid "$blocked_pid" '
+            ([.nftables[].rule.expr[]?.counter.packets // empty] | add // 0) as $packets
+            | ([.nftables[].rule.expr[]?.counter.bytes // empty] | add // 0) as $bytes
+            | {contact:$label,peer_id:$peer,agent_pid:$pid,agent_active:true,
+               isolation:"all UDP dropped in contact namespace",
+               dropped_packets:$packets,dropped_bytes:$bytes}' >"$blocked_output"
+    jq -e '.agent_active and .dropped_packets > 0 and .dropped_bytes > 0' \
+        "$blocked_output" >/dev/null
+}
+
+unblock_bootstrap_contact() {
+    ip netns exec "$1" nft delete table inet vp_a01_block
+}
+
+restart_advertiser() {
+    restart_node=$1
+    restart_unit=volparossa-alpha-agent@$restart_node.service
+    restart_old_pid=$(systemctl show --property=MainPID --value "$restart_unit")
+    case $restart_old_pid in ''|0|*[!0-9]*) return 1 ;; esac
+    systemctl restart "$restart_unit" || return 1
+    restart_attempt=0
+    while [ "$restart_attempt" -lt 300 ]; do
+        restart_state=$(systemctl show --property=ActiveState --value \
+            "$restart_unit" 2>/dev/null || true)
+        restart_new_pid=$(systemctl show --property=MainPID --value \
+            "$restart_unit" 2>/dev/null || true)
+        if [ "$restart_state" = active ] \
+            && [ -S "$WORK/runtime-$restart_node/control/agent.sock" ] \
+            && [ -n "$restart_new_pid" ] && [ "$restart_new_pid" != 0 ] \
+            && [ "$restart_new_pid" != "$restart_old_pid" ]; then
+            return 0
+        fi
+        sleep 0.1
+        restart_attempt=$((restart_attempt + 1))
+    done
+    return 1
+}
+
+wait_fresh_advertisement() {
+    fresh_peer=$1
+    fresh_before=$2
+    fresh_attempt=0
+    while [ "$fresh_attempt" -lt 600 ]; do
+        fresh_after=$(peer_advertisement_sequence "$fresh_peer" 2>/dev/null || true)
+        case $fresh_after in ''|*[!0-9]*) fresh_after=0 ;; esac
+        if [ "$fresh_after" -gt "$fresh_before" ]; then
+            printf '%s\n' "$fresh_after"
+            return 0
+        fi
+        sleep 0.1
+        fresh_attempt=$((fresh_attempt + 1))
+    done
+    return 1
+}
+
+wait_disconnected() {
+    idle_attempt=0
+    while [ "$idle_attempt" -lt 300 ]; do
+        "$binary_directory/volparossa" \
+            --control-socket "$WORK/runtime-client/control/agent.sock" status \
+            >"$WORK/status-client.txt" 2>/dev/null || true
+        if grep -Fx 'connected: false' "$WORK/status-client.txt" >/dev/null \
+            && grep -Fx 'active contexts: 0' "$WORK/status-client.txt" >/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+        idle_attempt=$((idle_attempt + 1))
+    done
+    return 1
+}
+
+a01_select_route() {
+    selection_label=$1
+    selection_status=1
+    selection_attempt=0
+    : >"$WORK/a01-$selection_label-connect.err"
+    while [ "$selection_attempt" -lt 30 ]; do
+        set +e
+        "$binary_directory/volparossa" \
+            --control-socket "$WORK/runtime-client/control/agent.sock" connect \
+            >"$WORK/a01-$selection_label-connect.out" \
+            2>>"$WORK/a01-$selection_label-connect.err"
+        selection_status=$?
+        set -e
+        [ "$selection_status" -ne 0 ] || break
+        grep -F 'PRESELECTION_UNAVAILABLE' \
+            "$WORK/a01-$selection_label-connect.err" >/dev/null || break
+        sleep 1
+        selection_attempt=$((selection_attempt + 1))
+    done
+    [ "$selection_status" -eq 0 ] || return 1
+
+    selection_path_attempt=0
+    while [ "$selection_path_attempt" -lt 300 ]; do
+        "$binary_directory/volparossa" \
+            --control-socket "$WORK/runtime-client/control/agent.sock" paths \
+            >"$WORK/a01-$selection_label-paths.txt" || true
+        if python3 - "$WORK/a01-$selection_label-paths.txt" \
+            "$WORK/a01-$selection_label-selection.json" "$R1_PEER" "$R2_PEER" \
+            "$EXIT_PEER" <<'PYTHON'
+import json
+import re
+import sys
+
+source, output, relay1, relay2, expected_exit = sys.argv[1:]
+pattern = re.compile(
+    r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
+    r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)"
+)
+paths = []
+for line in open(source, encoding="ascii"):
+    match = pattern.fullmatch(line.rstrip("\n"))
+    if match is None:
+        continue
+    context, path_id, relay, exit_peer, state, rtt, byte_count = match.groups()
+    paths.append(
+        {
+            "route_context_id": context,
+            "path_id": int(path_id),
+            "relay_peer_id": relay,
+            "exit_peer_id": exit_peer,
+            "state": int(state),
+            "smoothed_rtt_us": int(rtt),
+            "reported_bytes": int(byte_count),
+        }
+    )
+if len(paths) != 2:
+    raise SystemExit(1)
+if {path["relay_peer_id"] for path in paths} != {relay1, relay2}:
+    raise SystemExit(1)
+if {path["exit_peer_id"] for path in paths} != {expected_exit}:
+    raise SystemExit(1)
+if len({path["route_context_id"] for path in paths}) != 1:
+    raise SystemExit(1)
+if len({path["path_id"] for path in paths}) != 2:
+    raise SystemExit(1)
+paths.sort(key=lambda path: path["path_id"])
+with open(output, "w", encoding="ascii") as destination:
+    json.dump(
+        {
+            "exact_selected_relays": [relay1, relay2],
+            "exact_selected_exit": expected_exit,
+            "paths": paths,
+        },
+        destination,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    destination.write("\n")
+PYTHON
+        then
+            break
+        fi
+        sleep 0.1
+        selection_path_attempt=$((selection_path_attempt + 1))
+    done
+    [ "$selection_path_attempt" -lt 300 ] || return 1
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" disconnect \
+        >"$WORK/a01-$selection_label-disconnect.out" \
+        2>"$WORK/a01-$selection_label-disconnect.err" || return 1
+    wait_disconnected
+}
+
+wait_bootstrap_mesh() {
+    mesh_attempt=0
+    while [ "$mesh_attempt" -lt 600 ]; do
+        mesh_ready=yes
+        for mesh_node_required in client:2 bootstrap1:4 bootstrap2:4 \
+            relay0:3 relay1:2 relay2:2 exit:1; do
+            mesh_node=${mesh_node_required%%:*}
+            mesh_required=${mesh_node_required#*:}
+            if ! "$binary_directory/volparossa" \
+                --control-socket "$WORK/runtime-$mesh_node/control/agent.sock" status \
+                >"$WORK/status-$mesh_node.txt" 2>/dev/null; then
+                mesh_ready=no
+                continue
+            fi
+            mesh_active=$(awk '/^active peers: / { print $3 }' \
+                "$WORK/status-$mesh_node.txt")
+            case $mesh_active in ''|*[!0-9]*) mesh_ready=no; continue ;; esac
+            [ "$mesh_active" -ge "$mesh_required" ] || mesh_ready=no
+        done
+        [ "$mesh_ready" = yes ] && return 0
+        sleep 0.1
+        mesh_attempt=$((mesh_attempt + 1))
+    done
+    return 1
+}
+
+PHASE=a01-bootstrap1-loss
+A01_REQUESTED=true
+A01_STATUS=1
+initial_advertisement_attempt=0
+while [ "$initial_advertisement_attempt" -lt 600 ]; do
+    initial_advertisements_ready=yes
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" peers \
+        >"$WORK/a01-initial-peers.txt" || initial_advertisements_ready=no
+    for required_relay_peer in "$R0_PEER" "$R1_PEER" "$R2_PEER"; do
+        if ! grep -F "$required_relay_peer" "$WORK/a01-initial-peers.txt" \
+            | grep -F 'roles=0b010' >/dev/null; then
+            initial_advertisements_ready=no
+        fi
+    done
+    [ "$initial_advertisements_ready" = yes ] && break
+    sleep 0.1
+    initial_advertisement_attempt=$((initial_advertisement_attempt + 1))
+done
+[ "$initial_advertisements_ready" = yes ] \
+    || fail A01_INITIAL_ADVERTISEMENTS_UNAVAILABLE
+
+a01_b1_sequence_before=$(peer_advertisement_sequence "$R2_PEER") \
+    || fail A01_INITIAL_ADVERTISEMENT_SEQUENCE_UNAVAILABLE
+capture_link_bytes "$B2" b2r2 \
+    "$WORK/a01-bootstrap1-remaining-link-before.json" \
+    || fail A01_REMAINING_CONTACT_COUNTER_UNAVAILABLE
+block_bootstrap_contact "$B1" || fail A01_BOOTSTRAP1_ISOLATION_FAILED
+restart_advertiser relay2 || fail A01_RELAY2_RESTART_FAILED
+a01_b1_sequence_after=$(wait_fresh_advertisement "$R2_PEER" \
+    "$a01_b1_sequence_before") || fail A01_BOOTSTRAP1_ADVERTISEMENT_STALLED
+capture_link_bytes "$B2" b2r2 \
+    "$WORK/a01-bootstrap1-remaining-link-after.json" \
+    || fail A01_REMAINING_CONTACT_COUNTER_UNAVAILABLE
+capture_blocked_contact bootstrap1 "$B1" "$B1_PEER" \
+    "$WORK/a01-bootstrap1-blocked.json" \
+    || fail A01_BOOTSTRAP1_ISOLATION_NOT_OBSERVED
+a01_select_route bootstrap1 || fail A01_BOOTSTRAP1_SELECTION_FAILED
+unblock_bootstrap_contact "$B1" || fail A01_BOOTSTRAP1_RESTORE_FAILED
+wait_bootstrap_mesh || fail A01_BOOTSTRAP1_MESH_NOT_RESTORED
+
+PHASE=a01-bootstrap2-loss
+a01_b2_sequence_before=$(peer_advertisement_sequence "$R1_PEER") \
+    || fail A01_INITIAL_ADVERTISEMENT_SEQUENCE_UNAVAILABLE
+capture_link_bytes "$B1" b1r1 \
+    "$WORK/a01-bootstrap2-remaining-link-before.json" \
+    || fail A01_REMAINING_CONTACT_COUNTER_UNAVAILABLE
+block_bootstrap_contact "$B2" || fail A01_BOOTSTRAP2_ISOLATION_FAILED
+restart_advertiser relay1 || fail A01_RELAY1_RESTART_FAILED
+a01_b2_sequence_after=$(wait_fresh_advertisement "$R1_PEER" \
+    "$a01_b2_sequence_before") || fail A01_BOOTSTRAP2_ADVERTISEMENT_STALLED
+capture_link_bytes "$B1" b1r1 \
+    "$WORK/a01-bootstrap2-remaining-link-after.json" \
+    || fail A01_REMAINING_CONTACT_COUNTER_UNAVAILABLE
+capture_blocked_contact bootstrap2 "$B2" "$B2_PEER" \
+    "$WORK/a01-bootstrap2-blocked.json" \
+    || fail A01_BOOTSTRAP2_ISOLATION_NOT_OBSERVED
+a01_select_route bootstrap2 || fail A01_BOOTSTRAP2_SELECTION_FAILED
+unblock_bootstrap_contact "$B2" || fail A01_BOOTSTRAP2_RESTORE_FAILED
+wait_bootstrap_mesh || fail A01_BOOTSTRAP2_MESH_NOT_RESTORED
+
+jq -S -c -n \
+    --arg b1_peer "$B1_PEER" --arg b2_peer "$B2_PEER" \
+    --arg relay1_peer "$R1_PEER" --arg relay2_peer "$R2_PEER" \
+    --argjson b1_before "$a01_b1_sequence_before" \
+    --argjson b1_after "$a01_b1_sequence_after" \
+    --argjson b2_before "$a01_b2_sequence_before" \
+    --argjson b2_after "$a01_b2_sequence_after" \
+    --slurpfile b1_block "$WORK/a01-bootstrap1-blocked.json" \
+    --slurpfile b2_block "$WORK/a01-bootstrap2-blocked.json" \
+    --slurpfile b1_link_before "$WORK/a01-bootstrap1-remaining-link-before.json" \
+    --slurpfile b1_link_after "$WORK/a01-bootstrap1-remaining-link-after.json" \
+    --slurpfile b2_link_before "$WORK/a01-bootstrap2-remaining-link-before.json" \
+    --slurpfile b2_link_after "$WORK/a01-bootstrap2-remaining-link-after.json" \
+    --slurpfile b1_selection "$WORK/a01-bootstrap1-selection.json" \
+    --slurpfile b2_selection "$WORK/a01-bootstrap2-selection.json" \
+    '($b1_link_after[0].rx_bytes + $b1_link_after[0].tx_bytes
+        - $b1_link_before[0].rx_bytes - $b1_link_before[0].tx_bytes) as $b1_delta
+    | ($b2_link_after[0].rx_bytes + $b2_link_after[0].tx_bytes
+        - $b2_link_before[0].rx_bytes - $b2_link_before[0].tx_bytes) as $b2_delta
+    | (($b1_after > $b1_before) and ($b2_after > $b2_before)
+        and ($b1_delta > 0) and ($b2_delta > 0)
+        and $b1_block[0].agent_active and ($b1_block[0].dropped_packets > 0)
+        and $b2_block[0].agent_active and ($b2_block[0].dropped_packets > 0)
+        and (($b1_selection[0].paths | length) == 2)
+        and (($b2_selection[0].paths | length) == 2)) as $success
+    | {schema_version:1,acceptance_id:"A01",success:$success,
+       topology:{bootstrap_contacts:[$b1_peer,$b2_peer],
+         independently_removed:true,direct_client_exit_adjacency:false},
+       bootstrap1_removed:{isolation:$b1_block[0],remaining_contact:$b2_peer,
+         remaining_contact_link_bytes_delta:$b1_delta,
+         fresh_advertisement:{peer_id:$relay2_peer,
+           sequence_before:$b1_before,sequence_after:$b1_after},
+         selection:$b1_selection[0]},
+       bootstrap2_removed:{isolation:$b2_block[0],remaining_contact:$b1_peer,
+         remaining_contact_link_bytes_delta:$b2_delta,
+         fresh_advertisement:{peer_id:$relay1_peer,
+           sequence_before:$b2_before,sequence_after:$b2_after},
+         selection:$b2_selection[0]},
+       verification_basis:{real_agents:true,real_libp2p:true,
+         signed_peerstore_advertisement_sequence_advanced:true,
+         real_route_setup_completed_twice:true,mocks:false}}' >"$WORK/a01-evidence.json"
+jq -e '.success == true' "$WORK/a01-evidence.json" >/dev/null \
+    || fail A01_EVIDENCE_INVALID
+A01_STATUS=0
+A01_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a01-complete
+
 capture_product_logs() {
-    for log_node in client relay0 relay1 relay2 exit; do
+    for log_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
         "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-$log_node/control/agent.sock" logs --limit 400 \
             >"$WORK/logs-$log_node.txt" || true
@@ -2542,8 +2990,9 @@ record_a14_owned_inventory() {
         END { print count + 0 }
     ' "$WORK/a14-paths-before.txt")
     a14_namespace_count=0
-    for a14_node_namespace in client:"$CLIENT" relay0:"$R0" relay1:"$R1" \
-        relay2:"$R2" exit:"$EXIT_NODE" destination:"$DEST"; do
+    for a14_node_namespace in client:"$CLIENT" bootstrap1:"$B1" bootstrap2:"$B2" \
+        relay0:"$R0" relay1:"$R1" relay2:"$R2" exit:"$EXIT_NODE" \
+        destination:"$DEST"; do
         a14_node=${a14_node_namespace%%:*}
         a14_namespace=${a14_node_namespace#*:}
         [ -n "$(ip netns list | awk -v name="$a14_namespace" \
@@ -2578,6 +3027,8 @@ record_a14_owned_inventory() {
         --argjson runtime_sockets "$a14_socket_count" \
         --argjson mpquic_path_records "$a14_path_records" \
         --slurpfile client "$WORK/a14-owned-client.json" \
+        --slurpfile bootstrap1 "$WORK/a14-owned-bootstrap1.json" \
+        --slurpfile bootstrap2 "$WORK/a14-owned-bootstrap2.json" \
         --slurpfile relay0 "$WORK/a14-owned-relay0.json" \
         --slurpfile relay1 "$WORK/a14-owned-relay1.json" \
         --slurpfile relay2 "$WORK/a14-owned-relay2.json" \
@@ -2586,8 +3037,9 @@ record_a14_owned_inventory() {
         '{schema_version:1,network_namespace_count:$namespace_count,
           runtime_socket_count:$runtime_sockets,
           active_mpquic_path_records:$mpquic_path_records,
-          namespaces:[$client[0],$relay0[0],$relay1[0],$relay2[0],
-            $exit_node[0],$destination[0]]}' >"$WORK/a14-owned-before.json"
+          namespaces:[$client[0],$bootstrap1[0],$bootstrap2[0],$relay0[0],
+            $relay1[0],$relay2[0],$exit_node[0],$destination[0]]}' \
+        >"$WORK/a14-owned-before.json"
 }
 
 force_crash_unit() {
@@ -4162,12 +4614,12 @@ A14_REQUESTED=true
 A14_STATUS=1
 record_a14_owned_inventory || fail A14_OWNED_INVENTORY_UNAVAILABLE
 jq -e '
-  .network_namespace_count == 6 and
-  .runtime_socket_count >= 12 and
+  .network_namespace_count == 8 and
+  .runtime_socket_count >= 16 and
   .active_mpquic_path_records >= 2
 ' "$WORK/a14-owned-before.json" >/dev/null \
     || fail A14_OWNED_INVENTORY_INCOMPLETE
-for crash_node in client relay0 relay1 relay2 exit; do
+for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
     force_crash_unit agent "$crash_node" \
         "volparossa-alpha-agent@$crash_node.service" \
         || fail A14_AGENT_CRASH_FAILED
@@ -4177,16 +4629,16 @@ for crash_node in client exit; do
         "volparossa-alpha-mpquic@$crash_node.service" \
         || fail A14_NATIVE_CRASH_FAILED
 done
-for crash_node in client relay0 relay1 relay2 exit; do
+for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
     force_crash_unit helper "$crash_node" \
         "volparossa-alpha-helper@$crash_node.service" \
         || fail A14_HELPER_CRASH_FAILED
 done
 jq -S -c -s . "$WORK"/a14-crash-*.json >"$WORK/a14-crashes.json"
 jq -e '
-  length == 12 and
-  ([.[].class] | map(select(. == "agent")) | length) == 5 and
-  ([.[].class] | map(select(. == "helper")) | length) == 5 and
+  length == 16 and
+  ([.[].class] | map(select(. == "agent")) | length) == 7 and
+  ([.[].class] | map(select(. == "helper")) | length) == 7 and
   ([.[].class] | map(select(. == "native")) | length) == 2 and
   all(.[]; .sigkill_delivered and .pid_absent_after)
 ' "$WORK/a14-crashes.json" >/dev/null || fail A14_FORCED_CRASH_INCOMPLETE
