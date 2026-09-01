@@ -4264,7 +4264,7 @@ timeout --signal=TERM --kill-after=5s 330s \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/tls-policy-acceptance-fixture" server \
-    47.163.4.2:443 "$WORK/destination/tls-policy-cert.der" \
+    47.163.4.2:18443 "$WORK/destination/tls-policy-cert.der" \
     "$WORK/destination/tls-policy.ready" "$WORK/destination/tls-policy.json" \
     "$WORK/destination/tls-policy.stop" "$RUN_ID" \
     >"$WORK/tls-policy-server.log" 2>&1 &
@@ -4294,7 +4294,7 @@ timeout --signal=TERM --kill-after=5s 180s \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/tls-policy-acceptance-fixture" allowed \
-    47.163.4.2:443 "$WORK/tls-policy/tls-policy-cert.der" \
+    47.163.4.2:18443 "$WORK/tls-policy/tls-policy-cert.der" \
     "$RUN_ID" "$WORK/tls-policy/a08-client.json" \
     >"$WORK/tls-policy/a08-client.out" 2>"$WORK/tls-policy/a08-client.err"
 A08_STATUS=$?
@@ -4329,7 +4329,7 @@ if [ "$A08_STATUS" -eq 0 ]; then
         '($application[0]) as $app | ($destination[0]) as $destination
         | (($app.case == "allowed-domain")
             and ($app.hostname == "destination.volparossa.test")
-            and ($app.destination == {ip:"47.163.4.2",port:443})
+            and ($app.destination == {ip:"47.163.4.2",port:18443})
             and ($app.tls_version == "TLSv1.3")
             and ($app.negotiated_alpn == "volparossa-a08/1")
             and ($app.request_bytes == 1048576)
@@ -4439,15 +4439,15 @@ run_tls_policy_denial() {
 PHASE=a09-forbidden-destinations
 A09_REQUESTED=true
 A09_STATUS=1
-if run_tls_policy_denial unlisted-domain 47.163.4.2:443 \
+if run_tls_policy_denial unlisted-domain 47.163.4.2:18443 \
     INGRESS_TCP_POLICY_DENIED a09-unlisted-domain \
-    && run_tls_policy_denial raw-ip-server-name 47.163.4.2:443 \
+    && run_tls_policy_denial raw-ip-server-name 47.163.4.2:18443 \
         INGRESS_TCP_CLIENT_HELLO_DENIED a09-raw-ip-server-name \
-    && run_tls_policy_denial missing-server-name 47.163.4.2:443 \
+    && run_tls_policy_denial missing-server-name 47.163.4.2:18443 \
         INGRESS_TCP_CLIENT_HELLO_DENIED a09-missing-server-name \
-    && run_tls_policy_denial mismatched-destination 47.163.4.3:443 \
+    && run_tls_policy_denial mismatched-destination 47.163.4.3:18443 \
         INGRESS_TCP_STREAM_FAILED a09-mismatched-destination \
-    && run_tls_policy_denial forbidden-port 47.163.4.2:444 \
+    && run_tls_policy_denial forbidden-port 47.163.4.2:18444 \
         INGRESS_TCP_POLICY_DENIED a09-forbidden-port; then
     A09_STATUS=0
 fi
@@ -4492,9 +4492,9 @@ PHASE=a09-complete
 PHASE=a10-ech-and-unverifiable
 A10_REQUESTED=true
 A10_STATUS=1
-if run_tls_policy_denial ech 47.163.4.2:443 \
+if run_tls_policy_denial ech 47.163.4.2:18443 \
     INGRESS_TCP_ECH_DENIED a10-ech \
-    && run_tls_policy_denial unverifiable 47.163.4.2:443 \
+    && run_tls_policy_denial unverifiable 47.163.4.2:18443 \
         INGRESS_TCP_CLIENT_HELLO_DENIED a10-unverifiable; then
     A10_STATUS=0
 fi

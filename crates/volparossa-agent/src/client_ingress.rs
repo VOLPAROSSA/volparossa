@@ -315,15 +315,26 @@ pub(crate) struct ObservedTcpIngress {
 }
 
 impl ObservedTcpIngress {
-    /// Bind the kernel-observed tuple to the active manifest. TLS/443 additionally requires a
-    /// visible policy-approved SNI and retains the original address as an Exit-side DNS pin.
+    /// Bind the kernel-observed tuple to the active manifest. TCP/443 and destinations which are
+    /// not independently authorised by exact IP require a visible policy-approved SNI and retain
+    /// the original address as an Exit-side DNS pin. This keeps domain policy usable on explicit
+    /// non-standard TLS ports without turning an arbitrary denied raw-IP flow into egress.
     pub(crate) async fn authorize(
         self,
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<PolicyAuthorizedTcpIngress, ClientIngressTcpError> {
-        let (hostname, policy_hash, expires_at_ms) = if self.destination.port() == BROWSER_QUIC_PORT
-        {
+        let exact_ip_authorized = policy
+            .authorize_ip(
+                now_ms,
+                self.destination.ip(),
+                TransportProtocol::Tcp,
+                self.destination.port(),
+            )
+            .is_ok();
+        let requires_visible_name =
+            self.destination.port() == BROWSER_QUIC_PORT || !exact_ip_authorized;
+        let (hostname, policy_hash, expires_at_ms) = if requires_visible_name {
             let hostname = inspect_visible_tls_server_name(&self.stream).await?;
             policy
                 .authorize_domain(
@@ -1424,10 +1435,10 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn tls_ingress_retains_visible_sni_and_kernel_destination_pin() {
+    async fn tls_ingress_on_policy_port_retains_visible_sni_and_kernel_destination_pin() {
         const NOW_MS: u64 = 1_900_000_000_000;
         const HOSTNAME: &str = "allowed.example";
-        let destination = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 443));
+        let destination = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 18_443));
         let permission =
             ProtocolPort::new(TransportProtocol::Tcp, destination.port()).expect("TCP permission");
         let rule = DestinationRule::exact_domain(HOSTNAME, [permission]).expect("domain rule");

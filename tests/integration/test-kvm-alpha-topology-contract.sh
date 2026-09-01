@@ -178,6 +178,7 @@ grep -F 'a07_http3_relay_failover:{requested:$a07_requested,succeeded:$a07_succe
     >/dev/null
 grep -F 'tls-policy-acceptance-fixture" allowed' "$GUEST" >/dev/null
 grep -F 'tls-policy-acceptance-fixture" denied' "$GUEST" >/dev/null
+grep -F '47.163.4.2:18443' "$GUEST" >/dev/null
 grep -F '"$WORK/tls-policy/tls-policy-cert.der"' "$GUEST" >/dev/null
 grep -F 'destination.volparossa.test' "$GUEST" >/dev/null
 grep -F 'INGRESS_TCP_POLICY_DENIED' "$GUEST" >/dev/null

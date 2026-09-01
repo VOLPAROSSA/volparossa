@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     specification.add_rule(DestinationRule::exact_domain(
         "destination.volparossa.test",
         [
-            ProtocolPort::new(TransportProtocol::Tcp, 443)?,
+            ProtocolPort::new(TransportProtocol::Tcp, 18_443)?,
             ProtocolPort::new(TransportProtocol::Udp, 443)?,
         ],
     )?)?;
