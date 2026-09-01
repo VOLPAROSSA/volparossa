@@ -487,6 +487,14 @@ struct FreshEvidenceBatch {
 }
 
 impl FreshEvidenceBatch {
+    /// One private, purpose-bound copy for the parallel native/route admission split.
+    fn for_route_admission(&self) -> Self {
+        Self {
+            batch_id: self.batch_id,
+            entries: self.entries.clone(),
+        }
+    }
+
     #[cfg(test)]
     fn for_test(
         entries: Vec<FreshPeerEvidence>,
@@ -850,6 +858,36 @@ pub(crate) struct PreparedPreselectionEvidence {
     evidence_batch: FreshEvidenceBatch,
 }
 
+/// Config-bound selection inputs retained only long enough to mint the real route continuation.
+#[derive(Clone, Debug)]
+pub(crate) struct ClientRouteAdmissionProfile {
+    preflight: SnapshotPreflightParameters,
+    hard_lifetime: Duration,
+}
+
+impl ClientRouteAdmissionProfile {
+    pub(crate) fn new(
+        transport: SelectionTransport,
+        minimum_capacity: Bandwidth,
+        address_family: IpFamily,
+        exit_mix: SelectionMix,
+        relay_policy: RelaySelectionPolicy,
+        hard_lifetime: Duration,
+    ) -> Self {
+        Self {
+            preflight: SnapshotPreflightParameters {
+                transport,
+                minimum_capacity,
+                address_family: Some(address_family),
+                region: None,
+                exit_mix,
+                relay_policy,
+            },
+            hard_lifetime,
+        }
+    }
+}
+
 /// Affine production continuation after the first Exit Permit crossed its selected control Relay.
 ///
 /// The remaining candidates, replay cache, and verified Permit stay together for the later
@@ -867,6 +905,8 @@ pub(crate) struct ClientNativePreselection {
 #[must_use = "native path-batch ownership must remain affine"]
 struct ClientNativeProbeBatchOwner {
     owner: native_preselection::NativePreselectionAttemptOwner,
+    route_plan: Option<ProspectiveRoutePlan>,
+    route_hard_lifetime: Duration,
     replay: volparossa_protocol::ReplayCache,
     armed: Vec<native_preselection::ArmedNativeProbe>,
     proofs: Vec<native_preselection::BoundNativePathProof>,
@@ -951,6 +991,29 @@ pub(crate) struct CompletedClientNativeProbe {
     batch: ClientNativeProbeBatchOwner,
 }
 
+/// Terminal sampler ownership plus the real, still-undispatched reservation continuation.
+#[must_use = "native route admission must retire the sampler context and execute the continuation"]
+pub(crate) struct PreparedNativeRouteAdmission {
+    continuation: PreProbeContinuation,
+    sampler_owner: RuntimeBoundPreparedLeaseBatch,
+    remote_retirement: RemoteNativeSamplerRetirement,
+}
+
+enum RemoteNativeSamplerRetirement {
+    AwaitingProtocolAcknowledgement,
+}
+
+impl PreparedNativeRouteAdmission {
+    /// Consume the admission into its route handoff, local cleanup owner, and remote-ack status.
+    pub(crate) fn into_parts(self) -> (PreProbeContinuation, RuntimeBoundPreparedLeaseBatch, bool) {
+        let confirmed = !matches!(
+            self.remote_retirement,
+            RemoteNativeSamplerRetirement::AwaitingProtocolAcknowledgement
+        );
+        (self.continuation, self.sampler_owner, confirmed)
+    }
+}
+
 // One path accepts Request, Permit, Relay Ready, Relay reservation, nested Exit authorization,
 // Relay Result, and nested Exit Result envelopes into the shared fail-closed replay cache.
 const CLIENT_NATIVE_REPLAY_ENTRIES_PER_PATH: usize = 7;
@@ -989,14 +1052,31 @@ impl ClientNativePreparedBindFailure {
 /// selected control Relay.
 pub(crate) async fn begin_client_native_preselection(
     prepared: PreparedPreselectionEvidence,
-    required_path_count: usize,
+    admission: ClientRouteAdmissionProfile,
     discovery: &DiscoveryControlHandle,
 ) -> Result<ClientNativePreselection, native_preselection::NativePreselectionError> {
     let replay_capacity = volparossa_protocol::MAX_NATIVE_PROBE_CANDIDATES
         .checked_mul(CLIENT_NATIVE_REPLAY_ENTRIES_PER_PATH)
         .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+    let route_plan = snapshot_route_plan(
+        &prepared.snapshot,
+        admission.preflight,
+        prepared.evidence_batch.for_route_admission(),
+        &mut OsRng,
+    )
+    .map_err(|_| native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+    // The current native sampler still includes the selected control Relay as its first
+    // candidate. The follow-up protocol change separates that control hop from the exact
+    // route-plan data Relays; until then the signed count must include that retained control hop.
+    let required_path_count = route_plan
+        .prospective_relays
+        .len()
+        .checked_add(1)
+        .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
     ClientNativeProbeBatchOwner {
         owner: native_preselection::begin_native_preselection(prepared, required_path_count)?,
+        route_plan: Some(route_plan),
+        route_hard_lifetime: admission.hard_lifetime,
         replay: volparossa_protocol::ReplayCache::new(replay_capacity)?,
         armed: Vec::new(),
         proofs: Vec::new(),
@@ -1047,6 +1127,11 @@ impl ClientNativePreselection {
 }
 
 impl ClientNativeRelayReady {
+    /// Total candidate-set paths that must prove native reachability before admission.
+    pub(crate) fn candidate_path_count(&self) -> usize {
+        self.batch.owner.candidate_count()
+    }
+
     /// Number of exact Ready authorities retained for the shared helper lifecycle.
     pub(crate) fn ready_path_count(&self) -> usize {
         self.batch.armed.len() + 1
@@ -1468,6 +1553,100 @@ impl CompletedClientNativeProbe {
     pub(crate) fn completed_path_count(&self) -> usize {
         debug_assert!(self.batch.committed_owner.is_some());
         self.batch.proofs.len()
+    }
+
+    /// Consume terminal native evidence into the existing production route continuation.
+    pub(crate) fn into_route_admission(
+        mut self,
+    ) -> Result<PreparedNativeRouteAdmission, ClientNativeProbeError> {
+        let plan = self
+            .batch
+            .route_plan
+            .take()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        let sampler_owner = self
+            .batch
+            .committed_owner
+            .take()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        let proven_relays = self
+            .batch
+            .proofs
+            .iter()
+            .map(|proof| {
+                let relay = proof.data_relay();
+                (relay.node_id.clone(), relay.peer_id.clone())
+            })
+            .collect::<HashSet<_>>();
+        let expected_relays = std::iter::once(&plan.forwarded_exit.control.identity)
+            .chain(
+                plan.prospective_relays
+                    .iter()
+                    .map(|relay| &relay.relay.identity),
+            )
+            .map(|identity| (identity.wire_node_id.to_vec(), identity.peer_id.to_bytes()))
+            .collect::<HashSet<_>>();
+        if proven_relays.len() != self.batch.proofs.len()
+            || expected_relays.len() != self.batch.proofs.len()
+            || proven_relays != expected_relays
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let now_ms = crate::unix_millis();
+        let setup_ceiling_ms = now_ms
+            .checked_add(
+                u64::try_from(MAXIMUM_SETUP_DURATION.as_millis())
+                    .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+            )
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?
+            .min(plan.earliest_evidence_expiry_ms);
+        let actor_hard_ceiling_ms = std::iter::once(&plan.forwarded_exit.control.identity)
+            .chain(std::iter::once(&plan.forwarded_exit.exit.identity))
+            .chain(
+                plan.prospective_relays
+                    .iter()
+                    .map(|relay| &relay.relay.identity),
+            )
+            .map(|identity| {
+                identity
+                    .advertisement_expires_at_ms
+                    .min(identity.policy_expires_at_ms)
+                    .min(identity.expires_at_ms)
+            })
+            .min()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        let hard_expires_at_ms = now_ms
+            .checked_add(
+                u64::try_from(self.batch.route_hard_lifetime.as_millis())
+                    .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+            )
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?
+            .min(plan.scope.policy.expires_at_ms)
+            .min(actor_hard_ceiling_ms);
+        if hard_expires_at_ms < setup_ceiling_ms {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let limits = RouteSetupLimits::new(
+            MAXIMUM_SETUP_DURATION,
+            super::MAXIMUM_CALL_DURATION,
+            super::MAXIMUM_OUTBOUND_ATTEMPTS,
+        )
+        .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        let continuation = consume_prospective_route_plan(
+            plan,
+            RouteDeadlines {
+                setup_expires_at_ms: setup_ceiling_ms,
+                hard_expires_at_ms,
+            },
+            limits,
+            MAXIMUM_REPLAY_CAPACITY,
+        )
+        .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        Ok(PreparedNativeRouteAdmission {
+            continuation,
+            sampler_owner,
+            remote_retirement: RemoteNativeSamplerRetirement::AwaitingProtocolAcknowledgement,
+        })
     }
 }
 
@@ -5043,12 +5222,13 @@ mod tests {
             .split("impl FreshEvidenceBatch {")
             .nth(1)
             .expect("fresh batch implementation");
-        assert_eq!(batch_impl.matches("fn ").count(), 2);
+        assert_eq!(batch_impl.matches("fn ").count(), 3);
         assert_eq!(
             batch_impl.matches("#[cfg(test)]\n    fn for_test(").count(),
             1
         );
         assert_eq!(batch_impl.matches("fn validate_at(").count(), 1);
+        assert_eq!(batch_impl.matches("fn for_route_admission(").count(), 1);
         assert!(!batch_impl.contains("fn new("));
         assert!(!batch_impl.contains("\n    pub "));
 

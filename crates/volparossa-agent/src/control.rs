@@ -253,6 +253,10 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the control boundary maps every fail-closed route phase to one stable diagnostic"
+)]
 async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
     {
         let mut state = context.state.write().await;
@@ -267,79 +271,121 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             );
         }
     }
-    let (result, diagnostic, log_code) = match Box::pin(context.routes.connect(
+    let (result, diagnostic, log_code, log_level) = match Box::pin(context.routes.connect(
         &context.config,
         &context.discovery,
         &context.helper,
     ))
     .await
     {
-        Ok(ClientRouteProgress::NativeProbeComplete) => (
-            ControlResult::Unavailable,
-            "NATIVE_ROUTE_ADMISSION_UNAVAILABLE",
-            "CONNECT_NATIVE_PROBE_COMPLETE",
+        Ok(ClientRouteProgress::TransportActive) => (
+            ControlResult::Ok,
+            "OK",
+            "CONNECT_ROUTE_ESTABLISHED",
+            LogLevel::Info,
         ),
         Err(ClientRouteConnectError::Busy) => (
             ControlResult::InvalidState,
             "CONNECT_ALREADY_IN_PROGRESS",
             "CONNECT_ALREADY_IN_PROGRESS",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::InvalidProfile) => (
             ControlResult::InvalidRequest,
             "CLIENT_ROUTE_PROFILE_INVALID",
             "CONNECT_PROFILE_INVALID",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::PreselectionUnavailable) => (
             ControlResult::Unavailable,
             "PRESELECTION_UNAVAILABLE",
             "CONNECT_PRESELECTION_UNAVAILABLE",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativePermitUnavailable) => (
             ControlResult::Unavailable,
             "NATIVE_PERMIT_UNAVAILABLE",
             "CONNECT_NATIVE_PERMIT_UNAVAILABLE",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativeRelayUnavailable) => (
             ControlResult::Unavailable,
             "NATIVE_RELAY_READY_UNAVAILABLE",
             "CONNECT_NATIVE_RELAY_READY_UNAVAILABLE",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativeHelperPrepareUnavailable) => (
             ControlResult::Unavailable,
             "NATIVE_HELPER_PREPARE_UNAVAILABLE",
             "CONNECT_NATIVE_HELPER_PREPARE_UNAVAILABLE",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativeAuthorizationUnavailable) => (
             ControlResult::Unavailable,
             "NATIVE_PROBE_AUTHORIZE_UNAVAILABLE",
             "CONNECT_NATIVE_PROBE_AUTHORIZE_UNAVAILABLE",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativeHelperActivateUnavailable) => (
             ControlResult::Unavailable,
             "NATIVE_HELPER_ACTIVATE_UNAVAILABLE",
             "CONNECT_NATIVE_HELPER_ACTIVATE_UNAVAILABLE",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativeStartUnavailable) => (
             ControlResult::Unavailable,
             "NATIVE_PROBE_START_UNAVAILABLE",
             "CONNECT_NATIVE_PROBE_START_UNAVAILABLE",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativeHelperCommitUnavailable) => (
             ControlResult::Unavailable,
             "NATIVE_HELPER_COMMIT_UNAVAILABLE",
             "CONNECT_NATIVE_HELPER_COMMIT_UNAVAILABLE",
+            LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativeProofUnavailable) => (
             ControlResult::Unavailable,
             "NATIVE_PROBE_PROOF_UNAVAILABLE",
             "CONNECT_NATIVE_PROBE_PROOF_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeSamplerRetirementUnavailable) => (
+            ControlResult::Helper,
+            "NATIVE_SAMPLER_RETIREMENT_UNAVAILABLE",
+            "CONNECT_NATIVE_SAMPLER_RETIREMENT_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeRemoteRetirementUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_REMOTE_RETIREMENT_UNAVAILABLE",
+            "CONNECT_NATIVE_REMOTE_RETIREMENT_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeTransportIdentityUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_TRANSPORT_IDENTITY_UNAVAILABLE",
+            "CONNECT_NATIVE_TRANSPORT_IDENTITY_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::RouteAdmissionUnavailable) => (
+            ControlResult::Unavailable,
+            "ROUTE_ADMISSION_UNAVAILABLE",
+            "CONNECT_ROUTE_ADMISSION_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::TransportRuntimeUnavailable) => (
+            ControlResult::Unavailable,
+            "TRANSPORT_RUNTIME_UNAVAILABLE",
+            "CONNECT_TRANSPORT_RUNTIME_UNAVAILABLE",
+            LogLevel::Warn,
         ),
     };
     context
         .state
         .write()
         .await
-        .log(LogLevel::Warn, log_code, unix_millis());
+        .log(log_level, log_code, unix_millis());
     response(
         request_id,
         result,

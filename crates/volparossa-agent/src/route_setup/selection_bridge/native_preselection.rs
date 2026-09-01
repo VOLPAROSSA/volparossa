@@ -185,7 +185,7 @@ pub(super) struct NativeRelayAuthorizationDispatch {
 #[must_use = "a bound native path proof grants no route until a later provider validates it"]
 pub(super) struct BoundNativePathProof {
     _verified_result: VerifiedNativeProbeResult,
-    _candidate: NativeCandidateTemplate,
+    candidate: NativeCandidateTemplate,
 }
 
 struct NativeCandidateProjection {
@@ -514,6 +514,14 @@ pub(super) fn begin_native_preselection_for_test(
 }
 
 impl NativePreselectionAttemptOwner {
+    /// Exact native candidate-set cardinality retained across affine path dispatches.
+    pub(super) fn candidate_count(&self) -> usize {
+        self.candidate_set
+            .data_relays
+            .len()
+            .min(MAX_NATIVE_PROBE_PATHS)
+    }
+
     /// Remove and begin exactly one pending path, preserving all remaining ownership locally.
     pub(super) fn begin_next(
         &mut self,
@@ -558,6 +566,13 @@ impl NativePreselectionAttemptOwner {
     #[cfg(test)]
     pub(super) fn pending_for_test(&self) -> &VecDeque<PendingNativeProbeAuthority> {
         &self.pending
+    }
+}
+
+impl BoundNativePathProof {
+    /// Borrow the exact data-Relay actor whose terminal proof was verified.
+    pub(super) fn data_relay(&self) -> &PreselectionActorBinding {
+        &self.candidate.data_relay
     }
 }
 
@@ -935,7 +950,7 @@ impl AwaitingNativeResult {
         )?;
         Ok(BoundNativePathProof {
             _verified_result: verified_result,
-            _candidate: self.candidate,
+            candidate: self.candidate,
         })
     }
 }

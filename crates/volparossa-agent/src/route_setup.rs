@@ -64,7 +64,8 @@ use volparossa_routing::{
 #[cfg(test)]
 use volparossa_selection::Candidate;
 use volparossa_selection::{
-    FilterRequirements, ProjectedRelayPath, RelaySelectionPolicy, select_projected_relay_paths,
+    FilterRequirements, ProjectedRelayPath, RelaySelectionPolicy, SelectionMix,
+    select_projected_relay_paths,
 };
 use volparossa_wireguard::{HelperContextHandle, PublicWireGuardEndpoint};
 
@@ -102,13 +103,12 @@ enum ClientRouteControlState {
     #[default]
     Idle,
     Connecting,
-    NativeProbeComplete(Box<selection_bridge::CompletedClientNativeProbe>),
 }
 
 /// Detail-free current production boundary reached by a successful native-path bootstrap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClientRouteProgress {
-    NativeProbeComplete,
+    TransportActive,
 }
 
 /// Stable local classification for a failed client-route bootstrap.
@@ -125,6 +125,11 @@ pub(crate) enum ClientRouteConnectError {
     NativeStartUnavailable,
     NativeHelperCommitUnavailable,
     NativeProofUnavailable,
+    NativeSamplerRetirementUnavailable,
+    NativeRemoteRetirementUnavailable,
+    NativeTransportIdentityUnavailable,
+    RouteAdmissionUnavailable,
+    TransportRuntimeUnavailable,
 }
 
 impl ClientRouteControl {
@@ -146,21 +151,30 @@ impl ClientRouteControl {
         let result = begin_client_route(config, discovery).await;
         let result = match result {
             Ok((ready, required_native_paths)) => {
-                Box::pin(complete_required_client_native_paths(
+                match Box::pin(complete_required_client_native_paths(
                     ready,
                     required_native_paths,
                     discovery,
                     helper,
                 ))
                 .await
+                {
+                    Ok(completed) => {
+                        Box::pin(admit_completed_native_route(
+                            completed, config, discovery, helper,
+                        ))
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Err(error) => Err(error),
         };
         let mut state = self.state.lock().await;
         match result {
-            Ok(completed) => {
-                *state = ClientRouteControlState::NativeProbeComplete(Box::new(completed));
-                Ok(ClientRouteProgress::NativeProbeComplete)
+            Ok(progress) => {
+                *state = ClientRouteControlState::Idle;
+                Ok(progress)
             }
             Err(error) => {
                 *state = ClientRouteControlState::Idle;
@@ -172,6 +186,48 @@ impl ClientRouteControl {
     /// Cancels any pre-route affine ownership; helper cleanup remains a separate fail-closed step.
     pub(crate) async fn disconnect(&self) {
         *self.state.lock().await = ClientRouteControlState::Idle;
+    }
+}
+
+async fn admit_completed_native_route(
+    completed: selection_bridge::CompletedClientNativeProbe,
+    _config: &Config,
+    discovery: &DiscoveryControlHandle,
+    helper: &HelperClient,
+) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+    let Ok(admission) = completed.into_route_admission() else {
+        let _ = helper.cleanup_owned().await;
+        return Err(ClientRouteConnectError::RouteAdmissionUnavailable);
+    };
+    let (continuation, sampler_owner, remote_retirement_confirmed) = admission.into_parts();
+    helper
+        .destroy_context(&sampler_owner)
+        .await
+        .map_err(|_| ClientRouteConnectError::NativeSamplerRetirementUnavailable)?;
+    drop(sampler_owner);
+    if !remote_retirement_confirmed {
+        return Err(ClientRouteConnectError::NativeRemoteRetirementUnavailable);
+    }
+    let orchestrator = ProductionRouteOrchestrator::start(helper.clone())
+        .map_err(|_| ClientRouteConnectError::RouteAdmissionUnavailable)?;
+    let attempt = orchestrator.connect(continuation, discovery.clone());
+    match attempt.wait().await {
+        Ok(route) => {
+            // A committed route is not a successful Connect until its configured real transport
+            // owner has also adopted helper descriptors and become usable. The provider signal
+            // needed to construct that owner is the next typed production boundary.
+            let _ = route.disconnect().await;
+            let _ = orchestrator.shutdown().await;
+            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        }
+        Err(ProductionRouteError::NativeTransportIdentityUnavailable) => {
+            let _ = orchestrator.shutdown().await;
+            Err(ClientRouteConnectError::NativeTransportIdentityUnavailable)
+        }
+        Err(_) => {
+            let _ = orchestrator.shutdown().await;
+            Err(ClientRouteConnectError::RouteAdmissionUnavailable)
+        }
     }
 }
 
@@ -217,8 +273,7 @@ async fn complete_required_client_native_paths(
     helper: &HelperClient,
 ) -> Result<selection_bridge::CompletedClientNativeProbe, ClientRouteConnectError> {
     while ready.ready_path_count() < required_paths {
-        let preselection = ready
-            .retain_and_dispatch_next_permit(discovery)
+        let preselection = Box::pin(ready.retain_and_dispatch_next_permit(discovery))
             .await
             .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
         ready = preselection
@@ -226,7 +281,7 @@ async fn complete_required_client_native_paths(
             .await
             .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
     }
-    let result = complete_client_native_probe(ready, discovery, helper).await;
+    let result = Box::pin(complete_client_native_probe(ready, discovery, helper)).await;
     if result.is_err() {
         // A later affine protocol join may have consumed its exact current helper owner. The
         // existing agent-scoped token is the only authority that can close the shared context.
@@ -295,23 +350,99 @@ async fn begin_client_route(
     config: &Config,
     discovery: &DiscoveryControlHandle,
 ) -> Result<(selection_bridge::ClientNativeRelayReady, usize), ClientRouteConnectError> {
-    let (parameters, required_native_paths) = client_preselection_plan(config)?;
+    let (parameters, minimum_native_paths) = client_preselection_plan(config)?;
+    let admission = client_route_admission_profile(config)?;
     let prepared = discovery
         .prepare_client_preselection(parameters)
         .await
         .map_err(map_preselection_error)?;
-    let preselection = selection_bridge::begin_client_native_preselection(
-        prepared,
-        required_native_paths,
-        discovery,
-    )
-    .await
-    .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
+    let preselection =
+        selection_bridge::begin_client_native_preselection(prepared, admission, discovery)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
     let ready = preselection
         .dispatch_relay_ready(discovery)
         .await
         .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
+    let required_native_paths = ready.candidate_path_count();
+    if required_native_paths < minimum_native_paths {
+        return Err(ClientRouteConnectError::NativeRelayUnavailable);
+    }
     Ok((ready, required_native_paths))
+}
+
+fn client_route_admission_profile(
+    config: &Config,
+) -> Result<selection_bridge::ClientRouteAdmissionProfile, ClientRouteConnectError> {
+    let (transport, required_paths) = client_native_path_requirement(config)?;
+    let transport = match transport {
+        Transport::TcpMptcp => SelectionTransport::TcpMptcp,
+        Transport::UdpSinglePath => SelectionTransport::UdpSinglePath,
+        Transport::MultipathQuic => SelectionTransport::MultipathQuic,
+        Transport::Unspecified => return Err(ClientRouteConnectError::InvalidProfile),
+    };
+    let address_family = match config.routing.client_address_family {
+        ClientAddressFamily::Ipv4 => IpFamily::Ipv4,
+        ClientAddressFamily::Ipv6 => IpFamily::Ipv6,
+    };
+    let minimum_capacity = Bandwidth::new(
+        config.routing.client_minimum_upload_mbps,
+        config.routing.client_minimum_download_mbps,
+    )
+    .map_err(|_| ClientRouteConnectError::InvalidProfile)?;
+    let exploration = config.selection.exploration_ratio;
+    if !exploration.is_finite() || !(0.0..=0.5).contains(&exploration) {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    }
+    let mix = SelectionMix {
+        high: 0.8 - exploration,
+        diverse_middle: 0.2,
+        exploration,
+    };
+    let relay_policy = if transport == SelectionTransport::UdpSinglePath {
+        RelaySelectionPolicy {
+            active_paths: 1,
+            minimum_paths: 1,
+            maximum_paths: 1,
+            warm_backup_paths: 0,
+            maximum_rtt_spread_ms: f64::from(config.selection.maximum_rtt_spread_ms),
+            minimum_unique_throughput_gain_ratio: 0.10,
+            mix,
+        }
+    } else {
+        let maximum_paths = usize::from(config.selection.maximum_multipath_paths);
+        let active_paths = usize::from(config.selection.active_multipath_paths).max(required_paths);
+        if active_paths > maximum_paths {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        RelaySelectionPolicy {
+            active_paths,
+            minimum_paths: required_paths,
+            maximum_paths,
+            warm_backup_paths: usize::from(config.selection.warm_backup_paths)
+                .min(maximum_paths.saturating_sub(active_paths)),
+            maximum_rtt_spread_ms: f64::from(config.selection.maximum_rtt_spread_ms),
+            minimum_unique_throughput_gain_ratio: 0.10,
+            mix,
+        }
+    };
+    let hard_lifetime = Duration::from_secs(
+        config
+            .routing
+            .context_ttl_seconds
+            .min(MAXIMUM_RESERVATION_LIFETIME_MS / 1_000),
+    );
+    if hard_lifetime.is_zero() {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    }
+    Ok(selection_bridge::ClientRouteAdmissionProfile::new(
+        transport,
+        minimum_capacity,
+        address_family,
+        mix,
+        relay_policy,
+        hard_lifetime,
+    ))
 }
 
 fn client_preselection_parameters(
@@ -2203,6 +2334,9 @@ pub(crate) struct ProductionRoute {
 /// Compact failure returned to the Connect/runtime seam.
 #[derive(Debug, Error)]
 pub(crate) enum ProductionRouteError {
+    /// A real native-process preflight identity has not yet crossed the production boundary.
+    #[error("production native transport identity is unavailable")]
+    NativeTransportIdentityUnavailable,
     /// Setup failed; `cleanup_pending` means retirement remains quarantined and owned.
     #[error("production route setup failed")]
     Setup {
@@ -2283,8 +2417,14 @@ impl ProductionRouteAttempt {
             .wait()
             .await
             .map(|established| ProductionRoute { established })
-            .map_err(|failure| ProductionRouteError::Setup {
-                cleanup_pending: failure.cleanup == CleanupStatus::Quarantined,
+            .map_err(|failure| {
+                if failure.cause == RouteSetupError::NativeRouteScopeUnavailable {
+                    ProductionRouteError::NativeTransportIdentityUnavailable
+                } else {
+                    ProductionRouteError::Setup {
+                        cleanup_pending: failure.cleanup == CleanupStatus::Quarantined,
+                    }
+                }
             })
     }
 }
