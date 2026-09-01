@@ -1131,10 +1131,21 @@ single clean-build A01--A15 run; the score is not a release claim.
   record. This remains control-plane
   transcript production only and claims no Freshness, readiness, capacity, reservation, route or
   datapath.
-  There is still no outbound production client attempt owner, sampler, A1a exact-set join, or
-  conversion into fresh local evidence. A future client-side boundary must consume and exact-set
-  join its `BoundClientPreselectionTransport`, opaque `BoundForwardedPreselectionTranscript` and
-  retained A1a set before phase-A evidence. A first private A1c precursor passively tracks
+  There is still no outbound production client attempt owner or sampler. A dormant affine join now
+  consumes the completed A1a owner plus one exact `BoundClientPreselectionTransport` per canonical
+  request and purpose-consumes both opaque proof types. It rejects count, order, duplicate or wrong
+  request hash, actor/role/forwarded-control shape, transport, family, wall-window and independent
+  monotonic-window substitution before retaining one bounded endpoint-free record per request. The
+  original candidate snapshot remains the non-cloned sibling throughout. The route-selection child
+  can consume that result directly into its existing private `FreshEvidenceBatch`; no parallel
+  evidence type or public constructor was added. Direct records carry the exact client-Relay prefix
+  and RTT. The forwarded record carries the client-control prefix plus the exact control-signed
+  upstream Exit prefix, while its RTT is explicitly the complete
+  client-control-Exit-control-client request round trip, not a direct client-Exit measurement.
+  This mint records one successful reachability sample, no measured p25, neutral zero proximity and
+  egress-quality values, a configured non-authoritative preselection ceiling, and
+  `network_address_usable = false`. Its false local-block flag means only that no blocklist hit was
+  supplied, not that policy was proved. A private A1c precursor passively tracks
   authenticated libp2p establish/address-change/close lineage under the existing
   384-global/four-per-peer ceilings.
   It counts unusable siblings for uniqueness, accepts prefixes only from exact direct public-IP
@@ -1144,13 +1155,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   witness/binding rechecks the exact Peer ID, `ConnectionId`, non-zero generation and native /24 or
   /48. It has no generic registry/address/prefix accessor; only the purpose-specific client and
   upstream seams may consume its affine witness, and only the affine Relay wrapper may consume an
-  upstream binding into the signed endpoint-free prefix. There is still no A1a join or
-  Fresh-evidence mint. The fake-only 1-200-record evidence boundary and prospective planner remain
-  separate; no checkbox is closed. Production still publishes no usable relay/exit capability, route
-  finalization still fails closed with `ProbeEvidenceUnavailable`, and no production evidence
-  producer, production transaction caller/orchestration or disposable live-network proof for that
-  discovery/evidence pipeline exists. This control-plane responder/forwarder closes no checklist or
-  scorecard row; the fixed alpha score remains **11/100 (11%)**.
+  upstream binding into the signed endpoint-free prefix. The exact join and Fresh mint have no
+  actor/runtime caller; the existing hard filter rejects their output until a separate native-path
+  sampler proves dataplane address usability. No checkbox is closed. Production still publishes no
+  usable relay/exit capability, route finalization still fails closed with
+  `ProbeEvidenceUnavailable`, and no production client transaction, native sampler, route
+  admission, orchestration or disposable live-network proof for that pipeline exists. This closes
+  no scorecard row; the fixed alpha score remains **11/100 (11%)**.
 - [ ] Bootstrap from peerstore, mDNS, multiple independent built-ins, peerlinks, and signed bootstrap files works.
 - [ ] No bootstrap node or DHT record becomes a unique authority or central node catalogue.
 - [ ] `volparossa://peer/...` peerlinks round-trip and validate.
@@ -1169,13 +1180,14 @@ single clean-build A01--A15 run; the score is not a release claim.
 - [x] Peerstore does not persist browsing domains or destination history.
 - [ ] A tested conservative capacity primitive takes the minimum of advertised free, fresh local
   p25 when present, and a conservative preselection capacity ceiling. Snapshot projection
-  deliberately omits stored endpoint/RTT/capacity history; the fake batch accepts scope-bound
-  p25/count, one normalized public /24 or /48, exact advertisement payload hashes and that ceiling
-  only from test observations and preserves sparsely measured peers as bounded exploration. The
-  prefix, hashes and ceiling grant no provenance, reservation or dispatch authority. Explicit
-  validity is bounded by freshness, policy, advertisement and actor capability expiry. The bridge has no
-  runtime caller or observation producer, so the intended actor path remains at zero usable route
-  candidates instead of substituting control-plane or stored evidence.
+  deliberately omits stored endpoint/RTT/capacity history. The dormant exact A1 proof mint supplies
+  no measured p25 and treats its configured ceiling only as a bound, while test observations also
+  cover sparse exploration. Both paths bind one normalized public /24 or /48 and exact
+  advertisement payload hashes. The prefix, hashes and ceiling grant no measured capacity,
+  reservation or dispatch authority. Explicit validity is bounded by freshness, attempt, policy,
+  advertisement and actor capability expiry. The bridge has no runtime caller or native-path
+  sampler and deliberately sets dataplane address usability false, so the actor path remains at
+  zero usable route candidates instead of substituting control-plane or stored evidence.
 - [ ] A bounded 70/20/10 exploration primitive and a peer-only prospective relay selector are
   tested. The latter canonically handles at most 200 candidates, returns at most eight, and applies
   strict control/exit/slate diversity without synthetic complete-path metrics. Its dormant
@@ -1213,8 +1225,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   preselection capacity ceiling and normalized prefix are only test scalars and establish no offer,
   hold, reservation, admission, provenance or dispatch authority. Exact advertisement payload hashes
   bind the projected advertisement, direct/forwarded capabilities, Fresh/authenticated/verified
-  records and later capability re-resolution. A1a and Fresh remain disconnected; no production
-  producer or caller supplies this evidence.
+  records and later capability re-resolution. A dormant exact A1a/A1c proof join now mints the
+  existing private Fresh batch, but no production client owner or native-path sampler calls or
+  completes it; its output remains deliberately unusable for selection.
 - [ ] Relay selection measures and scores the complete client-relay-exit path. The second dormant
   scalar preflight stage can require complete evidence bound to the selected exit and exact relay
   snapshot, but it remains a test-only boundary and is not called or trusted by the new phase-A

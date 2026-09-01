@@ -147,9 +147,10 @@ actor's canonical wire capability.
 Requests and actor envelopes use their own validity clocks. The request must satisfy
 `created_at_ms <= local_now_ms < expires_at_ms`; each signed envelope is independently checked by
 `TimePolicy` and has at most a 60-second signed lifetime. No ordering between control and exit
-timestamps is inferred across their clocks. A later producer must record local arrival wall time
-and monotonic RTT itself. Its aggregate validity ceiling must be the minimum of the local-arrival
-freshness ceiling, the future supervisor's unchanged absolute observation-attempt deadline, every
+timestamps is inferred across their clocks. The service-bound A1c transport proof records local
+arrival wall time and monotonic RTT, and the dormant agent join combines it only with its exact
+request transcript. The aggregate validity ceiling is the minimum of the local-arrival
+freshness ceiling, the supervisor's unchanged absolute observation-attempt deadline, every
 applicable signed receipt/attestation validity window, actor advertisement/capability expiries,
 and the policy expiry. Remote `observed_at_ms` is not local reachability, RTT, or freshness
 evidence.
@@ -180,9 +181,9 @@ outer control envelope and structural nested binding; it does not verify or repl
 nested exit signature. Likewise, a standalone verified Exit receipt is not a forwarded composite
 transcript. The opaque values have no `Clone`, `Debug`, Serde, getter, or decomposition surface.
 Neither is local origin, reachability, RTT, capacity, admission, reservation, route-session, or
-dispatch authority. The wire messages contain no capacity value; future phase A must independently
-supply its conservative local preselection ceiling. Dormant A1a accepts that value only as
-caller-supplied local input; a future production phase-A owner must derive it independently.
+dispatch authority. The wire messages contain no capacity value; dormant A1a independently accepts
+a conservative local preselection ceiling as caller-supplied input. A future production
+client-side owner must derive that ceiling independently.
 
 The agent now has a separate dormant A1a consumer around this protocol boundary. Its
 discovery-private `pub(super)` affine `PreselectionAttemptGate` validates one endpoint-free reduced
@@ -214,9 +215,30 @@ the endpoint-free subject/scope binding, opaque bound transcript tokens, process
 correlation, and attempt ceilings. It has no getter or decomposition surface and contains no local
 socket, connection ID, send/arrival event, prefix-derived direct origin, RTT, reachability,
 `FreshPeerEvidence`, route-session, reservation, or dispatch authority. There is still no
-production client-side attempt owner, transport exact-set join, or Fresh-evidence producer. A1a
-therefore grants no production route authority; the server-side responders and forwarding wrapper
-described below operate independently of this dormant client value.
+production client-side attempt owner, outbound orchestrator, or sampler; A1a therefore does not
+alter production discovery behavior.
+
+The completed A1a owner now has one dormant, affine A1c join. It accepts exactly one
+`BoundClientPreselectionTransport` in canonical request order for each retained transcript and
+purpose-consumes both opaque proof types only after rechecking the exact count, unique request
+hash, actor/role/forwarded-control shape, transport, native family, wall-clock attempt window and
+independent monotonic attempt window. Any mismatch consumes the unusable proof set and returns only
+the cooldown owner. A successful join retains the original snapshot and produces one bounded
+endpoint-free proof record per request; it adds no constructor, clone, serialization or reusable
+dispatch authority.
+
+The route-selection child is the sole production mint for those joined facts and constructs its
+existing private `FreshEvidenceBatch` directly. Direct Relay evidence uses the matching
+client-Relay prefix and round trip. Forwarded evidence uses the client's control-Relay prefix plus
+the exact control-signed upstream Exit prefix; its RTT is the complete
+client-control-Exit-control-client transaction, not a direct client-Exit measurement. The mint
+records one reachability sample, no measured p25, a configured non-authoritative capacity ceiling,
+zero proximity and egress-quality scores, and `network_address_usable = false`. Its
+`locally_blocked = false` means only that no local blocklist hit was supplied, not that policy was
+proved. The existing hard filter therefore rejects the batch until a separate native-path sampler
+adds dataplane evidence. No actor calls this join/mint yet, and it grants no admission, reservation,
+route or datapath authority. The server-side responders and forwarding wrapper described below
+operate independently of this dormant client value.
 
 Discovery composes A1c wire protocols without changing A0 or adding a protobuf wrapper.
 `/volparossa/preselection-observation/4` carries an exact canonical Relay or forwarded
@@ -328,10 +350,10 @@ deadline and responder-disable cleanup. Its `/24` derives from explicitly inject
 lineage; it is not an external-network measurement. This is still control-plane transcript
 production only: it makes no Fresh, readiness, capacity, reservation, route or datapath claim.
 
-A later client-side outbound owner must consume its exact `BoundClientPreselectionTransport` and
-the opaque `BoundForwardedPreselectionTranscript` together with the retained A1a set before any
-observation can become usable. There is still no production client attempt owner, A1a exact-set
-join or Fresh-evidence conversion. The fixed alpha score remains **11/100 (11%)**.
+A future client-side outbound owner must drive the existing exact A1a/A1c join and private
+Fresh-evidence mint. There is still no production client attempt owner, sampler, native
+dataplane-usability proof, route admission, or runtime caller. The fixed alpha score remains
+**11/100 (11%)**.
 
 Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
 relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7

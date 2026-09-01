@@ -153,14 +153,18 @@ control intentionally echoes the exit-subject challenge with its own signed-enve
 time window; it is not separately challenged. The claim contains no host address, endpoint, port,
 capacity, reservation, or dispatch authority, and a control signature is not proof that a
 malicious control reported origin truthfully. The production Relay handler derives the prefix from
-the exact authenticated upstream connection. Prefix validation maps the fixed three- or six-byte wire
+the exact authenticated upstream connection before signing it. Prefix validation maps the fixed
+three- or six-byte wire
 field directly into the shared normalized prefix type and checks its public range; it never
 constructs a representative host IP. That normalized value alone proves neither provenance nor
 origin truth.
 
-A0 still has no production client-side outbound attempt owner, sampler, or conversion into
-`FreshPeerEvidence`, `FreshEvidenceBatch`, or `CandidateEvidence`. Discovery composes
-request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
+A0 still has no production client-side outbound attempt owner or sampler. A dormant affine join can
+now consume the completed A1a owner together with one exact service-bound client transport per
+request, purpose-consume both proof kinds, and mint the route-selection child's existing private
+`FreshEvidenceBatch`. No actor calls that bridge, and its conservative batch deliberately leaves
+native dataplane-address usability false, so it cannot yet produce a selectable `CandidateEvidence`
+or route. Discovery composes request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
 dispatch one request, bind an opaque matching response arrival sealed and timestamped by the
 originating service's private pump to a current unique connection proof, or cancel that exact
 dispatch; the affine Relay forwarding wrapper owns upstream sending separately.
@@ -368,30 +372,44 @@ connection and all lifecycle cleanup paths above. The test `/24` is derived from
 injected public endpoint lineage and is not external-network evidence. Neither receipt nor wrapper
 claims origin, RTT, capacity, Fresh evidence, reservation, route, admission, readiness, or datapath
 authority. The production agent supplies the policy and permanent signer, but there is still no
-client-side outbound attempt owner, A1a exact-set join, or Fresh-evidence mint. A future application
-owner must supply those remaining authenticated transaction semantics.
+client-side outbound attempt owner or sampler. The dormant exact-set join and private Fresh-evidence
+mint described below therefore have no runtime caller.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than
 provenance: the path retains no full host IP, sets the legacy candidate-origin field to `None`, and
 uses one opaque /24 or /48 value in the shared hard-filter, exit, prospective-relay and complete-path
 kernels. Legacy full-origin selector entry points remain source-compatible boundary adapters. A1b
-adds no sampler, handler, transport evidence, production caller or usable production candidate;
-A1c remains required before any A1a observation may become Fresh evidence.
+adds no sampler, production caller or usable production candidate. The A1a/A1c bridge now consumes
+the exact opaque transport and transcript proofs, but deliberately cannot prove native dataplane
+usability.
 
-A new dormant, fake-only phase-A boundary consumes one non-cloneable `FreshEvidenceBatch` before it
-builds a `ProspectiveRoutePlan`. The batch has a non-zero opaque ID, contains exactly the 1-200
+A dormant phase-A boundary consumes one non-cloneable `FreshEvidenceBatch` before it builds a
+`ProspectiveRoutePlan`. In addition to test fixtures, its private production mint now requires the
+exact retained A1a candidate set and one purpose-consumed A1c transport plus cryptographic
+transcript for every request. It rejects count, order, request hash, actor, forwarded-control,
+transport, family, wall-window and monotonic-window substitution before minting. The batch has a non-zero opaque ID, contains exactly the 1-200
 direct-relay plus forwarded-exit identities in the actor snapshot (no missing or unrelated record),
 and binds every observation to role, node/Peer ID, capability public key, advertisement
 sequence/expiry/payload hash, transport, address family, policy version/hash/expiry, observation
 time, explicit `valid_until`, one normalized public IPv4 /24 or IPv6 /48, and a conservative
 preselection capacity ceiling. A relay observation has the Relay role and no forwarded-control
 field. An exit observation has the Exit role and carries the exact forwarded control tuple,
-including its advertisement hash plus key and advertisement/capability expiries. The test-only
-ceiling and prefix are only local selector input: they establish no offer, hold, reservation,
-admission, provenance or dispatch authority. Trusted time must satisfy
+including its advertisement hash plus key and advertisement/capability expiries. A direct record's
+RTT is its exact client-Relay request round trip. The forwarded record's RTT spans the complete
+client-control-Exit-control-client request round trip and is copied conservatively to its control
+and Exit evidence; it is never represented as a direct client-Exit measurement. The configured
+ceiling and endpoint-free prefixes are only local selector input: they establish no measured
+capacity, offer, hold, reservation, admission or dispatch authority. Trusted time must satisfy
 `observed_at <= now < valid_until`; the observation is at most 60 seconds old and `valid_until`
 cannot exceed freshness, policy, advertisement or capability expiry.
+
+The proof mint records one successful reachability sample, no measured p25, neutral zero proximity
+and egress-quality scores, and no native dataplane-address proof. `locally_blocked = false` means
+only that this proof input supplied no local blocklist hit; it is not affirmative policy evidence.
+Consequently the existing hard filter rejects every such batch until a separate native-path
+sampler supplies the missing dataplane evidence. The bridge grants no discovery dispatch,
+reservation or route authority and has no production caller.
 
 Phase A still selects the exclusively forwarded exit first. It then uses only hard-filtered local
 peer evidence and the existing randomized 70/20/10 score bands to choose a seed-dependent
