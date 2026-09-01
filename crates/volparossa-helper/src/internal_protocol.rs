@@ -134,6 +134,7 @@ pub(crate) enum InternalTransportSocketKind {
     MptcpConnected = 1,
     MptcpListener = 2,
     QuicUdpUnconnected = 3,
+    NativeProbeUdpConnected = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, prost::Enumeration)]
@@ -1308,7 +1309,8 @@ fn validate_transport_tuple(
     }
     let local = transport_address(local.ok_or(InternalProtocolError::Invalid)?)?;
     match kind {
-        InternalTransportSocketKind::MptcpConnected => {
+        InternalTransportSocketKind::MptcpConnected
+        | InternalTransportSocketKind::NativeProbeUdpConnected => {
             let remote = transport_address(remote.ok_or(InternalProtocolError::Invalid)?)?;
             if std::mem::discriminant(&local) != std::mem::discriminant(&remote) || local == remote
             {

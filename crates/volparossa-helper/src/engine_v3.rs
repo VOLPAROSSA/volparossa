@@ -29,8 +29,9 @@ use volparossa_routing::{
     IngressSocketKind, IngressSocketReady, LeaseActivation, LeasePlan, MptcpEndpointMode,
     PrepareClientIngress, PrepareLeaseBatch, PreparedClientIngress, PreparedIngressSocket,
     PreparedLease, PreparedLeaseBatch, PublicUdpEndpoint, REQUIRED_INGRESS_SOCKETS,
-    ReconcileExpiredPrepare, ReconciledExpiredPrepare, RemoveMptcpEndpoint, TransportSocketReady,
-    UnderlayEvidence, WireguardRole, helper_request, helper_response, operation_digest,
+    ReconcileExpiredPrepare, ReconciledExpiredPrepare, RemoveMptcpEndpoint,
+    TransportSocketKind as RoutingTransportSocketKind, TransportSocketReady, UnderlayEvidence,
+    WireguardRole, helper_request, helper_response, operation_digest,
 };
 use zeroize::Zeroizing;
 
@@ -3763,6 +3764,16 @@ impl HelperEngine {
         value: &AcquireTransportSocket,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
+        let descriptor_kind = match RoutingTransportSocketKind::try_from(value.descriptor_kind) {
+            Ok(kind) => kind,
+            Err(_) => return Some(execution(invalid_response(request), None)),
+        };
+        let (required_context_phase, backend_phase) =
+            if descriptor_kind == RoutingTransportSocketKind::NativeProbeUdpConnected {
+                (ContextPhase::Activated, BackendPhase::Activated)
+            } else {
+                (ContextPhase::Committed, BackendPhase::Committed)
+            };
         let backend = Arc::clone(&self.inner.backend);
         let query_binding = BackendRuntimeBinding {
             helper_runtime_id: self.inner.runtime_id,
@@ -3841,7 +3852,7 @@ impl HelperEngine {
                     None,
                 ));
             }
-            if context.phase != ContextPhase::Committed {
+            if context.phase != required_context_phase {
                 return Some(execution(
                     response(request, phase_result(context.phase), "INVALID_STATE", None),
                     None,
@@ -3880,7 +3891,7 @@ impl HelperEngine {
                 digest,
                 context_id,
                 generation,
-                Some(ContextPhase::Committed),
+                Some(required_context_phase),
                 OperationKind::Acquire,
                 lineage,
                 Instant::now() + self.inner.backend_timeout,
@@ -3897,7 +3908,7 @@ impl HelperEngine {
         let backend = Arc::clone(&self.inner.backend);
         let binding = BackendBinding::for_owner(
             &token,
-            BackendPhase::Committed,
+            backend_phase,
             BackendAction::AcquireTransportSocket,
             token.call_deadline(),
         );
@@ -3971,7 +3982,7 @@ impl HelperEngine {
             && state.contexts.get(&context_id).is_some_and(|context| {
                 context.generation == operation.generation
                     && context_backend_lineage(context_id, context) == token.lineage()
-                    && context.phase == ContextPhase::Committed
+                    && context.phase == required_context_phase
                     && matches_handle(&context.handle, &value.context_handle)
                     && context.leases.contains_key(&(value.path_id, value.role))
                     && deadline_live(

@@ -182,7 +182,16 @@ pub enum TransportSocketKind {
     MptcpListener = 2,
     /// Bound, explicitly unconnected UDP socket for Quinn.
     QuicUdpUnconnected = 3,
+    /// Probe-only connected UDP socket available only while the exact context is Activated.
+    NativeProbeUdpConnected = 4,
 }
+
+/// Fixed Client-side port for one helper-scoped native challenge datagram.
+pub const NATIVE_PROBE_CLIENT_PORT: u16 = 41_910;
+/// Fixed Exit-side port for one helper-scoped native challenge datagram.
+pub const NATIVE_PROBE_EXIT_PORT: u16 = 41_911;
+/// Exact native challenge/response payload size.
+pub const NATIVE_PROBE_DATAGRAM_BYTES: usize = 32;
 
 /// Concrete transport address; wildcard addresses, zero ports and names are unrepresentable.
 #[derive(Clone, PartialEq, Message)]
@@ -1802,7 +1811,7 @@ fn validate_transport_tuple(
     let local =
         transport_address(local.ok_or(HelperProtocolError::Invalid("transport local address"))?)?;
     match kind {
-        TransportSocketKind::MptcpConnected => {
+        TransportSocketKind::MptcpConnected | TransportSocketKind::NativeProbeUdpConnected => {
             let remote = transport_address(
                 remote.ok_or(HelperProtocolError::Invalid("transport remote address"))?,
             )?;

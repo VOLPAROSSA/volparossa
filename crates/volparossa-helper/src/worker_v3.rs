@@ -2474,11 +2474,11 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         WorkerProbeOutcome::Committed(probed)
     }
 
-    /// Project one exact immutable committed Client/Exit lease accepted by the transport factory.
+    /// Project one exact immutable Client/Exit lease accepted by the transport factory.
     ///
     /// The later request supplies only a tuple to check. The route, endpoint role and overlay
     /// address remain derived from the already committed worker-owned `WireGuard` resource.
-    fn committed_transport_lease(
+    fn transport_lease(
         &self,
         operation: &AcquireTransportSocket,
     ) -> Result<CommittedSocketLease, InternalWorkerResult> {
@@ -2489,20 +2489,32 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 return Err(InternalWorkerResult::Invalid);
             }
         };
-        let Some(WorkerLeaseLifecycle::Committed(ownerships)) = self.lease.as_ref() else {
-            return Err(if self.lease.is_some() {
-                InternalWorkerResult::Conflict
-            } else {
-                InternalWorkerResult::NotFound
-            });
+        let kind = InternalTransportSocketKind::try_from(operation.descriptor_kind)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        let ownerships = match (kind, self.lease.as_ref()) {
+            (
+                InternalTransportSocketKind::NativeProbeUdpConnected,
+                Some(WorkerLeaseLifecycle::Activated(ownerships)),
+            )
+            | (
+                InternalTransportSocketKind::MptcpConnected
+                | InternalTransportSocketKind::MptcpListener
+                | InternalTransportSocketKind::QuicUdpUnconnected,
+                Some(WorkerLeaseLifecycle::Committed(ownerships)),
+            ) => ownerships,
+            _ => {
+                return Err(if self.lease.is_some() {
+                    InternalWorkerResult::Conflict
+                } else {
+                    InternalWorkerResult::NotFound
+                });
+            }
         };
         let path_id = u8::try_from(operation.path_id)
             .ok()
             .filter(|path_id| (1..=8).contains(path_id))
             .ok_or(InternalWorkerResult::Invalid)?;
         let role = InternalEndpointRole::try_from(operation.role)
-            .map_err(|_| InternalWorkerResult::Invalid)?;
-        let kind = InternalTransportSocketKind::try_from(operation.descriptor_kind)
             .map_err(|_| InternalWorkerResult::Invalid)?;
         let expected_routing_role =
             routing_endpoint_role(operation.role).ok_or(InternalWorkerResult::Invalid)?;
@@ -2529,6 +2541,10 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 InternalEndpointRole::Exit,
                 InternalTransportSocketKind::MptcpListener,
                 None
+            ) | (
+                InternalEndpointRole::Client | InternalEndpointRole::Exit,
+                InternalTransportSocketKind::NativeProbeUdpConnected,
+                Some(_)
             )
         );
         if role != expected_role
@@ -3478,7 +3494,7 @@ fn acquire_transport_child_context(
     }) else {
         return Ok((InternalWorkerResult::NotFound, None, None));
     };
-    let lease = match context.committed_transport_lease(acquire) {
+    let lease = match context.transport_lease(acquire) {
         Ok(lease) => lease,
         Err(result) => return Ok((result, None, None)),
     };
@@ -7415,14 +7431,22 @@ fn transition(
         (StablePhase::Activated, Some(Operation::ProbeCommitLeases(_))) => {
             Ok((StablePhase::Committed, false))
         }
+        (StablePhase::Activated, Some(Operation::AcquireTransportSocket(value)))
+            if InternalTransportSocketKind::try_from(value.descriptor_kind)
+                == Ok(InternalTransportSocketKind::NativeProbeUdpConnected) =>
+        {
+            Ok((StablePhase::Activated, false))
+        }
         (
             StablePhase::Committed,
-            Some(
-                Operation::AddMptcpEndpoint(_)
-                | Operation::RemoveMptcpEndpoint(_)
-                | Operation::AcquireTransportSocket(_),
-            ),
+            Some(Operation::AddMptcpEndpoint(_) | Operation::RemoveMptcpEndpoint(_)),
         ) => Ok((StablePhase::Committed, false)),
+        (StablePhase::Committed, Some(Operation::AcquireTransportSocket(value)))
+            if InternalTransportSocketKind::try_from(value.descriptor_kind)
+                != Ok(InternalTransportSocketKind::NativeProbeUdpConnected) =>
+        {
+            Ok((StablePhase::Committed, false))
+        }
         (_, Some(Operation::DestroyContext(_))) => Ok((phase, true)),
         (_, Some(Operation::DestroyClientIngress(_))) => Ok((phase, true)),
         _ => Err(WorkerV3Error::Conflict),
@@ -14040,7 +14064,7 @@ mod tests {
             let (context, exact, overlay) =
                 committed_quic_udp_worker_fixture(context_seed, context_role, endpoint_role);
             assert_eq!(
-                context.committed_transport_lease(&exact),
+                context.transport_lease(&exact),
                 Ok(CommittedSocketLease {
                     route_context_id,
                     path_id: 1,
@@ -14068,7 +14092,7 @@ mod tests {
                 _ => unreachable!("fixture endpoint role"),
             };
             assert_eq!(
-                context.committed_transport_lease(&mptcp),
+                context.transport_lease(&mptcp),
                 Ok(CommittedSocketLease {
                     route_context_id,
                     path_id: 1,
@@ -14087,7 +14111,7 @@ mod tests {
                 },
             ] {
                 assert_eq!(
-                    context.committed_transport_lease(&changed),
+                    context.transport_lease(&changed),
                     Err(InternalWorkerResult::Invalid)
                 );
             }
@@ -14104,7 +14128,7 @@ mod tests {
                 _ => unreachable!("fixture endpoint role"),
             };
             assert_eq!(
-                context.committed_transport_lease(&wrong_mptcp_kind),
+                context.transport_lease(&wrong_mptcp_kind),
                 Err(InternalWorkerResult::Invalid)
             );
         }
@@ -14121,7 +14145,7 @@ mod tests {
             .map(|offset| acquire_start + offset)
             .expect("production child Acquire end");
         let acquire = &source[acquire_start..acquire_end];
-        assert!(acquire.contains("context.committed_transport_lease(acquire)"));
+        assert!(acquire.contains("context.transport_lease(acquire)"));
         assert!(acquire.contains("create_transport_socket(lease, acquire)"));
         assert!(acquire.contains("Some(descriptor)"));
 

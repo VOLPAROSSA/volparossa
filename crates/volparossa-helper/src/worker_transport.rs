@@ -1129,6 +1129,9 @@ pub(crate) fn create_transport_socket(
         }
         TransportSocketExpectation::MptcpListener { local } => create_mptcp_listener(local),
         TransportSocketExpectation::UdpUnconnected { local } => create_bound_udp(local),
+        TransportSocketExpectation::NativeProbeUdpConnected { local, remote } => {
+            create_connected_udp(local, remote)
+        }
     }
 }
 
@@ -1183,6 +1186,10 @@ enum TransportSocketExpectation {
     UdpUnconnected {
         local: SocketAddr,
     },
+    NativeProbeUdpConnected {
+        local: SocketAddr,
+        remote: SocketAddr,
+    },
 }
 
 fn transport_socket_expectation(
@@ -1216,6 +1223,14 @@ fn transport_socket_expectation(
         (InternalTransportSocketKind::QuicUdpUnconnected, None) => {
             Ok(TransportSocketExpectation::UdpUnconnected { local })
         }
+        (InternalTransportSocketKind::NativeProbeUdpConnected, Some(remote)) => {
+            let remote = socket_address(remote)?;
+            if std::mem::discriminant(&local) != std::mem::discriminant(&remote) || local == remote
+            {
+                return Err(WorkerTransportError::Invalid);
+            }
+            Ok(TransportSocketExpectation::NativeProbeUdpConnected { local, remote })
+        }
         _ => Err(WorkerTransportError::Invalid),
     }
 }
@@ -1232,6 +1247,9 @@ fn validate_transport_socket(
             validate_mptcp_listener(socket, local)
         }
         TransportSocketExpectation::UdpUnconnected { local } => validate_bound_udp(socket, local),
+        TransportSocketExpectation::NativeProbeUdpConnected { local, remote } => {
+            validate_connected_udp(socket, local, remote)
+        }
     }
 }
 
@@ -1263,7 +1281,11 @@ fn validate_committed_request(
         return Err(WorkerTransportError::Invalid);
     }
     match (kind, request.expected_remote.as_ref()) {
-        (InternalTransportSocketKind::MptcpConnected, Some(remote)) => {
+        (
+            InternalTransportSocketKind::MptcpConnected
+            | InternalTransportSocketKind::NativeProbeUdpConnected,
+            Some(remote),
+        ) => {
             let remote = socket_address(remote)?;
             if std::mem::discriminant(&local) != std::mem::discriminant(&remote) || local == remote
             {
@@ -1287,10 +1309,12 @@ fn role_allows_socket(role: InternalEndpointRole, kind: InternalTransportSocketK
             InternalEndpointRole::Client,
             InternalTransportSocketKind::MptcpConnected
                 | InternalTransportSocketKind::QuicUdpUnconnected
+                | InternalTransportSocketKind::NativeProbeUdpConnected
         ) | (
             InternalEndpointRole::Exit,
             InternalTransportSocketKind::MptcpListener
                 | InternalTransportSocketKind::QuicUdpUnconnected
+                | InternalTransportSocketKind::NativeProbeUdpConnected
         )
     )
 }
@@ -1349,6 +1373,22 @@ fn create_bound_udp(local: SocketAddr) -> Result<OwnedFd, WorkerTransportError> 
     Ok(socket.into())
 }
 
+fn create_connected_udp(
+    local: SocketAddr,
+    remote: SocketAddr,
+) -> Result<OwnedFd, WorkerTransportError> {
+    let socket = Socket::new(
+        Domain::for_address(local),
+        Type::DGRAM.nonblocking().cloexec(),
+        Some(Protocol::UDP),
+    )?;
+    configure_exact_address_family(&socket, local)?;
+    socket.bind(&SockAddr::from(local))?;
+    socket.connect(&SockAddr::from(remote))?;
+    validate_connected_udp(&socket, local, remote)?;
+    Ok(socket.into())
+}
+
 fn wait_for_connect(socket: &Socket) -> Result<(), WorkerTransportError> {
     let mut descriptors = [PollFd::new(socket.as_fd(), PollFlags::POLLOUT)];
     if poll(&mut descriptors, MPTCP_CONNECT_TIMEOUT_MILLISECONDS).map_err(errno_io)? == 0 {
@@ -1397,6 +1437,18 @@ fn validate_mptcp_listener(socket: &Socket, local: SocketAddr) -> Result<(), Wor
 fn validate_bound_udp(socket: &Socket, local: SocketAddr) -> Result<(), WorkerTransportError> {
     validate_common(socket, Type::DGRAM, Protocol::UDP, local, false)?;
     if peer_is_connected(socket)? {
+        return Err(WorkerTransportError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate_connected_udp(
+    socket: &Socket,
+    local: SocketAddr,
+    remote: SocketAddr,
+) -> Result<(), WorkerTransportError> {
+    validate_common(socket, Type::DGRAM, Protocol::UDP, local, false)?;
+    if socket.peer_addr()?.as_socket() != Some(remote) {
         return Err(WorkerTransportError::Invalid);
     }
     Ok(())
@@ -1489,7 +1541,7 @@ mod tests {
     use std::{
         env,
         io::{IoSlice, Read as _, Write as _},
-        net::UdpSocket,
+        net::{Ipv6Addr, UdpSocket},
         os::fd::{AsRawFd as _, IntoRawFd as _, OwnedFd},
         os::unix::net::UnixStream,
         process::{Command, Stdio},
@@ -1517,6 +1569,7 @@ mod tests {
         "VOLPAROSSA_ADOPTED_SOCKET_NAMESPACE_TEST_CHILD";
     const MPTCP_TRANSPORT_NAMESPACE_CHILD_ENV: &str =
         "VOLPAROSSA_MPTCP_TRANSPORT_NAMESPACE_TEST_CHILD";
+    const NATIVE_PROBE_NAMESPACE_CHILD_ENV: &str = "VOLPAROSSA_NATIVE_PROBE_NAMESPACE_TEST_CHILD";
 
     fn address(octets: [u8; 4], port: u32) -> InternalSocketAddress {
         InternalSocketAddress {
@@ -2829,6 +2882,138 @@ mod tests {
         assert!(
             output.status.success(),
             "disposable MPTCP transport proof failed\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn activated_probe_sockets_exchange_exact_challenge_in_disposable_netns() {
+        if env::var_os(NATIVE_PROBE_NAMESPACE_CHILD_ENV).is_some() {
+            for arguments in [
+                ["link", "set", "lo", "up"].as_slice(),
+                ["-6", "address", "add", "fd76::1/128", "dev", "lo", "nodad"].as_slice(),
+                ["-6", "address", "add", "fd76::4/128", "dev", "lo", "nodad"].as_slice(),
+            ] {
+                let status = Command::new("ip")
+                    .args(arguments)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .expect("run ip inside disposable native-probe namespace");
+                assert!(status.success(), "ip {arguments:?} failed");
+            }
+
+            let context_id = [0x6e; 16];
+            let path_id = 1;
+            let client_address = SocketAddr::from((
+                "fd76::1".parse::<Ipv6Addr>().expect("client address"),
+                volparossa_routing::NATIVE_PROBE_CLIENT_PORT,
+            ));
+            let exit_address = SocketAddr::from((
+                "fd76::4".parse::<Ipv6Addr>().expect("Exit address"),
+                volparossa_routing::NATIVE_PROBE_EXIT_PORT,
+            ));
+
+            let mut exit_request = acquire_request_for_local(
+                InternalTransportSocketKind::NativeProbeUdpConnected,
+                exit_address,
+            );
+            let exit_operation = acquire_operation_mut(&mut exit_request);
+            exit_operation.route_context_id = context_id.to_vec();
+            exit_operation.path_id = path_id;
+            exit_operation.role = InternalEndpointRole::Exit as i32;
+            exit_operation.expected_remote = Some(internal_address(client_address));
+            let exit_descriptor = create_transport_socket(
+                CommittedSocketLease {
+                    route_context_id: context_id,
+                    path_id,
+                    role: InternalEndpointRole::Exit,
+                    overlay_address: exit_address.ip(),
+                },
+                exit_operation,
+            )
+            .expect("create activated Exit probe socket");
+
+            let mut client_request = acquire_request_for_local(
+                InternalTransportSocketKind::NativeProbeUdpConnected,
+                client_address,
+            );
+            let client_operation = acquire_operation_mut(&mut client_request);
+            client_operation.route_context_id = context_id.to_vec();
+            client_operation.path_id = path_id;
+            client_operation.role = InternalEndpointRole::Client as i32;
+            client_operation.expected_remote = Some(internal_address(exit_address));
+            let client_descriptor = create_transport_socket(
+                CommittedSocketLease {
+                    route_context_id: context_id,
+                    path_id,
+                    role: InternalEndpointRole::Client,
+                    overlay_address: client_address.ip(),
+                },
+                client_operation,
+            )
+            .expect("create activated Client probe socket");
+
+            let exit_socket = UdpSocket::from(exit_descriptor);
+            let client_socket = UdpSocket::from(client_descriptor);
+            exit_socket
+                .set_nonblocking(false)
+                .expect("blocking Exit fixture");
+            client_socket
+                .set_nonblocking(false)
+                .expect("blocking Client fixture");
+            let challenge = [0xa5; volparossa_routing::NATIVE_PROBE_DATAGRAM_BYTES];
+            assert_eq!(
+                client_socket.send(&challenge).expect("send challenge"),
+                challenge.len()
+            );
+            let mut observed = [0_u8; volparossa_routing::NATIVE_PROBE_DATAGRAM_BYTES];
+            assert_eq!(
+                exit_socket.recv(&mut observed).expect("receive challenge"),
+                observed.len()
+            );
+            assert_eq!(observed, challenge);
+            assert_eq!(
+                exit_socket.send(&observed).expect("send response"),
+                observed.len()
+            );
+            let mut response = [0_u8; volparossa_routing::NATIVE_PROBE_DATAGRAM_BYTES];
+            assert_eq!(
+                client_socket.recv(&mut response).expect("receive response"),
+                response.len()
+            );
+            assert_eq!(response, challenge);
+            return;
+        }
+
+        let executable = env::current_exe().expect("current helper test executable");
+        let output = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net"])
+            .arg(executable)
+            .arg("--exact")
+            .arg(
+                "worker_transport::tests::activated_probe_sockets_exchange_exact_challenge_in_disposable_netns",
+            )
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(NATIVE_PROBE_NAMESPACE_CHILD_ENV, "1")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn disposable native-probe namespace test");
+        if unprivileged_user_namespace_policy_denied(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ) {
+            eprintln!("skipped live native-probe socket proof: user namespaces denied by policy");
+            return;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "disposable native-probe socket proof failed\nstdout: {stdout}\nstderr: {stderr}"
         );
     }
 

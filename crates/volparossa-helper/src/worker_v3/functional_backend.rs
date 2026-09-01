@@ -38,10 +38,12 @@ use volparossa_routing::{
     AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeaseBatch,
     AddMptcpEndpoint, ClosedPreparePlan, ContextRole, DestroyClientIngress, HELPER_HANDLE_BYTES,
     IngressAddressFamily, IngressSocketAddress, IngressSocketKind, LeasePlan as RoutingLeasePlan,
-    MptcpEndpointMode, PrepareClientIngress, PrepareIntent, PrepareLeaseBatch, PublicUdpEndpoint,
-    RemoveMptcpEndpoint, TransportSocketAddress, TransportSocketKind,
-    UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
+    MptcpEndpointMode, NATIVE_PROBE_CLIENT_PORT, NATIVE_PROBE_EXIT_PORT, PrepareClientIngress,
+    PrepareIntent, PrepareLeaseBatch, PublicUdpEndpoint, RemoveMptcpEndpoint,
+    TransportSocketAddress, TransportSocketKind, UnderlayEvidence as RoutingUnderlayEvidence,
+    WireguardRole,
 };
+use volparossa_wireguard::overlay_addresses;
 
 use crate::{
     deadline::HardDeadline,
@@ -1078,7 +1080,7 @@ impl FunctionalAlphaLeaseBackend {
         let operation_deadline = worker_operation_deadline(deadline)?;
         let generation = {
             let state = lock_state(&self.state);
-            validate_committed_acquire_entry(exact_entry(state.as_ref(), key)?, &value, &internal)?
+            validate_acquire_entry(exact_entry(state.as_ref(), key)?, &value, &internal)?
         };
         let request = worker_request(
             worker_attempt_request_id(key, STAGE_ACQUIRE_TRANSPORT, binding),
@@ -1107,7 +1109,7 @@ impl FunctionalAlphaLeaseBackend {
         let still_exact = {
             let state = lock_state(&self.state);
             exact_entry(state.as_ref(), key).is_ok_and(|entry| {
-                validate_committed_acquire_entry(entry, &value, &internal) == Ok(generation)
+                validate_acquire_entry(entry, &value, &internal) == Ok(generation)
             })
         };
         if !still_exact || deadline.ensure_remaining().is_err() || ensure_hard_is_live(key).is_err()
@@ -2762,7 +2764,7 @@ fn validate_acquire_transport_binding(
         (role.context, descriptor_kind),
         (
             ContextRole::Client | ContextRole::Exit,
-            TransportSocketKind::QuicUdpUnconnected
+            TransportSocketKind::QuicUdpUnconnected | TransportSocketKind::NativeProbeUdpConnected
         ) | (ContextRole::Client, TransportSocketKind::MptcpConnected)
             | (ContextRole::Exit, TransportSocketKind::MptcpListener)
     );
@@ -2791,6 +2793,30 @@ fn validate_acquire_transport_binding(
                 }),
             )
         }
+        TransportSocketKind::NativeProbeUdpConnected => {
+            let (remote_address, remote_port) =
+                parse_overlay_socket_address(value.expected_remote.as_ref())?;
+            if remote_address == local_address
+                || !native_probe_transport_tuple_matches(
+                    context_id,
+                    value.path_id,
+                    value.role,
+                    local_address,
+                    local_port,
+                    remote_address,
+                    remote_port,
+                )
+            {
+                return Err(BackendError::Invalid);
+            }
+            (
+                InternalTransportSocketKind::NativeProbeUdpConnected,
+                Some(InternalSocketAddress {
+                    address: remote_address.octets().to_vec(),
+                    port: u32::from(remote_port),
+                }),
+            )
+        }
         TransportSocketKind::MptcpListener => {
             if value.expected_remote.is_some() {
                 return Err(BackendError::Invalid);
@@ -2799,15 +2825,21 @@ fn validate_acquire_transport_binding(
         }
         TransportSocketKind::Unspecified => return Err(BackendError::Invalid),
     };
-    // `operation_generation` is the engine's exact current Committed-context generation. The
+    let (required_backend_phase, required_context_phase) =
+        if descriptor_kind == TransportSocketKind::NativeProbeUdpConnected {
+            (BackendPhase::Activated, ContextPhase::Activated)
+        } else {
+            (BackendPhase::Committed, ContextPhase::Committed)
+        };
+    // `operation_generation` is the engine's exact current stable-context generation. The
     // lineage's `backend_generation` deliberately remains the stable Prepare generation across
     // Activate and Probe/Commit. The engine owns exact current-generation checks before dispatch
     // and again before accepting the completion; this adapter must validate both identities
     // without incorrectly requiring them to be equal.
     if binding.action != BackendAction::AcquireTransportSocket
-        || binding.phase != BackendPhase::Committed
+        || binding.phase != required_backend_phase
         || binding.operation_kind != OperationKind::Acquire
-        || binding.prior_phase != Some(ContextPhase::Committed)
+        || binding.prior_phase != Some(required_context_phase)
         || binding.operation_sequence == 0
         || binding.operation_generation == 0
         || binding.request_id.iter().all(|byte| *byte == 0)
@@ -2943,7 +2975,49 @@ const fn public_transport_kind_to_internal(
         TransportSocketKind::QuicUdpUnconnected => {
             Some(InternalTransportSocketKind::QuicUdpUnconnected)
         }
+        TransportSocketKind::NativeProbeUdpConnected => {
+            Some(InternalTransportSocketKind::NativeProbeUdpConnected)
+        }
         TransportSocketKind::Unspecified => None,
+    }
+}
+
+fn native_probe_transport_tuple_matches(
+    context_id: [u8; 16],
+    path_id: u32,
+    role: i32,
+    local_address: Ipv6Addr,
+    local_port: u16,
+    remote_address: Ipv6Addr,
+    remote_port: u16,
+) -> bool {
+    let Ok(path_id) = u8::try_from(path_id) else {
+        return false;
+    };
+    let Ok(addresses) = overlay_addresses(context_id, path_id) else {
+        return false;
+    };
+    match WireguardRole::try_from(role) {
+        Ok(WireguardRole::Client) => {
+            (local_address, local_port, remote_address, remote_port)
+                == (
+                    addresses.client,
+                    NATIVE_PROBE_CLIENT_PORT,
+                    addresses.exit,
+                    NATIVE_PROBE_EXIT_PORT,
+                )
+        }
+        Ok(WireguardRole::Exit) => {
+            (local_address, local_port, remote_address, remote_port)
+                == (
+                    addresses.exit,
+                    NATIVE_PROBE_EXIT_PORT,
+                    addresses.client,
+                    NATIVE_PROBE_CLIENT_PORT,
+                )
+        }
+        Ok(WireguardRole::Unspecified | WireguardRole::RelayClient | WireguardRole::RelayExit)
+        | Err(_) => false,
     }
 }
 
@@ -2972,7 +3046,7 @@ fn ensure_hard_is_live(key: OpenLineageKey) -> Result<(), BackendError> {
     Ok(())
 }
 
-fn validate_committed_acquire_entry(
+fn validate_acquire_entry(
     entry: &OpenLeaseEntry,
     value: &AcquireTransportSocket,
     internal: &InternalAcquireTransportSocket,
@@ -3009,9 +3083,16 @@ fn validate_committed_acquire_entry(
     let exact_prepare_local = prepare.local_overlay_address.as_ref().is_some_and(|local| {
         local.prefix_length == 128 && local.address.as_slice() == expected_overlay_bytes
     });
+    let required_phase = if TransportSocketKind::try_from(value.descriptor_kind)
+        == Ok(TransportSocketKind::NativeProbeUdpConnected)
+    {
+        OpenLeasePhase::Activated
+    } else {
+        OpenLeasePhase::Committed
+    };
     if !matches!(role.context, ContextRole::Client | ContextRole::Exit)
         || entry.context_role != role.context
-        || entry.phase != OpenLeasePhase::Committed
+        || entry.phase != required_phase
         || entry.child_cleanup.is_some()
         || entry.worker_cleanup.is_some()
         || entry.durable_prepare_terminal.is_some()
@@ -3184,7 +3265,10 @@ const fn destroy_operation_shape_is_valid(binding: BackendBinding) -> bool {
         (OperationKind::Prepare, None)
             | (OperationKind::Activate, Some(ContextPhase::Prepared))
             | (OperationKind::Probe, Some(ContextPhase::Activated))
-            | (OperationKind::Acquire, Some(ContextPhase::Committed))
+            | (
+                OperationKind::Acquire,
+                Some(ContextPhase::Activated | ContextPhase::Committed),
+            )
             | (OperationKind::Destroy, Some(_))
             | (
                 OperationKind::Reconcile,
@@ -5581,7 +5665,7 @@ mod tests {
                 .expect("well-formed but different Acquire request");
             let state = lock_state(&backend.state);
             assert_eq!(
-                validate_committed_acquire_entry(
+                validate_acquire_entry(
                     state.as_ref().expect("committed entry"),
                     &changed,
                     &changed_internal,
@@ -5606,7 +5690,7 @@ mod tests {
             validate_acquire_transport_binding(binding, &supported_mptcp).and_then(
                 |(_, internal)| {
                     let state = lock_state(&backend.state);
-                    validate_committed_acquire_entry(
+                    validate_acquire_entry(
                         state.as_ref().expect("committed entry"),
                         &supported_mptcp,
                         &internal,
@@ -5656,12 +5740,8 @@ mod tests {
             validate_acquire_transport_binding(binding, &value).expect("exact Acquire binding");
         let generation = {
             let state = lock_state(&backend.state);
-            validate_committed_acquire_entry(
-                state.as_ref().expect("committed entry"),
-                &value,
-                &internal,
-            )
-            .expect("exact committed singleton")
+            validate_acquire_entry(state.as_ref().expect("committed entry"), &value, &internal)
+                .expect("exact committed singleton")
         };
         assert_ne!(generation, 0);
         assert_acquire_binding_fail_closed(binding, &value);
@@ -5671,7 +5751,7 @@ mod tests {
             let mut state = lock_state(&backend.state);
             state.as_mut().expect("committed entry").phase = OpenLeasePhase::Activated;
             assert_eq!(
-                validate_committed_acquire_entry(state.as_ref().expect("entry"), &value, &internal,),
+                validate_acquire_entry(state.as_ref().expect("entry"), &value, &internal,),
                 Err(BackendError::Invalid)
             );
             state.as_mut().expect("committed entry").phase = OpenLeasePhase::Committed;
@@ -5697,7 +5777,7 @@ mod tests {
             validate_acquire_transport_binding(binding, &value).expect("path two Acquire binding");
         {
             let state = lock_state(&backend.state);
-            validate_committed_acquire_entry(
+            validate_acquire_entry(
                 state.as_ref().expect("multipath committed entry"),
                 &value,
                 &internal,
@@ -5714,7 +5794,7 @@ mod tests {
         {
             let state = lock_state(&backend.state);
             assert_eq!(
-                validate_committed_acquire_entry(
+                validate_acquire_entry(
                     state.as_ref().expect("multipath committed entry"),
                     &wrong_path,
                     &wrong_internal,
