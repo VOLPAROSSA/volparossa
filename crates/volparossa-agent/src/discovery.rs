@@ -116,6 +116,9 @@ use crate::{
         protocol_endpoint_for_native,
     },
     helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
+    mptcp_flow_runtime::{
+        ProductionMptcpExitCleanup, ProductionMptcpExitCompletion, ProductionMptcpExitRuntime,
+    },
     mptcp_transport::{ExitMptcpListenerSignal, ExitMptcpTransport, PRODUCTION_MPTCP_EXIT_PORT},
     roles::RoleStore,
     route_setup::{PreparedPreselectionEvidence, prepare_preselection_evidence},
@@ -129,6 +132,7 @@ use crate::{
 const PEERSTORE_LOAD_BOUND: usize = 1_000;
 const PEER_RETENTION_SECONDS: u64 = 3_600;
 const ROLE_COMMAND_CAPACITY: usize = 8;
+const MPTCP_EXIT_RUNTIME_EVENT_CAPACITY: usize = 64;
 const ROLE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RESERVATION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 const CAPABILITY_QUERY_INTERVAL: Duration = Duration::from_secs(5);
@@ -815,32 +819,16 @@ struct PreparedProductionExitRoute {
 pub(crate) struct ActiveProductionMptcpExitRoute {
     canonical_start: Vec<u8>,
     encoded_signal: Vec<u8>,
-    helper_owner: RuntimeBoundPreparedLeaseBatch,
-    transport: Option<ExitMptcpTransport>,
-    tcp_route: volparossa_exit::ActiveTcpRoute,
-    native_authorization: volparossa_exit::ExitNativeRouteAuthorization,
+    runtime: Option<ProductionMptcpExitRuntime>,
+    cleanup: Option<ProductionMptcpExitCleanup>,
+    runtime_started: bool,
     reservation_id: [u8; FORWARD_ID_BYTES],
     expires_at_ms: u64,
 }
 
-#[allow(
-    dead_code,
-    reason = "the TLS13 OPEN_TCP runner consumes this retained owner in the next vertical slice"
-)]
-impl ActiveProductionMptcpExitRoute {
-    pub(crate) fn transport(&self) -> Option<&ExitMptcpTransport> {
-        self.transport.as_ref()
-    }
-
-    pub(crate) const fn tcp_route(&self) -> &volparossa_exit::ActiveTcpRoute {
-        &self.tcp_route
-    }
-
-    pub(crate) const fn native_authorization(
-        &self,
-    ) -> &volparossa_exit::ExitNativeRouteAuthorization {
-        &self.native_authorization
-    }
+struct MptcpExitRuntimeEvent {
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    completion: ProductionMptcpExitCompletion,
 }
 
 #[derive(Clone)]
@@ -1567,6 +1555,8 @@ pub struct DiscoveryRuntime {
     pending_mptcp_exit_sessions: HashMap<[u8; FORWARD_ID_BYTES], PendingMptcpExitSession>,
     active_production_mptcp_exit_routes:
         HashMap<[u8; FORWARD_ID_BYTES], ActiveProductionMptcpExitRoute>,
+    mptcp_exit_runtime_events: mpsc::Sender<MptcpExitRuntimeEvent>,
+    mptcp_exit_runtime_completions: mpsc::Receiver<MptcpExitRuntimeEvent>,
     exit_native_ready_attempts: HashMap<[u8; FORWARD_ID_BYTES], ExitNativeReadyAttempt>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
     datapath_index: HashMap<DatapathKey, request_response::OutboundRequestId>,
@@ -1645,6 +1635,8 @@ impl DiscoveryRuntime {
             None
         };
         let (role_sender, role_commands) = mpsc::channel(ROLE_COMMAND_CAPACITY);
+        let (mptcp_exit_runtime_events, mptcp_exit_runtime_completions) =
+            mpsc::channel(MPTCP_EXIT_RUNTIME_EVENT_CAPACITY);
         let client_preselection = if roles.client {
             PreselectionAttemptGate::new().map_or(
                 ClientPreselectionOwner::Closed,
@@ -1700,6 +1692,8 @@ impl DiscoveryRuntime {
             prepared_production_exit_routes: HashMap::new(),
             pending_mptcp_exit_sessions: HashMap::new(),
             active_production_mptcp_exit_routes: HashMap::new(),
+            mptcp_exit_runtime_events,
+            mptcp_exit_runtime_completions,
             exit_native_ready_attempts: HashMap::new(),
             pending_datapath: HashMap::new(),
             datapath_index: HashMap::new(),
@@ -1838,6 +1832,11 @@ impl DiscoveryRuntime {
                         break;
                     };
                     self.handle_command(command, &state).await;
+                }
+                completion = self.mptcp_exit_runtime_completions.recv() => {
+                    if let Some(completion) = completion {
+                        self.finish_mptcp_exit_runtime(completion, &state).await;
+                    }
                 }
             }
         }
@@ -7373,7 +7372,8 @@ impl DiscoveryRuntime {
             .active_production_mptcp_exit_routes
             .iter()
             .filter_map(|(route_context_id, route)| {
-                (route.expires_at_ms <= now_ms).then_some(*route_context_id)
+                (route.expires_at_ms <= now_ms && !route.runtime_started)
+                    .then_some(*route_context_id)
             })
             .collect::<Vec<_>>();
         let mut destroyed = 0;
@@ -8102,8 +8102,7 @@ impl DiscoveryRuntime {
             .active_production_mptcp_exit_routes
             .get(&route_context_id)
         {
-            if active.transport.is_some()
-                && active.expires_at_ms > now_ms
+            if active.expires_at_ms > now_ms
                 && active.canonical_start == request.canonical_request()
             {
                 self.send_mptcp_exit_granted(
@@ -8327,15 +8326,51 @@ impl DiscoveryRuntime {
             self.send_pending_mptcp_exit_unavailable(pending);
             return;
         }
+        let expires_at_ms = route.expires_at_ms;
+        let Some(exit_service) = self.exit_service.as_ref() else {
+            let _ = transport.shutdown(&self.helper).await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let runtime = ProductionMptcpExitRuntime::new(
+            self.helper.clone(),
+            route.helper_owner,
+            transport,
+            active_route,
+            native_authorization,
+            exit_service,
+            now_ms,
+        );
+        let runtime = match runtime {
+            Ok(runtime) => runtime,
+            Err(failure) => {
+                let _cause = failure.cause();
+                let active = ActiveProductionMptcpExitRoute {
+                    canonical_start: pending.canonical_start.clone(),
+                    encoded_signal: encoded_signal.clone(),
+                    runtime: None,
+                    cleanup: Some(failure.into_cleanup()),
+                    runtime_started: false,
+                    reservation_id,
+                    expires_at_ms: 0,
+                };
+                self.active_production_mptcp_exit_routes
+                    .insert(route_context_id, active);
+                self.send_pending_mptcp_exit_unavailable(pending);
+                log_relay_forward_admission(Some(state), "MPTCP_SESSION_EXIT_RUNTIME_REJECTED");
+                return;
+            }
+        };
         let active = ActiveProductionMptcpExitRoute {
             canonical_start: pending.canonical_start.clone(),
             encoded_signal: encoded_signal.clone(),
-            helper_owner: route.helper_owner,
-            transport: Some(transport),
-            tcp_route: active_route,
-            native_authorization,
+            runtime: Some(runtime),
+            cleanup: None,
+            runtime_started: false,
             reservation_id,
-            expires_at_ms: route.expires_at_ms,
+            expires_at_ms,
         };
         if self
             .active_production_mptcp_exit_routes
@@ -8349,6 +8384,7 @@ impl DiscoveryRuntime {
         self.active_production_mptcp_exit_routes
             .insert(route_context_id, active);
         self.send_pending_mptcp_exit_granted(pending, &encoded_signal);
+        self.start_mptcp_exit_runtime(route_context_id);
         log_relay_forward_admission(Some(state), "MPTCP_SESSION_EXIT_LISTENER_READY");
     }
 
@@ -8408,6 +8444,103 @@ impl DiscoveryRuntime {
         }
     }
 
+    fn start_mptcp_exit_runtime(&mut self, route_context_id: [u8; FORWARD_ID_BYTES]) {
+        let Some(active) = self
+            .active_production_mptcp_exit_routes
+            .get_mut(&route_context_id)
+        else {
+            return;
+        };
+        let Some(runtime) = active.runtime.take() else {
+            return;
+        };
+        active.runtime_started = true;
+        let completions = self.mptcp_exit_runtime_events.clone();
+        tokio::spawn(async move {
+            let completion = runtime.run().await;
+            let event = MptcpExitRuntimeEvent {
+                route_context_id,
+                completion,
+            };
+            if let Err(error) = completions.send(event).await {
+                if let Some(cleanup) = error.0.completion.into_cleanup() {
+                    let _ = cleanup.destroy().await;
+                }
+            }
+        });
+    }
+
+    async fn finish_mptcp_exit_runtime(
+        &mut self,
+        event: MptcpExitRuntimeEvent,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let Some(mut active) = self
+            .active_production_mptcp_exit_routes
+            .remove(&event.route_context_id)
+        else {
+            if let Some(cleanup) = event.completion.into_cleanup() {
+                let _ = cleanup.destroy().await;
+            }
+            state.write().await.log(
+                LogLevel::Error,
+                "MPTCP_EXIT_RUNTIME_OWNER_MISSING",
+                unix_millis(),
+            );
+            return;
+        };
+        if event.completion.reservation_id() != &active.reservation_id {
+            if let Some(cleanup) = event.completion.into_cleanup() {
+                let _ = cleanup.destroy().await;
+            }
+            active.expires_at_ms = 0;
+            self.active_production_mptcp_exit_routes
+                .insert(event.route_context_id, active);
+            state.write().await.log(
+                LogLevel::Error,
+                "MPTCP_EXIT_RUNTIME_SCOPE_MISMATCH",
+                unix_millis(),
+            );
+            return;
+        }
+        let succeeded = event.completion.succeeded();
+        if let Some(cleanup) = event.completion.into_cleanup() {
+            match cleanup.destroy().await {
+                Ok(()) => {}
+                Err(cleanup) => {
+                    active.cleanup = Some(cleanup);
+                    active.runtime_started = false;
+                    active.expires_at_ms = 0;
+                    self.active_production_mptcp_exit_routes
+                        .insert(event.route_context_id, active);
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "MPTCP_EXIT_RUNTIME_CLEANUP_PENDING",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            }
+        }
+        let _ = self
+            .exit_service
+            .as_mut()
+            .and_then(|service| service.release(&active.reservation_id).ok());
+        state.write().await.log(
+            if succeeded {
+                LogLevel::Info
+            } else {
+                LogLevel::Warn
+            },
+            if succeeded {
+                "MPTCP_EXIT_FLOW_COMPLETED"
+            } else {
+                "MPTCP_EXIT_FLOW_FAILED"
+            },
+            unix_millis(),
+        );
+    }
+
     async fn finish_mptcp_exit_session_unavailable(
         &mut self,
         route_context_id: [u8; FORWARD_ID_BYTES],
@@ -8457,15 +8590,22 @@ impl DiscoveryRuntime {
         mut route: ActiveProductionMptcpExitRoute,
     ) -> bool {
         route.expires_at_ms = 0;
-        if let Some(transport) = route.transport.take() {
-            let _ = transport.shutdown(&self.helper).await;
+        if let Some(runtime) = route.runtime.take() {
+            if let Err(cleanup) = runtime.shutdown().await {
+                route.cleanup = Some(cleanup);
+            }
         }
-        if self
-            .helper
-            .destroy_context(&route.helper_owner)
-            .await
-            .is_ok()
-        {
+        let cleanup_complete = match route.cleanup.take() {
+            Some(cleanup) => match cleanup.destroy().await {
+                Ok(()) => true,
+                Err(cleanup) => {
+                    route.cleanup = Some(cleanup);
+                    false
+                }
+            },
+            None => true,
+        };
+        if cleanup_complete {
             let _ = self
                 .exit_service
                 .as_mut()

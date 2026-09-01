@@ -61,7 +61,7 @@ use volparossa_reservation::{
 };
 use volparossa_tcp_proxy::{
     AuthorizedTcpFlow, StreamTransferLimits, StreamTransferStats, TcpAuthorizationScope,
-    TcpProxyError, VerifiedMptcpRoute, proxy_bidirectional,
+    TcpProxyError, VerifiedMptcpRoute, proxy_bidirectional, read_authorized_open_tcp,
 };
 use volparossa_udp::{
     AuthorizedUdpFlow, DatagramLimits, ExitUdpBridge, QuicUdpAssociation, UdpAuthorizationScope,
@@ -742,6 +742,33 @@ impl ExitService {
         }
     }
 
+    /// Consume one activated TCP route into a self-contained one-flow egress owner.
+    ///
+    /// The returned owner keeps the verified multipath route, current threshold-signed policy,
+    /// independent bounded replay state, and metrics needed by a background datapath task. The
+    /// reservation remains allocated in this service until the caller reports completion through
+    /// [`Self::release`]. Consuming [`ActiveTcpRoute`] makes this transition one-shot.
+    ///
+    /// # Errors
+    ///
+    /// An inactive/expired reservation or policy, or unavailable replay capacity, fails closed.
+    pub fn detach_tcp_egress_route(
+        &self,
+        route: ActiveTcpRoute,
+        now_ms: u64,
+    ) -> Result<ActiveTcpEgressRoute, ExitError> {
+        self.ensure_active_reservation(&route.reservation_id)?;
+        route.route.ensure_active_at(now_ms)?;
+        self.policy.ensure_active_at(now_ms)?;
+        Ok(ActiveTcpEgressRoute {
+            route: route.route,
+            reservation_id: route.reservation_id,
+            policy: self.policy.clone(),
+            flow_replay: ReplayCache::new(self.config.replay_capacity)?,
+            metrics: self.metrics.clone(),
+        })
+    }
+
     /// Verify and consume one client-signed UDP flow for an active relay path.
     ///
     /// This general path deliberately rejects UDP/443. Other exact policy
@@ -854,78 +881,22 @@ impl ExitService {
     pub async fn run_tcp_egress<C>(
         &self,
         flow: &AuthorizedTcpFlow,
-        mut protected_client: C,
+        protected_client: C,
         now_ms: u64,
         limits: TcpEgressLimits,
     ) -> Result<StreamTransferStats, ExitError>
     where
         C: AsyncRead + AsyncWrite + Unpin,
     {
-        flow.ensure_active_at(now_ms)?;
-        self.policy.ensure_active_at(now_ms)?;
-
-        let initial = if flow.port() == 443 {
-            match time::timeout(
-                limits.client_hello_timeout,
-                read_client_hello_prefix(&mut protected_client, flow.hostname()),
-            )
-            .await
-            {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(error)) => {
-                    self.record_policy_denial();
-                    return Err(error);
-                }
-                Err(_elapsed) => {
-                    self.record_policy_denial();
-                    return Err(ExitError::EgressTimeout("TLS ClientHello"));
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        let mut destination = resolve_and_connect(
-            flow.hostname(),
-            flow.port(),
-            limits.dns_timeout,
-            limits.connect_timeout,
+        run_tcp_egress_with_policy(
+            &self.policy,
+            self.metrics.as_ref(),
+            flow,
+            protected_client,
+            now_ms,
+            limits,
         )
-        .await?;
-        if !initial.is_empty() {
-            time::timeout(
-                limits.transfer.idle_timeout(),
-                destination.write_all(&initial),
-            )
-            .await
-            .map_err(|_| ExitError::EgressTimeout("initial TLS forwarding"))??;
-        }
-        let prefix_bytes = u64::try_from(initial.len())
-            .map_err(|_| ExitError::InvalidGrant("ClientHello length"))?;
-        let remaining_up = limits
-            .transfer
-            .maximum_client_to_exit_bytes()
-            .checked_sub(prefix_bytes)
-            .filter(|remaining| *remaining > 0)
-            .ok_or(TcpProxyError::ByteLimit)?;
-        let adjusted = StreamTransferLimits::new(
-            limits.transfer.buffer_bytes(),
-            remaining_up,
-            limits.transfer.maximum_exit_to_client_bytes(),
-            limits.transfer.idle_timeout(),
-        )?;
-        let mut statistics = proxy_bidirectional(protected_client, destination, adjusted).await?;
-        statistics.client_to_exit_bytes = statistics
-            .client_to_exit_bytes
-            .checked_add(prefix_bytes)
-            .ok_or(TcpProxyError::ByteLimit)?;
-        if let Some(metrics) = &self.metrics {
-            metrics.record_throughput(
-                statistics.client_to_exit_bytes,
-                statistics.exit_to_client_bytes,
-            );
-        }
-        Ok(statistics)
+        .await
     }
     /// Consume the exact stored native-route TLS owner once.
     ///
@@ -1422,6 +1393,88 @@ impl ActiveTcpRoute {
     }
 }
 
+/// One independently runnable TCP egress route detached from the discovery actor.
+///
+/// This affine owner authorizes exactly scoped client flow openings with route-local replay state.
+/// It never creates or accepts a transport itself: callers must supply a genuine protected MPTCP
+/// TLS stream. The original [`ActiveTcpRoute`] is consumed when this value is created.
+pub struct ActiveTcpEgressRoute {
+    route: VerifiedMptcpRoute,
+    reservation_id: [u8; ID_BYTES],
+    policy: VerifiedManifest,
+    flow_replay: ReplayCache,
+    metrics: Option<MetricsRegistry>,
+}
+
+impl ActiveTcpEgressRoute {
+    /// Return the still-allocated reservation identifier for completion reporting.
+    #[must_use]
+    pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
+        &self.reservation_id
+    }
+
+    /// Read and verify exactly one bounded signed `OPEN_TCP` frame from the protected stream.
+    ///
+    /// # Errors
+    ///
+    /// Malformed framing, timeout, invalid signature, replay, route/policy mismatch and denied
+    /// destinations all fail closed before any ordinary Internet connection is opened.
+    pub async fn read_authorized_open_tcp<R>(
+        &mut self,
+        reader: &mut R,
+        now_ms: u64,
+        timeout: Duration,
+    ) -> Result<AuthorizedTcpFlow, ExitError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        self.route.ensure_active_at(now_ms)?;
+        self.policy.ensure_active_at(now_ms)?;
+        let scope = TcpAuthorizationScope::new(&self.route, &self.policy);
+        let result = read_authorized_open_tcp(
+            reader,
+            &scope,
+            now_ms,
+            TimePolicy::default(),
+            &mut self.flow_replay,
+            timeout,
+        )
+        .await;
+        if matches!(&result, Err(TcpProxyError::Policy(_))) {
+            if let Some(metrics) = &self.metrics {
+                metrics.record_policy_denial();
+            }
+        }
+        result.map_err(ExitError::from)
+    }
+
+    /// Resolve and proxy one authorized flow over the supplied protected client stream.
+    ///
+    /// # Errors
+    ///
+    /// Expiry, policy, DNS, connect, inspection, I/O and transfer-limit failures close the flow.
+    pub async fn run_tcp_egress<C>(
+        &self,
+        flow: &AuthorizedTcpFlow,
+        protected_client: C,
+        now_ms: u64,
+        limits: TcpEgressLimits,
+    ) -> Result<StreamTransferStats, ExitError>
+    where
+        C: AsyncRead + AsyncWrite + Unpin,
+    {
+        run_tcp_egress_with_policy(
+            &self.policy,
+            self.metrics.as_ref(),
+            flow,
+            protected_client,
+            now_ms,
+            limits,
+        )
+        .await
+    }
+}
+
 /// An exit-verified single relay path, consumable by one UDP association.
 pub struct ActiveUdpPath {
     path: VerifiedSingleRelayPath,
@@ -1812,6 +1865,88 @@ async fn resolve_and_connect(
     .map_err(ExitError::Io)
 }
 
+async fn run_tcp_egress_with_policy<C>(
+    policy: &VerifiedManifest,
+    metrics: Option<&MetricsRegistry>,
+    flow: &AuthorizedTcpFlow,
+    mut protected_client: C,
+    now_ms: u64,
+    limits: TcpEgressLimits,
+) -> Result<StreamTransferStats, ExitError>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    flow.ensure_active_at(now_ms)?;
+    policy.ensure_active_at(now_ms)?;
+
+    let initial = if flow.port() == 443 {
+        match time::timeout(
+            limits.client_hello_timeout,
+            read_client_hello_prefix(&mut protected_client, flow.hostname()),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                if let Some(metrics) = metrics {
+                    metrics.record_policy_denial();
+                }
+                return Err(error);
+            }
+            Err(_elapsed) => {
+                if let Some(metrics) = metrics {
+                    metrics.record_policy_denial();
+                }
+                return Err(ExitError::EgressTimeout("TLS ClientHello"));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut destination = resolve_and_connect(
+        flow.hostname(),
+        flow.port(),
+        limits.dns_timeout,
+        limits.connect_timeout,
+    )
+    .await?;
+    if !initial.is_empty() {
+        time::timeout(
+            limits.transfer.idle_timeout(),
+            destination.write_all(&initial),
+        )
+        .await
+        .map_err(|_| ExitError::EgressTimeout("initial TLS forwarding"))??;
+    }
+    let prefix_bytes =
+        u64::try_from(initial.len()).map_err(|_| ExitError::InvalidGrant("ClientHello length"))?;
+    let remaining_up = limits
+        .transfer
+        .maximum_client_to_exit_bytes()
+        .checked_sub(prefix_bytes)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(TcpProxyError::ByteLimit)?;
+    let adjusted = StreamTransferLimits::new(
+        limits.transfer.buffer_bytes(),
+        remaining_up,
+        limits.transfer.maximum_exit_to_client_bytes(),
+        limits.transfer.idle_timeout(),
+    )?;
+    let mut statistics = proxy_bidirectional(protected_client, destination, adjusted).await?;
+    statistics.client_to_exit_bytes = statistics
+        .client_to_exit_bytes
+        .checked_add(prefix_bytes)
+        .ok_or(TcpProxyError::ByteLimit)?;
+    if let Some(metrics) = metrics {
+        metrics.record_throughput(
+            statistics.client_to_exit_bytes,
+            statistics.exit_to_client_bytes,
+        );
+    }
+    Ok(statistics)
+}
+
 fn permitted_egress(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => permitted_v4(address),
@@ -2089,15 +2224,19 @@ mod tests {
     use ring::aead;
 
     use ed25519_dalek::{Signer as _, SigningKey};
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        time::Duration,
+    };
 
     use volparossa_core::Bandwidth;
     use volparossa_metrics::MetricsRegistry;
     use volparossa_policy::{DestinationRule, ProtocolPort, TransportProtocol};
     use volparossa_protocol::{
-        NativeRouteIdentity, ProbeAddressFamily, ProbeLegEvidence, ProtocolError, RelayProbePermit,
-        RelayProbeResult, RelayReservation, ReplayCache, TimePolicy, Transport, generate_nonce,
-        node_id_from_public_key, sign_control_message, verify_control_message,
+        MAX_CONTROL_MESSAGE_SIZE, NativeRouteIdentity, ProbeAddressFamily, ProbeLegEvidence,
+        ProtocolError, RelayProbePermit, RelayProbeResult, RelayReservation, ReplayCache,
+        TimePolicy, Transport, generate_nonce, node_id_from_public_key, sign_control_message,
+        verify_control_message,
     };
     use volparossa_relay::{RelayService, RelayServiceConfig};
     use volparossa_reservation::{
@@ -3414,6 +3553,49 @@ mod tests {
                 volparossa_tcp_proxy::TcpProxyError::Protocol(ProtocolError::Replay)
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn detached_tcp_egress_owner_reads_one_bounded_signed_open() {
+        let rule = DestinationRule::exact_domain(
+            "allowed.example",
+            [ProtocolPort::new(TransportProtocol::Tcp, 80).unwrap()],
+        )
+        .unwrap();
+        let (mut service, admitted) = admit_route(
+            2,
+            &[Transport::TcpMptcp],
+            vec![rule],
+            MetricsRegistry::new(),
+        );
+        let relays = admitted
+            .signed_relays
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let active = service
+            .bind_tcp_route(&admitted.accepted, &relays, NOW_MS)
+            .unwrap();
+        let reservation_id = *active.reservation_id();
+        let signed_open = admitted.sign_open_tcp(service.policy_hash(), "allowed.example", 80);
+        let mut detached = service
+            .detach_tcp_egress_route(active, NOW_MS)
+            .expect("detached route");
+        assert_eq!(detached.reservation_id(), &reservation_id);
+
+        let (mut client, mut exit) = tokio::io::duplex(MAX_CONTROL_MESSAGE_SIZE * 2);
+        let writer = tokio::spawn(async move {
+            volparossa_tcp_proxy::write_open_tcp(&mut client, &signed_open, Duration::from_secs(1))
+                .await
+        });
+        let flow = detached
+            .read_authorized_open_tcp(&mut exit, NOW_MS, Duration::from_secs(1))
+            .await
+            .expect("authorized flow");
+        writer.await.unwrap().unwrap();
+        assert_eq!(flow.hostname(), "allowed.example");
+        assert_eq!(flow.port(), 80);
+        service.release(&reservation_id).unwrap();
     }
 
     #[test]

@@ -4356,6 +4356,7 @@ dependencies = [
  "volparossa-reservation",
  "volparossa-routing",
  "volparossa-selection",
+ "volparossa-tcp-proxy",
  "volparossa-test-support",
  "volparossa-udp",
  "volparossa-wireguard",

@@ -47,6 +47,7 @@ volparossa-relay = { path = "../volparossa-relay", version = "=0.1.0" }
 volparossa-reservation = { path = "../volparossa-reservation", version = "=0.1.0" }
 volparossa-routing = { path = "../volparossa-routing", version = "=0.1.0" }
 volparossa-selection = { path = "../volparossa-selection", version = "=0.1.0" }
+volparossa-tcp-proxy = { path = "../volparossa-tcp-proxy", version = "=0.1.0" }
 volparossa-udp = { path = "../volparossa-udp", version = "=0.1.0" }
 volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
 

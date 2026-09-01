@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, oneshot, watch},
     time::{Instant, timeout},
 };
@@ -51,7 +52,7 @@ use volparossa_discovery::{
     MptcpSessionPathProof, MptcpSessionStartRequest,
     UdpExitSessionSignal as DiscoveryUdpExitSessionSignal, UdpSessionStartRequest,
 };
-use volparossa_policy::VerifiedManifest;
+use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{
     MAX_CONTROL_MESSAGE_SIZE, ProbeAddressFamily, ProbeLegEvidence, ReplayCache, SignedEnvelope,
     TimePolicy, Transport, decode_canonical, encode_canonical,
@@ -75,6 +76,7 @@ use volparossa_selection::{
     FilterRequirements, ProjectedRelayPath, RelaySelectionPolicy, SelectionMix,
     select_projected_relay_paths,
 };
+use volparossa_tcp_proxy::VerifiedMptcpRoute;
 use volparossa_udp::{
     AuthorizedUdpFlow, CommittedQuicUdpTransport, CommittedUdpRole, ProtectedExitUdpTarget,
     SINGLE_RELAY_UDP_EXIT_PORT, SingleRelayUdpClient, VerifiedSingleRelayPath,
@@ -96,6 +98,7 @@ use crate::{
         HelperClient, HelperClientError, PrepareLeaseBatchFailure, PrepareReconciliationAuthority,
         RuntimeBoundPreparedLeaseBatch,
     },
+    mptcp_flow_runtime::{ActiveProductionMptcpClientFlow, activate_production_mptcp_client_flow},
     mptcp_transport::{ClientMptcpTransport, ExitMptcpListenerSignal},
 };
 use retirement::{PreparedContextOwner, RetirementOutcome, RetirementSink, RetirementSupervisor};
@@ -110,6 +113,8 @@ const MAXIMUM_RETIREMENT_OWNERS: usize = 64;
 const ID_BYTES: usize = 16;
 const CLIENT_SINGLE_RELAY_UDP_PORT: u16 = 40_001;
 const MAXIMUM_EXIT_CERTIFICATE_DER_BYTES: usize = 64 * 1_024;
+const MAXIMUM_TCP_STREAM_CHUNK_BYTES: usize = 64 * 1_024;
+const OPEN_TCP_LIFETIME_MS: u64 = 60_000;
 
 /// Cloneable single-owner gate for the local Connect route bootstrap.
 #[derive(Clone, Default)]
@@ -134,6 +139,7 @@ struct EstablishedClientRoute {
 
 enum ClientTransportState {
     TcpMptcp(ClientMptcpTransport),
+    TcpActive(ActiveProductionMptcpClientFlow),
     UdpReady(CertificateBoundProductionUdpRoute),
     UdpActive(ActiveProductionUdpRoute),
 }
@@ -142,9 +148,9 @@ impl EstablishedClientRoute {
     const fn progress(&self) -> ClientRouteProgress {
         match &self.transport {
             ClientTransportState::UdpReady(_) => ClientRouteProgress::UdpRouteReady,
-            ClientTransportState::TcpMptcp(_) | ClientTransportState::UdpActive(_) => {
-                ClientRouteProgress::TransportActive
-            }
+            ClientTransportState::TcpMptcp(_)
+            | ClientTransportState::TcpActive(_)
+            | ClientTransportState::UdpActive(_) => ClientRouteProgress::TransportActive,
         }
     }
 
@@ -152,6 +158,9 @@ impl EstablishedClientRoute {
         match self.transport {
             ClientTransportState::TcpMptcp(transport) => {
                 let _ = transport.shutdown(&self.helper).await;
+            }
+            ClientTransportState::TcpActive(flow) => {
+                let _ = flow.shutdown(&self.helper).await;
             }
             ClientTransportState::UdpReady(route) => {
                 let _ = route.disconnect().await;
@@ -269,6 +278,144 @@ impl ClientRouteControl {
                 Err(error)
             }
         }
+    }
+
+    /// Consume the connected genuine-MPTCP capability into one pinned TLS 1.3 TCP flow.
+    ///
+    /// This is the functional stream seam used until transparent TCP ingress is connected. The
+    /// caller supplies a hostname/port that must already be allowed by the active signed policy;
+    /// the retained route coordinator signs that exact tuple and the frame is written before this
+    /// method reports success.
+    pub(crate) async fn activate_tcp_flow(
+        &self,
+        policy: &VerifiedManifest,
+        hostname: &str,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if policy
+            .authorize_domain(now_ms, hostname, TransportProtocol::Tcp, port)
+            .is_err()
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let previous = {
+            let mut state = self.state.lock().await;
+            std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
+        };
+        let established = match previous {
+            ClientRouteControlState::Established(established) => established,
+            other => {
+                let mut state = self.state.lock().await;
+                *state = other;
+                return Err(ClientRouteConnectError::Busy);
+            }
+        };
+        let EstablishedClientRoute {
+            transport,
+            route,
+            orchestrator,
+            helper,
+        } = *established;
+        let (transport, route) = match (transport, route) {
+            (ClientTransportState::TcpMptcp(transport), Some(route)) => (transport, route),
+            (transport, route) => {
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    transport,
+                    route,
+                    orchestrator,
+                    helper,
+                }));
+                return Err(ClientRouteConnectError::Busy);
+            }
+        };
+        let material = match client_open_tcp_material(&route, policy, hostname, port, now_ms) {
+            Ok(material) => material,
+            Err(error) => {
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    transport: ClientTransportState::TcpMptcp(transport),
+                    route: Some(route),
+                    orchestrator,
+                    helper,
+                }));
+                return Err(error);
+            }
+        };
+        let activation = activate_production_mptcp_client_flow(
+            transport,
+            &material.route,
+            &material.certificate_sha256,
+            &material.tls_server_name,
+            &material.signed_open_tcp,
+            now_ms,
+        )
+        .await;
+        match activation {
+            Ok(flow) => {
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    transport: ClientTransportState::TcpActive(flow),
+                    route: Some(route),
+                    orchestrator,
+                    helper,
+                }));
+                Ok(ClientRouteProgress::TransportActive)
+            }
+            Err(failure) => {
+                let _cause = failure.cause();
+                failure.cleanup(&helper).await;
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Idle;
+                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+            }
+        }
+    }
+
+    /// Write one bounded payload chunk to the active protected TCP stream.
+    pub(crate) async fn write_tcp_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<(), ClientRouteConnectError> {
+        if payload.is_empty() || payload.len() > MAXIMUM_TCP_STREAM_CHUNK_BYTES {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let ClientTransportState::TcpActive(flow) = &mut established.transport else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        timeout(MAXIMUM_CALL_DURATION, flow.stream_mut().write_all(payload))
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        timeout(MAXIMUM_CALL_DURATION, flow.stream_mut().flush())
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    /// Read at most one fixed-size payload chunk from the active protected TCP stream.
+    pub(crate) async fn read_tcp_payload(&self) -> Result<Vec<u8>, ClientRouteConnectError> {
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let ClientTransportState::TcpActive(flow) = &mut established.transport else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let mut payload = vec![0_u8; MAXIMUM_TCP_STREAM_CHUNK_BYTES];
+        let count = timeout(MAXIMUM_CALL_DURATION, flow.stream_mut().read(&mut payload))
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        payload.truncate(count);
+        Ok(payload)
     }
 
     /// Bind one kernel-observed datagram to this route, activate Quinn, and queue its payload.
@@ -397,6 +544,79 @@ impl ClientRouteControl {
             Box::pin(established.shutdown()).await;
         }
     }
+}
+
+struct ClientOpenTcpMaterial {
+    route: VerifiedMptcpRoute,
+    certificate_sha256: [u8; 32],
+    tls_server_name: String,
+    signed_open_tcp: Vec<u8>,
+}
+
+fn client_open_tcp_material(
+    route: &ProductionRoute,
+    policy: &VerifiedManifest,
+    hostname: &str,
+    port: u16,
+    now_ms: u64,
+) -> Result<ClientOpenTcpMaterial, ClientRouteConnectError> {
+    let established = &route.established;
+    if established.request.parameters.allowed_transports != [Transport::TcpMptcp]
+        || established.request.parameters.policy_hash != *policy.policy_hash()
+    {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    let relay_reservations = established
+        .relay_grants
+        .iter()
+        .map(VerifiedRelayGrant::signed_relay_reservation)
+        .collect::<Vec<_>>();
+    let mut replay = ReplayCache::new(MAXIMUM_REPLAY_CAPACITY)
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let verified_route = VerifiedMptcpRoute::verify(
+        &established.signed_exit_reservation,
+        &relay_reservations,
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let identity = established.native_authorization.native_route_identity();
+    let certificate_sha256: [u8; 32] = identity
+        .certificate_sha256
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let expires_at_ms = now_ms
+        .checked_add(OPEN_TCP_LIFETIME_MS)
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+        .min(verified_route.expires_at_ms())
+        .min(policy.expires_at_ms());
+    if expires_at_ms <= now_ms {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    let coordinator = established
+        .owner
+        .as_ref()
+        .and_then(PreparedContextOwner::protocol)
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let signed_open_tcp = coordinator
+        .coordinator
+        .sign_open_tcp(
+            *verified_route.route_context_id(),
+            *policy.policy_hash(),
+            hostname,
+            port,
+            now_ms,
+            expires_at_ms,
+        )
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    Ok(ClientOpenTcpMaterial {
+        route: verified_route,
+        certificate_sha256,
+        tls_server_name: identity.tls_server_name.clone(),
+        signed_open_tcp,
+    })
 }
 
 async fn admit_completed_native_route(

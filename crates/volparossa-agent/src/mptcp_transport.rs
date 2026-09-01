@@ -24,6 +24,27 @@ pub struct ClientMptcpTransport {
     route_context_id: Vec<u8>,
     context_handle: Vec<u8>,
     active_paths: Vec<u32>,
+    certificate_der: Option<Vec<u8>>,
+}
+
+/// Endpoint-removal capability retained after the connected MPTCP stream enters TLS.
+#[must_use = "active MPTCP endpoints must be removed after the TLS flow"]
+pub(crate) struct ClientMptcpEndpointCleanup {
+    route_context_id: Vec<u8>,
+    context_handle: Vec<u8>,
+    active_paths: Vec<u32>,
+}
+
+impl ClientMptcpEndpointCleanup {
+    pub(crate) async fn shutdown(self, helper: &HelperClient) -> Result<(), MptcpTransportError> {
+        remove_paths(
+            helper,
+            &self.route_context_id,
+            &self.context_handle,
+            &self.active_paths,
+        )
+        .await
+    }
 }
 
 /// Exact Exit listener tuple received through the authenticated route control plane.
@@ -131,16 +152,19 @@ impl ClientMptcpTransport {
         local_port: u16,
     ) -> Result<Self, MptcpTransportError> {
         let selected_paths = signal.selected_path_ids.clone();
+        let certificate_der = signal.certificate_der.clone();
         let request = client_acquire_request(&signal, context_handle.clone(), local_port)?;
         let acquired = helper.acquire_transport_socket(request).await?;
-        Self::activate(
+        let mut transport = Self::activate(
             helper,
             acquired,
             signal.route_context_id.to_vec(),
             context_handle,
             selected_paths,
         )
-        .await
+        .await?;
+        transport.certificate_der = Some(certificate_der);
+        Ok(transport)
     }
 
     /// Adopts a committed helper descriptor and registers at least two exact selected paths.
@@ -187,6 +211,7 @@ impl ClientMptcpTransport {
             route_context_id,
             context_handle,
             active_paths,
+            certificate_der: None,
         })
     }
 
@@ -196,22 +221,37 @@ impl ClientMptcpTransport {
         &self.stream
     }
 
+    /// Consume the connected stream into TLS while retaining exact endpoint cleanup authority.
+    pub(crate) fn into_tls_parts(
+        self,
+    ) -> Result<(MptcpStream, Vec<u8>, ClientMptcpEndpointCleanup), MptcpTransportError> {
+        let certificate_der = self
+            .certificate_der
+            .ok_or(MptcpTransportError::InvalidMetadata)?;
+        Ok((
+            self.stream,
+            certificate_der,
+            ClientMptcpEndpointCleanup {
+                route_context_id: self.route_context_id,
+                context_handle: self.context_handle,
+                active_paths: self.active_paths,
+            },
+        ))
+    }
+
     /// Removes all selected endpoints before releasing the adopted stream.
     ///
     /// # Errors
     ///
     /// Returns an error when the helper cannot remove an exact owned endpoint.
     pub async fn shutdown(self, helper: &HelperClient) -> Result<(), MptcpTransportError> {
-        for path_id in self.active_paths.iter().rev().copied() {
-            helper
-                .remove_mptcp_endpoint(RemoveMptcpEndpoint {
-                    route_context_id: self.route_context_id.clone(),
-                    context_handle: self.context_handle.clone(),
-                    path_id,
-                })
-                .await?;
-        }
-        Ok(())
+        remove_paths(
+            helper,
+            &self.route_context_id,
+            &self.context_handle,
+            &self.active_paths,
+        )
+        .await
     }
 }
 
@@ -325,6 +365,24 @@ async fn rollback_paths(
             })
             .await;
     }
+}
+
+async fn remove_paths(
+    helper: &HelperClient,
+    route_context_id: &[u8],
+    context_handle: &[u8],
+    active_paths: &[u32],
+) -> Result<(), MptcpTransportError> {
+    for path_id in active_paths.iter().rev().copied() {
+        helper
+            .remove_mptcp_endpoint(RemoveMptcpEndpoint {
+                route_context_id: route_context_id.to_vec(),
+                context_handle: context_handle.to_vec(),
+                path_id,
+            })
+            .await?;
+    }
+    Ok(())
 }
 
 fn socket_address(
