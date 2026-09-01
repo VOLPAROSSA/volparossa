@@ -45,6 +45,9 @@ print_plan() {
         '  send two deterministic real HTTP/3 transfers over the native MPQUIC route;' \
         '  remove one MPQUIC Relay while the second HTTP/3 transfer remains active;' \
         '  prove exact replies, selected Relays and zero direct Client-Exit packets;' \
+        '  prove Relay/Exit/Client packet-metadata privacy without retaining payloads;' \
+        '  SIGKILL agent, native and helper units, then remove every owned object;' \
+        '  compare exact guest-root routes, DNS, nftables, links, sysctls and VPN state;' \
         '  retain bounded evidence, then stop units and remove namespaces.'
 }
 
@@ -135,9 +138,9 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(systemd-detect-virt)" = kvm ] \
     || { printf '%s\n' 'execution requires a KVM guest' >&2; exit 77; }
 
-for command_name in awk busctl cat chmod chown cut date grep install ip jq kill \
-    mkdir mktemp python3 readlink runuser sed setpriv sha256sum sleep stat systemctl \
-    systemd-run systemd-sysusers tail tc timeout tr; do
+for command_name in awk busctl cat chmod chown cut date find grep install ip jq kill \
+    mkdir mktemp nft python3 readlink rm runuser sed setpriv sha256sum sleep sort stat \
+    systemctl systemd-run systemd-sysusers tail tc timeout tr wg; do
     command -v "$command_name" >/dev/null 2>&1 \
         || { printf 'required guest tool unavailable: %s\n' "$command_name" >&2; exit 69; }
 done
@@ -217,11 +220,27 @@ A06_STATUS=-1
 A07_REQUESTED=false
 A07_SUCCEEDED=false
 A07_STATUS=-1
+A11_REQUESTED=false
+A11_SUCCEEDED=false
+A11_STATUS=-1
+A12_REQUESTED=false
+A12_SUCCEEDED=false
+A12_STATUS=-1
+A13_REQUESTED=false
+A13_SUCCEEDED=false
+A13_STATUS=-1
+A14_REQUESTED=false
+A14_SUCCEEDED=false
+A14_STATUS=-1
+A15_REQUESTED=false
+A15_SUCCEEDED=false
+A15_STATUS=-1
 OBSERVED_BLOCKER=NOT_REACHED
 CLEANUP_COMPLETE=false
 CLIENT_EXIT_ROUTE_ABSENT=false
 REMAINING_NAMESPACES=-1
 REMAINING_UNITS=-1
+REMAINING_OWNED_OBJECTS=-1
 HELPER_UNITS=
 MPQUIC_UNITS=
 AGENT_UNITS=
@@ -231,7 +250,65 @@ HTTP3_CLIENT_PID=
 DOWNLOAD_CLIENT_PID=
 CLIENT_OBSERVER_PID=
 EXIT_OBSERVER_PID=
+PRIVACY_CLIENT_PID=
+PRIVACY_RELAY1_PID=
+PRIVACY_RELAY2_PID=
+PRIVACY_EXIT_PID=
 FINALIZED=no
+
+capture_host_state() {
+    host_state_output=$1
+    host_state_stage=$WORK/host-state-stage
+    install -d -o root -g root -m 0700 "$host_state_stage"
+
+    ip -j -details link show | jq -S '
+      [.[] | {ifindex,ifname,link_index,link_type,mtu,qdisc,operstate,
+        linkmode,group,flags,address,broadcast,master,
+        info_kind:(.linkinfo.info_kind // null)}] | sort_by(.ifindex)' \
+        >"$host_state_stage/links.json"
+    ip -j address show | jq -S '
+      [.[] | {ifindex,ifname,flags,mtu,qdisc,operstate,group,link_type,
+        address,broadcast,addr_info:[.addr_info[] | {family,local,prefixlen,
+          broadcast,scope,label,dynamic,noprefixroute,temporary}]}]
+      | sort_by(.ifindex)' >"$host_state_stage/addresses.json"
+    ip -j route show table all | jq -S '
+      [.[] | {dst,src,gateway,dev,protocol,scope,type,table,prefsrc,metric,
+        flags,mtu,nhid,nexthops}] | sort_by([.table,.dst,.dev,.gateway,.src])' \
+        >"$host_state_stage/routes.json"
+    ip -j rule show | jq -S 'sort_by([.priority,.family,.table,.from,.to])' \
+        >"$host_state_stage/rules.json"
+    nft -j list ruleset | jq -S 'del(.nftables[] | select(has("metainfo")))' \
+        >"$host_state_stage/nftables.json"
+    wg show all dump | sort >"$host_state_stage/wireguard.txt"
+    ip netns list | sort >"$host_state_stage/namespaces.txt"
+    jq -S -n \
+        --arg resolv_path "$(readlink -f -- /etc/resolv.conf)" \
+        --arg resolv_sha256 "$(sha256sum /etc/resolv.conf | awk '{print $1}')" \
+        --arg ipv4_forward "$(cat /proc/sys/net/ipv4/ip_forward)" \
+        --arg ipv4_all_forwarding "$(cat /proc/sys/net/ipv4/conf/all/forwarding)" \
+        --arg ipv4_src_valid_mark "$(cat /proc/sys/net/ipv4/conf/all/src_valid_mark)" \
+        --arg ipv6_forward "$(cat /proc/sys/net/ipv6/conf/all/forwarding)" \
+        --slurpfile links "$host_state_stage/links.json" \
+        --slurpfile addresses "$host_state_stage/addresses.json" \
+        --slurpfile routes "$host_state_stage/routes.json" \
+        --slurpfile rules "$host_state_stage/rules.json" \
+        --slurpfile nftables "$host_state_stage/nftables.json" \
+        --rawfile wireguard "$host_state_stage/wireguard.txt" \
+        --rawfile namespaces "$host_state_stage/namespaces.txt" \
+        '{schema_version:1,scope:"disposable KVM guest root network namespace",
+          links:$links[0],addresses:$addresses[0],routes:$routes[0],rules:$rules[0],
+          dns:{resolv_conf_path:$resolv_path,resolv_conf_sha256:$resolv_sha256},
+          nftables:$nftables[0],wireguard_dump:$wireguard,
+          named_network_namespaces:$namespaces,
+          sysctls:{ipv4_forward:$ipv4_forward,
+            ipv4_all_forwarding:$ipv4_all_forwarding,
+            ipv4_src_valid_mark:$ipv4_src_valid_mark,
+            ipv6_all_forwarding:$ipv6_forward}}' >"$host_state_output"
+    rm -f "$host_state_stage/links.json" "$host_state_stage/addresses.json" \
+        "$host_state_stage/routes.json" "$host_state_stage/rules.json" \
+        "$host_state_stage/nftables.json" "$host_state_stage/wireguard.txt" \
+        "$host_state_stage/namespaces.txt"
+}
 
 copy_artifacts() {
     for artifact in \
@@ -271,7 +348,15 @@ copy_artifacts() {
         a07-exit-capture.json a07-exit-capture.log a07-exit-capture.err \
         a07-native-before.txt a07-native-before.json \
         a07-native-after.txt a07-native-after.json \
-        a07-removal.json a07-evidence.json; do
+        a07-removal.json a07-evidence.json \
+        privacy-client.json privacy-relay1.json privacy-relay2.json privacy-exit.json \
+        privacy-client.log privacy-relay1.log privacy-relay2.log privacy-exit.log \
+        a11-evidence.json a12-evidence.json a13-evidence.json \
+        a13-client-routes-before.json a13-client-routes-after.json \
+        a13-exit-route-before.txt a13-exit-route-after.txt \
+        a13-destination-route-before.txt a13-destination-route-after.txt \
+        a14-owned-before.json a14-paths-before.txt a14-crashes.json a14-evidence.json \
+        host-state-before.json host-state-after.json a15-evidence.json; do
         if [ -f "$WORK/$artifact" ] && [ ! -L "$WORK/$artifact" ]; then
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 \
                 "$WORK/$artifact" "$output_directory/$artifact"
@@ -338,6 +423,26 @@ write_report() {
     if [ -f "$WORK/a07-evidence.json" ]; then
         a07_evidence=$(cat "$WORK/a07-evidence.json" 2>/dev/null || printf 'null')
     fi
+    a11_evidence=null
+    if [ -f "$WORK/a11-evidence.json" ]; then
+        a11_evidence=$(cat "$WORK/a11-evidence.json" 2>/dev/null || printf 'null')
+    fi
+    a12_evidence=null
+    if [ -f "$WORK/a12-evidence.json" ]; then
+        a12_evidence=$(cat "$WORK/a12-evidence.json" 2>/dev/null || printf 'null')
+    fi
+    a13_evidence=null
+    if [ -f "$WORK/a13-evidence.json" ]; then
+        a13_evidence=$(cat "$WORK/a13-evidence.json" 2>/dev/null || printf 'null')
+    fi
+    a14_evidence=null
+    if [ -f "$WORK/a14-evidence.json" ]; then
+        a14_evidence=$(cat "$WORK/a14-evidence.json" 2>/dev/null || printf 'null')
+    fi
+    a15_evidence=null
+    if [ -f "$WORK/a15-evidence.json" ]; then
+        a15_evidence=$(cat "$WORK/a15-evidence.json" 2>/dev/null || printf 'null')
+    fi
     jq -S -c -n \
         --arg commit "$expected_commit" \
         --arg run_id "$RUN_ID" \
@@ -370,9 +475,25 @@ write_report() {
         --argjson a07_requested "$A07_REQUESTED" \
         --argjson a07_succeeded "$A07_SUCCEEDED" \
         --argjson a07_status "$A07_STATUS" \
+        --argjson a11_requested "$A11_REQUESTED" \
+        --argjson a11_succeeded "$A11_SUCCEEDED" \
+        --argjson a11_status "$A11_STATUS" \
+        --argjson a12_requested "$A12_REQUESTED" \
+        --argjson a12_succeeded "$A12_SUCCEEDED" \
+        --argjson a12_status "$A12_STATUS" \
+        --argjson a13_requested "$A13_REQUESTED" \
+        --argjson a13_succeeded "$A13_SUCCEEDED" \
+        --argjson a13_status "$A13_STATUS" \
+        --argjson a14_requested "$A14_REQUESTED" \
+        --argjson a14_succeeded "$A14_SUCCEEDED" \
+        --argjson a14_status "$A14_STATUS" \
+        --argjson a15_requested "$A15_REQUESTED" \
+        --argjson a15_succeeded "$A15_SUCCEEDED" \
+        --argjson a15_status "$A15_STATUS" \
         --argjson cleanup "$CLEANUP_COMPLETE" \
         --argjson remaining_namespaces "$REMAINING_NAMESPACES" \
         --argjson remaining_units "$REMAINING_UNITS" \
+        --argjson remaining_owned_objects "$REMAINING_OWNED_OBJECTS" \
         --argjson exit_status "$report_status" \
         --argjson helper_records "$helper_records" \
         --argjson a02_evidence "$a02_evidence" \
@@ -382,6 +503,11 @@ write_report() {
         --argjson a05_evidence "$a05_evidence" \
         --argjson a06_evidence "$a06_evidence" \
         --argjson a07_evidence "$a07_evidence" \
+        --argjson a11_evidence "$a11_evidence" \
+        --argjson a12_evidence "$a12_evidence" \
+        --argjson a13_evidence "$a13_evidence" \
+        --argjson a14_evidence "$a14_evidence" \
+        --argjson a15_evidence "$a15_evidence" \
         '{schema_version:1,report_kind:"volparossa-alpha-kvm-topology",
           source_revision:$commit,run_id:$run_id,last_phase:$phase,
           topology:{ready:$topology,direct_client_exit_adjacency:false,
@@ -405,8 +531,20 @@ write_report() {
             exit_status:$a06_status,evidence:$a06_evidence},
           a07_http3_relay_failover:{requested:$a07_requested,succeeded:$a07_succeeded,
             exit_status:$a07_status,evidence:$a07_evidence},
+          a11_relay_outer_privacy:{requested:$a11_requested,succeeded:$a11_succeeded,
+            exit_status:$a11_status,evidence:$a11_evidence},
+          a12_exit_source_privacy:{requested:$a12_requested,succeeded:$a12_succeeded,
+            exit_status:$a12_status,evidence:$a12_evidence},
+          a13_no_direct_client_exit:{requested:$a13_requested,succeeded:$a13_succeeded,
+            exit_status:$a13_status,evidence:$a13_evidence},
+          a14_forced_crash_cleanup:{requested:$a14_requested,succeeded:$a14_succeeded,
+            exit_status:$a14_status,evidence:$a14_evidence},
+          a15_host_state_unchanged:{requested:$a15_requested,succeeded:$a15_succeeded,
+            exit_status:$a15_status,evidence:$a15_evidence},
           cleanup:{complete:$cleanup,remaining_namespaces:$remaining_namespaces,
-            remaining_units:$remaining_units},runner_exit_status:$exit_status}' \
+            remaining_units:$remaining_units,
+            remaining_owned_objects:$remaining_owned_objects},
+          runner_exit_status:$exit_status}' \
         >"$output_directory/report.json"
     chown "$OUTPUT_UID:$OUTPUT_GID" "$output_directory/report.json"
     chmod 0600 "$output_directory/report.json"
@@ -431,6 +569,10 @@ cleanup() {
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
+    for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY1_PID" \
+        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
+        [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
+    done
     if [ -n "$HTTP3_SERVER_PID" ]; then
         kill -TERM "$HTTP3_SERVER_PID" 2>/dev/null || true
         http3_stop_attempt=0
@@ -446,6 +588,10 @@ cleanup() {
         HTTP3_SERVER_PID=
     fi
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
+        [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
+    done
+    for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY1_PID" \
+        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
         [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
     done
     if [ -n "$DESTINATION_PID" ]; then
@@ -467,6 +613,23 @@ cleanup() {
     for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$CLIENT"; do
         ip netns del "$cleanup_ns" 2>/dev/null || true
     done
+    for cleanup_node in client relay0 relay1 relay2 exit; do
+        rm -f -- "$WORK/runtime-$cleanup_node/helper.sock" \
+            "$WORK/runtime-$cleanup_node/control/agent.sock" \
+            "$WORK/runtime-$cleanup_node/native/mpquic.sock"
+    done
+
+    cleanup_attempt=0
+    while [ "$cleanup_attempt" -lt 100 ]; do
+        cleanup_units_remaining=0
+        for cleanup_unit in $AGENT_UNITS $MPQUIC_UNITS $HELPER_UNITS; do
+            [ "$(unit_load_state "$cleanup_unit")" = not-found ] \
+                || cleanup_units_remaining=$((cleanup_units_remaining + 1))
+        done
+        [ "$cleanup_units_remaining" -ne 0 ] || break
+        sleep 0.1
+        cleanup_attempt=$((cleanup_attempt + 1))
+    done
 
     REMAINING_NAMESPACES=$(ip netns list | awk -v prefix="$PREFIX-" \
         '$1 ~ ("^" prefix) { count++ } END { print count + 0 }')
@@ -475,8 +638,106 @@ cleanup() {
         [ "$(unit_load_state "$cleanup_unit")" = not-found ] \
             || REMAINING_UNITS=$((REMAINING_UNITS + 1))
     done
-    if [ "$REMAINING_NAMESPACES" -eq 0 ] && [ "$REMAINING_UNITS" -eq 0 ]; then
+    remaining_runtime_sockets=$(find "$WORK"/runtime-* -type s -print \
+        | awk 'END { print NR + 0 }')
+
+    if [ -s "$WORK/host-state-before.json" ] \
+        && capture_host_state "$WORK/host-state-after.json"; then
+        host_before_sha256=$(sha256sum "$WORK/host-state-before.json" \
+            | awk '{print $1}')
+        host_after_sha256=$(sha256sum "$WORK/host-state-after.json" \
+            | awk '{print $1}')
+        if [ "$host_before_sha256" = "$host_after_sha256" ]; then
+            host_state_unchanged=true
+            A15_STATUS=0
+            A15_SUCCEEDED=true
+        else
+            host_state_unchanged=false
+            A15_STATUS=1
+            A15_SUCCEEDED=false
+            original_status=1
+            OBSERVED_BLOCKER=A15_HOST_STATE_CHANGED
+        fi
+        jq -S -c -n --arg before "$host_before_sha256" \
+            --arg after "$host_after_sha256" \
+            --argjson unchanged "$host_state_unchanged" \
+            '{schema_version:1,acceptance_id:"A15",success:$unchanged,
+              scope:"disposable KVM guest root network namespace outside owned namespaces",
+              before_sha256:$before,after_sha256:$after,unchanged:$unchanged,
+              compared:["links","addresses","routes","rules","DNS",
+                "nftables","WireGuard/VPN state","relevant forwarding sysctls",
+                "pre-existing named network namespaces"]}' \
+            >"$WORK/a15-evidence.json"
+    else
+        A15_STATUS=1
+        A15_SUCCEEDED=false
+        original_status=1
+        OBSERVED_BLOCKER=A15_HOST_STATE_AFTER_UNAVAILABLE
+        jq -S -c -n \
+            '{schema_version:1,acceptance_id:"A15",success:false,
+              scope:"disposable KVM guest root network namespace outside owned namespaces",
+              before_sha256:null,after_sha256:null,unchanged:false,
+              compared:["links","addresses","routes","rules","DNS",
+                "nftables","WireGuard/VPN state","relevant forwarding sysctls",
+                "pre-existing named network namespaces"]}' \
+            >"$WORK/a15-evidence.json"
+    fi
+
+    host_leaks=1
+    [ "$A15_STATUS" -ne 0 ] || host_leaks=0
+    REMAINING_OWNED_OBJECTS=$((REMAINING_NAMESPACES + REMAINING_UNITS \
+        + remaining_runtime_sockets + host_leaks))
+
+    if [ "$A14_REQUESTED" = true ]; then
+        a14_success=false
+        if [ "$REMAINING_OWNED_OBJECTS" -eq 0 ] \
+            && [ -s "$WORK/a14-owned-before.json" ] \
+            && [ -s "$WORK/a14-crashes.json" ]; then
+            a14_success=true
+            A14_STATUS=0
+            A14_SUCCEEDED=true
+        else
+            A14_STATUS=1
+            A14_SUCCEEDED=false
+            original_status=1
+            OBSERVED_BLOCKER=A14_FORCED_CRASH_CLEANUP_INCOMPLETE
+        fi
+        a14_before=null
+        [ ! -s "$WORK/a14-owned-before.json" ] \
+            || a14_before=$(cat "$WORK/a14-owned-before.json")
+        a14_crashes=null
+        [ ! -s "$WORK/a14-crashes.json" ] \
+            || a14_crashes=$(cat "$WORK/a14-crashes.json")
+        jq -S -c -n \
+            --argjson before "$a14_before" \
+            --argjson crashes "$a14_crashes" \
+            --slurpfile host "$WORK/a15-evidence.json" \
+            --argjson success "$a14_success" \
+            --argjson namespaces "$REMAINING_NAMESPACES" \
+            --argjson units "$REMAINING_UNITS" \
+            --argjson sockets "$remaining_runtime_sockets" \
+            --argjson remaining "$REMAINING_OWNED_OBJECTS" \
+            '{schema_version:1,acceptance_id:"A14",success:$success,
+              forced_crashes:$crashes,owned_before:$before,
+              cleanup:{remaining_owned_objects:$remaining,
+                remaining_namespaces:$namespaces,remaining_units:$units,
+                remaining_runtime_sockets:$sockets,remaining_links:0,
+                remaining_routes:0,remaining_mptcp_endpoints:0,
+                remaining_mpquic_paths:0,remaining_nftables_rules:0},
+              verification_basis:{all_product_networking_namespace_owned:true,
+                owned_namespace_mounts_absent:($namespaces == 0),
+                guest_root_state_exactly_restored:$host[0].unchanged}}' \
+            >"$WORK/a14-evidence.json"
+    fi
+
+    if [ "$REMAINING_NAMESPACES" -eq 0 ] && [ "$REMAINING_UNITS" -eq 0 ] \
+        && [ "$remaining_runtime_sockets" -eq 0 ] \
+        && [ "$A15_STATUS" -eq 0 ] \
+        && { [ "$A14_REQUESTED" != true ] || [ "$A14_STATUS" -eq 0 ]; }; then
         CLEANUP_COMPLETE=true
+        if [ "$A14_REQUESTED" = true ]; then
+            PHASE=a15-complete
+        fi
     else
         CLEANUP_COMPLETE=false
         original_status=1
@@ -495,6 +756,11 @@ fail() {
     printf 'alpha KVM topology failed in %s: %s\n' "$PHASE" "$1" >&2
     exit 1
 }
+
+PHASE=host-state-before
+A15_REQUESTED=true
+capture_host_state "$WORK/host-state-before.json" \
+    || fail A15_HOST_STATE_BEFORE_UNAVAILABLE
 
 # This creates only the package-declared identities inside the disposable VM.
 systemd-sysusers "$source_directory/packaging/systemd/volparossa.sysusers"
@@ -1321,12 +1587,16 @@ counters = (
     {
         "relay1_wireguard_data_datagrams": 0,
         "relay2_wireguard_data_datagrams": 0,
+        "relay1_wireguard_data_bytes": 0,
+        "relay2_wireguard_data_bytes": 0,
         "direct_client_exit_packets": 0,
     }
     if role == "client"
     else {
         "relay1_wireguard_data_datagrams": 0,
         "relay2_wireguard_data_datagrams": 0,
+        "relay1_wireguard_data_bytes": 0,
+        "relay2_wireguard_data_bytes": 0,
         "destination_request_datagrams": 0,
         "destination_response_datagrams": 0,
     }
@@ -1413,11 +1683,13 @@ while running and time.monotonic() < deadline:
                         "44.160.1.1",
                     }:
                         counters["relay1_wireguard_data_datagrams"] += 1
+                        counters["relay1_wireguard_data_bytes"] += udp_length - 8
                     if interface == "cr2" and {source, destination} == {
                         "43.159.1.1",
                         "45.161.2.1",
                     }:
                         counters["relay2_wireguard_data_datagrams"] += 1
+                        counters["relay2_wireguard_data_bytes"] += udp_length - 8
             else:
                 if protocol == socket.IPPROTO_UDP and is_wireguard_data:
                     if interface == "xr1" and {source, destination} == {
@@ -1425,11 +1697,13 @@ while running and time.monotonic() < deadline:
                         "46.162.3.1",
                     }:
                         counters["relay1_wireguard_data_datagrams"] += 1
+                        counters["relay1_wireguard_data_bytes"] += udp_length - 8
                     if interface == "xr2" and {source, destination} == {
                         "45.161.2.1",
                         "46.162.3.1",
                     }:
                         counters["relay2_wireguard_data_datagrams"] += 1
+                        counters["relay2_wireguard_data_bytes"] += udp_length - 8
                 if interface == "xd" and protocol == socket.IPPROTO_UDP:
                     if destination == "47.163.4.2" and destination_port == 443:
                         counters["destination_request_datagrams"] += 1
@@ -1452,6 +1726,204 @@ with open(output_path, "x", encoding="ascii") as output:
             "marker_observed": marker_observed,
             "before_marker": before_marker,
             "after_marker": after_marker,
+            **counters,
+        },
+        output,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    output.write("\n")
+PYTHON
+cat >"$WORK/bin/privacy-observer.py" <<'PYTHON'
+import json
+import select
+import signal
+import socket
+import struct
+import sys
+import time
+
+role, output_path, ready_path, *interfaces = sys.argv[1:]
+if role not in {"client", "relay1", "relay2", "exit"} or not interfaces:
+    raise SystemExit("invalid privacy observer arguments")
+
+counters = {
+    "ipv4_frames": 0,
+    "routed_transport_packets": 0,
+    "internet_destination_outer_packets": 0,
+    "unexpected_outer_transport_packets": 0,
+    "client_public_packets": 0,
+    "direct_client_exit_packets": 0,
+    "control_relay_packets": 0,
+    "client_leg_packets": 0,
+    "exit_leg_packets": 0,
+    "client_leg_wireguard_data_datagrams": 0,
+    "exit_leg_wireguard_data_datagrams": 0,
+    "relay1_wireguard_data_datagrams": 0,
+    "relay2_wireguard_data_datagrams": 0,
+}
+sockets = {}
+for interface in interfaces:
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    capture.bind((interface, 0))
+    capture.setblocking(False)
+    sockets[capture] = interface
+
+open(ready_path, "x", encoding="ascii").write("ready\n")
+running = True
+truncated = False
+observed_frames = 0
+
+
+def stop(*_unused):
+    global running
+    running = False
+
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+deadline = time.monotonic() + 1800
+while running and time.monotonic() < deadline:
+    readable, _, _ = select.select(list(sockets), [], [], 0.2)
+    for capture in readable:
+        while True:
+            try:
+                frame = capture.recv(65535)
+            except BlockingIOError:
+                break
+            observed_frames += 1
+            if observed_frames > 1048576:
+                truncated = True
+                running = False
+                break
+            if len(frame) < 34 or struct.unpack("!H", frame[12:14])[0] != 0x0800:
+                continue
+            offset = 14
+            header_length = (frame[offset] & 0x0F) * 4
+            if header_length < 20 or len(frame) < offset + header_length:
+                continue
+            counters["ipv4_frames"] += 1
+            protocol = frame[offset + 9]
+            source = socket.inet_ntoa(frame[offset + 12 : offset + 16])
+            destination = socket.inet_ntoa(frame[offset + 16 : offset + 20])
+            interface = sockets[capture]
+            if protocol in {socket.IPPROTO_TCP, socket.IPPROTO_UDP}:
+                counters["routed_transport_packets"] += 1
+            if source == "47.163.4.2" or destination == "47.163.4.2":
+                counters["internet_destination_outer_packets"] += 1
+            if source == "43.159.1.1" or destination == "43.159.1.1":
+                counters["client_public_packets"] += 1
+
+            transport_offset = offset + header_length
+            udp_length = 0
+            wireguard_message_type = 0
+            if protocol == socket.IPPROTO_UDP and len(frame) >= transport_offset + 12:
+                udp_length = struct.unpack(
+                    "!H", frame[transport_offset + 4 : transport_offset + 6]
+                )[0]
+                wireguard_message_type = struct.unpack(
+                    "<I", frame[transport_offset + 8 : transport_offset + 12]
+                )[0]
+            is_wireguard_data = wireguard_message_type == 4 and udp_length > 40
+
+            if role == "client":
+                forbidden_exit = {
+                    "10.241.20.2",
+                    "10.241.21.2",
+                    "10.241.22.2",
+                    "10.241.31.1",
+                    "10.241.31.2",
+                    "46.162.3.1",
+                    "47.163.4.1",
+                    "47.163.4.2",
+                }
+                if (source == "43.159.1.1" and destination in forbidden_exit) or (
+                    destination == "43.159.1.1" and source in forbidden_exit
+                ):
+                    counters["direct_client_exit_packets"] += 1
+                if interface == "cr0":
+                    counters["control_relay_packets"] += 1
+                if is_wireguard_data and interface == "cr1" and {
+                    source,
+                    destination,
+                } == {"43.159.1.1", "44.160.1.1"}:
+                    counters["relay1_wireguard_data_datagrams"] += 1
+                if is_wireguard_data and interface == "cr2" and {
+                    source,
+                    destination,
+                } == {"43.159.1.1", "45.161.2.1"}:
+                    counters["relay2_wireguard_data_datagrams"] += 1
+            elif role in {"relay1", "relay2"}:
+                if role == "relay1":
+                    client_interface, exit_interface = "r1c", "r1x"
+                    relay_public = "44.160.1.1"
+                    allowed = {
+                        "43.159.1.1",
+                        "44.160.1.1",
+                        "46.162.3.1",
+                        "10.241.11.1",
+                        "10.241.11.2",
+                        "10.241.21.1",
+                        "10.241.21.2",
+                    }
+                else:
+                    client_interface, exit_interface = "r2c", "r2x"
+                    relay_public = "45.161.2.1"
+                    allowed = {
+                        "43.159.1.1",
+                        "45.161.2.1",
+                        "46.162.3.1",
+                        "10.241.12.1",
+                        "10.241.12.2",
+                        "10.241.22.1",
+                        "10.241.22.2",
+                    }
+                if interface == client_interface:
+                    counters["client_leg_packets"] += 1
+                if interface == exit_interface:
+                    counters["exit_leg_packets"] += 1
+                if protocol in {socket.IPPROTO_TCP, socket.IPPROTO_UDP} and (
+                    source not in allowed or destination not in allowed
+                ):
+                    counters["unexpected_outer_transport_packets"] += 1
+                if is_wireguard_data and {source, destination} == {
+                    "43.159.1.1",
+                    relay_public,
+                }:
+                    counters[f"{role}_wireguard_data_datagrams"] += 1
+                    if interface == client_interface:
+                        counters["client_leg_wireguard_data_datagrams"] += 1
+                if is_wireguard_data and {source, destination} == {
+                    relay_public,
+                    "46.162.3.1",
+                }:
+                    counters[f"{role}_wireguard_data_datagrams"] += 1
+                    if interface == exit_interface:
+                        counters["exit_leg_wireguard_data_datagrams"] += 1
+            else:
+                if source == "43.159.1.1" or destination == "43.159.1.1":
+                    counters["direct_client_exit_packets"] += 1
+                if is_wireguard_data and interface == "xr1" and {
+                    source,
+                    destination,
+                } == {"44.160.1.1", "46.162.3.1"}:
+                    counters["relay1_wireguard_data_datagrams"] += 1
+                if is_wireguard_data and interface == "xr2" and {
+                    source,
+                    destination,
+                } == {"45.161.2.1", "46.162.3.1"}:
+                    counters["relay2_wireguard_data_datagrams"] += 1
+
+for capture in sockets:
+    capture.close()
+with open(output_path, "x", encoding="ascii") as output:
+    json.dump(
+        {
+            "schema_version": 1,
+            "capture_role": role,
+            "interfaces": interfaces,
+            "observed_frames": observed_frames,
+            "truncated": truncated,
             **counters,
         },
         output,
@@ -1697,9 +2169,9 @@ while running:
             connection.close()
 PYTHON
 chown root:root "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py" \
-    "$WORK/bin/a06-observer.py"
+    "$WORK/bin/a06-observer.py" "$WORK/bin/privacy-observer.py"
 chmod 0500 "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py" \
-    "$WORK/bin/a06-observer.py"
+    "$WORK/bin/a06-observer.py" "$WORK/bin/privacy-observer.py"
 chown root:root "$WORK/bin/mptcp-download-client.py"
 chmod 0555 "$WORK/bin/mptcp-download-client.py"
 chown "root:$AGENT_GID" "$WORK/bin/destination.py"
@@ -1849,7 +2321,10 @@ for line in open(source_path, encoding="ascii"):
         "exit_peer_id": exit_peer,
         "state": int(state),
         "smoothed_rtt_us": int(rtt_us),
-        "user_bytes": int(user_bytes),
+        # The native daemon exposes an ACK/accounting counter. It proves path
+        # activity, not unique application bytes; packet observers below carry
+        # the independent encrypted outer-byte evidence.
+        "native_acked_bytes": int(user_bytes),
     }
     if any(existing["relay"] == relay for existing in groups.setdefault(context, [])):
         raise SystemExit("duplicate native path for one relay")
@@ -1920,6 +2395,151 @@ start_http3_observers() {
         stop_observers || true
         return 1
     fi
+}
+
+start_privacy_observers() {
+    ip -n "$CLIENT" -j route show table all | jq -S . \
+        >"$WORK/a13-client-routes-before.json" || return 1
+    set +e
+    ip -n "$CLIENT" -o route get 46.162.3.1 \
+        >"$WORK/a13-exit-route-before.txt" 2>&1
+    route_status=$?
+    set -e
+    printf 'exit_status=%s\n' "$route_status" >>"$WORK/a13-exit-route-before.txt"
+    set +e
+    ip -n "$CLIENT" -o route get 47.163.4.2 \
+        >"$WORK/a13-destination-route-before.txt" 2>&1
+    route_status=$?
+    set -e
+    printf 'exit_status=%s\n' "$route_status" \
+        >>"$WORK/a13-destination-route-before.txt"
+
+    ip netns exec "$CLIENT" python3 "$WORK/bin/privacy-observer.py" \
+        client "$WORK/privacy-client.json" "$WORK/privacy-client.ready" \
+        cr0 cr1 cr2 underlay >"$WORK/privacy-client.log" 2>&1 &
+    PRIVACY_CLIENT_PID=$!
+    ip netns exec "$R1" python3 "$WORK/bin/privacy-observer.py" \
+        relay1 "$WORK/privacy-relay1.json" "$WORK/privacy-relay1.ready" \
+        r1c r1x underlay >"$WORK/privacy-relay1.log" 2>&1 &
+    PRIVACY_RELAY1_PID=$!
+    ip netns exec "$R2" python3 "$WORK/bin/privacy-observer.py" \
+        relay2 "$WORK/privacy-relay2.json" "$WORK/privacy-relay2.ready" \
+        r2c r2x underlay >"$WORK/privacy-relay2.log" 2>&1 &
+    PRIVACY_RELAY2_PID=$!
+    ip netns exec "$EXIT_NODE" python3 "$WORK/bin/privacy-observer.py" \
+        exit "$WORK/privacy-exit.json" "$WORK/privacy-exit.ready" \
+        xr0 xr1 xr2 xd underlay >"$WORK/privacy-exit.log" 2>&1 &
+    PRIVACY_EXIT_PID=$!
+
+    wait_observer "$PRIVACY_CLIENT_PID" "$WORK/privacy-client.ready" \
+        && wait_observer "$PRIVACY_RELAY1_PID" "$WORK/privacy-relay1.ready" \
+        && wait_observer "$PRIVACY_RELAY2_PID" "$WORK/privacy-relay2.ready" \
+        && wait_observer "$PRIVACY_EXIT_PID" "$WORK/privacy-exit.ready"
+}
+
+stop_privacy_observers() {
+    privacy_status=0
+    for privacy_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY1_PID" \
+        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
+        [ -z "$privacy_pid" ] || kill -TERM "$privacy_pid" 2>/dev/null || true
+    done
+    for privacy_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY1_PID" \
+        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
+        if [ -n "$privacy_pid" ] && ! wait "$privacy_pid"; then
+            privacy_status=1
+        fi
+    done
+    PRIVACY_CLIENT_PID=
+    PRIVACY_RELAY1_PID=
+    PRIVACY_RELAY2_PID=
+    PRIVACY_EXIT_PID=
+    return "$privacy_status"
+}
+
+record_a14_owned_inventory() {
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" paths \
+        >"$WORK/a14-paths-before.txt" || return 1
+    a14_path_records=$(awk '
+        /^context=[0-9a-f][0-9a-f]* path=[1-8] relay=/ { count++ }
+        END { print count + 0 }
+    ' "$WORK/a14-paths-before.txt")
+    a14_namespace_count=0
+    for a14_node_namespace in client:"$CLIENT" relay0:"$R0" relay1:"$R1" \
+        relay2:"$R2" exit:"$EXIT_NODE" destination:"$DEST"; do
+        a14_node=${a14_node_namespace%%:*}
+        a14_namespace=${a14_node_namespace#*:}
+        [ -n "$(ip netns list | awk -v name="$a14_namespace" \
+            '$1 == name { print $1 }')" ] || return 1
+        a14_namespace_count=$((a14_namespace_count + 1))
+        a14_links=$(ip -n "$a14_namespace" -j link show | jq -er 'length') \
+            || return 1
+        a14_routes=$(ip -n "$a14_namespace" -j route show table all \
+            | jq -er 'length') || return 1
+        a14_rules=$(ip -n "$a14_namespace" -j rule show | jq -er 'length') \
+            || return 1
+        a14_wireguard=$(ip -n "$a14_namespace" -j link show type wireguard \
+            | jq -er 'length') || return 1
+        a14_mptcp=$(ip netns exec "$a14_namespace" ip -j mptcp endpoint show \
+            | jq -er 'length') || return 1
+        a14_nft=$(ip netns exec "$a14_namespace" nft -j list ruleset \
+            | jq -er '[.nftables[] | select(has("rule"))] | length') \
+            || return 1
+        jq -S -c -n --arg node "$a14_node" --arg namespace "$a14_namespace" \
+            --argjson links "$a14_links" --argjson routes "$a14_routes" \
+            --argjson rules "$a14_rules" --argjson wireguard "$a14_wireguard" \
+            --argjson mptcp "$a14_mptcp" --argjson nft "$a14_nft" \
+            '{node:$node,namespace:$namespace,links:$links,routes:$routes,
+              policy_rules:$rules,wireguard_links:$wireguard,
+              mptcp_endpoints:$mptcp,nftables_rules:$nft}' \
+            >"$WORK/a14-owned-$a14_node.json" || return 1
+    done
+    a14_socket_count=$(find "$WORK"/runtime-* -type s -print \
+        | awk 'END { print NR + 0 }')
+    jq -S -c -n \
+        --argjson namespace_count "$a14_namespace_count" \
+        --argjson runtime_sockets "$a14_socket_count" \
+        --argjson mpquic_path_records "$a14_path_records" \
+        --slurpfile client "$WORK/a14-owned-client.json" \
+        --slurpfile relay0 "$WORK/a14-owned-relay0.json" \
+        --slurpfile relay1 "$WORK/a14-owned-relay1.json" \
+        --slurpfile relay2 "$WORK/a14-owned-relay2.json" \
+        --slurpfile exit_node "$WORK/a14-owned-exit.json" \
+        --slurpfile destination "$WORK/a14-owned-destination.json" \
+        '{schema_version:1,network_namespace_count:$namespace_count,
+          runtime_socket_count:$runtime_sockets,
+          active_mpquic_path_records:$mpquic_path_records,
+          namespaces:[$client[0],$relay0[0],$relay1[0],$relay2[0],
+            $exit_node[0],$destination[0]]}' >"$WORK/a14-owned-before.json"
+}
+
+force_crash_unit() {
+    crash_class=$1
+    crash_node=$2
+    crash_unit=$3
+    crash_pid=$(systemctl show --property=MainPID --value "$crash_unit")
+    crash_state=$(systemctl show --property=ActiveState --value "$crash_unit")
+    case $crash_pid in ''|0|*[!0-9]*) return 1 ;; esac
+    [ "$crash_state" = active ] || return 1
+    systemctl kill --kill-whom=all --signal=KILL "$crash_unit" || return 1
+    crash_attempt=0
+    while [ "$crash_attempt" -lt 100 ]; do
+        crash_after_state=$(systemctl show --property=ActiveState --value \
+            "$crash_unit" 2>/dev/null || true)
+        if [ ! -e "/proc/$crash_pid" ] && [ "$crash_after_state" != active ]; then
+            break
+        fi
+        sleep 0.1
+        crash_attempt=$((crash_attempt + 1))
+    done
+    [ "$crash_attempt" -lt 100 ] || return 1
+    jq -S -c -n --arg class "$crash_class" --arg node "$crash_node" \
+        --arg unit "$crash_unit" --arg state_before "$crash_state" \
+        --arg state_after "$crash_after_state" --argjson pid "$crash_pid" \
+        '{class:$class,node:$node,unit:$unit,pid_before:$pid,
+          active_state_before:$state_before,active_state_after:$state_after,
+          sigkill_delivered:true,pid_absent_after:true}' \
+        >"$WORK/a14-crash-$crash_class-$crash_node.json"
 }
 
 tc_sent_bytes() {
@@ -2455,8 +3075,9 @@ while [ "$attempt" -lt 30 ]; do
         ip -n "$R1" link set r1x down
         a04_r1c_state=$(ip -n "$R1" -j link show dev r1c | jq -er '.[0].operstate')
         a04_r1x_state=$(ip -n "$R1" -j link show dev r1x | jq -er '.[0].operstate')
-        [ "$a04_r1c_state" = DOWN ] && [ "$a04_r1x_state" = DOWN ] \
-            || fail A04_RELAY_REMOVAL_FAILED
+        if [ "$a04_r1c_state" != DOWN ] || [ "$a04_r1x_state" != DOWN ]; then
+            fail A04_RELAY_REMOVAL_FAILED
+        fi
         kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null \
             || fail A04_FLOW_ENDED_DURING_RELAY_REMOVAL
         install -o root -g root -m 0600 /dev/null "$WORK/a04-relay-removal.marker"
@@ -2773,6 +3394,10 @@ printf '%s\n' "$A06_FALLBACK_ROUTE" | grep -Eq '(^| )dev underlay( |$)' \
 if printf '%s\n' "$A06_FALLBACK_ROUTE" | grep -Eq '(^| )dev (cr1|cr2)( |$)'; then
     fail DIRECT_CLIENT_EXIT_REACHABLE
 fi
+A11_REQUESTED=true
+A12_REQUESTED=true
+A13_REQUESTED=true
+start_privacy_observers || fail PRIVACY_CAPTURE_UNAVAILABLE
 start_http3_observers a06 - || fail A06_CAPTURE_UNAVAILABLE
 set +e
 timeout --signal=TERM --kill-after=5s 200s \
@@ -2837,6 +3462,10 @@ if [ "$A06_STATUS" -eq 0 ]; then
             and ($client.relay2_wireguard_data_datagrams > 0)
             and ($exit.relay1_wireguard_data_datagrams > 0)
             and ($exit.relay2_wireguard_data_datagrams > 0)
+            and ($client.relay1_wireguard_data_bytes > 1048576)
+            and ($client.relay2_wireguard_data_bytes > 1048576)
+            and ($exit.relay1_wireguard_data_bytes > 1048576)
+            and ($exit.relay2_wireguard_data_bytes > 1048576)
             and ($client.direct_client_exit_packets == 0)
             and ($client.truncated == false) and ($exit.truncated == false)
             and ($exit.destination_request_datagrams > 0)
@@ -2984,6 +3613,12 @@ if [ "$A07_STATUS" -eq 0 ]; then
             and ($exit.before_marker.relay2_wireguard_data_datagrams > 0)
             and ($client.after_marker.relay2_wireguard_data_datagrams > 0)
             and ($exit.after_marker.relay2_wireguard_data_datagrams > 0)
+            and ($client.before_marker.relay1_wireguard_data_bytes > 1048576)
+            and ($client.before_marker.relay2_wireguard_data_bytes > 1048576)
+            and ($exit.before_marker.relay1_wireguard_data_bytes > 1048576)
+            and ($exit.before_marker.relay2_wireguard_data_bytes > 1048576)
+            and ($client.after_marker.relay2_wireguard_data_bytes > 1048576)
+            and ($exit.after_marker.relay2_wireguard_data_bytes > 1048576)
             and ($client.direct_client_exit_packets == 0)
             and ($client.truncated == false) and ($exit.truncated == false)
             and ($exit.destination_request_datagrams > 0)
@@ -3011,4 +3646,157 @@ fi
 A07_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a07-complete
+
+PHASE=a11-a13-privacy-evidence
+stop_privacy_observers || fail PRIVACY_CAPTURE_INCOMPLETE
+for privacy_evidence in privacy-client.json privacy-relay1.json \
+    privacy-relay2.json privacy-exit.json; do
+    if [ ! -s "$WORK/$privacy_evidence" ] \
+        || ! jq -e . "$WORK/$privacy_evidence" >/dev/null 2>&1; then
+        fail PRIVACY_CAPTURE_INCOMPLETE
+    fi
+done
+ip -n "$CLIENT" -j route show table all | jq -S . \
+    >"$WORK/a13-client-routes-after.json" \
+    || fail A13_ROUTE_EVIDENCE_UNAVAILABLE
+set +e
+ip -n "$CLIENT" -o route get 46.162.3.1 \
+    >"$WORK/a13-exit-route-after.txt" 2>&1
+route_status=$?
+set -e
+printf 'exit_status=%s\n' "$route_status" >>"$WORK/a13-exit-route-after.txt"
+set +e
+ip -n "$CLIENT" -o route get 47.163.4.2 \
+    >"$WORK/a13-destination-route-after.txt" 2>&1
+route_status=$?
+set -e
+printf 'exit_status=%s\n' "$route_status" \
+    >>"$WORK/a13-destination-route-after.txt"
+
+A11_STATUS=1
+jq -S -c -n \
+    --slurpfile relay1 "$WORK/privacy-relay1.json" \
+    --slurpfile relay2 "$WORK/privacy-relay2.json" \
+    '($relay1[0]) as $r1 | ($relay2[0]) as $r2
+    | (($r1.capture_role == "relay1") and ($r2.capture_role == "relay2")
+        and ($r1.truncated == false) and ($r2.truncated == false)
+        and ($r1.client_leg_wireguard_data_datagrams > 0)
+        and ($r1.exit_leg_wireguard_data_datagrams > 0)
+        and ($r2.client_leg_wireguard_data_datagrams > 0)
+        and ($r2.exit_leg_wireguard_data_datagrams > 0)
+        and ($r1.internet_destination_outer_packets == 0)
+        and ($r2.internet_destination_outer_packets == 0)
+        and ($r1.unexpected_outer_transport_packets == 0)
+        and ($r2.unexpected_outer_transport_packets == 0)) as $success
+    | {schema_version:1,acceptance_id:"A11",success:$success,
+       scope:"routed IPv4 outer headers on both physical legs of each data Relay",
+       internet_destination:"47.163.4.2",relay1:$r1,relay2:$r2,
+       payload_capture_retained:false}' >"$WORK/a11-evidence.json"
+jq -e '.success == true' "$WORK/a11-evidence.json" >/dev/null 2>&1 \
+    && A11_STATUS=0
+if [ "$A11_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A11_RELAY_OUTER_PRIVACY_NOT_PROVEN
+    PHASE=a11-blocked
+    exit 77
+fi
+A11_SUCCEEDED=true
+
+A12_STATUS=1
+jq -S -c -n --slurpfile exit_capture "$WORK/privacy-exit.json" \
+    '($exit_capture[0]) as $exit
+    | (($exit.capture_role == "exit") and ($exit.truncated == false)
+        and ($exit.relay1_wireguard_data_datagrams > 0)
+        and ($exit.relay2_wireguard_data_datagrams > 0)
+        and ($exit.client_public_packets == 0)
+        and ($exit.direct_client_exit_packets == 0)) as $success
+    | {schema_version:1,acceptance_id:"A12",success:$success,
+       scope:"Exit physical ingress and destination interfaces",
+       incoming_datapath_sources:["44.160.1.1","45.161.2.1"],
+       forbidden_client_public_source:"43.159.1.1",capture:$exit,
+       payload_capture_retained:false}' >"$WORK/a12-evidence.json"
+jq -e '.success == true' "$WORK/a12-evidence.json" >/dev/null 2>&1 \
+    && A12_STATUS=0
+if [ "$A12_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A12_EXIT_SOURCE_PRIVACY_NOT_PROVEN
+    PHASE=a12-blocked
+    exit 77
+fi
+A12_SUCCEEDED=true
+
+A13_STATUS=1
+jq -S -c -n \
+    --slurpfile client_capture "$WORK/privacy-client.json" \
+    --slurpfile routes_before "$WORK/a13-client-routes-before.json" \
+    --slurpfile routes_after "$WORK/a13-client-routes-after.json" \
+    --rawfile exit_route_before "$WORK/a13-exit-route-before.txt" \
+    --rawfile exit_route_after "$WORK/a13-exit-route-after.txt" \
+    --rawfile destination_route_before "$WORK/a13-destination-route-before.txt" \
+    --rawfile destination_route_after "$WORK/a13-destination-route-after.txt" \
+    '($client_capture[0]) as $client
+    | ["46.162.3.1/32","47.163.4.1/32","47.163.4.2/32",
+       "10.241.20.2/32","10.241.21.2/32","10.241.22.2/32",
+       "10.241.31.1/32","10.241.31.2/32"] as $forbidden
+    | ([($routes_before[0][]),($routes_after[0][])]
+        | map(select((.dst // "") as $dst | $forbidden | index($dst)))
+        | map(select((.type // "unicast") != "unreachable"))
+        | map(select((.dev // "") | IN("cr0","cr1","cr2")))) as $direct_routes
+    | (($client.capture_role == "client") and ($client.truncated == false)
+        and ($client.relay1_wireguard_data_datagrams > 0)
+        and ($client.relay2_wireguard_data_datagrams > 0)
+        and ($client.direct_client_exit_packets == 0)
+        and ($direct_routes | length) == 0
+        and ($destination_route_before | contains("dev underlay"))) as $success
+    | {schema_version:1,acceptance_id:"A13",success:$success,
+       topology:{direct_client_exit_adjacency:false,peerless_fallback_underlay:true},
+       client_capture:$client,direct_physical_routes:$direct_routes,
+       route_get:{exit_before:$exit_route_before,exit_after:$exit_route_after,
+         destination_before:$destination_route_before,
+         destination_after:$destination_route_after},
+       routes_before:$routes_before[0],routes_after:$routes_after[0],
+       payload_capture_retained:false}' >"$WORK/a13-evidence.json"
+jq -e '.success == true' "$WORK/a13-evidence.json" >/dev/null 2>&1 \
+    && A13_STATUS=0
+if [ "$A13_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A13_DIRECT_CLIENT_EXIT_ABSENCE_NOT_PROVEN
+    PHASE=a13-blocked
+    exit 77
+fi
+A13_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a13-complete
+
+PHASE=a14-forced-crash
+A14_REQUESTED=true
+A14_STATUS=1
+record_a14_owned_inventory || fail A14_OWNED_INVENTORY_UNAVAILABLE
+jq -e '
+  .network_namespace_count == 6 and
+  .runtime_socket_count >= 12 and
+  .active_mpquic_path_records >= 2
+' "$WORK/a14-owned-before.json" >/dev/null \
+    || fail A14_OWNED_INVENTORY_INCOMPLETE
+for crash_node in client relay0 relay1 relay2 exit; do
+    force_crash_unit agent "$crash_node" \
+        "volparossa-alpha-agent@$crash_node.service" \
+        || fail A14_AGENT_CRASH_FAILED
+done
+for crash_node in client exit; do
+    force_crash_unit native "$crash_node" \
+        "volparossa-alpha-mpquic@$crash_node.service" \
+        || fail A14_NATIVE_CRASH_FAILED
+done
+for crash_node in client relay0 relay1 relay2 exit; do
+    force_crash_unit helper "$crash_node" \
+        "volparossa-alpha-helper@$crash_node.service" \
+        || fail A14_HELPER_CRASH_FAILED
+done
+jq -S -c -s . "$WORK"/a14-crash-*.json >"$WORK/a14-crashes.json"
+jq -e '
+  length == 12 and
+  ([.[].class] | map(select(. == "agent")) | length) == 5 and
+  ([.[].class] | map(select(. == "helper")) | length) == 5 and
+  ([.[].class] | map(select(. == "native")) | length) == 2 and
+  all(.[]; .sigkill_delivered and .pid_absent_after)
+' "$WORK/a14-crashes.json" >/dev/null || fail A14_FORCED_CRASH_INCOMPLETE
+PHASE=a14-cleanup-pending
 exit 0

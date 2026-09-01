@@ -150,6 +150,11 @@ jobs:
               "A05 UDP echo succeeded: \(.a05_udp_echo.succeeded)",
               "A06 HTTP/3 MPQUIC succeeded: \(.a06_http3_mpquic.succeeded)",
               "A07 HTTP/3 Relay failover succeeded: \(.a07_http3_relay_failover.succeeded)",
+              "A11 Relay outer privacy succeeded: \(.a11_relay_outer_privacy.succeeded)",
+              "A12 Exit source privacy succeeded: \(.a12_exit_source_privacy.succeeded)",
+              "A13 No direct Client-Exit succeeded: \(.a13_no_direct_client_exit.succeeded)",
+              "A14 Forced-crash cleanup succeeded: \(.a14_forced_crash_cleanup.succeeded)",
+              "A15 Host state unchanged: \(.a15_host_state_unchanged.succeeded)",
               "observed blocker: \(.client_connect.observed_blocker)",
               "cleanup complete: \(.cleanup.complete)"
             ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -167,7 +172,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Require successful A02 through A07 datapaths
+      - name: Require successful A02-A07 and A11-A15 evidence
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -190,13 +195,41 @@ jobs:
             .a06_http3_mpquic.evidence.application.protocol == "HTTP/3" and
             .a06_http3_mpquic.evidence.native_mpquic.required_path_count == 2 and
             (.a06_http3_mpquic.evidence.native_mpquic.paths | length) == 2 and
+            .a06_http3_mpquic.evidence.path_evidence.client_capture.relay1_wireguard_data_bytes > 1048576 and
+            .a06_http3_mpquic.evidence.path_evidence.client_capture.relay2_wireguard_data_bytes > 1048576 and
+            .a06_http3_mpquic.evidence.path_evidence.exit_capture.relay1_wireguard_data_bytes > 1048576 and
+            .a06_http3_mpquic.evidence.path_evidence.exit_capture.relay2_wireguard_data_bytes > 1048576 and
             .a06_http3_mpquic.evidence.no_direct_client_exit.observed_packets == 0 and
             .a07_http3_relay_failover.succeeded == true and
             .a07_http3_relay_failover.evidence.success == true and
             .a07_http3_relay_failover.evidence.application_flow_completed == true and
             .a07_http3_relay_failover.evidence.ordinary_quic_fallback_allowed == false and
             .a07_http3_relay_failover.evidence.direct_client_exit_packets == 0 and
+            .a07_http3_relay_failover.evidence.path_evidence.client_capture.before_marker.relay1_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.client_capture.before_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.client_capture.after_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.exit_capture.before_marker.relay1_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.exit_capture.before_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.exit_capture.after_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a11_relay_outer_privacy.succeeded == true and
+            .a11_relay_outer_privacy.evidence.success == true and
+            .a11_relay_outer_privacy.evidence.relay1.internet_destination_outer_packets == 0 and
+            .a11_relay_outer_privacy.evidence.relay2.internet_destination_outer_packets == 0 and
+            .a12_exit_source_privacy.succeeded == true and
+            .a12_exit_source_privacy.evidence.success == true and
+            .a12_exit_source_privacy.evidence.capture.client_public_packets == 0 and
+            .a13_no_direct_client_exit.succeeded == true and
+            .a13_no_direct_client_exit.evidence.success == true and
+            .a13_no_direct_client_exit.evidence.client_capture.direct_client_exit_packets == 0 and
+            (.a13_no_direct_client_exit.evidence.direct_physical_routes | length) == 0 and
+            .a14_forced_crash_cleanup.succeeded == true and
+            .a14_forced_crash_cleanup.evidence.success == true and
+            .a14_forced_crash_cleanup.evidence.cleanup.remaining_owned_objects == 0 and
+            .a15_host_state_unchanged.succeeded == true and
+            .a15_host_state_unchanged.evidence.success == true and
+            .a15_host_state_unchanged.evidence.before_sha256 == .a15_host_state_unchanged.evidence.after_sha256 and
             .cleanup.complete == true and
             .cleanup.remaining_namespaces == 0 and
-            .cleanup.remaining_units == 0
+            .cleanup.remaining_units == 0 and
+            .cleanup.remaining_owned_objects == 0
           ' "$VOLPAROSSA_ALPHA_OUTPUT/report.json" >/dev/null

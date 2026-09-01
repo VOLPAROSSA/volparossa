@@ -94,7 +94,7 @@ grep -F 'application.sendto(payload, destination)' "$GUEST" >/dev/null
 grep -F 'response, source = application.recvfrom(2048)' "$GUEST" >/dev/null
 grep -F 'direct_client_exit_packets' "$GUEST" >/dev/null
 if grep -F 'relay0_wireguard_data_datagrams' "$GUEST"; then exit 1; fi
-if grep -E 'interface == "(cr0|xr0)"' "$GUEST"; then exit 1; fi
+if grep -E 'is_wireguard_data and interface == "(cr0|xr0)"' "$GUEST"; then exit 1; fi
 grep -F '"$DOWNLOAD_MARKER" cr1 cr2 underlay' "$GUEST" >/dev/null
 grep -F '"$DOWNLOAD_MARKER" xr1 xr2 xd' "$GUEST" >/dev/null
 grep -F 'client "$WORK/a05-client-capture.json" "$WORK/a05-client-capture.ready"' \
@@ -154,10 +154,25 @@ grep -F 'ordinary_quic_fallback_allowed:false' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A07",success:$success' "$GUEST" >/dev/null
 grep -F 'a07_http3_relay_failover:{requested:$a07_requested,succeeded:$a07_succeeded' "$GUEST" \
     >/dev/null
-grep -F 'Require successful A02 through A07 datapaths' "$WORKFLOW" >/dev/null
+grep -F 'Require successful A02-A07 and A11-A15 evidence' "$WORKFLOW" >/dev/null
 grep -F '.a06_http3_mpquic.evidence.native_mpquic.required_path_count == 2' "$WORKFLOW" \
     >/dev/null
 grep -F '.a07_http3_relay_failover.evidence.application_flow_completed == true' "$WORKFLOW" \
+    >/dev/null
+grep -F 'relay1_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
+grep -F 'after_marker.relay2_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A11",success:$success' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A12",success:$success' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A13",success:$success' "$GUEST" >/dev/null
+grep -F 'systemctl kill --kill-whom=all --signal=KILL "$crash_unit"' "$GUEST" \
+    >/dev/null
+grep -F 'acceptance_id:"A14",success:$success' "$GUEST" >/dev/null
+grep -F 'capture_host_state "$WORK/host-state-before.json"' "$GUEST" >/dev/null
+grep -F 'capture_host_state "$WORK/host-state-after.json"' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A15",success:$unchanged' "$GUEST" >/dev/null
+grep -F '.a14_forced_crash_cleanup.evidence.cleanup.remaining_owned_objects == 0' \
+    "$WORKFLOW" >/dev/null
+grep -F '.a15_host_state_unchanged.evidence.before_sha256 ==' "$WORKFLOW" \
     >/dev/null
 
 printf '%s\n' 'KVM alpha topology static contract passed'
