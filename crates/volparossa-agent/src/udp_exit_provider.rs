@@ -55,6 +55,7 @@ impl ExitNativeRouteIdentityProvider for ProductionExitNativeRouteIdentityProvid
             masque_context_id: request.masque_context_id(),
             client_native_instance_id: request.client_native_instance_id().to_vec(),
             exit_native_instance_id: request.exit_native_instance_id().to_vec(),
+            credential_hpke_public_key: Vec::new(),
         };
         ExitNativeRouteIdentityOwner::new(
             *request,

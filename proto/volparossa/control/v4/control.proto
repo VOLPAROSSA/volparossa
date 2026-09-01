@@ -41,6 +41,7 @@ enum ControlMessageType {
   CONTROL_MESSAGE_TYPE_NATIVE_PROBE_START = 23;
   CONTROL_MESSAGE_TYPE_NATIVE_PROBE_EXIT_RESULT = 24;
   CONTROL_MESSAGE_TYPE_NATIVE_PROBE_RELAY_RESULT = 25;
+  CONTROL_MESSAGE_TYPE_NATIVE_ROUTE_CREDENTIAL_DELIVERY = 26;
 }
 
 enum Transport {
@@ -634,6 +635,35 @@ message NativeRouteIdentity {
   uint64 masque_context_id = 5;
   bytes client_native_instance_id = 6;
   bytes exit_native_instance_id = 7;
+  // Route-scoped RFC 9180 DHKEM(X25519, HKDF-SHA256) recipient key.
+  bytes credential_hpke_public_key = 8;
+}
+
+// Public authenticated associated data for the route bearer HPKE ciphertext.
+message NativeRouteCredentialScope {
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  bytes finalize_id = 3;
+  bytes exit_node_id = 4;
+  bytes client_session_id = 5;
+  bytes client_session_public_key = 6;
+  bytes auth_commitment = 7;
+  bytes certificate_sha256 = 8;
+  bytes spki_sha256 = 9;
+  uint64 masque_context_id = 10;
+  bytes client_native_instance_id = 11;
+  bytes exit_native_instance_id = 12;
+  bytes credential_hpke_public_key = 13;
+  uint64 created_at_ms = 14;
+  uint64 expires_at_ms = 15;
+  bytes nonce = 16;
+}
+
+// Client-session-signed opaque RFC 9180 delivery of the 43-byte native bearer.
+message NativeRouteCredentialDelivery {
+  NativeRouteCredentialScope scope = 1;
+  bytes encapsulated_key = 2;
+  bytes ciphertext = 3;
 }
 
 message ExitReservation {

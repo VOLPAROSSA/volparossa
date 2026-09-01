@@ -92,6 +92,7 @@ fn preselection_schema_tags_and_callerless_surface_are_exact() {
     );
     assert_eq!(ControlMessageType::NativeProbePermitRequest as i32, 19);
     assert_eq!(ControlMessageType::NativeProbeRelayResult as i32, 25);
+    assert_eq!(ControlMessageType::NativeRouteCredentialDelivery as i32, 26);
 
     let schema = include_str!("../../../proto/volparossa/control/v4/control.proto");
     let messages = include_str!("../src/messages.rs");
@@ -1415,6 +1416,7 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "NATIVE_PROBE_START",
         "NATIVE_PROBE_EXIT_RESULT",
         "NATIVE_PROBE_RELAY_RESULT",
+        "NATIVE_ROUTE_CREDENTIAL_DELIVERY",
     ];
     let rust_names = [
         "Unspecified",
@@ -1443,6 +1445,7 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "NativeProbeStart",
         "NativeProbeExitResult",
         "NativeProbeRelayResult",
+        "NativeRouteCredentialDelivery",
     ];
     assert_eq!(schema_enum.matches(';').count(), names.len());
     assert_eq!(
@@ -3056,6 +3059,7 @@ fn checked_in_v4_schema_has_exact_native_route_tags() {
         ("masque_context_id", "uint64", 5),
         ("client_native_instance_id", "bytes", 6),
         ("exit_native_instance_id", "bytes", 7),
+        ("credential_hpke_public_key", "bytes", 8),
     ] {
         assert!(
             identity.contains(&format!("{kind} {field} = {tag};")),
@@ -3067,8 +3071,8 @@ fn checked_in_v4_schema_has_exact_native_route_tags() {
             .lines()
             .filter(|line| line.trim_end().ends_with(';'))
             .count(),
-        7,
-        "NativeRouteIdentity must expose only its seven committed fields"
+        8,
+        "NativeRouteIdentity must expose only its eight committed fields"
     );
 
     let reservation = schema
@@ -3541,6 +3545,7 @@ fn native_route_identity() -> NativeRouteIdentity {
         masque_context_id: 23,
         client_native_instance_id: vec![24; 32],
         exit_native_instance_id: vec![25; 32],
+        credential_hpke_public_key: vec![26; 32],
     }
 }
 

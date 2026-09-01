@@ -10,6 +10,7 @@ mod envelope;
 mod messages;
 mod native_preselection_probe;
 mod native_route;
+mod native_route_credential;
 mod preselection_observation;
 mod reservation_requests;
 
@@ -22,7 +23,8 @@ pub use envelope::{
 pub use messages::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork, AdvertisementPolicy,
     AdvertisementQuality, AdvertisementRoles, ControlMessageType, ExitConfirmationReceipt,
-    ExitReservation, ExitReservationConfirmation, NativeRouteIdentity, NodeAdvertisement, OpenTcp,
+    ExitReservation, ExitReservationConfirmation, NativeRouteCredentialDelivery,
+    NativeRouteCredentialScope, NativeRouteIdentity, NodeAdvertisement, OpenTcp,
     RelayAuthorization, RelayReservation, Transport, UdpFlowAuthorization, WireguardEndpoint,
     exit_confirmation_envelope_hash, finalized_reservation_bundle_hash,
     relay_reservation_request_sha256, verify_relay_reservation,
@@ -51,6 +53,11 @@ pub use native_preselection_probe::{
 pub use native_route::{
     NATIVE_ROUTE_AUTH_BEARER_LENGTH, NATIVE_ROUTE_AUTH_COMMITMENT_DOMAIN,
     native_route_auth_commitment,
+};
+pub use native_route_credential::{
+    NATIVE_ROUTE_CREDENTIAL_CIPHERTEXT_LENGTH, NATIVE_ROUTE_CREDENTIAL_ENCAPSULATED_KEY_LENGTH,
+    NATIVE_ROUTE_CREDENTIAL_HPKE_KEY_LENGTH, NativeRouteCredentialError,
+    NativeRouteCredentialKeyPair, SealedNativeRouteCredential, seal_native_route_credential,
 };
 pub use preselection_observation::{
     BoundDirectPreselectionTranscript, BoundForwardedPreselectionTranscript,

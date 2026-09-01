@@ -15,13 +15,14 @@ use volparossa_protocol::{
     ExitCapacityHoldRequest, ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
     ExitReservationFinalizeRequest, FinalizedRelayPath, MAX_CONTROL_MESSAGE_SIZE,
     MAX_CONTROL_PAYLOAD_SIZE, MAX_MASQUE_CONTEXT_ID, NATIVE_ROUTE_AUTH_BEARER_LENGTH,
+    NativeRouteCredentialDelivery, NativeRouteCredentialError, NativeRouteCredentialScope,
     NativeRouteIdentity, OpenTcp, ProbeAddressFamily, ProbeLegEvidence, ProtocolError,
     RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
     RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
     UdpFlowAuthorization, WireguardEndpoint, decode_canonical, exit_confirmation_envelope_hash,
     finalized_reservation_bundle_hash, generate_nonce, native_route_auth_commitment,
-    node_id_from_public_key, sign_control_message, verify_control_message,
-    verify_relay_reservation,
+    node_id_from_public_key, seal_native_route_credential, sign_control_message,
+    verify_control_message, verify_relay_reservation,
 };
 use volparossa_wireguard::{
     ClientEndpointLease, HelperContextHandle, PublicWireGuardEndpoint, WireGuardPublicKey,
@@ -288,6 +289,7 @@ pub struct ClientNativeRouteAuthorization {
     reservation_id: [u8; ID_BYTES],
     route_context_id: [u8; ID_BYTES],
     finalize_id: [u8; ID_BYTES],
+    exit_node_id: [u8; KEY_BYTES],
     auth_bearer: Zeroizing<[u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
     identity: NativeRouteIdentity,
     expires_at_ms: u64,
@@ -310,6 +312,12 @@ impl ClientNativeRouteAuthorization {
     #[must_use]
     pub const fn finalize_id(&self) -> &[u8; ID_BYTES] {
         &self.finalize_id
+    }
+
+    /// Exact Exit identity which signed the route and owns the HPKE recipient key.
+    #[must_use]
+    pub const fn exit_node_id(&self) -> &[u8; KEY_BYTES] {
+        &self.exit_node_id
     }
 
     /// Canonical 43-byte route bearer. Callers must not log or persist it.
@@ -452,6 +460,7 @@ struct ClientPathState {
 struct PendingNativeRouteAuthorization {
     reservation_id: [u8; ID_BYTES],
     route_context_id: [u8; ID_BYTES],
+    exit_node_id: [u8; KEY_BYTES],
     auth_bearer: Zeroizing<[u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
     auth_commitment: [u8; KEY_BYTES],
     masque_context_id: u64,
@@ -661,6 +670,60 @@ impl ReservationCoordinator {
             TimePolicy::default(),
         )
         .map_err(CoordinatorError::from)
+    }
+
+    /// Encrypt and sign the route bearer to the exact Exit-owned RFC 9180 recipient key.
+    ///
+    /// The returned control message may cross an untrusted Relay: it carries only public route
+    /// scope, the HPKE encapsulated key and authenticated ciphertext. The bearer remains retained
+    /// by `authorization` for the local native Client.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an expired or inconsistent authorization, invalid signed identity, randomness
+    /// failure, or canonical signing failure.
+    pub fn sign_native_route_credential_delivery(
+        &self,
+        authorization: &ClientNativeRouteAuthorization,
+        created_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if created_at_ms >= authorization.expires_at_ms {
+            return Err(CoordinatorError::Scope("native credential lifetime"));
+        }
+        let identity = authorization.native_route_identity();
+        let nonce = generate_nonce();
+        let scope = NativeRouteCredentialScope {
+            reservation_id: authorization.reservation_id.to_vec(),
+            route_context_id: authorization.route_context_id.to_vec(),
+            finalize_id: authorization.finalize_id.to_vec(),
+            exit_node_id: authorization.exit_node_id.to_vec(),
+            client_session_id: self.client_session_id.to_vec(),
+            client_session_public_key: self.client_session_public_key().to_vec(),
+            auth_commitment: identity.auth_commitment.clone(),
+            certificate_sha256: identity.certificate_sha256.clone(),
+            spki_sha256: identity.spki_sha256.clone(),
+            masque_context_id: identity.masque_context_id,
+            client_native_instance_id: identity.client_native_instance_id.clone(),
+            exit_native_instance_id: identity.exit_native_instance_id.clone(),
+            credential_hpke_public_key: identity.credential_hpke_public_key.clone(),
+            created_at_ms,
+            expires_at_ms: authorization.expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        let sealed = seal_native_route_credential(&scope, authorization.auth_bearer())?;
+        sign_control_message(
+            &NativeRouteCredentialDelivery {
+                scope: Some(scope),
+                encapsulated_key: sealed.encapsulated_key().to_vec(),
+                ciphertext: sealed.ciphertext().to_vec(),
+            },
+            &self.session_key,
+            created_at_ms,
+            authorization.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(Into::into)
     }
 
     /// Sign a short capacity-hold request that discloses no relay selection.
@@ -1120,6 +1183,7 @@ impl ReservationCoordinator {
             PendingNativeRouteAuthorization {
                 reservation_id: intent.reservation_id,
                 route_context_id: intent.route_context_id,
+                exit_node_id: intent.exit_node_id,
                 auth_bearer,
                 auth_commitment,
                 masque_context_id: intent.masque_context_id,
@@ -1593,6 +1657,7 @@ impl ReservationCoordinator {
             reservation_id: pending.reservation_id,
             route_context_id: pending.route_context_id,
             finalize_id,
+            exit_node_id: pending.exit_node_id,
             auth_bearer: pending.auth_bearer,
             identity,
             expires_at_ms: pending.expires_at_ms,
@@ -1880,6 +1945,9 @@ pub enum CoordinatorError {
     /// Canonical signing, signature, replay, time or parser validation failed.
     #[error("reservation protocol verification failed: {0}")]
     Protocol(#[from] ProtocolError),
+    /// RFC 9180 bearer encryption or its route binding failed.
+    #[error("reservation native credential delivery failed: {0}")]
+    NativeRouteCredential(#[from] NativeRouteCredentialError),
     /// A validly signed message did not match the selected route scope.
     #[error("reservation scope mismatch: {0}")]
     Scope(&'static str),
@@ -2229,6 +2297,7 @@ mod tests {
             masque_context_id: request.masque_context_id,
             client_native_instance_id: request.client_native_instance_id.to_vec(),
             exit_native_instance_id: vec![83; 32],
+            credential_hpke_public_key: vec![84; 32],
         }
     }
 

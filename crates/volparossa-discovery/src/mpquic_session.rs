@@ -3,9 +3,10 @@
 use prost::Message;
 use thiserror::Error;
 use volparossa_protocol::{
-    ControlMessageType, ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
-    MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, PROTOCOL_VERSION, RelayReservation,
-    SignedEnvelope, Transport, decode_canonical,
+    ControlMessageType, ControlPayload, ExitConfirmationReceipt, ExitReservation,
+    ExitReservationConfirmation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
+    NativeRouteCredentialDelivery, PROTOCOL_VERSION, RelayReservation, SignedEnvelope, Transport,
+    decode_canonical,
 };
 
 const ID_BYTES: usize = 16;
@@ -66,6 +67,8 @@ pub struct MpquicSessionStartRequest {
     signed_exit_reservation: Vec<u8>,
     #[prost(message, repeated, tag = "2")]
     paths: Vec<MpquicSessionPathProof>,
+    #[prost(bytes = "vec", tag = "3")]
+    signed_credential_delivery: Vec<u8>,
 }
 
 impl MpquicSessionStartRequest {
@@ -78,10 +81,12 @@ impl MpquicSessionStartRequest {
     pub fn new(
         signed_exit_reservation: Vec<u8>,
         paths: Vec<MpquicSessionPathProof>,
+        signed_credential_delivery: Vec<u8>,
     ) -> Result<Self, MpquicSessionFrameError> {
         let value = Self {
             signed_exit_reservation,
             paths,
+            signed_credential_delivery,
         };
         value.validate()?;
         Ok(value)
@@ -106,6 +111,14 @@ impl MpquicSessionStartRequest {
             .native_route_identity
             .as_ref()
             .ok_or(MpquicSessionFrameError::Invalid)?;
+        let credential = signed_control_payload::<NativeRouteCredentialDelivery>(
+            &self.signed_credential_delivery,
+            ControlMessageType::NativeRouteCredentialDelivery,
+        )?;
+        let credential_scope = credential
+            .scope
+            .as_ref()
+            .ok_or(MpquicSessionFrameError::Invalid)?;
         if fixed_nonzero::<ID_BYTES>(&exit.reservation_id).is_none()
             || fixed_nonzero::<ID_BYTES>(&exit.route_context_id).is_none()
             || fixed_nonzero::<NODE_ID_BYTES>(&exit.exit_node_id).is_none()
@@ -116,6 +129,7 @@ impl MpquicSessionStartRequest {
             || !exit
                 .allowed_transports
                 .contains(&(Transport::MultipathQuic as i32))
+            || !credential_matches_exit(credential_scope, &exit, native)
         {
             return Err(MpquicSessionFrameError::Invalid);
         }
@@ -162,6 +176,12 @@ impl MpquicSessionStartRequest {
     #[must_use]
     pub fn paths(&self) -> &[MpquicSessionPathProof] {
         &self.paths
+    }
+
+    /// Client-session-signed opaque RFC 9180 delivery for the exact Exit/native route.
+    #[must_use]
+    pub fn signed_credential_delivery(&self) -> &[u8] {
+        &self.signed_credential_delivery
     }
 }
 
@@ -278,6 +298,50 @@ fn signed_payload<T: Message + Default>(
         .map_err(|_| MpquicSessionFrameError::Invalid)
 }
 
+fn signed_control_payload<T: ControlPayload>(
+    encoded: &[u8],
+    expected: ControlMessageType,
+) -> Result<T, MpquicSessionFrameError> {
+    if encoded.is_empty() || encoded.len() > MAX_CONTROL_MESSAGE_SIZE {
+        return Err(MpquicSessionFrameError::Invalid);
+    }
+    let envelope = decode_canonical::<SignedEnvelope>(encoded, MAX_CONTROL_MESSAGE_SIZE)
+        .map_err(|_| MpquicSessionFrameError::Invalid)?;
+    if envelope.protocol_version != PROTOCOL_VERSION || envelope.message_type != expected as i32 {
+        return Err(MpquicSessionFrameError::Invalid);
+    }
+    let payload = decode_canonical::<T>(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE)
+        .map_err(|_| MpquicSessionFrameError::Invalid)?;
+    payload
+        .validate()
+        .and_then(|()| payload.validate_envelope(&envelope))
+        .map_err(|_| MpquicSessionFrameError::Invalid)?;
+    Ok(payload)
+}
+
+fn credential_matches_exit(
+    credential: &volparossa_protocol::NativeRouteCredentialScope,
+    exit: &ExitReservation,
+    native: &volparossa_protocol::NativeRouteIdentity,
+) -> bool {
+    credential.reservation_id == exit.reservation_id
+        && credential.route_context_id == exit.route_context_id
+        && credential.finalize_id == exit.finalize_id
+        && credential.exit_node_id == exit.exit_node_id
+        && credential.client_session_id == exit.client_session_id
+        && credential.client_session_public_key == exit.client_session_public_key
+        && credential.auth_commitment == native.auth_commitment
+        && credential.certificate_sha256 == native.certificate_sha256
+        && credential.spki_sha256 == native.spki_sha256
+        && credential.masque_context_id == native.masque_context_id
+        && credential.client_native_instance_id == native.client_native_instance_id
+        && credential.exit_native_instance_id == native.exit_native_instance_id
+        && credential.credential_hpke_public_key == native.credential_hpke_public_key
+        && credential.created_at_ms >= exit.created_at_ms
+        && credential.created_at_ms < credential.expires_at_ms
+        && credential.expires_at_ms == exit.expires_at_ms
+}
+
 fn relay_matches_exit(relay: &RelayReservation, exit: &ExitReservation) -> bool {
     relay.reservation_id == exit.reservation_id
         && relay.route_context_id == exit.route_context_id
@@ -352,7 +416,12 @@ fn fixed_nonzero<const N: usize>(value: &[u8]) -> Option<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
-    use volparossa_protocol::encode_canonical;
+    use ed25519_dalek::SigningKey;
+    use volparossa_protocol::{
+        NATIVE_ROUTE_CREDENTIAL_CIPHERTEXT_LENGTH, NATIVE_ROUTE_CREDENTIAL_ENCAPSULATED_KEY_LENGTH,
+        NativeRouteCredentialScope, TimePolicy, encode_canonical, node_id_from_public_key,
+        sign_control_message,
+    };
 
     use super::*;
 
@@ -370,20 +439,70 @@ mod tests {
     }
 
     fn exit_reservation() -> ExitReservation {
+        let session_key = SigningKey::from_bytes(&[42; 32]);
+        let session_public_key = session_key.verifying_key().to_bytes();
         ExitReservation {
             reservation_id: vec![1; ID_BYTES],
             route_context_id: vec![2; ID_BYTES],
             exit_node_id: vec![3; NODE_ID_BYTES],
-            client_session_id: vec![4; ID_BYTES],
+            client_session_id: node_id_from_public_key(&session_public_key).to_vec(),
+            client_session_public_key: session_public_key.to_vec(),
             allowed_transports: vec![Transport::MultipathQuic as i32],
             maximum_paths: 2,
+            created_at_ms: 1_000,
+            expires_at_ms: 61_000,
+            finalize_id: vec![7; ID_BYTES],
             native_route_identity: Some(volparossa_protocol::NativeRouteIdentity {
+                auth_commitment: vec![8; NODE_ID_BYTES],
+                certificate_sha256: vec![9; NODE_ID_BYTES],
+                spki_sha256: vec![10; NODE_ID_BYTES],
+                masque_context_id: 12,
                 client_native_instance_id: vec![5; NATIVE_INSTANCE_BYTES],
                 exit_native_instance_id: vec![6; NATIVE_INSTANCE_BYTES],
-                ..volparossa_protocol::NativeRouteIdentity::default()
+                credential_hpke_public_key: vec![11; NODE_ID_BYTES],
+                tls_server_name: "route.test.invalid".to_owned(),
             }),
             ..ExitReservation::default()
         }
+    }
+
+    fn signed_credential(exit: &ExitReservation) -> Vec<u8> {
+        let native = exit
+            .native_route_identity
+            .as_ref()
+            .expect("native identity");
+        let nonce = [13; NODE_ID_BYTES];
+        let delivery = NativeRouteCredentialDelivery {
+            scope: Some(NativeRouteCredentialScope {
+                reservation_id: exit.reservation_id.clone(),
+                route_context_id: exit.route_context_id.clone(),
+                finalize_id: exit.finalize_id.clone(),
+                exit_node_id: exit.exit_node_id.clone(),
+                client_session_id: exit.client_session_id.clone(),
+                client_session_public_key: exit.client_session_public_key.clone(),
+                auth_commitment: native.auth_commitment.clone(),
+                certificate_sha256: native.certificate_sha256.clone(),
+                spki_sha256: native.spki_sha256.clone(),
+                masque_context_id: native.masque_context_id,
+                client_native_instance_id: native.client_native_instance_id.clone(),
+                exit_native_instance_id: native.exit_native_instance_id.clone(),
+                credential_hpke_public_key: native.credential_hpke_public_key.clone(),
+                created_at_ms: 2_000,
+                expires_at_ms: exit.expires_at_ms,
+                nonce: nonce.to_vec(),
+            }),
+            encapsulated_key: vec![14; NATIVE_ROUTE_CREDENTIAL_ENCAPSULATED_KEY_LENGTH],
+            ciphertext: vec![15; NATIVE_ROUTE_CREDENTIAL_CIPHERTEXT_LENGTH],
+        };
+        sign_control_message(
+            &delivery,
+            &SigningKey::from_bytes(&[42; 32]),
+            2_000,
+            exit.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed credential delivery")
     }
 
     fn proof(exit: &ExitReservation, path_id: u32) -> MpquicSessionPathProof {
@@ -395,6 +514,19 @@ mod tests {
             exit_node_id: exit.exit_node_id.clone(),
             client_session_id: exit.client_session_id.clone(),
             allowed_transports: exit.allowed_transports.clone(),
+            maximum_up_mbps: exit.reserved_up_mbps,
+            maximum_down_mbps: exit.reserved_down_mbps,
+            policy_hash: exit.policy_hash.clone(),
+            created_at_ms: exit.created_at_ms,
+            expires_at_ms: exit.expires_at_ms,
+            capability_id: exit.capability_id.clone(),
+            client_session_public_key: exit.client_session_public_key.clone(),
+            exit_boot_id: exit.exit_boot_id.clone(),
+            hold_id: exit.hold_id.clone(),
+            finalize_id: exit.finalize_id.clone(),
+            control_relay_node_id: exit.control_relay_node_id.clone(),
+            control_relay_peer_id: exit.control_relay_peer_id.clone(),
+            exit_peer_id: exit.exit_peer_id.clone(),
             ..RelayReservation::default()
         };
         let signed_relay = signed(ControlMessageType::RelayReservation, &relay);
@@ -409,7 +541,16 @@ mod tests {
                     relay_node_id: relay.relay_node_id,
                     exit_node_id: exit.exit_node_id.clone(),
                     client_session_id: exit.client_session_id.clone(),
+                    policy_hash: exit.policy_hash.clone(),
                     relay_reservation: signed_relay,
+                    capability_id: exit.capability_id.clone(),
+                    client_session_public_key: exit.client_session_public_key.clone(),
+                    exit_boot_id: exit.exit_boot_id.clone(),
+                    hold_id: exit.hold_id.clone(),
+                    finalize_id: exit.finalize_id.clone(),
+                    control_relay_node_id: exit.control_relay_node_id.clone(),
+                    control_relay_peer_id: exit.control_relay_peer_id.clone(),
+                    exit_peer_id: exit.exit_peer_id.clone(),
                     ..ExitReservationConfirmation::default()
                 },
             ),
@@ -421,6 +562,13 @@ mod tests {
                     client_session_id: exit.client_session_id.clone(),
                     path_id,
                     exit_node_id: exit.exit_node_id.clone(),
+                    capability_id: exit.capability_id.clone(),
+                    exit_boot_id: exit.exit_boot_id.clone(),
+                    hold_id: exit.hold_id.clone(),
+                    finalize_id: exit.finalize_id.clone(),
+                    control_relay_node_id: exit.control_relay_node_id.clone(),
+                    control_relay_peer_id: exit.control_relay_peer_id.clone(),
+                    exit_peer_id: exit.exit_peer_id.clone(),
                     ..ExitConfirmationReceipt::default()
                 },
             ),
@@ -433,6 +581,7 @@ mod tests {
         let start = MpquicSessionStartRequest::new(
             signed(ControlMessageType::ExitReservation, &exit),
             vec![proof(&exit, 1), proof(&exit, 2)],
+            signed_credential(&exit),
         )
         .expect("complete MPQUIC proof set");
         let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE).expect("start encode");
@@ -462,6 +611,7 @@ mod tests {
                 MpquicSessionStartRequest::new(
                     signed(ControlMessageType::ExitReservation, &exit),
                     paths,
+                    signed_credential(&exit),
                 ),
                 Err(MpquicSessionFrameError::Invalid)
             );
@@ -474,6 +624,18 @@ mod tests {
             MpquicSessionStartRequest::new(
                 signed(ControlMessageType::ExitReservation, &ordinary),
                 vec![proof(&exit, 1), proof(&exit, 2)],
+                signed_credential(&ordinary),
+            ),
+            Err(MpquicSessionFrameError::Invalid)
+        );
+
+        let mut foreign_scope = exit.clone();
+        foreign_scope.route_context_id[0] ^= 1;
+        assert_eq!(
+            MpquicSessionStartRequest::new(
+                signed(ControlMessageType::ExitReservation, &exit),
+                vec![proof(&exit, 1), proof(&exit, 2)],
+                signed_credential(&foreign_scope),
             ),
             Err(MpquicSessionFrameError::Invalid)
         );

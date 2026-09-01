@@ -204,6 +204,7 @@ where
             masque_context_id: 1,
             client_native_instance_id: vec![14; 32],
             exit_native_instance_id: vec![15; 32],
+            credential_hpke_public_key: vec![16; 32],
         }),
     };
     mutate(&mut message);

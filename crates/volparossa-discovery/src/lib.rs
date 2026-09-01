@@ -1996,7 +1996,7 @@ mod tests {
             bounded_prefix(&values, MAX_DISCOVERY_ADDRESSES_PER_EVENT).len(),
             MAX_DISCOVERY_ADDRESSES_PER_EVENT
         );
-        assert_eq!(bounded_prefix(&values, 0), &[]);
+        assert!(bounded_prefix(&values, 0).is_empty());
     }
 
     #[test]

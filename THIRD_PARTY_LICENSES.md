@@ -424,6 +424,7 @@ is rejected.
 | serde, serde_json, serde_yaml, prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
 | rust-libp2p and Quinn | decentralised control plane and QUIC | MIT |
 | rustls, ring, ed25519-dalek, x25519-dalek, Argon2 | transport, identity, and key protection | mixed permissive licenses; inspect every resolved crate |
+| `hpke` 0.14.0 (`rust-hpke`) | RFC 9180 route-credential sealing, exact crates.io pin in `Cargo.lock` | MIT/Apache-2.0; upstream `https://github.com/rozbb/rust-hpke` |
 | rusqlite and SQLite bundle | bounded local peer/session state | MIT for wrapper; SQLite is public domain |
 | rtnetlink, netlink-sys, wireguard-uapi, nix, libc | Linux networking and OS boundary | mixed permissive licenses; inspect every resolved crate |
 

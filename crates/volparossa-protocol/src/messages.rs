@@ -74,6 +74,8 @@ pub enum ControlMessageType {
     NativeProbeExitResult = 24,
     /// Relay-signed endpoint-free result containing the exact nested Exit result.
     NativeProbeRelayResult = 25,
+    /// Client-session-signed opaque RFC 9180 delivery of one native route bearer.
+    NativeRouteCredentialDelivery = 26,
 }
 
 /// Data transport authorized by a reservation.
@@ -320,6 +322,58 @@ pub struct NativeRouteIdentity {
     pub client_native_instance_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "7")]
     pub exit_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub credential_hpke_public_key: Vec<u8>,
+}
+
+/// Public authenticated associated data for one route bearer HPKE ciphertext.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeRouteCredentialScope {
+    #[prost(bytes = "vec", tag = "1")]
+    pub reservation_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub route_context_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub finalize_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub exit_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub client_session_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub client_session_public_key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub auth_commitment: Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub certificate_sha256: Vec<u8>,
+    #[prost(bytes = "vec", tag = "9")]
+    pub spki_sha256: Vec<u8>,
+    #[prost(uint64, tag = "10")]
+    pub masque_context_id: u64,
+    #[prost(bytes = "vec", tag = "11")]
+    pub client_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "12")]
+    pub exit_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "13")]
+    pub credential_hpke_public_key: Vec<u8>,
+    #[prost(uint64, tag = "14")]
+    pub created_at_ms: u64,
+    #[prost(uint64, tag = "15")]
+    pub expires_at_ms: u64,
+    #[prost(bytes = "vec", tag = "16")]
+    pub nonce: Vec<u8>,
+}
+
+/// Client-session-signed opaque RFC 9180 delivery of one native route bearer.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeRouteCredentialDelivery {
+    #[prost(message, optional, tag = "1")]
+    pub scope: Option<NativeRouteCredentialScope>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub encapsulated_key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub ciphertext: Vec<u8>,
 }
 
 /// Exit-signed authorization for one relay path.
@@ -746,7 +800,96 @@ impl NativeRouteIdentity {
             &self.exit_native_instance_id,
             "native_route_identity.exit_native_instance_id",
         )?;
+        require_nonzero_length::<KEY_LENGTH>(
+            &self.credential_hpke_public_key,
+            "native_route_identity.credential_hpke_public_key",
+        )?;
         Ok(())
+    }
+}
+
+impl NativeRouteCredentialScope {
+    pub(crate) fn validate_fields(&self) -> Result<(), ProtocolError> {
+        validate_reservation_ids(
+            &self.reservation_id,
+            &self.route_context_id,
+            &self.client_session_id,
+        )?;
+        require_nonzero_length::<ID_LENGTH>(&self.finalize_id, "native credential finalize_id")?;
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.exit_node_id,
+            "native credential exit_node_id",
+        )?;
+        validate_session_binding(&self.client_session_id, &self.client_session_public_key)?;
+        for (value, field) in [
+            (&self.auth_commitment, "native credential auth_commitment"),
+            (
+                &self.certificate_sha256,
+                "native credential certificate_sha256",
+            ),
+            (&self.spki_sha256, "native credential spki_sha256"),
+            (
+                &self.client_native_instance_id,
+                "native credential client instance",
+            ),
+            (
+                &self.exit_native_instance_id,
+                "native credential exit instance",
+            ),
+            (
+                &self.credential_hpke_public_key,
+                "native credential HPKE public key",
+            ),
+        ] {
+            require_nonzero_length::<HASH_LENGTH>(value, field)?;
+        }
+        if self.masque_context_id == 0 || self.masque_context_id > crate::MAX_MASQUE_CONTEXT_ID {
+            return Err(ProtocolError::InvalidField(
+                "native credential MASQUE context",
+            ));
+        }
+        require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "native credential nonce")?;
+        validate_lifetime(
+            self.created_at_ms,
+            self.expires_at_ms,
+            MAX_RESERVATION_LIFETIME_MS,
+            "native credential lifetime",
+        )
+    }
+}
+
+impl ControlPayload for NativeRouteCredentialDelivery {
+    const MESSAGE_TYPE: ControlMessageType = ControlMessageType::NativeRouteCredentialDelivery;
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let scope = self
+            .scope
+            .as_ref()
+            .ok_or(ProtocolError::InvalidField("native credential scope"))?;
+        scope.validate_fields()?;
+        require_nonzero_length::<{ crate::NATIVE_ROUTE_CREDENTIAL_ENCAPSULATED_KEY_LENGTH }>(
+            &self.encapsulated_key,
+            "native credential encapsulated key",
+        )?;
+        if self.ciphertext.len() != crate::NATIVE_ROUTE_CREDENTIAL_CIPHERTEXT_LENGTH {
+            return Err(ProtocolError::InvalidField("native credential ciphertext"));
+        }
+        Ok(())
+    }
+
+    fn validate_envelope(&self, envelope: &SignedEnvelope) -> Result<(), ProtocolError> {
+        let scope = self
+            .scope
+            .as_ref()
+            .ok_or(ProtocolError::InvalidField("native credential scope"))?;
+        validate_signed_fields(
+            &scope.client_session_id,
+            scope.created_at_ms,
+            scope.expires_at_ms,
+            &scope.nonce,
+            envelope,
+            "native credential envelope binding",
+        )
     }
 }
 

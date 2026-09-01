@@ -52,9 +52,10 @@ use volparossa_inspection::{
 use volparossa_metrics::MetricsRegistry;
 use volparossa_policy::{PolicyError, VerifiedManifest, normalize_domain};
 use volparossa_protocol::{
-    MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteIdentity, ProtocolError,
+    MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteCredentialDelivery,
+    NativeRouteCredentialError, NativeRouteCredentialKeyPair, NativeRouteIdentity, ProtocolError,
     ReplayCache, SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, decode_canonical,
-    node_id_from_public_key,
+    node_id_from_public_key, verify_control_message,
 };
 use volparossa_reservation::{
     AuthorizedReservation, AvailableCapacity, CapacityLedger, LedgerLimits, ReservationError,
@@ -214,6 +215,7 @@ pub struct ExitNativeRouteIdentityOwner {
     public_identity: NativeRouteIdentity,
     tls_certificate_pem: Zeroizing<Vec<u8>>,
     tls_private_key_pem: Zeroizing<Vec<u8>>,
+    credential_key_pair: NativeRouteCredentialKeyPair,
 }
 
 impl ExitNativeRouteIdentityOwner {
@@ -229,12 +231,20 @@ impl ExitNativeRouteIdentityOwner {
     /// bounded PEM framing are rejected.
     pub fn new(
         request: ExitNativeRouteIdentityRequest,
-        public_identity: NativeRouteIdentity,
+        mut public_identity: NativeRouteIdentity,
         tls_certificate_pem: Vec<u8>,
         tls_private_key_pem: Vec<u8>,
     ) -> Result<Self, ExitNativeRouteIdentityError> {
         let tls_certificate_pem = Zeroizing::new(tls_certificate_pem);
         let tls_private_key_pem = Zeroizing::new(tls_private_key_pem);
+        if !public_identity.credential_hpke_public_key.is_empty() {
+            return Err(ExitNativeRouteIdentityError::Rejected(
+                "native credential recipient key must be owner-generated",
+            ));
+        }
+        let credential_key_pair = NativeRouteCredentialKeyPair::generate()
+            .map_err(|_| ExitNativeRouteIdentityError::Unavailable)?;
+        public_identity.credential_hpke_public_key = credential_key_pair.public_key().to_vec();
         let exit_native_instance_id = validate_native_route_identity(&request, &public_identity)?;
         if !valid_pem(
             &tls_certificate_pem,
@@ -257,6 +267,7 @@ impl ExitNativeRouteIdentityOwner {
             public_identity,
             tls_certificate_pem,
             tls_private_key_pem,
+            credential_key_pair,
         })
     }
 
@@ -281,6 +292,16 @@ impl ExitNativeRouteIdentityOwner {
 
     fn matches_scope(&self, scope: &ExitNativeRouteAuthorizationScope) -> bool {
         self.authorization_scope() == *scope
+    }
+
+    fn open_credential(
+        &self,
+        delivery: &NativeRouteCredentialDelivery,
+    ) -> Result<Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>, ExitError>
+    {
+        self.credential_key_pair
+            .open(delivery)
+            .map_err(ExitError::NativeRouteCredential)
     }
 }
 
@@ -383,6 +404,51 @@ impl fmt::Debug for ExitNativeRouteAuthorization {
             .field("scope", &self.scope())
             .field("expires_at_ms", &self.expires_at_ms)
             .field("tls_material", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+/// One-shot native-route authorization plus the Client-created authentication bearer.
+///
+/// The bearer reached this Exit only through the Client-session-signed RFC 9180 HPKE delivery;
+/// it is never exposed to the forwarding Relay. This type deliberately implements neither
+/// [`Clone`] nor ordinary field-level [`Debug`].
+pub struct ExitNativeRouteCredentialAuthorization {
+    authorization: ExitNativeRouteAuthorization,
+    auth_bearer: Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+}
+
+impl ExitNativeRouteCredentialAuthorization {
+    /// Borrow the exact native-route TLS and public identity authorization.
+    #[must_use]
+    pub const fn authorization(&self) -> &ExitNativeRouteAuthorization {
+        &self.authorization
+    }
+
+    /// Borrow the canonical native authentication bearer. Callers must not log or persist it.
+    #[must_use]
+    pub fn auth_bearer(&self) -> &[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH] {
+        &self.auth_bearer
+    }
+
+    /// Split the one-shot authorization for direct transfer into the native backend.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ExitNativeRouteAuthorization,
+        Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+    ) {
+        (self.authorization, self.auth_bearer)
+    }
+}
+
+impl fmt::Debug for ExitNativeRouteCredentialAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExitNativeRouteCredentialAuthorization")
+            .field("authorization", &self.authorization)
+            .field("auth_bearer", &"<redacted>")
             .finish_non_exhaustive()
     }
 }
@@ -503,6 +569,7 @@ pub struct ExitService {
     native_probe_request_replay: ReplayCache,
     confirmation_replay: ReplayCache,
     relay_confirmation_replay: ReplayCache,
+    native_credential_replay: ReplayCache,
     route_replay: ReplayCache,
     flow_replay: ReplayCache,
     ledger: Option<CapacityLedger>,
@@ -602,6 +669,7 @@ impl ExitService {
             native_probe_request_replay: ReplayCache::new(config.replay_capacity)?,
             confirmation_replay: ReplayCache::new(config.replay_capacity)?,
             relay_confirmation_replay: ReplayCache::new(config.replay_capacity)?,
+            native_credential_replay: ReplayCache::new(config.replay_capacity)?,
             route_replay: ReplayCache::new(config.replay_capacity)?,
             flow_replay: ReplayCache::new(config.replay_capacity)?,
             config,
@@ -946,6 +1014,120 @@ impl ExitService {
             owner,
             expires_at_ms,
         })
+    }
+
+    /// Verify and consume one Client-to-Exit encrypted native-route bearer.
+    ///
+    /// The delivery is authenticated by the fresh Client session and replay protected before its
+    /// RFC 9180 ciphertext is opened with the route owner's private recipient key. Every public
+    /// field is then matched to the finalized reservation, exact native instances and signed TLS
+    /// identity. A forwarding Relay can carry this message but cannot learn or substitute the
+    /// bearer.
+    ///
+    /// # Errors
+    ///
+    /// Disabled, expired, unconfirmed, replayed, cross-scoped, undecryptable, unknown or
+    /// already-consumed ownership is rejected. Failed local correlation rolls back only the
+    /// provisional replay entry; a successful delivery remains permanently replay protected.
+    pub fn take_native_route_authorization_with_credential(
+        &mut self,
+        scope: &ExitNativeRouteAuthorizationScope,
+        signed_delivery: &[u8],
+        now_ms: u64,
+    ) -> Result<ExitNativeRouteCredentialAuthorization, ExitError> {
+        self.require_enabled()?;
+        self.purge_expired(now_ms);
+        self.policy.ensure_active_at(now_ms)?;
+        let reservation_key = text_id::<ReservationId>(scope.request.reservation_id())?;
+        let verified = verify_control_message::<NativeRouteCredentialDelivery>(
+            signed_delivery,
+            now_ms,
+            TimePolicy::default(),
+            &mut self.native_credential_replay,
+        )?;
+        let replay_entry = (*verified.sender_id(), *verified.nonce());
+
+        let result = (|| {
+            let state = self
+                .endpoint_states
+                .get(&reservation_key)
+                .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+            if state.phase != ExitReservationPhase::Finalized
+                || state.expires_at_ms <= now_ms
+                || state.paths.is_empty()
+                || state.paths.iter().any(|path| {
+                    path.relay_exit_endpoint.is_none() || path.relay_reservation_hash.is_none()
+                })
+            {
+                return Err(ExitError::ConfirmationRequired);
+            }
+            let owner = self
+                .native_route_identity_owners
+                .get(&reservation_key)
+                .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+            if !owner.matches_scope(scope) {
+                return Err(ExitError::NativeRouteAuthorizationMismatch);
+            }
+            let delivery_scope = verified
+                .message()
+                .scope
+                .as_ref()
+                .ok_or(ExitError::NativeRouteAuthorizationMismatch)?;
+            let identity = owner.public_identity();
+            let request = scope.request();
+            let finalize_matches = state.finalize_id.as_ref().is_some_and(|finalize_id| {
+                delivery_scope.finalize_id.as_slice() == finalize_id
+                    && finalize_id == request.finalize_id()
+            });
+            let exact_scope = delivery_scope.reservation_id.as_slice() == request.reservation_id()
+                && delivery_scope.route_context_id.as_slice() == request.route_context_id()
+                && delivery_scope.exit_node_id.as_slice() == self.config.node_id
+                && delivery_scope.client_session_id.as_slice() == state.client_session_id
+                && delivery_scope.client_session_public_key.as_slice()
+                    == state.client_session_public_key
+                && verified.sender_id() == &state.client_session_id
+                && verified.sender_public_key() == &state.client_session_public_key
+                && delivery_scope.auth_commitment.as_slice() == request.auth_commitment()
+                && delivery_scope.auth_commitment == identity.auth_commitment
+                && delivery_scope.certificate_sha256 == identity.certificate_sha256
+                && delivery_scope.spki_sha256 == identity.spki_sha256
+                && delivery_scope.masque_context_id == request.masque_context_id()
+                && delivery_scope.masque_context_id == identity.masque_context_id
+                && delivery_scope.client_native_instance_id.as_slice()
+                    == request.client_native_instance_id()
+                && delivery_scope.client_native_instance_id == identity.client_native_instance_id
+                && delivery_scope.exit_native_instance_id.as_slice()
+                    == scope.exit_native_instance_id()
+                && delivery_scope.exit_native_instance_id == identity.exit_native_instance_id
+                && delivery_scope.credential_hpke_public_key == identity.credential_hpke_public_key
+                && delivery_scope.created_at_ms >= state.created_at_ms
+                && delivery_scope.expires_at_ms == state.expires_at_ms
+                && verified.expires_at_ms() == state.expires_at_ms
+                && finalize_matches;
+            if !exact_scope {
+                return Err(ExitError::NativeRouteAuthorizationMismatch);
+            }
+
+            let auth_bearer = owner.open_credential(verified.message())?;
+            let owner = self
+                .native_route_identity_owners
+                .remove(&reservation_key)
+                .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+            Ok(ExitNativeRouteCredentialAuthorization {
+                authorization: ExitNativeRouteAuthorization {
+                    owner,
+                    expires_at_ms: state.expires_at_ms,
+                },
+                auth_bearer,
+            })
+        })();
+
+        if result.is_err() {
+            let _ = self
+                .native_credential_replay
+                .rollback(&replay_entry.0, &replay_entry.1);
+        }
+        result
     }
 
     /// Explicitly release one route allocation.
@@ -2017,6 +2199,10 @@ fn validate_native_route_identity(
     let exit_native_instance_id =
         <[u8; NODE_ID_BYTES]>::try_from(&identity.exit_native_instance_id[..])
             .map_err(|_| ExitNativeRouteIdentityError::Rejected("invalid exit native instance"))?;
+    let credential_hpke_public_key =
+        <[u8; NODE_ID_BYTES]>::try_from(&identity.credential_hpke_public_key[..]).map_err(
+            |_| ExitNativeRouteIdentityError::Rejected("invalid native credential recipient key"),
+        )?;
     if identity.auth_commitment.as_slice() != request.auth_commitment
         || identity.masque_context_id != request.masque_context_id
         || identity.client_native_instance_id.as_slice() != request.client_native_instance_id
@@ -2024,6 +2210,7 @@ fn validate_native_route_identity(
         || certificate_sha256 == [0; NODE_ID_BYTES]
         || spki_sha256 == [0; NODE_ID_BYTES]
         || exit_native_instance_id == [0; NODE_ID_BYTES]
+        || credential_hpke_public_key == [0; NODE_ID_BYTES]
         || !canonical_dns_name(&identity.tls_server_name)
     {
         return Err(ExitNativeRouteIdentityError::Rejected(
@@ -2154,6 +2341,10 @@ pub enum ExitError {
     /// Native route public identity or private ownership was unavailable or invalid.
     #[error("exit native route identity failed: {0}")]
     NativeRouteIdentity(#[from] ExitNativeRouteIdentityError),
+    /// RFC 9180 native bearer delivery was malformed, undecryptable or contradicted its public
+    /// commitment.
+    #[error("exit native route credential delivery failed: {0}")]
+    NativeRouteCredential(#[from] NativeRouteCredentialError),
     /// The route-scoped native authorization was absent or already consumed.
     #[error("exit native route authorization is unavailable or already consumed")]
     NativeRouteAuthorizationUnavailable,
@@ -2233,9 +2424,10 @@ mod tests {
     use volparossa_metrics::MetricsRegistry;
     use volparossa_policy::{DestinationRule, ProtocolPort, TransportProtocol};
     use volparossa_protocol::{
-        MAX_CONTROL_MESSAGE_SIZE, NativeRouteIdentity, ProbeAddressFamily, ProbeLegEvidence,
-        ProtocolError, RelayProbePermit, RelayProbeResult, RelayReservation, ReplayCache,
-        TimePolicy, Transport, generate_nonce, node_id_from_public_key, sign_control_message,
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteCredentialDelivery,
+        NativeRouteIdentity, ProbeAddressFamily, ProbeLegEvidence, ProtocolError, RelayProbePermit,
+        RelayProbeResult, RelayReservation, ReplayCache, SignedEnvelope, TimePolicy, Transport,
+        decode_canonical, generate_nonce, node_id_from_public_key, sign_control_message,
         verify_control_message,
     };
     use volparossa_relay::{RelayService, RelayServiceConfig};
@@ -2445,6 +2637,7 @@ mod tests {
                 masque_context_id: request.masque_context_id(),
                 client_native_instance_id: request.client_native_instance_id().to_vec(),
                 exit_native_instance_id: request.exit_native_instance_id().to_vec(),
+                credential_hpke_public_key: Vec::new(),
             },
             TEST_TLS_CERTIFICATE_PEM.to_vec(),
             TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
@@ -3274,6 +3467,62 @@ mod tests {
     }
 
     #[test]
+    fn native_route_bearer_is_hpke_delivered_client_to_exit_once() {
+        let (mut service, mut route) = admit_route(
+            2,
+            &[Transport::MultipathQuic],
+            Vec::new(),
+            MetricsRegistry::new(),
+        );
+        let scope = route.accepted.native_route_authorization_scope();
+        let client_authorization = route
+            .coordinator
+            .take_native_route_authorization(*scope.request().finalize_id(), NOW_MS)
+            .expect("fully confirmed client native authorization");
+        let expected_bearer = *client_authorization.auth_bearer();
+        let signed_delivery = route
+            .coordinator
+            .sign_native_route_credential_delivery(&client_authorization, NOW_MS)
+            .expect("HPKE-sealed Client credential delivery");
+
+        let envelope =
+            decode_canonical::<SignedEnvelope>(&signed_delivery, MAX_CONTROL_MESSAGE_SIZE)
+                .expect("signed delivery envelope");
+        let opaque = decode_canonical::<NativeRouteCredentialDelivery>(
+            &envelope.payload,
+            MAX_CONTROL_PAYLOAD_SIZE,
+        )
+        .expect("credential payload");
+        assert!(
+            !opaque
+                .ciphertext
+                .windows(expected_bearer.len())
+                .any(|window| window == expected_bearer),
+            "the Relay-visible ciphertext must not contain the bearer in plaintext"
+        );
+
+        let exit_authorization = service
+            .take_native_route_authorization_with_credential(&scope, &signed_delivery, NOW_MS)
+            .expect("authenticated Exit credential admission");
+        assert_eq!(exit_authorization.auth_bearer(), &expected_bearer);
+        assert_eq!(
+            exit_authorization.authorization().scope(),
+            scope,
+            "the decrypted bearer must retain the exact native owner"
+        );
+        assert!(format!("{exit_authorization:?}").contains("<redacted>"));
+
+        assert!(matches!(
+            service.take_native_route_authorization_with_credential(
+                &scope,
+                &signed_delivery,
+                NOW_MS
+            ),
+            Err(ExitError::Protocol(ProtocolError::Replay))
+        ));
+    }
+
+    #[test]
     fn native_route_owner_rejects_mismatched_public_scope_and_malformed_pem() {
         let request = ExitNativeRouteIdentityRequest::new(
             [1; 16], [2; 16], [3; 16], [4; 32], 5, [6; 32], [8; 32],
@@ -3287,6 +3536,7 @@ mod tests {
             masque_context_id: request.masque_context_id(),
             client_native_instance_id: request.client_native_instance_id().to_vec(),
             exit_native_instance_id: request.exit_native_instance_id().to_vec(),
+            credential_hpke_public_key: Vec::new(),
         };
         let owner = ExitNativeRouteIdentityOwner::new(
             request,

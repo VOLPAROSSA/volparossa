@@ -995,11 +995,16 @@ single clean-build A01--A15 run; the score is not a release claim.
   complete ordered path set. A preflighted production Client consumes one helper-owned QUIC UDP FD
   for each committed WireGuard Relay path and passes all of them to the pinned native multipath
   process. Its browser-datagram API rechecks the exact signed policy destination on outbound and
-  reverse inner UDP packets; it has no direct-Exit address input or ordinary-QUIC fallback. Live
-  orchestration remains fail closed because the provider still cannot start the matching native Exit
-  session without a secure end-to-end delivery mechanism for its bearer secret. No bearer is exposed
-  through a Relay, and no disposable two-path browser traffic has yet been proved, so this row and
-  the alpha score remain open.
+  reverse inner UDP packets; it has no direct-Exit address input or ordinary-QUIC fallback. The
+  Client coordinator now HPKE-seals its retained 43-byte bearer directly to a route-owner-generated
+  RFC 9180 X25519/HKDF-SHA256/ChaCha20-Poly1305 recipient key. The Client-session-signed opaque
+  delivery binds the exact reservation, route, finalization, Exit identity, TLS certificate/SPKI,
+  both native instances, expiry and nonce. The Exit verifies that signature and replay state,
+  correlates every field with its finalized reservation, decrypts and checks the public commitment,
+  and atomically consumes the TLS/native owner. The MPQUIC activation frame carries the signed
+  ciphertext; a Relay never receives the bearer plaintext. Production responder wiring still must
+  pass that frame into the provider-side native `StartExitSession`, and no disposable two-path
+  browser traffic has yet been proved, so this row and the alpha score remain open.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
 
 ## Identity and signed protocol

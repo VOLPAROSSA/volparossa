@@ -6545,6 +6545,7 @@ mod tests {
                     masque_context_id: request.masque_context_id(),
                     client_native_instance_id: request.client_native_instance_id().to_vec(),
                     exit_native_instance_id: TEST_EXIT_NATIVE_INSTANCE_ID.to_vec(),
+                    credential_hpke_public_key: Vec::new(),
                 },
                 b"-----BEGIN CERTIFICATE-----\ntest-certificate\n-----END CERTIFICATE-----\n"
                     .to_vec(),

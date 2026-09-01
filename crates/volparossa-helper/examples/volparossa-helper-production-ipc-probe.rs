@@ -1497,6 +1497,7 @@ fn functional_signed_relay_reservation(
             masque_context_id: 1,
             client_native_instance_id: random_nonzero_32()?.to_vec(),
             exit_native_instance_id: random_nonzero_32()?.to_vec(),
+            credential_hpke_public_key: random_nonzero_32()?.to_vec(),
         }),
     };
     let signed_exit_reservation = sign_control_message(
@@ -1706,6 +1707,7 @@ fn functional_signed_relay_pair_authority(
             masque_context_id: 1,
             client_native_instance_id: random_nonzero_32()?.to_vec(),
             exit_native_instance_id: random_nonzero_32()?.to_vec(),
+            credential_hpke_public_key: random_nonzero_32()?.to_vec(),
         }),
     };
     let signed_exit_reservation = sign_control_message(
