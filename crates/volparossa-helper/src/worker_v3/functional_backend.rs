@@ -67,9 +67,9 @@ use super::{
     ConfirmedWorkerGenerationAbsent, DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_MAX_TTL,
     DurableFunctionalPrepareFailure, DurableFunctionalPrepareInput,
     DurableFunctionalWorkerOwnership, DurablePrepareTerminalSelector,
-    DurablePrepareTerminalSettlement, ShutdownStatus, WorkerCoordinator, WorkerGenerationOwnership,
-    WorkerGenerationReap, WorkerLifecycleAdmission, WorkerRecoveryIdentitySource, WorkerRegistry,
-    WorkerV3Error,
+    DurablePrepareTerminalSettlement, ReapedWorkerRestartCustody, ShutdownStatus,
+    WorkerCoordinator, WorkerGenerationOwnership, WorkerGenerationReap, WorkerLifecycleAdmission,
+    WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
 };
 
 const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 1;
@@ -195,7 +195,10 @@ struct OpenLeaseEntry {
     key: OpenLineageKey,
     context_role: ContextRole,
     worker: Option<WorkerGenerationOwnership>,
+    /// Complete live-worker recovery authority, retained only until exact generation reap.
     recovery: Option<WorkerRecoveryIdentitySource>,
+    /// The sole post-reap namespace capability, retained only until exact manager absence.
+    restart_custody: Option<ReapedWorkerRestartCustody>,
     durable: Option<DurableLeaseCustody>,
     durable_prepare_terminal: Option<DurablePrepareTerminalSelector>,
     wireguard: Vec<LiveWireguardLeaseOwner>,
@@ -564,6 +567,7 @@ impl FunctionalAlphaLeaseBackend {
             context_role,
             worker: None,
             recovery: None,
+            restart_custody: None,
             durable: None,
             durable_prepare_terminal: None,
             wireguard: Vec::new(),
@@ -1194,25 +1198,32 @@ impl FunctionalAlphaLeaseBackend {
             {
                 WorkerGenerationReap::Confirmed(proof) => {
                     // Process death alone does not destroy an anonymous network namespace while
-                    // duplicated recovery descriptors still pin it. Consume those descriptors
-                    // immediately after exact reap confirmation, before any fallible parent-link
-                    // cleanup or later deadline check can retain the entry for retry.
-                    let recovery = {
-                        let mut state = lock_state(&self.state);
-                        let Ok(entry) = exact_entry_mut(&mut state, key) else {
-                            return false;
-                        };
-                        if entry.durable.is_none() {
-                            drop(proof);
-                            entry.recovery.take()
-                        } else {
-                            if entry.worker_cleanup.replace(proof).is_some() {
-                                std::process::abort();
-                            }
-                            None
-                        }
+                    // duplicated recovery descriptors still pin it. Exact reap replaces the
+                    // live-process identity proof: close the complete authenticated duplicate
+                    // immediately and retain only the smaller restart pair needed for exact
+                    // descriptor-store removal.
+                    let mut state = lock_state(&self.state);
+                    let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                        return false;
                     };
-                    drop(recovery);
+                    if entry.restart_custody.is_some() {
+                        std::process::abort();
+                    }
+                    let recovery = entry.recovery.take();
+                    if entry.durable.is_none() {
+                        drop(proof);
+                        drop(recovery);
+                    } else {
+                        let Some(recovery) = recovery else {
+                            std::process::abort();
+                        };
+                        let restart_custody = recovery.into_reaped_restart_custody(&proof);
+                        if entry.worker_cleanup.replace(proof).is_some()
+                            || entry.restart_custody.replace(restart_custody).is_some()
+                        {
+                            std::process::abort();
+                        }
+                    }
                 }
                 WorkerGenerationReap::Retained { ownership, .. } => {
                     let mut state = lock_state(&self.state);
@@ -1292,12 +1303,12 @@ impl FunctionalAlphaLeaseBackend {
         let Some(handle) = self.durable_ownership.as_ref() else {
             return false;
         };
-        let (mut custody, recovery, child, worker) = {
+        let (mut custody, mut restart_custody, child, worker) = {
             let mut state = lock_state(&self.state);
             let Ok(entry) = exact_entry_mut(&mut state, key) else {
                 return false;
             };
-            if entry.durable.is_none() || entry.recovery.is_none() {
+            if entry.durable.is_none() || entry.recovery.is_some() {
                 return false;
             }
             if entry
@@ -1315,15 +1326,26 @@ impl FunctionalAlphaLeaseBackend {
             {
                 return false;
             }
+            let manager_absence_proven = entry.durable.as_ref().is_some_and(|custody| {
+                matches!(
+                    custody.settlement,
+                    DurableJournalSettlement::ManagerRemovalProven(_)
+                )
+            });
+            if manager_absence_proven != entry.restart_custody.is_none()
+                || entry
+                    .restart_custody
+                    .as_ref()
+                    .is_some_and(|restart| restart.context_id() != key.context_id)
+            {
+                return false;
+            }
             let Some(custody) = entry.durable.take() else {
-                std::process::abort();
-            };
-            let Some(recovery) = entry.recovery.take() else {
                 std::process::abort();
             };
             (
                 custody,
-                recovery,
+                entry.restart_custody.take(),
                 entry.child_cleanup.take(),
                 entry.worker_cleanup.take(),
             )
@@ -1354,7 +1376,7 @@ impl FunctionalAlphaLeaseBackend {
                     }
                     DurableCleanupOutcome::Retained { proof, .. } => {
                         custody.settlement = DurableJournalSettlement::CleanupProven(proof);
-                        self.restore_durable_cleanup(key, custody, recovery);
+                        self.restore_durable_cleanup(key, custody, restart_custody);
                         return false;
                     }
                 }
@@ -1362,27 +1384,82 @@ impl FunctionalAlphaLeaseBackend {
             settlement => settlement,
         };
 
-        let Ok(pair) = crate::systemd_fdstore::BorrowedCustodyPair::new(
-            recovery.restart_custody.borrowed_pidfd(),
-            recovery.restart_custody.borrowed_network_namespace(),
-        ) else {
-            self.restore_durable_cleanup(key, custody, recovery);
-            return false;
-        };
-        let Ok(binding) = pair.descriptor_binding() else {
-            self.restore_durable_cleanup(key, custody, recovery);
-            return false;
-        };
+        if !matches!(
+            custody.settlement,
+            DurableJournalSettlement::ManagerRemovalProven(_)
+        ) {
+            let Some(restart) = restart_custody.as_ref() else {
+                std::process::abort();
+            };
+            let Ok(pair) = crate::systemd_fdstore::BorrowedCustodyPair::new(
+                restart.borrowed_pidfd(),
+                restart.borrowed_network_namespace(),
+            ) else {
+                self.restore_durable_cleanup(key, custody, restart_custody);
+                return false;
+            };
+            let Ok(binding) = pair.descriptor_binding() else {
+                self.restore_durable_cleanup(key, custody, restart_custody);
+                return false;
+            };
 
-        custody.settlement = match custody.settlement {
-            DurableJournalSettlement::CleanupConfirmed(cleanup) => {
-                let Some(baseline) = custody.attestation.removal_baseline() else {
-                    custody.settlement = DurableJournalSettlement::CleanupConfirmed(cleanup);
-                    self.restore_durable_cleanup(key, custody, recovery);
-                    return false;
-                };
-                match crate::systemd_fdstore::remove_current_process_custody(
-                    baseline,
+            custody.settlement = match custody.settlement {
+                DurableJournalSettlement::CleanupConfirmed(cleanup) => {
+                    let Some(baseline) = custody.attestation.removal_baseline() else {
+                        custody.settlement = DurableJournalSettlement::CleanupConfirmed(cleanup);
+                        self.restore_durable_cleanup(key, custody, restart_custody);
+                        return false;
+                    };
+                    match crate::systemd_fdstore::remove_current_process_custody(
+                        baseline,
+                        custody.custody_name,
+                        binding.clone(),
+                        pair,
+                        deadline,
+                    )
+                    .await
+                    {
+                        Ok(proof) => {
+                            if proof
+                                .verify_exact_target(custody.custody_name, &binding)
+                                .is_err()
+                            {
+                                custody.settlement =
+                                    DurableJournalSettlement::CleanupConfirmed(cleanup);
+                                self.restore_durable_cleanup(key, custody, restart_custody);
+                                return false;
+                            }
+                            DurableJournalSettlement::ManagerRemovalProven(
+                                ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
+                                    cleanup,
+                                    proof.into_same_runtime_manager_proof(),
+                                ),
+                            )
+                        }
+                        Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
+                            custody.settlement =
+                                DurableJournalSettlement::CleanupConfirmed(cleanup);
+                            self.restore_durable_cleanup(key, custody, restart_custody);
+                            return false;
+                        }
+                        Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
+                            attempt_id,
+                            ..
+                        }) => {
+                            custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                                cleanup,
+                                attempt_id,
+                            };
+                            self.restore_durable_cleanup(key, custody, restart_custody);
+                            return false;
+                        }
+                    }
+                }
+                DurableJournalSettlement::RemovalAmbiguous {
+                    cleanup,
+                    attempt_id,
+                } => match crate::systemd_fdstore::reconcile_current_process_removal(
+                    attempt_id,
                     custody.custody_name,
                     binding.clone(),
                     pair,
@@ -1390,14 +1467,16 @@ impl FunctionalAlphaLeaseBackend {
                 )
                 .await
                 {
-                    Ok(proof) => {
+                    crate::systemd_fdstore::RemovalInventoryReconciliation::ExactRemoved(proof) => {
                         if proof
                             .verify_exact_target(custody.custody_name, &binding)
                             .is_err()
                         {
-                            custody.settlement =
-                                DurableJournalSettlement::CleanupConfirmed(cleanup);
-                            self.restore_durable_cleanup(key, custody, recovery);
+                            custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                                cleanup,
+                                attempt_id,
+                            };
+                            self.restore_durable_cleanup(key, custody, restart_custody);
                             return false;
                         }
                         DurableJournalSettlement::ManagerRemovalProven(
@@ -1407,139 +1486,96 @@ impl FunctionalAlphaLeaseBackend {
                             ),
                         )
                     }
-                    Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
-                        custody.settlement = DurableJournalSettlement::CleanupConfirmed(cleanup);
-                        self.restore_durable_cleanup(key, custody, recovery);
+                    crate::systemd_fdstore::RemovalInventoryReconciliation::ExactStillPresent(
+                        evidence,
+                    ) => {
+                        custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
+                            cleanup,
+                            evidence: Box::new(evidence),
+                        };
+                        self.restore_durable_cleanup(key, custody, restart_custody);
                         return false;
                     }
-                    Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
-                        attempt_id,
+                    crate::systemd_fdstore::RemovalInventoryReconciliation::Unresolved {
                         ..
-                    }) => {
+                    } => {
                         custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
                             cleanup,
                             attempt_id,
                         };
-                        self.restore_durable_cleanup(key, custody, recovery);
+                        self.restore_durable_cleanup(key, custody, restart_custody);
                         return false;
                     }
-                }
-            }
-            DurableJournalSettlement::RemovalAmbiguous {
-                cleanup,
-                attempt_id,
-            } => match crate::systemd_fdstore::reconcile_current_process_removal(
-                attempt_id,
-                custody.custody_name,
-                binding.clone(),
-                pair,
-                deadline,
-            )
-            .await
-            {
-                crate::systemd_fdstore::RemovalInventoryReconciliation::ExactRemoved(proof) => {
-                    if proof
-                        .verify_exact_target(custody.custody_name, &binding)
-                        .is_err()
-                    {
-                        custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
-                            cleanup,
-                            attempt_id,
-                        };
-                        self.restore_durable_cleanup(key, custody, recovery);
-                        return false;
-                    }
-                    DurableJournalSettlement::ManagerRemovalProven(
-                        ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
-                            cleanup,
-                            proof.into_same_runtime_manager_proof(),
-                        ),
+                },
+                DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence } => {
+                    match crate::systemd_fdstore::retry_current_process_removal(
+                        &evidence,
+                        custody.custody_name,
+                        binding.clone(),
+                        pair,
+                        deadline,
                     )
-                }
-                crate::systemd_fdstore::RemovalInventoryReconciliation::ExactStillPresent(
-                    evidence,
-                ) => {
-                    custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
-                        cleanup,
-                        evidence: Box::new(evidence),
-                    };
-                    self.restore_durable_cleanup(key, custody, recovery);
-                    return false;
-                }
-                crate::systemd_fdstore::RemovalInventoryReconciliation::Unresolved { .. } => {
-                    custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
-                        cleanup,
-                        attempt_id,
-                    };
-                    self.restore_durable_cleanup(key, custody, recovery);
-                    return false;
-                }
-            },
-            DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence } => {
-                match crate::systemd_fdstore::retry_current_process_removal(
-                    &evidence,
-                    custody.custody_name,
-                    binding.clone(),
-                    pair,
-                    deadline,
-                )
-                .await
-                {
-                    Ok(proof) => {
-                        if proof
-                            .verify_exact_target(custody.custody_name, &binding)
-                            .is_err()
-                        {
+                    .await
+                    {
+                        Ok(proof) => {
+                            if proof
+                                .verify_exact_target(custody.custody_name, &binding)
+                                .is_err()
+                            {
+                                custody.settlement =
+                                    DurableJournalSettlement::RemovalRetryAuthorized {
+                                        cleanup,
+                                        evidence,
+                                    };
+                                self.restore_durable_cleanup(key, custody, restart_custody);
+                                return false;
+                            }
+                            DurableJournalSettlement::ManagerRemovalProven(
+                                ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
+                                    cleanup,
+                                    proof.into_same_runtime_manager_proof(),
+                                ),
+                            )
+                        }
+                        Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
                             custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
                                 cleanup,
                                 evidence,
                             };
-                            self.restore_durable_cleanup(key, custody, recovery);
+                            self.restore_durable_cleanup(key, custody, restart_custody);
                             return false;
                         }
-                        DurableJournalSettlement::ManagerRemovalProven(
-                            ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
-                                cleanup,
-                                proof.into_same_runtime_manager_proof(),
-                            ),
-                        )
-                    }
-                    Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
-                        custody.settlement =
-                            DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence };
-                        self.restore_durable_cleanup(key, custody, recovery);
-                        return false;
-                    }
-                    Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
-                        attempt_id,
-                        ..
-                    }) => {
-                        custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
-                            cleanup,
+                        Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
                             attempt_id,
-                        };
-                        self.restore_durable_cleanup(key, custody, recovery);
-                        return false;
+                            ..
+                        }) => {
+                            custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                                cleanup,
+                                attempt_id,
+                            };
+                            self.restore_durable_cleanup(key, custody, restart_custody);
+                            return false;
+                        }
                     }
                 }
-            }
-            settlement @ DurableJournalSettlement::ManagerRemovalProven(_) => settlement,
-            DurableJournalSettlement::MayOwn(_) | DurableJournalSettlement::CleanupProven(_) => {
-                std::process::abort()
-            }
-        };
+                settlement @ DurableJournalSettlement::ManagerRemovalProven(_) => settlement,
+                DurableJournalSettlement::MayOwn(_)
+                | DurableJournalSettlement::CleanupProven(_) => std::process::abort(),
+            };
+        }
 
         let DurableJournalSettlement::ManagerRemovalProven(proof) = custody.settlement else {
             std::process::abort();
         };
+        // Manager absence has replaced the last use of the restart pair. Close its pidfd and
+        // network namespace before the journal terminal is confirmed or any Destroy response can
+        // be constructed. A retained journal proof no longer carries local kernel custody.
+        drop(restart_custody.take());
         match handle.confirm_manager_absent_until(proof, deadline) {
-            DurableManagerAbsentOutcome::Absent => {
-                drop(recovery);
-                true
-            }
+            DurableManagerAbsentOutcome::Absent => true,
             DurableManagerAbsentOutcome::Retained { proof, .. } => {
                 custody.settlement = DurableJournalSettlement::ManagerRemovalProven(proof);
-                self.restore_durable_cleanup(key, custody, recovery);
+                self.restore_durable_cleanup(key, custody, None);
                 false
             }
         }
@@ -1549,17 +1585,25 @@ impl FunctionalAlphaLeaseBackend {
         &self,
         key: OpenLineageKey,
         custody: DurableLeaseCustody,
-        recovery: WorkerRecoveryIdentitySource,
+        restart_custody: Option<ReapedWorkerRestartCustody>,
     ) {
         let mut state = lock_state(&self.state);
         let Ok(entry) = exact_entry_mut(&mut state, key) else {
             std::process::abort();
         };
-        if entry.durable.is_some() || entry.recovery.is_some() {
+        let manager_absence_proven = matches!(
+            custody.settlement,
+            DurableJournalSettlement::ManagerRemovalProven(_)
+        );
+        if entry.durable.is_some()
+            || entry.recovery.is_some()
+            || entry.restart_custody.is_some()
+            || manager_absence_proven != restart_custody.is_none()
+        {
             std::process::abort();
         }
         entry.durable = Some(custody);
-        entry.recovery = Some(recovery);
+        entry.restart_custody = restart_custody;
     }
 
     async fn destroy_one(
@@ -3802,6 +3846,7 @@ mod tests {
             context_role: role.context,
             worker: None,
             recovery: None,
+            restart_custody: None,
             durable: None,
             durable_prepare_terminal: None,
             wireguard: vec![wireguard],
@@ -3843,6 +3888,7 @@ mod tests {
             context_role: ContextRole::Relay,
             worker: None,
             recovery: None,
+            restart_custody: None,
             durable: None,
             durable_prepare_terminal: None,
             birth_may_exist: vec![false; wireguard.len()],
@@ -5163,6 +5209,9 @@ mod tests {
         let exact_worker_reap = source[..cleanup_start]
             .rfind("WorkerGenerationReap::Confirmed(proof) =>")
             .expect("exact worker-generation reap");
+        let live_recovery_consumed = source[..cleanup_start]
+            .rfind("recovery.into_reaped_restart_custody(&proof)")
+            .expect("live recovery consumed after exact reap");
         let worker_reap_recorded = source[..cleanup_start]
             .rfind("entry.worker_cleanup.replace(proof)")
             .expect("affine worker reap evidence retention");
@@ -5181,7 +5230,8 @@ mod tests {
         assert!(
             child_cleanup_classified < retain_without_child_cleanup
                 && retain_without_child_cleanup < exact_worker_reap
-                && exact_worker_reap < worker_reap_recorded
+                && exact_worker_reap < live_recovery_consumed
+                && live_recovery_consumed < worker_reap_recorded
                 && worker_reap_recorded < kernel_absent
                 && kernel_absent < all_cleanup_evidence
                 && all_cleanup_evidence < parent_absence
@@ -5218,6 +5268,9 @@ mod tests {
         let retry_manager_proof = cleanup
             .rfind("ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(")
             .expect("retry opaque manager-absence proof mint");
+        let restart_custody_released = cleanup
+            .find("drop(restart_custody.take());")
+            .expect("post-manager-proof restart custody release");
         let manager_absent = cleanup
             .find("handle.confirm_manager_absent_until(proof, deadline)")
             .expect("Absent transition");
@@ -5231,8 +5284,147 @@ mod tests {
                 && retry_authority < fdstore_retry
                 && fdstore_retry < retry_removal_validation
                 && retry_removal_validation < retry_manager_proof
-                && retry_manager_proof < manager_absent
+                && retry_manager_proof < restart_custody_released
+                && restart_custody_released < manager_absent
         );
+    }
+
+    fn contains_in_order(source: &str, needles: &[&str]) -> bool {
+        let mut remainder = source;
+        for needle in needles {
+            let Some(index) = remainder.find(needle) else {
+                return false;
+            };
+            remainder = &remainder[index + needle.len()..];
+        }
+        true
+    }
+
+    fn phase_split_namespace_custody_contract(worker: &str, functional: &str) -> bool {
+        let Some(worker_end) = worker.find("#[cfg(test)]\nmod tests {") else {
+            return false;
+        };
+        let worker = &worker[..worker_end];
+        let Some(functional_end) = functional.find("#[cfg(test)]\nmod tests {") else {
+            return false;
+        };
+        let functional = &functional[..functional_end];
+        let Some(reaped_start) = worker.find("struct ReapedWorkerRestartCustody {") else {
+            return false;
+        };
+        let Some(reaped_end_offset) =
+            worker[reaped_start..].find("\nimpl WorkerRecoveryIdentitySource {")
+        else {
+            return false;
+        };
+        let reaped = &worker[reaped_start..reaped_start + reaped_end_offset];
+        if !reaped.contains("restart: crate::worker_sandbox::PinnedWorkerRestartCustody,")
+            || reaped.contains("pending:")
+            || reaped.contains("WorkerRecoveryIdentitySource")
+        {
+            return false;
+        }
+        let Some(conversion_start) = worker.find("    fn into_reaped_restart_custody(") else {
+            return false;
+        };
+        let Some(conversion_end_offset) =
+            worker[conversion_start..].find("\n}\n\nimpl ReapedWorkerRestartCustody {")
+        else {
+            return false;
+        };
+        let conversion = &worker[conversion_start..conversion_start + conversion_end_offset];
+        if !contains_in_order(
+            conversion,
+            &[
+                "if self.pending.coordinates != reaped.coordinates",
+                "let Self {",
+                "pending,",
+                "restart_custody,",
+                "drop(pending);",
+                "ReapedWorkerRestartCustody {",
+                "restart: restart_custody,",
+            ],
+        ) {
+            return false;
+        }
+
+        let Some(cleanup_start) = functional.find("    async fn cleanup_exact(") else {
+            return false;
+        };
+        let Some(cleanup_end_offset) =
+            functional[cleanup_start..].find("\n    async fn settle_durable_cleanup(")
+        else {
+            return false;
+        };
+        let cleanup = &functional[cleanup_start..cleanup_start + cleanup_end_offset];
+        if !contains_in_order(
+            cleanup,
+            &[
+                "WorkerGenerationReap::Confirmed(proof) =>",
+                "let recovery = entry.recovery.take();",
+                "recovery.into_reaped_restart_custody(&proof)",
+                "entry.worker_cleanup.replace(proof)",
+                "entry.restart_custody.replace(restart_custody)",
+                "let parent_absent =",
+            ],
+        ) {
+            return false;
+        }
+
+        let Some(settle_start) = functional.find("    async fn settle_durable_cleanup(") else {
+            return false;
+        };
+        let Some(settle_end_offset) =
+            functional[settle_start..].find("\n    fn restore_durable_cleanup(")
+        else {
+            return false;
+        };
+        let settle = &functional[settle_start..settle_start + settle_end_offset];
+        contains_in_order(
+            settle,
+            &[
+                "manager_absence_proven != entry.restart_custody.is_none()",
+                "entry.restart_custody.take()",
+                "BorrowedCustodyPair::new(",
+                "remove_current_process_custody(",
+                ".verify_exact_target(custody.custody_name, &binding)",
+                "ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(",
+                "drop(restart_custody.take());",
+                "handle.confirm_manager_absent_until(proof, deadline)",
+                "self.restore_durable_cleanup(key, custody, None);",
+            ],
+        ) && functional.matches("drop(restart_custody.take());").count() == 1
+    }
+
+    #[test]
+    fn production_terminal_destroy_releases_namespace_custody_by_proven_phase() {
+        let worker = include_str!("../worker_v3.rs");
+        let functional = include_str!("functional_backend.rs");
+        assert!(phase_split_namespace_custody_contract(worker, functional));
+
+        let pending_leak = worker.replacen("drop(pending);", "let _pending = pending;", 1);
+        assert!(!phase_split_namespace_custody_contract(
+            &pending_leak,
+            functional
+        ));
+        let restart_leak = functional.replacen(
+            "drop(restart_custody.take());",
+            "let _restart_custody = restart_custody.take();",
+            1,
+        );
+        assert!(!phase_split_namespace_custody_contract(
+            worker,
+            &restart_leak
+        ));
+        let retained_local_fd = functional.replacen(
+            "self.restore_durable_cleanup(key, custody, None);",
+            "self.restore_durable_cleanup(key, custody, restart_custody);",
+            1,
+        );
+        assert!(!phase_split_namespace_custody_contract(
+            worker,
+            &retained_local_fd
+        ));
     }
 
     #[test]
@@ -8012,6 +8204,7 @@ mod tests {
         let retained = state.as_ref().expect("retryable parent ownership");
         assert!(retained.worker.is_none());
         assert!(retained.recovery.is_none());
+        assert!(retained.restart_custody.is_none());
         assert_eq!(retained.wireguard.len(), 2);
         assert!(retained.birth_may_exist.is_empty());
     }
