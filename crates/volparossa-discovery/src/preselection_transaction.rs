@@ -278,7 +278,7 @@ pub fn consume_bound_client_preselection_transport_for_freshness(
     })
 }
 
-/// Affine owner of one exact relay-to-exit request and its pre-send connection witness.
+/// Affine owner of one exact relay-to-exit request and its connection-binding mode.
 #[must_use = "an upstream preselection dispatch must be bound or cancelled through its originating DiscoveryService"]
 pub struct UpstreamPreselectionDispatch {
     request_id: OutboundRequestId,
@@ -287,7 +287,12 @@ pub struct UpstreamPreselectionDispatch {
     instance: Arc<()>,
     sent_at: Instant,
     deadline: Instant,
-    witness: ConnectionWitness,
+    witness: UpstreamConnectionWitness,
+}
+
+enum UpstreamConnectionWitness {
+    PreSend(ConnectionWitness),
+    BindResponse(IpFamily),
 }
 
 /// Affine relay-to-exit dispatch carrying its exact caller-owned forwarding context.
@@ -403,9 +408,9 @@ impl DiscoveryService {
 
     /// Read-only admission check for a forwarded request before shared replay capacity is spent.
     ///
-    /// This deliberately proves only that the request is currently dispatchable over one unique
-    /// authenticated Exit connection. The real dispatch repeats every check and mints its own
-    /// immediate pre-send witness, so this preflight grants no response or transport authority.
+    /// This proves role, canonical request, exact Exit target and the unoccupied upstream slot.
+    /// It deliberately does not require an already-established Exit connection: request-response
+    /// may dial it, while the sealed response remains responsible for exact connection binding.
     pub(super) fn preflight_preselection_observation_upstream(
         &self,
         request: &UpstreamPreselectionObservationRequest,
@@ -422,14 +427,7 @@ impl DiscoveryService {
         typed_request
             .validate()
             .map_err(|_| PreselectionDispatchError::Request)?;
-        let (expected_peer_id, family) =
-            upstream_target_and_family(&typed_request, *self.local_peer_id())?;
-        let _ = self
-            .swarm
-            .behaviour()
-            .connection_provenance
-            .unique_witness(expected_peer_id, family)
-            .ok_or(PreselectionDispatchError::Provenance)?;
+        let _ = upstream_target_and_family(&typed_request, *self.local_peer_id())?;
         Ok(())
     }
 
@@ -823,14 +821,16 @@ impl DiscoveryService {
     /// Send one unchanged forwarded Exit request over its request-derived authenticated exit.
     ///
     /// The exact exit target and native family are decoded only from `request`. The request must
-    /// name this service as its forwarding control relay. A connection witness is minted
-    /// immediately before the synchronous libp2p send, with no suspension point.
+    /// name this service as its forwarding control relay. An existing Exit connection is
+    /// witnessed before send; otherwise request-response may dial it and the sealed response
+    /// connection is witnessed before consumption.
     ///
     /// # Errors
     ///
     /// Returns a detail-free error for an occupied upstream slot, disabled relay role, invalid
     /// request/local-control binding, unavailable wall or monotonic time, an expired effective
-    /// deadline, or unavailable unique direct exit-connection provenance.
+    /// deadline, or invalid request/local-control binding. Missing pre-send provenance is allowed;
+    /// response binding still requires unique direct Exit-connection provenance.
     pub fn dispatch_preselection_observation_upstream(
         &mut self,
         request: UpstreamPreselectionObservationRequest,
@@ -882,7 +882,10 @@ impl DiscoveryService {
             .behaviour()
             .connection_provenance
             .unique_witness(expected_peer_id, family)
-            .ok_or(PreselectionDispatchError::Provenance)?;
+            .map_or(
+                UpstreamConnectionWitness::BindResponse(family),
+                UpstreamConnectionWitness::PreSend,
+            );
         let request_id = self
             .swarm
             .behaviour_mut()
@@ -1059,6 +1062,15 @@ impl DiscoveryService {
         if arrived_at_mono < sent_at || arrived_at_mono >= deadline {
             return Err(PreselectionDispatchError::Time);
         }
+        let witness = match witness {
+            UpstreamConnectionWitness::PreSend(witness) => witness,
+            UpstreamConnectionWitness::BindResponse(family) => self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .unique_witness(expected_peer_id, family)
+                .ok_or(PreselectionDispatchError::Provenance)?,
+        };
         let observation = self
             .swarm
             .behaviour()
@@ -3580,7 +3592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upstream_preflight_is_read_only_and_requires_unique_exit_provenance() {
+    async fn upstream_preflight_and_dispatch_allow_dial_then_bind_exact_exit_response() {
         let created_at_ms = now_ms();
         let local_key = identity::Keypair::generate_ed25519();
         let exit_key = identity::Keypair::generate_ed25519();
@@ -3594,17 +3606,9 @@ mod tests {
         );
         let mut service = relay_service(local_key);
         let request = upstream_request(&fixture);
-        assert_eq!(
-            service.preflight_preselection_observation_upstream(&request),
-            Err(PreselectionDispatchError::Provenance),
-            "an unconnected Exit must fail before a caller spends replay capacity"
-        );
-
-        let endpoint = dialer("/ip4/8.8.8.8/tcp/443");
-        established(&mut service, exit_peer, CONNECTION, &endpoint, 0);
         service
             .preflight_preselection_observation_upstream(&request)
-            .expect("current unique Exit provenance");
+            .expect("an unconnected exact Exit remains dialable");
         service
             .preflight_preselection_observation_upstream(&request)
             .expect("preflight itself must not occupy the affine upstream slot");
@@ -3613,10 +3617,21 @@ mod tests {
                 upstream_request(&fixture),
                 Instant::now() + Duration::from_secs(1),
             )
-            .expect("dispatch repeats admission and owns the slot only at send");
-        service
-            .cancel_preselection_observation_upstream_dispatch(dispatch)
-            .expect("exact upstream cancellation");
+            .expect("dispatch queues a dial to the request-derived Exit");
+        let request_id = dispatch.request_id;
+        let sent_at = dispatch.sent_at;
+        let endpoint = dialer("/ip4/8.8.8.8/tcp/443");
+        established(&mut service, exit_peer, CONNECTION, &endpoint, 0);
+        let _transport = service
+            .bind_preselection_observation_upstream_response_at(
+                dispatch,
+                exit_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                request_id,
+                sent_at,
+                now_ms(),
+            )
+            .expect("the sealed response connection supplies exact Exit provenance");
     }
 
     #[tokio::test]
@@ -4061,7 +4076,11 @@ mod tests {
                 production,
                 "pub struct UpstreamPreselectionDispatch {"
             )),
-            "request_id:OutboundRequestId,request_hash:[u8;32],expected_peer_id:PeerId,instance:Arc<()>,sent_at:Instant,deadline:Instant,witness:ConnectionWitness,"
+            "request_id:OutboundRequestId,request_hash:[u8;32],expected_peer_id:PeerId,instance:Arc<()>,sent_at:Instant,deadline:Instant,witness:UpstreamConnectionWitness,"
+        );
+        assert_eq!(
+            compact(item_body(production, "enum UpstreamConnectionWitness {")),
+            "PreSend(ConnectionWitness),BindResponse(IpFamily),"
         );
         assert_eq!(
             compact(item_body(
@@ -4230,20 +4249,16 @@ mod tests {
         let upstream_signature = upstream_dispatch.split('{').next().expect("signature");
         assert!(!upstream_signature.contains("PeerId"));
         assert!(!upstream_signature.contains("IpFamily"));
-        let upstream_adjacent = concat!(
-            "letwitness=self.swarm.behaviour().connection_provenance",
-            ".unique_witness(expected_peer_id,family)",
-            ".ok_or(PreselectionDispatchError::Provenance)?;",
-            "letrequest_id=self.swarm.behaviour_mut().preselection_observation_upstream",
-            ".send_request(&expected_peer_id,request);"
-        );
-        assert_eq!(
-            compact(upstream_dispatch)
-                .matches(upstream_adjacent)
-                .count(),
-            1
-        );
-        let upstream_witness = upstream_dispatch.find(".unique_witness(").expect("witness");
+        let compact_dispatch = compact(upstream_dispatch);
+        assert!(compact_dispatch.contains(
+            "letwitness=self.swarm.behaviour().connection_provenance.unique_witness(expected_peer_id,family).map_or(UpstreamConnectionWitness::BindResponse(family),UpstreamConnectionWitness::PreSend,);"
+        ));
+        assert!(compact_dispatch.contains(
+            "letrequest_id=self.swarm.behaviour_mut().preselection_observation_upstream.send_request(&expected_peer_id,request);"
+        ));
+        let upstream_witness = upstream_dispatch
+            .find(".unique_witness(")
+            .expect("optional witness");
         let upstream_send = upstream_dispatch.find(".send_request(").expect("send");
         for forbidden in [".await", "yield_now", "sleep(", "spawn("] {
             assert!(!upstream_dispatch[upstream_witness..upstream_send].contains(forbidden));
