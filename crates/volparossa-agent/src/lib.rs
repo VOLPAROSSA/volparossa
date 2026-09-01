@@ -22,6 +22,7 @@ mod roles;
 mod route_setup;
 mod secret;
 mod state;
+mod udp_exit_provider;
 
 use std::{
     fs::{self, OpenOptions},

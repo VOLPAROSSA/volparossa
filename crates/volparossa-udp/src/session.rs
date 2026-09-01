@@ -348,32 +348,50 @@ pub struct SingleRelayUdpExit {
     bridge: ExitUdpBridge,
 }
 
-impl SingleRelayUdpExit {
-    /// Adopt a committed Exit descriptor and accept exactly one QUIC flow from
-    /// the canonical Client overlay address of the verified relay path.
-    ///
-    /// The first unidirectional stream must carry one signed authorization.
-    /// The Exit verifies it against the current whitelist, resolves and pins
-    /// the destination once, and only then creates the egress bridge.
+/// Bound QUIC listener for one committed Exit route.
+///
+/// Construction adopts the helper descriptor synchronously. Returning this owner therefore proves
+/// that the exact protected-overlay socket is listening before public certificate readiness is
+/// signalled to the Client; flow authorization and destination egress still happen only in
+/// [`accept`](Self::accept).
+#[must_use = "the committed Exit listener must be accepted or shut down"]
+pub struct SingleRelayUdpExitListener {
+    endpoint: ManagedQuinnEndpoint,
+    path: VerifiedSingleRelayPath,
+}
+
+impl SingleRelayUdpExitListener {
+    /// Adopt the committed Exit descriptor and start its bounded QUIC listener.
     ///
     /// # Errors
     ///
-    /// Fails for any descriptor, peer, reservation, authorization, policy,
-    /// replay, expiry, DNS, QUIC, or destination-socket error. The endpoint is
-    /// shut down before an error is returned.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn accept(
+    /// Rejects a descriptor, role, path, address, or TLS configuration mismatch.
+    pub fn listen(
         transport: CommittedQuicUdpTransport,
         server_config: ServerConfig,
         path: VerifiedSingleRelayPath,
+    ) -> Result<Self, UdpError> {
+        let endpoint = transport.adopt(CommittedUdpRole::Exit, &path, Some(server_config))?;
+        Ok(Self { endpoint, path })
+    }
+
+    /// Accept and authorize exactly one Client flow on this committed listener.
+    ///
+    /// # Errors
+    ///
+    /// Fails for any peer, reservation, authorization, policy, replay, expiry, DNS, QUIC, or
+    /// destination-socket error. The endpoint is shut down before an error is returned.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept(
+        self,
         policy: &VerifiedManifest,
         replay_cache: &mut ReplayCache,
         time_policy: TimePolicy,
         authorization_timeout: Duration,
         limits: DatagramLimits,
         now_ms: u64,
-    ) -> Result<Self, UdpError> {
-        let endpoint = transport.adopt(CommittedUdpRole::Exit, &path, Some(server_config))?;
+    ) -> Result<SingleRelayUdpExit, UdpError> {
+        let Self { endpoint, path } = self;
         let attempt = async {
             let connection = endpoint.accept().await?;
             let path_id = u8::try_from(path.path_id())
@@ -401,12 +419,55 @@ impl SingleRelayUdpExit {
         }
         .await;
         match attempt {
-            Ok(bridge) => Ok(Self { endpoint, bridge }),
+            Ok(bridge) => Ok(SingleRelayUdpExit { endpoint, bridge }),
             Err(error) => {
                 endpoint.shutdown().await;
                 Err(error)
             }
         }
+    }
+
+    /// Close the listener and wait until Quinn releases the committed socket.
+    pub async fn shutdown(self) {
+        self.endpoint.shutdown().await;
+    }
+}
+
+impl SingleRelayUdpExit {
+    /// Adopt a committed Exit descriptor and accept exactly one QUIC flow from
+    /// the canonical Client overlay address of the verified relay path.
+    ///
+    /// The first unidirectional stream must carry one signed authorization.
+    /// The Exit verifies it against the current whitelist, resolves and pins
+    /// the destination once, and only then creates the egress bridge.
+    ///
+    /// # Errors
+    ///
+    /// Fails for any descriptor, peer, reservation, authorization, policy,
+    /// replay, expiry, DNS, QUIC, or destination-socket error. The endpoint is
+    /// shut down before an error is returned.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept(
+        transport: CommittedQuicUdpTransport,
+        server_config: ServerConfig,
+        path: VerifiedSingleRelayPath,
+        policy: &VerifiedManifest,
+        replay_cache: &mut ReplayCache,
+        time_policy: TimePolicy,
+        authorization_timeout: Duration,
+        limits: DatagramLimits,
+        now_ms: u64,
+    ) -> Result<Self, UdpError> {
+        SingleRelayUdpExitListener::listen(transport, server_config, path)?
+            .accept(
+                policy,
+                replay_cache,
+                time_policy,
+                authorization_timeout,
+                limits,
+                now_ms,
+            )
+            .await
     }
 
     /// Run both datagram pumps until closure, expiry, or the configured bounded

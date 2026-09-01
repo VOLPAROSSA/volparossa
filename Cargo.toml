@@ -48,6 +48,7 @@ lru = "0.14.0"
 netlink-sys = "0.8.7"
 nix = { version = "0.30.1", default-features = false, features = ["fs", "net", "poll", "process", "signal", "socket", "user"] }
 parking_lot = "0.12.4"
+pem = "3.0.6"
 percent-encoding = "2.3.1"
 prost = "0.14.1"
 prost-build = "0.14.1"

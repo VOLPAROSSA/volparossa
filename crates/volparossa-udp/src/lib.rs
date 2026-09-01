@@ -29,7 +29,7 @@ pub use framing::{read_authorized_udp_flow, write_udp_authorization};
 pub use path::VerifiedSingleRelayPath;
 pub use session::{
     CommittedQuicUdpTransport, CommittedUdpRole, ProtectedExitUdpTarget, SingleRelayUdpClient,
-    SingleRelayUdpExit, committed_quic_udp_socket_request,
+    SingleRelayUdpExit, SingleRelayUdpExitListener, committed_quic_udp_socket_request,
 };
 
 /// Fixed protected-overlay port on which a committed Exit single-relay UDP session listens.
