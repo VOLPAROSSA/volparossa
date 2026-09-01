@@ -301,7 +301,8 @@ start_failure_stage_is_safe() {
         functional-exit-cleanup-parent-custody|\
         functional-exit-cleanup-parent-custody-pidfd|\
         functional-exit-cleanup-parent-custody-procfd|\
-        functional-exit-cleanup-parent-custody-foreign-netns|\
+        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker|\
+        functional-exit-cleanup-parent-custody-foreign-netns-other|\
         functional-exit-cleanup-parent-custody-fd-scan|\
         functional-exit-cleanup-parent-custody-clear|\
         functional-relay-pair-ready|\
@@ -441,7 +442,8 @@ advance_start_failure_stage() {
         functional-exit-cleanup-fdstore-absence:functional-exit-cleanup-parent-custody|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-pidfd|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-procfd|\
-        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns-exit-worker|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns-other|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-fd-scan|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-clear|\
         functional-exit-cleanup-parent-custody:functional-relay-pair-ready|\
@@ -4943,6 +4945,19 @@ wait_for_helper_no_worker_custody() {
     done
 }
 
+refine_parent_custody_failure_stage() {
+    [ "$hook_custody_failure_stage" = foreign-netns ] || return 0
+    kernel_object_identity_is_safe "$hook_custody_observed_identity" || return 1
+    if kernel_object_identity_is_safe \
+        "${hook_functional_exit_worker_namespace:-}" \
+        && [ "$hook_custody_observed_identity" = \
+            "$hook_functional_exit_worker_namespace" ]; then
+        hook_custody_failure_stage=foreign-netns-exit-worker
+    else
+        hook_custody_failure_stage=foreign-netns-other
+    fi
+}
+
 advance_parent_custody_failure_diagnostic() {
     [ "$#" -eq 2 ] || return 1
     [ "$start_failure_stage" = \
@@ -4959,8 +4974,9 @@ advance_parent_custody_failure_diagnostic() {
             hook_custody_failure_stage=clear
         fi
     fi
+    refine_parent_custody_failure_stage || return 1
     case $hook_custody_failure_stage in
-        pidfd|procfd|foreign-netns|fd-scan|clear) ;;
+        pidfd|procfd|foreign-netns-exit-worker|foreign-netns-other|fd-scan|clear) ;;
         *) return 1 ;;
     esac
     advance_start_failure_stage \

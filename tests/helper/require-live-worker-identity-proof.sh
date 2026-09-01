@@ -1005,7 +1005,8 @@ production_start_failure_stage_is_safe() {
         functional-exit-cleanup-parent-custody|\
         functional-exit-cleanup-parent-custody-pidfd|\
         functional-exit-cleanup-parent-custody-procfd|\
-        functional-exit-cleanup-parent-custody-foreign-netns|\
+        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker|\
+        functional-exit-cleanup-parent-custody-foreign-netns-other|\
         functional-exit-cleanup-parent-custody-fd-scan|\
         functional-exit-cleanup-parent-custody-clear|\
         functional-relay-pair-ready|\

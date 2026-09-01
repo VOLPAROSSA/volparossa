@@ -590,7 +590,8 @@ printf '%s\n' \
     functional-exit-cleanup-parent-custody \
     functional-exit-cleanup-parent-custody-pidfd \
     functional-exit-cleanup-parent-custody-procfd \
-    functional-exit-cleanup-parent-custody-foreign-netns \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker \
+    functional-exit-cleanup-parent-custody-foreign-netns-other \
     functional-exit-cleanup-parent-custody-fd-scan \
     functional-exit-cleanup-parent-custody-clear \
     functional-relay-pair-ready \
@@ -6230,7 +6231,7 @@ cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
 start_failure_stage=
 hook_stage_index=0
 expected_production_monotone_start_stages=$temporary_directory/expected-production-monotone-start-stages
-grep -Ev '^functional-exit-cleanup-parent-custody-(pidfd|procfd|foreign-netns|fd-scan|clear)$' \
+grep -Ev '^functional-exit-cleanup-parent-custody-(pidfd|procfd|foreign-netns-exit-worker|foreign-netns-other|fd-scan|clear)$' \
     "$expected_production_start_stages" \
     >"$expected_production_monotone_start_stages"
 while IFS= read -r hook_start_stage; do
@@ -6250,7 +6251,8 @@ done <"$expected_production_monotone_start_stages"
     printf '%s\n' 'production hook start stage did not reach publication' >&2
     exit 1
 }
-for hook_custody_failure_stage in pidfd procfd foreign-netns fd-scan clear; do
+for hook_custody_failure_stage in \
+    pidfd procfd foreign-netns-exit-worker foreign-netns-other fd-scan clear; do
     start_failure_stage=functional-exit-cleanup-parent-custody
     advance_start_failure_stage \
         "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" \
@@ -8395,8 +8397,10 @@ do
 done
 
 parent_custody_diagnostic_contract=$temporary_directory/parent-custody-diagnostic-contract.sh
-sed -n '/^advance_parent_custody_failure_diagnostic() {$/,/^}$/p' \
+sed -n '/^refine_parent_custody_failure_stage() {$/,/^}$/p' \
     "$ipc_hook" >"$parent_custody_diagnostic_contract"
+sed -n '/^advance_parent_custody_failure_diagnostic() {$/,/^}$/p' \
+    "$ipc_hook" >>"$parent_custody_diagnostic_contract"
 # These are literal hook-source contracts; expansion here would defeat them.
 # shellcheck disable=SC2016
 parent_custody_diagnostic_source_is_exact() {
@@ -8411,7 +8415,24 @@ parent_custody_diagnostic_source_is_exact() {
         && [ "$(grep -Fc 'helper_holds_no_worker_custody' "$1")" -eq 1 ] \
         && [ "$(grep -Fc 'hook_custody_failure_stage=clear' "$1")" -eq 1 ] \
         && [ "$(grep -Fc \
-            'pidfd|procfd|foreign-netns|fd-scan|clear) ;;' "$1")" -eq 1 ] \
+            'kernel_object_identity_is_safe "$hook_custody_observed_identity"' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"${hook_functional_exit_worker_namespace:-}"' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '[ "$hook_custody_observed_identity" = ' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"$hook_functional_exit_worker_namespace" ]; then' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'hook_custody_failure_stage=foreign-netns-exit-worker' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'hook_custody_failure_stage=foreign-netns-other' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'refine_parent_custody_failure_stage || return 1' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'pidfd|procfd|foreign-netns-exit-worker|foreign-netns-other|fd-scan|clear) ;;' \
+            "$1")" -eq 1 ] \
         && [ "$(grep -Fc \
             '"functional-exit-cleanup-parent-custody-$hook_custody_failure_stage"' \
             "$1")" -eq 1 ] \
@@ -8434,8 +8455,13 @@ sed 's/"$hook_custody_current_parent_pid" =/"$hook_custody_current_parent_pid" !
 parent_custody_predicate_mutant=$temporary_directory/parent-custody-predicate-mutant.sh
 sed 's/helper_holds_no_worker_custody/true/' \
     "$parent_custody_diagnostic_contract" >"$parent_custody_predicate_mutant"
+parent_custody_identity_mutant=$temporary_directory/parent-custody-identity-mutant.sh
+# This is a literal hook-source mutation; expansion here would defeat it.
+# shellcheck disable=SC2016
+sed 's/"$hook_custody_observed_identity" =/"$hook_custody_observed_identity" !=/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_identity_mutant"
 parent_custody_category_mutant=$temporary_directory/parent-custody-category-mutant.sh
-sed 's/pidfd|procfd|foreign-netns|fd-scan|clear/pidfd|procfd|foreign-netns|fd-scan|clear|private-value/' \
+sed 's/foreign-netns-other|fd-scan/foreign-netns-other|private-value|fd-scan/' \
     "$parent_custody_diagnostic_contract" >"$parent_custody_category_mutant"
 parent_custody_stage_mutant=$temporary_directory/parent-custody-stage-mutant.sh
 # This is a literal hook-source mutation; expansion here would defeat it.
@@ -8444,7 +8470,8 @@ sed 's/parent-custody-\$hook_custody_failure_stage/parent-custody-fd-scan/' \
     "$parent_custody_diagnostic_contract" >"$parent_custody_stage_mutant"
 for parent_custody_diagnostic_mutant in \
     "$parent_custody_binding_mutant" "$parent_custody_predicate_mutant" \
-    "$parent_custody_category_mutant" "$parent_custody_stage_mutant"
+    "$parent_custody_identity_mutant" "$parent_custody_category_mutant" \
+    "$parent_custody_stage_mutant"
 do
     sh -n "$parent_custody_diagnostic_mutant"
     if parent_custody_diagnostic_source_is_exact \
@@ -8460,7 +8487,8 @@ for parent_custody_runtime_function in \
     number_is_safe fd_number_is_safe kernel_object_number_is_safe \
     kernel_object_identity_is_safe namespace_number_from_target \
     capture_parent_namespace_fd_identity helper_holds_no_worker_custody \
-    wait_for_helper_no_worker_custody advance_start_failure_stage \
+    wait_for_helper_no_worker_custody refine_parent_custody_failure_stage \
+    advance_start_failure_stage \
     advance_parent_custody_failure_diagnostic
 do
     sed -n \
@@ -8473,6 +8501,19 @@ sh -n "$parent_custody_runtime_contract"
 # shellcheck disable=SC1090,SC2031
 exercise_parent_custody_runtime_contract() (
     . "$parent_custody_runtime_contract"
+    hook_custody_failure_stage=foreign-netns
+    # The extracted hook function reads these globals at runtime.
+    # shellcheck disable=SC2034
+    hook_custody_observed_identity=1:2
+    # shellcheck disable=SC2034
+    hook_functional_exit_worker_namespace=1:2
+    refine_parent_custody_failure_stage
+    [ "$hook_custody_failure_stage" = foreign-netns-exit-worker ]
+    hook_custody_failure_stage=foreign-netns
+    # shellcheck disable=SC2034
+    hook_custody_observed_identity=1:3
+    refine_parent_custody_failure_stage
+    [ "$hook_custody_failure_stage" = foreign-netns-other ]
     custody_runtime_child=
     cleanup_custody_runtime_child() {
         if [ -n "$custody_runtime_child" ]; then
