@@ -4875,6 +4875,7 @@ mod tests {
                 ExitForwardOperation::FetchExitAdvertisement
                 | ExitForwardOperation::NativeProbePermit
                 | ExitForwardOperation::NativeProbeAuthorize
+                | ExitForwardOperation::NativeProbeReady
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -5208,6 +5209,7 @@ mod tests {
                 ExitForwardOperation::FetchExitAdvertisement
                 | ExitForwardOperation::NativeProbePermit
                 | ExitForwardOperation::NativeProbeAuthorize
+                | ExitForwardOperation::NativeProbeReady
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(

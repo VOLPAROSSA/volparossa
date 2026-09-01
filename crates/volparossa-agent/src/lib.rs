@@ -101,6 +101,7 @@ impl Agent {
         fs::set_permissions(&paths.peerstore, fs::Permissions::from_mode(0o600))?;
         let metrics = MetricsRegistry::new();
         let mut state = AgentState::new(&config, roles, active_policy.clone(), metrics.clone())?;
+        let helper = HelperClient::new(paths.helper_socket.clone(), paths.helper_token.clone());
         let (discovery, discovery_control) = DiscoveryRuntime::new(
             identity,
             &config,
@@ -111,6 +112,7 @@ impl Agent {
                 policy: active_policy,
                 role_store,
                 metrics: metrics.clone(),
+                helper: helper.clone(),
             },
         )?;
         state.log(LogLevel::Info, "AGENT_INITIALIZED", unix_millis());
@@ -126,7 +128,6 @@ impl Agent {
             Ok(false) => state.log(LogLevel::Warn, "MPQUIC_SOCKET_ABSENT", unix_millis()),
             Err(()) => state.log(LogLevel::Warn, "MPQUIC_SOCKET_UNSAFE", unix_millis()),
         }
-        let helper = HelperClient::new(paths.helper_socket.clone(), paths.helper_token.clone());
         Ok(Self {
             paths,
             config: Arc::new(config),

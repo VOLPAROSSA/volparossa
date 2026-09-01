@@ -59,7 +59,7 @@ use volparossa_discovery::{
     DiscoveryService, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT,
     ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
     LocalPreselectionPolicy, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
-    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES,
+    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, NativeProbeReadyForwardRequest,
     PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink, UpstreamExitForwardRequest,
     UpstreamExitForwardResponse, advertisement_envelope_matches_peer, capability,
     signed_envelope_matches_peer,
@@ -75,20 +75,33 @@ use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
     ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
-    ExitReservationConfirmation, ExitReservationFinalizeRequest, MAX_NATIVE_PROBE_LIFETIME_MS,
+    ExitReservationConfirmation, ExitReservationFinalizeRequest, IssuedNativeProbeRelayReady,
+    MAX_CONTROL_PAYLOAD_SIZE, MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding,
     NativeProbePathScope, NativeProbePermitRequest, NativeProbeStart,
     NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, PreselectionActorBinding,
     RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservationRequest,
-    ReplayCache, SignedEnvelope, TimePolicy, Transport, VerifiedNativeProbeStartForRelay,
-    decode_canonical, encode_canonical, node_id_from_public_key, verify_control_message,
-    verify_native_probe_authorization_chain, verify_native_probe_permit,
+    ReplayCache, SignedEnvelope, TimePolicy, Transport, VerifiedNativeProbePermit,
+    VerifiedNativeProbeStartForRelay, decode_canonical, encode_canonical, generate_nonce,
+    native_probe_prepared_lease_commitment, node_id_from_public_key,
+    sign_native_probe_relay_ready_with, verify_control_message,
+    verify_native_probe_authorization_chain, verify_native_probe_exit_ready,
+    verify_native_probe_permit, verify_native_probe_start_for_relay,
 };
 use volparossa_relay::{RelayService, RelayServiceConfig};
+use volparossa_routing::{
+    ActivateLeaseBatch, ContextRole, LeaseActivation, LeasePlan, PrepareLeaseBatch,
+    PublicUdpEndpoint, WireguardRole,
+};
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
 use volparossa_wireguard::RelayEndpointLease;
 
 use crate::{
     advertisement::{AdvertisementPublisher, LocalAdvertisementInput},
+    endpoint_leases::{
+        bind_prepared_exit_endpoint_lease, bind_prepared_relay_endpoint_lease,
+        protocol_endpoint_for_native,
+    },
+    helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
     roles::RoleStore,
     route_setup::{PreparedPreselectionEvidence, prepare_preselection_evidence},
     state::AgentState,
@@ -122,6 +135,7 @@ pub(crate) struct DiscoveryRuntimeResources {
     pub(crate) policy: Option<VerifiedManifest>,
     pub(crate) role_store: RoleStore,
     pub(crate) metrics: MetricsRegistry,
+    pub(crate) helper: HelperClient,
 }
 
 /// Route-policy-only input for one actor-owned client preselection attempt.
@@ -550,7 +564,24 @@ struct PendingRelayForward {
     dispatch_attempts: usize,
     reserved_bytes: usize,
     client_channels: Vec<request_response::ResponseChannel<ExitForwardResponse>>,
+    native_ready: Option<PendingNativeProbeReady>,
     native_authorization: Option<PendingNativeProbeAuthorization>,
+}
+
+struct PendingNativeProbeReady {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    channel: request_response::ResponseChannel<DatapathRelayResponse>,
+    authenticated_client_peer: Libp2pPeerId,
+    permit: VerifiedNativeProbePermit,
+    endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+struct PreparedNativeProbeReady {
+    authenticated_client_peer: Libp2pPeerId,
+    ready: IssuedNativeProbeRelayReady,
+    endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
 }
 
 /// Relay-owned affine Start plus the exact already-prepared helper endpoint pair.
@@ -569,6 +600,7 @@ struct PendingNativeProbeAuthorization {
     channel: request_response::ResponseChannel<DatapathRelayResponse>,
     start: VerifiedNativeProbeStartForRelay,
     endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
 }
 
 #[derive(Clone)]
@@ -1243,6 +1275,7 @@ pub struct DiscoveryRuntime {
     local_node_id: [u8; 32],
     config: Config,
     roles: RolesConfig,
+    helper: HelperClient,
     relay_service: Option<RelayService>,
     exit_service: Option<ExitService>,
     metrics: MetricsRegistry,
@@ -1269,8 +1302,13 @@ pub struct DiscoveryRuntime {
     relay_forward_index: HashMap<RelayForwardKey, request_response::OutboundRequestId>,
     completed_relay_forwards: HashMap<RelayForwardKey, CompletedRelayForward>,
     retry_relay_forwards: HashMap<RelayForwardKey, RetryLedgerEntry>,
+    prepared_native_ready: HashMap<[u8; FORWARD_ID_BYTES], PreparedNativeProbeReady>,
     prepared_native_authorizations:
         HashMap<[u8; FORWARD_ID_BYTES], PreparedNativeProbeAuthorization>,
+    prepared_native_authorization_helpers:
+        HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
+    active_native_relay_helpers: HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
+    exit_native_ready_helpers: HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
     datapath_index: HashMap<DatapathKey, request_response::OutboundRequestId>,
     completed_datapath: HashMap<DatapathKey, CompletedDatapath>,
@@ -1308,6 +1346,7 @@ impl DiscoveryRuntime {
             policy,
             role_store: _role_store,
             metrics,
+            helper,
         } = resources;
         let protocol_roles = DiscoveryProtocolRoles::new(roles.client, roles.relay, roles.exit);
         let mut service =
@@ -1366,6 +1405,7 @@ impl DiscoveryRuntime {
             local_node_id,
             config: config.clone(),
             roles,
+            helper,
             relay_service,
             exit_service,
             metrics,
@@ -1391,7 +1431,11 @@ impl DiscoveryRuntime {
             relay_forward_index: HashMap::new(),
             completed_relay_forwards: HashMap::new(),
             retry_relay_forwards: HashMap::new(),
+            prepared_native_ready: HashMap::new(),
             prepared_native_authorizations: HashMap::new(),
+            prepared_native_authorization_helpers: HashMap::new(),
+            active_native_relay_helpers: HashMap::new(),
+            exit_native_ready_helpers: HashMap::new(),
             pending_datapath: HashMap::new(),
             datapath_index: HashMap::new(),
             completed_datapath: HashMap::new(),
@@ -3798,7 +3842,7 @@ impl DiscoveryRuntime {
                 Box::pin(self.handle_exit_forward_upstream_event(event, state)).await;
             }
             SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(event)) => {
-                self.handle_datapath_event(event, state).await;
+                Box::pin(self.handle_datapath_event(event, state)).await;
             }
             SwarmEvent::OutgoingConnectionError { .. }
             | SwarmEvent::IncomingConnectionError { .. } => {
@@ -4008,7 +4052,10 @@ impl DiscoveryRuntime {
                         request, channel, ..
                     },
                 ..
-            } => self.answer_exit_forward_upstream(peer, connection_id, request, channel, state),
+            } => {
+                self.answer_exit_forward_upstream(peer, connection_id, request, channel, state)
+                    .await;
+            }
             request_response::Event::Message {
                 peer,
                 message:
@@ -4018,9 +4065,8 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
-                let outcome = self
-                    .complete_relay_forward(request_id, peer, response, state)
-                    .await;
+                let outcome =
+                    Box::pin(self.complete_relay_forward(request_id, peer, response, state)).await;
                 log_outbound_event(state, outcome).await;
             }
             request_response::Event::OutboundFailure {
@@ -4048,15 +4094,28 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
-                if request.validated_operation() == Ok(DatapathRelayOperation::NativeProbeAuthorize)
-                {
-                    self.begin_native_probe_authorization(
-                        authenticated_client_peer,
-                        &request,
-                        channel,
-                        state,
-                    );
-                    return;
+                match request.validated_operation() {
+                    Ok(DatapathRelayOperation::NativeProbeReady) => {
+                        self.begin_native_probe_ready(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::NativeProbeAuthorize) => {
+                        self.begin_native_probe_start_authorization(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    _ => {}
                 }
                 let local_peer = *self.service.local_peer_id();
                 if let Some(response) = inbound_datapath_unavailable_response(
@@ -4093,14 +4152,299 @@ impl DiscoveryRuntime {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Relay helper Prepare and Exit-ready dispatch stay in one affine transaction"
+    )]
+    async fn begin_native_probe_ready(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::NativeProbeReady,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let Some(probe_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id()) else {
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let local_peer = *self.service.local_peer_id();
+        let now_ms = unix_millis();
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::NativeProbeReady,
+                now_ms,
+            )
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || fixed_bytes::<32>(request.relay_node_id()) != Some(self.local_node_id)
+            || Libp2pPeerId::from_bytes(request.relay_peer_id()).ok() != Some(local_peer)
+            || authenticated_client_peer == local_peer
+            || self.prepared_native_ready.contains_key(&probe_id)
+        {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        }
+        let Ok(permit) = verify_native_probe_permit(
+            request.client_signed_request().to_vec(),
+            request.exit_signed_authorization().to_vec(),
+            now_ms,
+            &mut self.replay,
+        ) else {
+            reject!("NATIVE_PROBE_READY_PERMIT_REJECTED");
+        };
+        let scope = permit.scope().clone();
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&exit.peer_id) else {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&exit.node_id) else {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        };
+        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+            reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        if exit_peer == local_peer
+            || !self.exit_provider_peers.contains_key(&exit_peer)
+            || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+            || !native_probe_data_relay_capability_matches(
+                &authorized_control,
+                data_relay,
+                &scope,
+                local_peer,
+                request.deadline_unix_ms(),
+            )
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_UNAVAILABLE");
+        }
+        let Some(prepare) = native_service_prepare_request(
+            &scope,
+            ContextRole::Relay,
+            &[WireguardRole::RelayClient, WireguardRole::RelayExit],
+            now_ms,
+        ) else {
+            reject!("NATIVE_PROBE_READY_HELPER_SCOPE_REJECTED");
+        };
+        let Ok(helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
+            reject!("NATIVE_PROBE_READY_HELPER_PREPARE_UNAVAILABLE");
+        };
+        let Ok(endpoint) =
+            bind_prepared_relay_endpoint_lease(&prepare, helper_owner.prepared().clone())
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_HELPER_BIND_REJECTED");
+        };
+        let Some(relay_exit_endpoint) = native_endpoint_binding(
+            helper_owner.helper_runtime_id(),
+            endpoint.route_context_id(),
+            endpoint.exit_facing_handle().as_bytes(),
+            endpoint.exit_facing_endpoint(),
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_HELPER_BIND_REJECTED");
+        };
+        let Ok(forward) = NativeProbeReadyForwardRequest::new(
+            request.client_signed_request().to_vec(),
+            request.exit_signed_authorization().to_vec(),
+            relay_exit_endpoint,
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let Ok(canonical_ready) = encode_canonical(
+            &forward,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            probe_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::NativeProbeReady,
+            canonical_ready,
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: probe_id,
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
+        {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_CAPACITY");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_TRANSPORT_UNAVAILABLE");
+        };
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::NativeProbeReady,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: None,
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: Some(PendingNativeProbeReady {
+                    datapath_request_id: probe_id,
+                    channel,
+                    authenticated_client_peer,
+                    permit,
+                    endpoint,
+                    helper_owner,
+                }),
+                native_authorization: None,
+            },
+        );
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_DISPATCHED");
+    }
+
+    async fn begin_native_probe_start_authorization(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let now_ms = unix_millis();
+        let Some(probe_id) = native_start_probe_id(request.client_signed_request()) else {
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        };
+        let Some(prepared) = self.prepared_native_ready.remove(&probe_id) else {
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        };
+        if prepared.authenticated_client_peer != authenticated_client_peer {
+            let _ = self.helper.destroy_context(&prepared.helper_owner).await;
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        }
+        let Ok(start) = verify_native_probe_start_for_relay(
+            prepared.ready,
+            request.client_signed_request().to_vec(),
+            now_ms,
+            &mut self.replay,
+        ) else {
+            let _ = self.helper.destroy_context(&prepared.helper_owner).await;
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        };
+        let Some(authorization_id) = native_start_authorization_id(start.encoded_start()) else {
+            let _ = self.helper.destroy_context(&prepared.helper_owner).await;
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        };
+        if request.request_id() != authorization_id
+            || !self.retain_prepared_native_probe_authorization(
+                authenticated_client_peer,
+                start,
+                prepared.endpoint,
+            )
+        {
+            let _ = self.helper.destroy_context(&prepared.helper_owner).await;
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        }
+        self.prepared_native_authorization_helpers
+            .insert(authorization_id, prepared.helper_owner);
+        self.begin_native_probe_authorization(authenticated_client_peer, request, channel, state)
+            .await;
+    }
+
+    fn send_native_datapath_unavailable(
+        &mut self,
+        request: &DatapathRelayRequest,
+        operation: DatapathRelayOperation,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+    ) {
+        if let Ok(response) = DatapathRelayResponse::unavailable(
+            request.request_id().to_vec(),
+            operation,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            let _ = self.service.send_datapath_relay_response(channel, response);
+        }
+    }
+
     /// Install the exact Ready-owned Start and Relay helper endpoint for one subsequent request.
     ///
     /// The preceding native Ready/Start phase calls this without serializing either affine owner.
     /// The authenticated client is retained so another connection cannot spend the preparation.
-    #[allow(
-        dead_code,
-        reason = "the native Ready producer is integrated as the immediately following alpha slice"
-    )]
     fn retain_prepared_native_probe_authorization(
         &mut self,
         authenticated_client_peer: Libp2pPeerId,
@@ -4132,6 +4476,9 @@ impl DiscoveryRuntime {
             || self
                 .prepared_native_authorizations
                 .contains_key(&request_id)
+            || self
+                .prepared_native_authorization_helpers
+                .contains_key(&request_id)
         {
             return false;
         }
@@ -4150,16 +4497,20 @@ impl DiscoveryRuntime {
         clippy::too_many_lines,
         reason = "one affine Relay-to-Exit native authorization dispatch transaction"
     )]
-    fn begin_native_probe_authorization(
+    async fn begin_native_probe_authorization(
         &mut self,
         authenticated_client_peer: Libp2pPeerId,
         request: &DatapathRelayRequest,
         channel: request_response::ResponseChannel<DatapathRelayResponse>,
         state: &Arc<RwLock<AgentState>>,
     ) {
+        let mut cleanup_owner: Option<RuntimeBoundPreparedLeaseBatch> = None;
         macro_rules! reject {
             ($code:literal) => {{
                 log_relay_forward_admission(Some(state), $code);
+                if let Some(owner) = cleanup_owner.take() {
+                    let _ = self.helper.destroy_context(&owner).await;
+                }
                 let request_id = request.request_id().to_vec();
                 if let Ok(response) = DatapathRelayResponse::unavailable(
                     request_id,
@@ -4194,6 +4545,13 @@ impl DiscoveryRuntime {
         let Some(prepared) = self.prepared_native_authorizations.remove(&request_id) else {
             reject!("NATIVE_PROBE_AUTHORIZATION_OWNER_UNAVAILABLE");
         };
+        let Some(helper_owner) = self
+            .prepared_native_authorization_helpers
+            .remove(&request_id)
+        else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_OWNER_UNAVAILABLE");
+        };
+        cleanup_owner = Some(helper_owner);
         if prepared.authenticated_client_peer != authenticated_client_peer
             || prepared.start.encoded_start() != request.client_signed_request()
             || prepared.start.scope().attempt_expires_at_ms != request.deadline_unix_ms()
@@ -4289,11 +4647,13 @@ impl DiscoveryRuntime {
                 dispatch_attempts: 1,
                 reserved_bytes,
                 client_channels: Vec::new(),
+                native_ready: None,
                 native_authorization: Some(PendingNativeProbeAuthorization {
                     datapath_request_id: request_id,
                     channel,
                     start: prepared.start,
                     endpoint: prepared.endpoint,
+                    helper_owner: cleanup_owner.take().expect("validated native helper owner"),
                 }),
             },
         );
@@ -4483,6 +4843,7 @@ impl DiscoveryRuntime {
                 dispatch_attempts,
                 reserved_bytes,
                 client_channels: vec![channel],
+                native_ready: None,
                 native_authorization: None,
             },
         );
@@ -4527,7 +4888,104 @@ impl DiscoveryRuntime {
             log_reservation_event(state, "EXIT_FORWARD_RELAY_RESPONSE_INVALID").await;
             return OutboundEventOutcome::InvalidResponse;
         }
-        if let Some(native) = pending.native_authorization.take() {
+        if let Some(native) = pending.native_ready.take() {
+            if response.validated_status() != Ok(ForwardStatus::Granted) {
+                pending.native_ready = Some(native);
+                self.finish_relay_definitive(pending);
+                return OutboundEventOutcome::Failed;
+            }
+            let Some(signed_exit_ready) = response.signed_responses().first() else {
+                pending.native_ready = Some(native);
+                self.finish_relay_definitive(pending);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let Ok(exit_ready) = verify_native_probe_exit_ready(
+                native.permit,
+                signed_exit_ready.clone(),
+                now_ms,
+                &mut self.replay,
+            ) else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let relay_client_endpoint = native_endpoint_binding(
+                native.helper_owner.helper_runtime_id(),
+                native.endpoint.route_context_id(),
+                native.endpoint.client_facing_handle().as_bytes(),
+                native.endpoint.client_facing_endpoint(),
+            );
+            let relay_exit_endpoint = native_endpoint_binding(
+                native.helper_owner.helper_runtime_id(),
+                native.endpoint.route_context_id(),
+                native.endpoint.exit_facing_handle().as_bytes(),
+                native.endpoint.exit_facing_endpoint(),
+            );
+            let ready = match (relay_client_endpoint, relay_exit_endpoint) {
+                (Some(relay_client), Some(relay_exit)) => {
+                    let identity = &self.identity;
+                    sign_native_probe_relay_ready_with(
+                        exit_ready,
+                        relay_client,
+                        relay_exit,
+                        self.local_public_key,
+                        now_ms,
+                        generate_nonce(),
+                        |message| identity.sign(message).ok(),
+                    )
+                    .ok()
+                }
+                _ => None,
+            };
+            let Some(ready) = ready else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::Failed;
+            };
+            let response = DatapathRelayResponse::granted(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeReady,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                ready.encoded_relay_ready().to_vec(),
+            );
+            let Ok(response) = response else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::Failed;
+            };
+            let previous = self.prepared_native_ready.insert(
+                native.datapath_request_id,
+                PreparedNativeProbeReady {
+                    authenticated_client_peer: native.authenticated_client_peer,
+                    ready,
+                    endpoint: native.endpoint,
+                    helper_owner: native.helper_owner,
+                },
+            );
+            if let Some(previous) = previous {
+                let inserted = self
+                    .prepared_native_ready
+                    .remove(&native.datapath_request_id)
+                    .expect("inserted native Ready owner");
+                self.destroy_helper_owner(inserted.helper_owner);
+                self.destroy_helper_owner(previous.helper_owner);
+                return OutboundEventOutcome::Failed;
+            }
+            if self
+                .service
+                .send_datapath_relay_response(native.channel, response)
+                .is_err()
+            {
+                if let Some(prepared) = self
+                    .prepared_native_ready
+                    .remove(&native.datapath_request_id)
+                {
+                    self.destroy_helper_owner(prepared.helper_owner);
+                }
+                return OutboundEventOutcome::Failed;
+            }
+            log_reservation_event(state, "NATIVE_PROBE_READY_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
+        }
+        if let Some(mut native) = pending.native_authorization.take() {
             if response.validated_status() != Ok(ForwardStatus::Granted) {
                 pending.native_authorization = Some(native);
                 self.finish_relay_definitive(pending);
@@ -4538,6 +4996,9 @@ impl DiscoveryRuntime {
                 self.finish_relay_definitive(pending);
                 return OutboundEventOutcome::InvalidResponse;
             };
+            let client_endpoint = native.start.client_endpoint().endpoint.clone();
+            let exit_endpoint = native.start.exit_endpoint().endpoint.clone();
+            let signed_start = native.start.encoded_start().to_vec();
             let identity = &self.identity;
             let endpoint = native.endpoint;
             let accepted = self.relay_service.as_mut().and_then(|service| {
@@ -4552,23 +5013,88 @@ impl DiscoveryRuntime {
                     )
                     .ok()
             });
-            let response = accepted.and_then(|accepted| {
-                DatapathRelayResponse::granted(
-                    native.datapath_request_id.to_vec(),
-                    DatapathRelayOperation::NativeProbeAuthorize,
-                    self.local_node_id.to_vec(),
-                    self.service.local_peer_id().to_bytes(),
-                    accepted.encoded().to_vec(),
-                )
-                .ok()
-            });
-            if let Some(response) = response {
-                let _ = self
-                    .service
-                    .send_datapath_relay_response(native.channel, response);
-                log_reservation_event(state, "NATIVE_PROBE_AUTHORIZATION_COMPLETED").await;
-                return OutboundEventOutcome::Completed;
+            let signed_relay_reservation = accepted.map(|accepted| accepted.encoded().to_vec());
+            let activation = match (
+                signed_relay_reservation.as_ref(),
+                client_endpoint,
+                exit_endpoint,
+            ) {
+                (Some(signed), Some(client), Some(exit)) => Some(ActivateLeaseBatch {
+                    route_context_id: endpoint.route_context_id().to_vec(),
+                    context_handle: endpoint.context_handle().as_bytes().to_vec(),
+                    leases: vec![
+                        LeaseActivation {
+                            lease_handle: endpoint.client_facing_handle().as_bytes().to_vec(),
+                            path_id: endpoint.path_id(),
+                            role: WireguardRole::RelayClient as i32,
+                            peer_public_key: client.public_key.clone(),
+                            peer_endpoint: Some(PublicUdpEndpoint {
+                                address: client.underlay_ip.clone(),
+                                port: client.listen_port,
+                            }),
+                            maximum_up_mbps: 0,
+                            maximum_down_mbps: 0,
+                            signed_relay_reservation: signed.clone(),
+                            signed_client_relay_request: signed_start.clone(),
+                        },
+                        LeaseActivation {
+                            lease_handle: endpoint.exit_facing_handle().as_bytes().to_vec(),
+                            path_id: endpoint.path_id(),
+                            role: WireguardRole::RelayExit as i32,
+                            peer_public_key: exit.public_key.clone(),
+                            peer_endpoint: Some(PublicUdpEndpoint {
+                                address: exit.underlay_ip,
+                                port: exit.listen_port,
+                            }),
+                            maximum_up_mbps: 0,
+                            maximum_down_mbps: 0,
+                            signed_relay_reservation: signed.clone(),
+                            signed_client_relay_request: signed_start,
+                        },
+                    ],
+                }),
+                _ => None,
+            };
+            let route_id = *endpoint.route_context_id();
+            if let (Some(signed), Some(activation)) = (signed_relay_reservation, activation) {
+                if self
+                    .helper
+                    .activate_lease_batch(&mut native.helper_owner, activation)
+                    .await
+                    .is_ok()
+                {
+                    let response = DatapathRelayResponse::granted(
+                        native.datapath_request_id.to_vec(),
+                        DatapathRelayOperation::NativeProbeAuthorize,
+                        self.local_node_id.to_vec(),
+                        self.service.local_peer_id().to_bytes(),
+                        signed,
+                    );
+                    if let Ok(response) = response {
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            self.active_native_relay_helpers.entry(route_id)
+                        {
+                            entry.insert(native.helper_owner);
+                            if self
+                                .service
+                                .send_datapath_relay_response(native.channel, response)
+                                .is_err()
+                            {
+                                if let Some(owner) =
+                                    self.active_native_relay_helpers.remove(&route_id)
+                                {
+                                    self.destroy_helper_owner(owner);
+                                }
+                                return OutboundEventOutcome::Failed;
+                            }
+                            log_reservation_event(state, "NATIVE_PROBE_AUTHORIZATION_COMPLETED")
+                                .await;
+                            return OutboundEventOutcome::Completed;
+                        }
+                    }
+                }
             }
+            self.destroy_helper_owner(native.helper_owner);
             if let Ok(response) = DatapathRelayResponse::unavailable(
                 native.datapath_request_id.to_vec(),
                 DatapathRelayOperation::NativeProbeAuthorize,
@@ -4668,6 +5194,7 @@ impl DiscoveryRuntime {
             None => matches!(
                 pending.operation,
                 ExitForwardOperation::FetchExitAdvertisement
+                    | ExitForwardOperation::NativeProbeReady
                     | ExitForwardOperation::NativeProbeAuthorize
             ),
         }
@@ -4704,6 +5231,20 @@ impl DiscoveryRuntime {
     }
 
     fn finish_relay_definitive(&mut self, mut pending: PendingRelayForward) {
+        if let Some(native) = pending.native_ready.take() {
+            if let Ok(response) = DatapathRelayResponse::unavailable(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeReady,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+            ) {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(native.channel, response);
+            }
+            self.destroy_helper_owner(native.helper_owner);
+            return;
+        }
         if let Some(native) = pending.native_authorization.take() {
             if let Ok(response) = DatapathRelayResponse::unavailable(
                 native.datapath_request_id.to_vec(),
@@ -4715,6 +5256,7 @@ impl DiscoveryRuntime {
                     .service
                     .send_datapath_relay_response(native.channel, response);
             }
+            self.destroy_helper_owner(native.helper_owner);
             return;
         }
         let response = Self::unavailable_for_pending_relay(&pending);
@@ -4729,7 +5271,8 @@ impl DiscoveryRuntime {
     }
 
     fn finish_relay_ambiguity(&mut self, pending: PendingRelayForward) {
-        if pending.native_authorization.is_none()
+        if pending.native_ready.is_none()
+            && pending.native_authorization.is_none()
             && pending.dispatch_attempts < MAX_DISPATCH_ATTEMPTS
             && pending.operation_expires_at_ms > unix_millis()
         {
@@ -4747,6 +5290,13 @@ impl DiscoveryRuntime {
         } else {
             self.finish_relay_definitive(pending);
         }
+    }
+
+    fn destroy_helper_owner(&self, owner: RuntimeBoundPreparedLeaseBatch) {
+        let helper = self.helper.clone();
+        tokio::spawn(async move {
+            let _ = helper.destroy_context(&owner).await;
+        });
     }
 
     fn fail_relay_forward(
@@ -4773,7 +5323,7 @@ impl DiscoveryRuntime {
         clippy::too_many_lines,
         reason = "one Exit admission path validates every forwarded operation and response"
     )]
-    fn answer_exit_forward_upstream(
+    async fn answer_exit_forward_upstream(
         &mut self,
         authenticated_control_relay: Libp2pPeerId,
         connection_id: ConnectionId,
@@ -4791,6 +5341,17 @@ impl DiscoveryRuntime {
         let Ok(operation) = request.validated_operation() else {
             reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
+        if operation == ExitForwardOperation::NativeProbeReady {
+            self.answer_native_probe_ready_upstream(
+                authenticated_control_relay,
+                connection_id,
+                &request,
+                channel,
+                state,
+            )
+            .await;
+            return;
+        }
         if operation == ExitForwardOperation::NativeProbeAuthorize {
             if let Some((connection, authenticated_data_relay, response)) = self
                 .prepare_native_probe_authorization_response(
@@ -5144,6 +5705,194 @@ impl DiscoveryRuntime {
         )
         .ok()?;
         Some((connection, authenticated_data_relay, response.into()))
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Exit helper Prepare and affine readiness response remain a single transaction"
+    )]
+    async fn answer_native_probe_ready_upstream(
+        &mut self,
+        authenticated_data_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Ok(response) = ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    ExitForwardOperation::NativeProbeReady,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self
+                        .service
+                        .send_exit_forward_upstream_response(channel, response.into());
+                }
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        if request.validate().is_err() || !self.roles.exit {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        }
+        let Ok(forward) = decode_canonical::<NativeProbeReadyForwardRequest>(
+            request.canonical_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        };
+        let Some(relay_exit_endpoint) = forward.relay_exit_endpoint().cloned() else {
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        };
+        let Ok(permit) = verify_native_probe_permit(
+            forward.signed_permit_request().to_vec(),
+            forward.signed_permit().to_vec(),
+            now_ms,
+            &mut self.replay,
+        ) else {
+            reject!("NATIVE_PROBE_READY_EXIT_PERMIT_REJECTED");
+        };
+        let scope = permit.scope().clone();
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let Some(data_relay_node_id) = fixed_bytes::<32>(request.control_relay_node_id()) else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let Some(data_relay_public_key) = fixed_bytes::<32>(request.control_relay_public_key())
+        else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let local_peer = *self.service.local_peer_id();
+        let current_data_relay = self.direct_relays.get(&authenticated_data_relay);
+        if request.validated_operation() != Ok(ExitForwardOperation::NativeProbeReady)
+            || request.forward_id() != scope.probe_id
+            || request.deadline_unix_ms() != scope.attempt_expires_at_ms
+            || request.control_relay_peer_id() != authenticated_data_relay.to_bytes()
+            || request.exit_node_id() != self.local_node_id
+            || request.exit_peer_id() != local_peer.to_bytes()
+            || data_relay.node_id.as_slice() != data_relay_node_id
+            || data_relay.public_key.as_slice() != data_relay_public_key
+            || current_data_relay.is_none_or(|current| {
+                !native_probe_data_relay_capability_matches(
+                    current,
+                    data_relay,
+                    &scope,
+                    authenticated_data_relay,
+                    request.deadline_unix_ms(),
+                )
+            })
+            || !self
+                .served_local_advertisement
+                .as_ref()
+                .is_some_and(|advertisement| {
+                    local_native_probe_exit_actor_matches(
+                        advertisement,
+                        exit,
+                        &scope,
+                        self.local_node_id,
+                        local_peer,
+                        self.local_public_key,
+                        now_ms,
+                    )
+                })
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        }
+        let Some(prepare) = native_service_prepare_request(
+            &scope,
+            ContextRole::Exit,
+            &[WireguardRole::Exit],
+            now_ms,
+        ) else {
+            reject!("NATIVE_PROBE_READY_EXIT_HELPER_SCOPE_REJECTED");
+        };
+        let Ok(helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
+            reject!("NATIVE_PROBE_READY_EXIT_HELPER_PREPARE_UNAVAILABLE");
+        };
+        let Ok(exit_lease) =
+            bind_prepared_exit_endpoint_lease(&prepare, helper_owner.prepared().clone())
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_EXIT_HELPER_BIND_REJECTED");
+        };
+        let Some(probe_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.probe_id) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        if self.exit_native_ready_helpers.contains_key(&probe_id) {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
+        }
+        let Some(connection) = self
+            .service
+            .bind_native_probe_data_relay_connection(authenticated_data_relay, connection_id)
+            .ok()
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_EXIT_CONNECTION_REJECTED");
+        };
+        let identity = &self.identity;
+        let accepted = self.exit_service.as_mut().and_then(|service| {
+            service
+                .issue_native_probe_ready_from_permit_with(
+                    forward.signed_permit_request(),
+                    forward.signed_permit(),
+                    &data_relay_node_id,
+                    &authenticated_data_relay.to_bytes(),
+                    relay_exit_endpoint,
+                    helper_owner.helper_runtime_id(),
+                    exit_lease,
+                    now_ms,
+                    self.local_public_key,
+                    |message| identity.sign(message).ok(),
+                )
+                .ok()
+        });
+        let Some(accepted) = accepted else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_EXIT_SERVICE_REJECTED");
+        };
+        let response = ExitForwardResponse::granted(
+            request.forward_id().to_vec(),
+            ExitForwardOperation::NativeProbeReady,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            vec![accepted.encoded().to_vec()],
+        );
+        let Ok(response) = response else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        };
+        self.exit_native_ready_helpers
+            .insert(probe_id, helper_owner);
+        if self
+            .service
+            .send_native_probe_ready_response(
+                connection,
+                authenticated_data_relay,
+                channel,
+                response.into(),
+            )
+            .is_err()
+        {
+            if let Some(owner) = self.exit_native_ready_helpers.remove(&probe_id) {
+                self.destroy_helper_owner(owner);
+            }
+            log_relay_forward_admission(
+                Some(state),
+                "NATIVE_PROBE_READY_EXIT_RESPONSE_UNAVAILABLE",
+            );
+            return;
+        }
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_EXIT_RESPONDED");
     }
 
     fn send_prepared_native_probe_authorization_response(
@@ -7206,6 +7955,44 @@ fn verified_native_probe_authorization_forward_scope(
         .then(|| scope.clone())
 }
 
+fn verified_native_probe_ready_forward_scope(
+    request: &ExitForwardRequest,
+    now_ms: u64,
+) -> Option<NativeProbePathScope> {
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbeReady
+        || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+    {
+        return None;
+    }
+    let ready = decode_canonical::<NativeProbeReadyForwardRequest>(
+        request.canonical_request(),
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+    )
+    .ok()?;
+    let mut replay = ReplayCache::new(2).ok()?;
+    let permit = verify_native_probe_permit(
+        ready.signed_permit_request().to_vec(),
+        ready.signed_permit().to_vec(),
+        now_ms,
+        &mut replay,
+    )
+    .ok()?;
+    let scope = permit.scope();
+    let data_relay = scope.data_relay.as_ref()?;
+    let exit = scope.exit.as_ref()?;
+    (request.forward_id() == scope.probe_id
+        && request.deadline_unix_ms() == scope.attempt_expires_at_ms
+        && request.control_relay_node_id() == data_relay.node_id
+        && request.control_relay_peer_id() == data_relay.peer_id
+        && request.control_relay_public_key() == data_relay.public_key
+        && request.exit_node_id() == exit.node_id
+        && request.exit_peer_id() == exit.peer_id
+        && ready
+            .relay_exit_endpoint()
+            .is_some_and(|binding| binding.route_context_id == scope.probe_id))
+    .then(|| scope.clone())
+}
+
 fn native_probe_authorization_request_id(mut start_nonce: [u8; 32]) -> [u8; FORWARD_ID_BYTES] {
     start_nonce[0] ^= 0x80;
     let mut request_id: [u8; FORWARD_ID_BYTES] = start_nonce[..FORWARD_ID_BYTES]
@@ -7215,6 +8002,87 @@ fn native_probe_authorization_request_id(mut start_nonce: [u8; 32]) -> [u8; FORW
         request_id[FORWARD_ID_BYTES - 1] = 1;
     }
     request_id
+}
+
+fn native_start_probe_id(encoded_start: &[u8]) -> Option<[u8; FORWARD_ID_BYTES]> {
+    let envelope = decode_canonical::<SignedEnvelope>(
+        encoded_start,
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .ok()?;
+    let start =
+        decode_canonical::<NativeProbeStart>(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).ok()?;
+    fixed_bytes::<FORWARD_ID_BYTES>(&start.scope?.probe_id)
+}
+
+fn native_start_authorization_id(encoded_start: &[u8]) -> Option<[u8; FORWARD_ID_BYTES]> {
+    let envelope = decode_canonical::<SignedEnvelope>(
+        encoded_start,
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .ok()?;
+    Some(native_probe_authorization_request_id(fixed_bytes::<32>(
+        &envelope.nonce,
+    )?))
+}
+
+fn native_service_prepare_request(
+    scope: &NativeProbePathScope,
+    role: ContextRole,
+    lease_roles: &[WireguardRole],
+    now_ms: u64,
+) -> Option<PrepareLeaseBatch> {
+    if scope.probe_id.len() != FORWARD_ID_BYTES
+        || scope.probe_id.iter().all(|byte| *byte == 0)
+        || scope.attempt_expires_at_ms <= now_ms.saturating_add(1_000)
+        || !matches!(
+            (role, lease_roles),
+            (
+                ContextRole::Relay,
+                [WireguardRole::RelayClient, WireguardRole::RelayExit]
+            ) | (ContextRole::Exit, [WireguardRole::Exit])
+        )
+    {
+        return None;
+    }
+    let expires_at_unix = scope.attempt_expires_at_ms / 1_000;
+    (expires_at_unix > unix_seconds()).then(|| PrepareLeaseBatch {
+        route_context_id: scope.probe_id.clone(),
+        role: role as i32,
+        mptcp_accepted_addrs: 1,
+        mptcp_subflows: 1,
+        leases: lease_roles
+            .iter()
+            .map(|lease_role| LeasePlan {
+                path_id: 1,
+                role: *lease_role as i32,
+            })
+            .collect(),
+        setup_expires_at_unix: expires_at_unix,
+        hard_expires_at_unix: expires_at_unix,
+    })
+}
+
+fn native_endpoint_binding(
+    helper_runtime_id: [u8; 32],
+    route_context_id: &[u8; FORWARD_ID_BYTES],
+    lease_handle: &[u8; 32],
+    endpoint: volparossa_wireguard::PublicWireGuardEndpoint,
+) -> Option<NativeProbeEndpointBinding> {
+    let wire = protocol_endpoint_for_native(endpoint);
+    let commitment = native_probe_prepared_lease_commitment(
+        &helper_runtime_id,
+        route_context_id,
+        lease_handle,
+        &wire,
+    )
+    .ok()?;
+    Some(NativeProbeEndpointBinding {
+        helper_runtime_id: helper_runtime_id.to_vec(),
+        route_context_id: route_context_id.to_vec(),
+        endpoint: Some(wire),
+        prepared_lease_commitment: commitment.to_vec(),
+    })
 }
 
 fn native_probe_control_capability_matches(
@@ -7462,6 +8330,9 @@ fn forward_request_scope_matches(
         }
         ExitForwardOperation::NativeProbeAuthorize => {
             verified_native_probe_authorization_forward_scope(request, now_ms).is_some()
+        }
+        ExitForwardOperation::NativeProbeReady => {
+            verified_native_probe_ready_forward_scope(request, now_ms).is_some()
         }
         ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
     }
@@ -7997,6 +8868,10 @@ mod tests {
                 policy: Some(policy.clone()),
                 role_store: role_store.clone(),
                 metrics,
+                helper: HelperClient::new(
+                    directory.path().join("helper.sock"),
+                    directory.path().join("helper.token"),
+                ),
             },
         )
         .expect("discovery runtime");
@@ -9225,6 +10100,119 @@ mod tests {
             expected[FORWARD_ID_BYTES - 1] = 1;
             expected
         });
+    }
+
+    #[test]
+    fn native_service_prepare_plan_is_role_exact_and_deadline_bound() {
+        let now_ms = unix_millis();
+        let scope = NativeProbePathScope {
+            probe_id: vec![0x37; FORWARD_ID_BYTES],
+            attempt_expires_at_ms: now_ms.saturating_add(60_000),
+            ..NativeProbePathScope::default()
+        };
+        let relay = native_service_prepare_request(
+            &scope,
+            ContextRole::Relay,
+            &[WireguardRole::RelayClient, WireguardRole::RelayExit],
+            now_ms,
+        )
+        .expect("relay prepare plan");
+        assert_eq!(relay.route_context_id, scope.probe_id);
+        assert_eq!(relay.role, ContextRole::Relay as i32);
+        assert_eq!(relay.leases.len(), 2);
+        assert!(relay.leases.iter().all(|lease| lease.path_id == 1));
+
+        let exit = native_service_prepare_request(
+            &scope,
+            ContextRole::Exit,
+            &[WireguardRole::Exit],
+            now_ms,
+        )
+        .expect("exit prepare plan");
+        assert_eq!(exit.leases.len(), 1);
+        assert_eq!(exit.leases[0].role, WireguardRole::Exit as i32);
+
+        assert!(
+            native_service_prepare_request(
+                &scope,
+                ContextRole::Relay,
+                &[WireguardRole::RelayExit, WireguardRole::RelayClient],
+                now_ms,
+            )
+            .is_none()
+        );
+        assert!(
+            native_service_prepare_request(
+                &scope,
+                ContextRole::Client,
+                &[WireguardRole::Client],
+                now_ms,
+            )
+            .is_none()
+        );
+        let mut expiring = scope;
+        expiring.attempt_expires_at_ms = now_ms.saturating_add(1_000);
+        assert!(
+            native_service_prepare_request(
+                &expiring,
+                ContextRole::Exit,
+                &[WireguardRole::Exit],
+                now_ms,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn native_ready_production_chain_prepares_signs_and_retains_before_authorize() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+
+        let relay_ready = braced_item(production, "async fn begin_native_probe_ready(");
+        let relay_prepare = relay_ready
+            .find(".prepare_lease_batch(")
+            .expect("Relay helper Prepare");
+        let ready_dispatch = relay_ready
+            .find(".request_exit_forward_upstream(")
+            .expect("Ready upstream dispatch");
+        assert!(relay_prepare < ready_dispatch);
+        assert!(relay_ready.contains("native_ready: Some(PendingNativeProbeReady"));
+
+        let exit_ready = braced_item(production, "async fn answer_native_probe_ready_upstream(");
+        let exit_prepare = exit_ready
+            .find(".prepare_lease_batch(")
+            .expect("Exit helper Prepare");
+        let connection_bind = exit_ready
+            .find(".bind_native_probe_data_relay_connection(")
+            .expect("affine data-Relay connection");
+        let issue_ready = exit_ready
+            .find(".issue_native_probe_ready_from_permit_with(")
+            .expect("Exit Ready issue");
+        let send_ready = exit_ready
+            .find(".send_native_probe_ready_response(")
+            .expect("affine Ready response");
+        assert!(exit_prepare < connection_bind);
+        assert!(connection_bind < issue_ready);
+        assert!(issue_ready < send_ready);
+
+        let client_start = braced_item(
+            production,
+            "async fn begin_native_probe_start_authorization(",
+        );
+        let verify_start = client_start
+            .find("verify_native_probe_start_for_relay(")
+            .expect("full Start verification");
+        let retain = client_start
+            .find(".retain_prepared_native_probe_authorization(")
+            .expect("affine prepared authorization retention");
+        let authorize = client_start
+            .find(".begin_native_probe_authorization(")
+            .expect("Authorize dispatch");
+        assert!(verify_start < retain);
+        assert!(retain < authorize);
     }
 
     #[test]
@@ -11203,6 +12191,7 @@ mod tests {
                 dispatch_attempts: 1,
                 reserved_bytes: 1,
                 client_channels: Vec::new(),
+                native_ready: None,
                 native_authorization: None,
             },
         );
@@ -13718,6 +14707,7 @@ mod tests {
                 attempt_deadline: Instant::now() + Duration::from_secs(5),
                 dispatch_attempts: 1,
                 client_channels: Vec::new(),
+                native_ready: None,
                 native_authorization: None,
             },
         );
@@ -13779,15 +14769,13 @@ mod tests {
         )
         .expect("Granted advertisement response");
         assert_eq!(
-            fixture
-                .runtime
-                .complete_relay_forward(
-                    request_id,
-                    exit_peer,
-                    response.clone().into(),
-                    &fixture.state,
-                )
-                .await,
+            Box::pin(fixture.runtime.complete_relay_forward(
+                request_id,
+                exit_peer,
+                response.clone().into(),
+                &fixture.state,
+            ))
+            .await,
             OutboundEventOutcome::Completed
         );
         assert!(fixture.runtime.pending_relay_forwards.is_empty());
@@ -13806,10 +14794,13 @@ mod tests {
             2
         );
         assert_eq!(
-            fixture
-                .runtime
-                .complete_relay_forward(request_id, exit_peer, response.into(), &fixture.state,)
-                .await,
+            Box::pin(fixture.runtime.complete_relay_forward(
+                request_id,
+                exit_peer,
+                response.into(),
+                &fixture.state,
+            ))
+            .await,
             OutboundEventOutcome::Unexpected
         );
         assert_eq!(fixture.runtime.completed_relay_forwards.len(), 1);
@@ -13989,6 +14980,7 @@ mod tests {
                 attempt_deadline,
                 dispatch_attempts: 1,
                 client_channels: Vec::new(),
+                native_ready: None,
                 native_authorization: None,
             },
         );

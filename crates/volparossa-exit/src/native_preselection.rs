@@ -93,6 +93,34 @@ pub(super) struct CachedNativeProbeRelayAuthorization {
     pub(super) expires_at_ms: u64,
 }
 
+/// Exit-signed readiness plus the probe identity retained by the production service.
+#[derive(Clone)]
+pub struct AcceptedNativeProbeExitReady {
+    encoded: Vec<u8>,
+    probe_id: [u8; ID_BYTES],
+    expires_at_ms: u64,
+}
+
+impl AcceptedNativeProbeExitReady {
+    /// Borrow the exact Exit-signed native readiness envelope.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+
+    /// Return the probe identity whose helper owner must remain retained.
+    #[must_use]
+    pub const fn probe_id(&self) -> &[u8; ID_BYTES] {
+        &self.probe_id
+    }
+
+    /// Return the exclusive signed readiness expiry in Unix milliseconds.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+}
+
 /// Exact endpoint-free request and Exit permit, consumed by readiness once.
 #[must_use = "an issued native-probe permit must be consumed or expire"]
 struct IssuedNativeProbePermit {
@@ -270,14 +298,75 @@ impl NativeProbePermitLedger {
             Entry::Occupied(_) => Err(ExitError::LeaseInvariant),
         }
     }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the exact Permit, authenticated data Relay, boot and policy epoch form one affine match"
+    )]
+    fn take_exact_for_ready(
+        &mut self,
+        signed_request: &[u8],
+        signed_permit: &[u8],
+        authenticated_data_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_data_relay_peer_id: &[u8],
+        exit_boot_id: [u8; ID_BYTES],
+        policy_version: u64,
+        policy_hash: &[u8; NODE_ID_BYTES],
+        policy_expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<([u8; NODE_ID_BYTES], StoredNativeProbePermit), ExitError> {
+        let request_hash: [u8; NODE_ID_BYTES] = Sha256::digest(signed_request).into();
+        let stored = self
+            .entries
+            .get(&request_hash)
+            .ok_or(ExitError::InvalidGrant(
+                "native probe Permit owner unavailable",
+            ))?;
+        let data_relay = stored
+            .owner
+            .scope
+            .data_relay
+            .as_ref()
+            .ok_or(ExitError::InvalidGrant("native probe data Relay"))?;
+        if stored.owner.signed_request != signed_request
+            || stored.owner.signed_permit != signed_permit
+            || data_relay.node_id.as_slice() != authenticated_data_relay_node_id
+            || data_relay.peer_id != authenticated_data_relay_peer_id
+            || stored.exit_boot_id != exit_boot_id
+            || stored.policy_version != policy_version
+            || stored.policy_hash != *policy_hash
+            || stored.policy_expires_at_ms != policy_expires_at_ms
+            || stored.expires_at_ms <= now_ms
+        {
+            return Err(ExitError::InvalidGrant("native probe Ready owner mismatch"));
+        }
+        let stored = self
+            .entries
+            .remove(&request_hash)
+            .ok_or(ExitError::LeaseInvariant)?;
+        Ok((request_hash, stored))
+    }
+
+    fn restore(
+        &mut self,
+        request_hash: [u8; NODE_ID_BYTES],
+        stored: StoredNativeProbePermit,
+    ) -> Result<(), ExitError> {
+        match self.entries.entry(request_hash) {
+            Entry::Vacant(entry) => {
+                entry.insert(stored);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(ExitError::LeaseInvariant),
+        }
+    }
 }
 
 /// Typed projection of one local Exit endpoint plus a claimed helper runtime.
 ///
 /// `ExitEndpointLease` is `Copy`, so this value is deliberately not described as affine helper
-/// custody, same-connection provenance or cleanup authority. Construction and use stay inside this
-/// callerless module until a future provider owns the actual helper context and bounded
-/// Destroy/reaper lifecycle.
+/// custody, same-connection provenance or cleanup authority. The agent keeps the actual helper
+/// owner process-local while this projection remains phase-bound inside `ExitService`.
 #[must_use = "a native-probe Exit endpoint projection must remain phase-bound"]
 struct PreparedNativeProbeExitProjection {
     _lease_projection: ExitEndpointLease,
@@ -313,12 +402,12 @@ impl PreparedNativeProbeExitProjection {
 
 /// Exit readiness plus the exact local projection retained for terminal proof binding.
 #[must_use = "native-probe Exit readiness must retain its projection until result"]
-struct IssuedNativeProbeExitReady {
+pub(super) struct IssuedNativeProbeExitReady {
     permit: IssuedNativeProbePermit,
     signed_ready: Vec<u8>,
     prepared_exit: PreparedNativeProbeExitProjection,
     exit_boot_id: [u8; ID_BYTES],
-    expires_at_ms: u64,
+    pub(super) expires_at_ms: u64,
 }
 
 impl IssuedNativeProbeExitReady {
@@ -442,6 +531,93 @@ impl ExitService {
                 now_ms,
             )?
             .ok_or(ExitError::LeaseInvariant)
+    }
+
+    /// Consume one exact retained Permit and a real helper-prepared Exit lease into readiness.
+    ///
+    /// The authenticated data Relay must be the actor selected by the original client request.
+    /// The supplied Relay-facing binding and typed Exit lease are checked by the protocol phase
+    /// producer before any signed bytes are returned. The affine readiness owner remains inside
+    /// `ExitService` for the later probe-result phase.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing/substituted Permit ownership, wrong Relay identity, helper/runtime or
+    /// endpoint mismatch, stale policy/boot state, replay, expiry, or signing failure.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "authenticated Relay, helper lease, local identity and signer remain explicit"
+    )]
+    pub fn issue_native_probe_ready_from_permit_with<F>(
+        &mut self,
+        signed_request: &[u8],
+        signed_permit: &[u8],
+        authenticated_data_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_data_relay_peer_id: &[u8],
+        relay_exit_endpoint: NativeProbeEndpointBinding,
+        helper_runtime_id: [u8; NODE_ID_BYTES],
+        exit_lease: ExitEndpointLease,
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        signer: F,
+    ) -> Result<AcceptedNativeProbeExitReady, ExitError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        self.require_enabled()?;
+        self.policy.ensure_active_at(now_ms)?;
+        self.ensure_native_probe_local_identity(local_public_key)?;
+        self.native_probe_permit_ledger.purge_expired(now_ms);
+        let policy_version = self.policy.manifest_version();
+        let policy_hash = *self.policy.policy_hash();
+        let policy_expires_at_ms = self.policy.expires_at_ms();
+        let (request_hash, stored) = self.native_probe_permit_ledger.take_exact_for_ready(
+            signed_request,
+            signed_permit,
+            authenticated_data_relay_node_id,
+            authenticated_data_relay_peer_id,
+            self.exit_boot_id,
+            policy_version,
+            &policy_hash,
+            policy_expires_at_ms,
+            now_ms,
+        )?;
+        let probe_id = stored.probe_id;
+        if self.native_probe_ready_owners.contains_key(&probe_id) {
+            self.native_probe_permit_ledger
+                .restore(request_hash, stored)?;
+            return Err(ExitError::LeaseInvariant);
+        }
+        let prepared_exit =
+            match PreparedNativeProbeExitProjection::from_typed_exit_lease_projection(
+                helper_runtime_id,
+                exit_lease,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.native_probe_permit_ledger
+                        .restore(request_hash, stored)?;
+                    return Err(error);
+                }
+            };
+        let owner = stored.owner;
+        let issued = self.issue_native_probe_ready_with(
+            owner,
+            authenticated_data_relay_node_id,
+            authenticated_data_relay_peer_id,
+            relay_exit_endpoint,
+            prepared_exit,
+            now_ms,
+            local_public_key,
+            signer,
+        )?;
+        let accepted = AcceptedNativeProbeExitReady {
+            encoded: issued.signed_ready().to_vec(),
+            probe_id,
+            expires_at_ms: issued.expires_at_ms,
+        };
+        self.native_probe_ready_owners.insert(probe_id, issued);
+        Ok(accepted)
     }
 
     /// Independently verify one data-Relay-forwarded native Start chain and issue the standard

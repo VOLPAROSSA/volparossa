@@ -49,7 +49,8 @@ pub use forwarding::{
     EXIT_FORWARD_PROTOCOL, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_PROTOCOL,
     EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
     FORWARDING_RPC_VERSION, ForwardStatus, ForwardingRpcError, MAX_CONCURRENT_FORWARDING_STREAMS,
-    MAX_FORWARDING_FRAME_BYTES, UpstreamExitForwardRequest, UpstreamExitForwardResponse,
+    MAX_FORWARDING_FRAME_BYTES, NativeProbeReadyForwardRequest, UpstreamExitForwardRequest,
+    UpstreamExitForwardResponse,
 };
 use forwarding::{
     ExitForwardCodec, UpstreamExitForwardCodec, exit_forward_behaviour,
@@ -1334,6 +1335,41 @@ impl DiscoveryService {
             .map_err(|_| {
                 DiscoveryError::Swarm("native-probe authorization response channel closed".into())
             })
+    }
+
+    /// Consume exact authenticated data-Relay lineage while returning one native Exit readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-readiness response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_ready_response(
+        &mut self,
+        connection: BoundNativeProbeDataRelayConnection,
+        authenticated_data_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbeReady
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_data_relay(connection, authenticated_data_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| DiscoveryError::Swarm("native-probe Ready response channel closed".into()))
     }
 
     /// Sends one canonical request directly to a selected datapath relay.
