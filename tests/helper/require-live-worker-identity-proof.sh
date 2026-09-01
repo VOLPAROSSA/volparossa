@@ -3698,6 +3698,8 @@ may_own_preexec_barrier_failure_stage_is_safe() {
         expectation-write|\
         record-content|\
         launcher-executable|\
+        launcher-script-fd|\
+        launcher-script-flags|\
         freezer)
             return 0
             ;;
@@ -3893,9 +3895,39 @@ may_own_preexec_barrier_is_exact() {
     may_own_preexec_barrier_failure_stage=record-content
     cmp -s "$may_own_barrier_expected" "$may_own_barrier_record" || return 1
     may_own_preexec_barrier_failure_stage=launcher-executable
-    [ "$(stat -Lc '%d:%i' "/proc/$may_own_barrier_main_pid/exe")" = \
-        "$(stat -Lc '%d:%i' "$temporary_stage/restart-launcher")" ] \
+    may_own_barrier_executable=$(stat -Lc '%d:%i' \
+        "/proc/$may_own_barrier_main_pid/exe") || return 1
+    may_own_barrier_interpreter=$(stat -Lc '%d:%i' /bin/sh) || return 1
+    [ "$may_own_barrier_executable" = "$may_own_barrier_interpreter" ] \
         || return 1
+    may_own_preexec_barrier_failure_stage=launcher-script-fd
+    may_own_barrier_launcher_fd=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s' \
+        "/proc/$may_own_barrier_main_pid/fd/9" 2>/dev/null) || return 1
+    may_own_barrier_launcher_stage=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s' \
+        "$temporary_stage/restart-launcher" 2>/dev/null) || return 1
+    [ "$may_own_barrier_launcher_fd" = "$may_own_barrier_launcher_stage" ] \
+        || return 1
+    may_own_preexec_barrier_failure_stage=launcher-script-flags
+    may_own_barrier_launcher_flags=$(/usr/bin/awk '
+        NR > 32 { invalid = 1 }
+        $1 == "flags:" {
+            records++
+            if (NF != 2) invalid = 1
+            value = $2
+        }
+        END {
+            if (invalid || records != 1) exit 1
+            print value
+        }
+    ' "/proc/$may_own_barrier_main_pid/fdinfo/9" 2>/dev/null) \
+        || return 1
+    case $may_own_barrier_launcher_flags in
+        ''|*[!0-7]*) return 1 ;;
+    esac
+    [ "${#may_own_barrier_launcher_flags}" -le 11 ] || return 1
+    may_own_barrier_launcher_flags=$((0$may_own_barrier_launcher_flags))
+    [ "$may_own_barrier_launcher_flags" -le 4294967295 ] || return 1
+    [ "$((may_own_barrier_launcher_flags & 3))" -eq 0 ] || return 1
     may_own_preexec_barrier_failure_stage=freezer
     [ "$(cat "/sys/fs/cgroup/system.slice/$unit_name/cgroup.freeze")" = 0 ] \
         || return 1

@@ -35,6 +35,10 @@ case ${VOLPAROSSA_HELPER_PREEXEC_MODE:-restart} in
     may-own)
         may_own_invocation_id=${INVOCATION_ID:-}
         invocation_id_is_safe "$may_own_invocation_id" || exit 65
+        if [ -e "/proc/$$/fd/9" ] || [ -L "/proc/$$/fd/9" ]; then
+            exit 65
+        fi
+        command exec 9<"$0" || exit 65
         may_own_ready_record=$proof_directory/may-own.pre-exec.$may_own_invocation_id
         may_own_ready_next=$may_own_ready_record.next
         may_own_release_capture=$proof_directory/may-own.pre-exec-release.$may_own_invocation_id
@@ -63,6 +67,8 @@ case ${VOLPAROSSA_HELPER_PREEXEC_MODE:-restart} in
         [ "$(stat -Lc '%F:%u:%g:%a:%h:%s' "$may_own_release_capture" \
             2>/dev/null || true)" = 'regular file:0:0:600:1:1' ] || exit 65
         [ "$(cat "$may_own_release_capture")" = G ] || exit 65
+        command exec 9<&- || exit 65
+        [ ! -e "/proc/$$/fd/9" ] && [ ! -L "/proc/$$/fd/9" ] || exit 65
         ;;
     restart)
         if [ ! -e "$crash_record" ] && [ ! -L "$crash_record" ]; then

@@ -67,6 +67,12 @@ if ! awk '
     /^\[ "\$#" -eq 0 \] \|\| exit 64$/ { argc = NR; argc_count++ }
     /^case \$\{VOLPAROSSA_HELPER_PREEXEC_MODE:-restart\} in$/ { mode = NR; mode_count++ }
     /^[[:space:]]*may-own\)$/ { may_own = NR; may_own_count++ }
+    $0 == "        if [ -e \"/proc/$$/fd/9\" ] || [ -L \"/proc/$$/fd/9\" ]; then" {
+        may_fd_absent = NR; may_fd_absent_count++
+    }
+    $0 == "        command exec 9<\"$0\" || exit 65" {
+        may_fd_open = NR; may_fd_open_count++
+    }
     /may-own\.pre-exec\.\$may_own_invocation_id$/ { may_ready = NR; may_ready_count++ }
     /VOLPAROSSA_HELPER_MAY_OWN_PRE_EXEC_BARRIER_V1=ready/ {
         may_record = NR; may_record_count++
@@ -79,6 +85,15 @@ if ! awk '
     }
     /printf .*"\$may_own_release_value" >"\$may_own_release_capture"/ {
         may_capture = NR; may_capture_count++
+    }
+    /^[[:space:]]*\[ "\$\(cat "\$may_own_release_capture"\)" = G \] \|\| exit 65$/ {
+        may_file_gate = NR; may_file_gate_count++
+    }
+    $0 == "        command exec 9<&- || exit 65" {
+        may_fd_close = NR; may_fd_close_count++
+    }
+    $0 == "        [ ! -e \"/proc/$$/fd/9\" ] && [ ! -L \"/proc/$$/fd/9\" ] || exit 65" {
+        may_fd_closed = NR; may_fd_closed_count++
     }
     /dd if="\$may_own_release_fifo"/ { invalid_may_own_child++ }
     /^[[:space:]]*restart\)$/ { restart = NR; restart_count++ }
@@ -110,9 +125,12 @@ if ! awk '
     }
     END {
         valid = argc_count == 1 && mode_count == 1 && may_own_count == 1
+        valid = valid && may_fd_absent_count == 1 && may_fd_open_count == 1
         valid = valid && may_ready_count == 1 && may_record_count == 1
         valid = valid && may_read_count == 1 && may_gate_count == 1
         valid = valid && may_capture_count == 1 && invalid_may_own_child == 0
+        valid = valid && may_file_gate_count == 1 && may_fd_close_count == 1
+        valid = valid && may_fd_closed_count == 1
         valid = valid && restart_count == 1
         valid = valid && absent_count == 1 && execs == 2
         valid = valid && invocation_count == 1 && ready_count == 1
@@ -121,10 +139,14 @@ if ! awk '
         valid = valid && bound_count == 1
         valid = valid && exact_count == 2 && gate_count == 1
         valid = valid && argc < mode && mode < may_own
-        valid = valid && may_own < may_ready && may_ready < may_record
+        valid = valid && may_own < may_fd_absent && may_fd_absent < may_fd_open
+        valid = valid && may_fd_open < may_ready && may_ready < may_record
         valid = valid && may_record < may_read && may_read < may_gate
         valid = valid && may_gate < may_capture && may_capture < may_exact
-        valid = valid && may_exact < restart
+        valid = valid && may_exact < may_file_gate
+        valid = valid && may_file_gate < may_fd_close
+        valid = valid && may_fd_close < may_fd_closed
+        valid = valid && may_fd_closed < restart
         valid = valid && restart < absent && absent < first_exec
         valid = valid && first_exec < invocation && invocation < fifo
         valid = valid && fifo < ready && ready < publish && publish < read

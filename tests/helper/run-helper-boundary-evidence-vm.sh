@@ -537,6 +537,8 @@ non_retained_may_own_preexec_barrier_stage_is_safe() {
         expectation-write|\
         record-content|\
         launcher-executable|\
+        launcher-script-fd|\
+        launcher-script-flags|\
         freezer)
             return 0
             ;;

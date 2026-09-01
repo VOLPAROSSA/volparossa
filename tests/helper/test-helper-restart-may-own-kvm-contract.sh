@@ -403,8 +403,47 @@ may_own_preexec_wait_contract_is_exact() {
         /cmp -s "\$may_own_barrier_expected" "\$may_own_barrier_record"/ {
             content = NR; content_count++
         }
-        /stat -Lc '\''%d:%i'\'' "\/proc\/\$may_own_barrier_main_pid\/exe"/ {
-            executable = NR; executable_count++
+        /may_own_preexec_barrier_failure_stage=launcher-executable/ {
+            executable_stage = NR; executable_stage_count++
+        }
+        /may_own_barrier_executable=\$\(stat -Lc '\''%d:%i'\''/ {
+            executable_capture = NR; executable_capture_count++
+        }
+        /"\/proc\/\$may_own_barrier_main_pid\/exe"\)/ {
+            executable_path = NR; executable_path_count++
+        }
+        /may_own_barrier_interpreter=\$\(stat -Lc '\''%d:%i'\'' \/bin\/sh\)/ {
+            interpreter = NR; interpreter_count++
+        }
+        /"\$may_own_barrier_executable" = "\$may_own_barrier_interpreter"/ {
+            interpreter_match = NR; interpreter_match_count++
+        }
+        /may_own_preexec_barrier_failure_stage=launcher-script-fd/ {
+            launcher_fd_stage = NR; launcher_fd_stage_count++
+        }
+        /may_own_barrier_launcher_fd=\$\(stat -Lc/ {
+            launcher_fd_capture = NR; launcher_fd_capture_count++
+        }
+        /"\/proc\/\$may_own_barrier_main_pid\/fd\/9"/ {
+            launcher_fd_path = NR; launcher_fd_path_count++
+        }
+        /may_own_barrier_launcher_stage=\$\(stat -Lc/ {
+            launcher_stage_capture = NR; launcher_stage_capture_count++
+        }
+        /"\$temporary_stage\/restart-launcher" 2>\/dev\/null\)/ {
+            launcher_stage_path = NR; launcher_stage_path_count++
+        }
+        /"\$may_own_barrier_launcher_fd" = "\$may_own_barrier_launcher_stage"/ {
+            launcher_fd_match = NR; launcher_fd_match_count++
+        }
+        /may_own_preexec_barrier_failure_stage=launcher-script-flags/ {
+            launcher_flags_stage = NR; launcher_flags_stage_count++
+        }
+        /"\/proc\/\$may_own_barrier_main_pid\/fdinfo\/9"/ {
+            launcher_fdinfo = NR; launcher_fdinfo_count++
+        }
+        /\[ "\$\(\(may_own_barrier_launcher_flags & 3\)\)" -eq 0 \]/ {
+            launcher_read_only = NR; launcher_read_only_count++
         }
         /cgroup\.freeze"\)" = 0 \]/ { freezer = NR; freezer_count++ }
         END {
@@ -421,7 +460,21 @@ may_own_preexec_wait_contract_is_exact() {
             valid = valid && shape_count == 1 && size_count == 1
             valid = valid && shape_do_count == 1 && shape_guard_count == 1
             valid = valid && shape_stage_count == 1
-            valid = valid && content_count == 1 && executable_count == 1
+            valid = valid && content_count == 1
+            valid = valid && executable_stage_count == 1
+            valid = valid && executable_capture_count == 1
+            valid = valid && executable_path_count == 1
+            valid = valid && interpreter_count == 1
+            valid = valid && interpreter_match_count == 1
+            valid = valid && launcher_fd_stage_count == 1
+            valid = valid && launcher_fd_capture_count == 1
+            valid = valid && launcher_fd_path_count == 1
+            valid = valid && launcher_stage_capture_count == 1
+            valid = valid && launcher_stage_path_count == 1
+            valid = valid && launcher_fd_match_count == 1
+            valid = valid && launcher_flags_stage_count == 1
+            valid = valid && launcher_fdinfo_count == 1
+            valid = valid && launcher_read_only_count == 1
             valid = valid && freezer_count == 1
             valid = valid && starttime[1] < wait_loop
             valid = valid && wait_loop < unsafe_exists
@@ -453,8 +506,21 @@ may_own_preexec_wait_contract_is_exact() {
             valid = valid && bound[2] < sleep_line[2]
             valid = valid && sleep_line[2] < loop_done[2]
             valid = valid && loop_done[2] < size
-            valid = valid && size < content && content < executable
-            valid = valid && executable < freezer
+            valid = valid && size < content && content < executable_stage
+            valid = valid && executable_stage < executable_capture
+            valid = valid && executable_capture < executable_path
+            valid = valid && executable_path < interpreter
+            valid = valid && interpreter < interpreter_match
+            valid = valid && interpreter_match < launcher_fd_stage
+            valid = valid && launcher_fd_stage < launcher_fd_capture
+            valid = valid && launcher_fd_capture < launcher_fd_path
+            valid = valid && launcher_fd_path < launcher_stage_capture
+            valid = valid && launcher_stage_capture < launcher_stage_path
+            valid = valid && launcher_stage_path < launcher_fd_match
+            valid = valid && launcher_fd_match < launcher_flags_stage
+            valid = valid && launcher_flags_stage < launcher_fdinfo
+            valid = valid && launcher_fdinfo < launcher_read_only
+            valid = valid && launcher_read_only < freezer
             if (!valid) exit 1
         }
     ' "$may_own_preexec_source"
@@ -467,7 +533,10 @@ for preexec_field in \
     'may_own_service_shape_is_exact "$may_own_barrier_main_pid" \' \
     'VOLPAROSSA_HELPER_MAY_OWN_PRE_EXEC_BARRIER_V1=ready' \
     'cmp -s "$may_own_barrier_expected" "$may_own_barrier_record"' \
-    'stat -Lc '\''%d:%i'\'' "/proc/$may_own_barrier_main_pid/exe"' \
+    'may_own_barrier_interpreter=$(stat -Lc '\''%d:%i'\'' /bin/sh)' \
+    '"/proc/$may_own_barrier_main_pid/fd/9"' \
+    '"/proc/$may_own_barrier_main_pid/fdinfo/9"' \
+    'may_own_barrier_launcher_flags & 3' \
     'cgroup.freeze")" = 0 ]'
 do
     grep -F "$preexec_field" "$preexec_contract" >/dev/null
@@ -495,6 +564,14 @@ sed 's/-lt 600/-lt 6000/' "$preexec_contract" >"$preexec_bound_mutant"
 preexec_shape_guard_mutant=$tmp/preexec-shape-guard-mutant
 sed 's/= shape-cgroup-members ]/= shape-cgroup-stat ]/' \
     "$preexec_contract" >"$preexec_shape_guard_mutant"
+preexec_interpreter_mutant=$tmp/preexec-interpreter-mutant
+sed 's@stat -Lc '\''%d:%i'\'' /bin/sh@stat -Lc '\''%d:%i'\'' /bin/false@' \
+    "$preexec_contract" >"$preexec_interpreter_mutant"
+preexec_launcher_fd_mutant=$tmp/preexec-launcher-fd-mutant
+sed 's@/fd/9@/fd/8@g; s@/fdinfo/9@/fdinfo/8@g' \
+    "$preexec_contract" >"$preexec_launcher_fd_mutant"
+preexec_launcher_flags_mutant=$tmp/preexec-launcher-flags-mutant
+sed 's/& 3/\& 0/' "$preexec_contract" >"$preexec_launcher_flags_mutant"
 preexec_shape_order_mutant=$tmp/preexec-shape-order-mutant
 awk '
     { source[NR] = $0 }
@@ -522,6 +599,8 @@ for preexec_mutant in \
     "$preexec_main_pid_mutant" \
     "$preexec_invocation_mutant" "$preexec_starttime_mutant" \
     "$preexec_bound_mutant" "$preexec_shape_guard_mutant" \
+    "$preexec_interpreter_mutant" "$preexec_launcher_fd_mutant" \
+    "$preexec_launcher_flags_mutant" \
     "$preexec_shape_order_mutant"
 do
     sh -n "$preexec_mutant"
@@ -544,7 +623,7 @@ sh -n "$preexec_diagnostic_functions"
 . "$preexec_diagnostic_functions"
 preexec_diagnostic_stdout=$tmp/preexec-diagnostic.stdout
 preexec_diagnostic_stderr=$tmp/preexec-diagnostic.stderr
-preexec_diagnostic_categories='arguments starttime publication-unsafe publication-timeout lineage-mainpid lineage-invocation lineage-starttime lineage-marker shape-mainpid-argument shape-invocation-argument shape-count-arguments shape-type shape-restart-usec shape-control-pid shape-main-pid shape-invocation shape-restarts shape-fdstore-count shape-fdstore-max shape-fdstore-preserve shape-exec-start-post shape-control-group shape-control-group-id shape-cgroup-path shape-cgroup-procs shape-cgroup-members shape-cgroup-type shape-cgroup-stat record-size expectation-create expectation-write record-content launcher-executable freezer'
+preexec_diagnostic_categories='arguments starttime publication-unsafe publication-timeout lineage-mainpid lineage-invocation lineage-starttime lineage-marker shape-mainpid-argument shape-invocation-argument shape-count-arguments shape-type shape-restart-usec shape-control-pid shape-main-pid shape-invocation shape-restarts shape-fdstore-count shape-fdstore-max shape-fdstore-preserve shape-exec-start-post shape-control-group shape-control-group-id shape-cgroup-path shape-cgroup-procs shape-cgroup-members shape-cgroup-type shape-cgroup-stat record-size expectation-create expectation-write record-content launcher-executable launcher-script-fd launcher-script-flags freezer'
 for preexec_diagnostic_category in $preexec_diagnostic_categories; do
     may_own_preexec_barrier_failure_stage_is_safe \
         "$preexec_diagnostic_category" || exit 1
