@@ -844,6 +844,7 @@ impl ClientRouteControl {
         };
         let EstablishedClientRoute {
             transport,
+            tcp_flow,
             route,
             orchestrator,
             helper,
@@ -852,6 +853,7 @@ impl ClientRouteControl {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
                 transport,
+                tcp_flow,
                 route,
                 orchestrator,
                 helper,
@@ -872,6 +874,7 @@ impl ClientRouteControl {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
                 transport: ClientTransportState::UdpReady(ready),
+                tcp_flow,
                 route: None,
                 orchestrator,
                 helper,
@@ -898,6 +901,7 @@ impl ClientRouteControl {
                 let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
                     transport: ClientTransportState::UdpActive(active),
+                    tcp_flow,
                     route: None,
                     orchestrator,
                     helper,

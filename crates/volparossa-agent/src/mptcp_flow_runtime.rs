@@ -130,10 +130,10 @@ impl ProductionMptcpExitRuntime {
         let mut failed = false;
         loop {
             if flows.len() >= MAXIMUM_CONCURRENT_MPTCP_FLOWS {
-                if let Some(result) = flows.join_next().await
-                    && !matches!(result, Ok(Ok(_)))
-                {
-                    failed = true;
+                if let Some(result) = flows.join_next().await {
+                    if !matches!(result, Ok(Ok(_))) {
+                        failed = true;
+                    }
                 }
                 continue;
             }
