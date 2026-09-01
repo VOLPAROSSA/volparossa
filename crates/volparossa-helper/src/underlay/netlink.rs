@@ -736,12 +736,18 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
     if payload[1] != 0 {
         return Ok(None);
     }
+    let effective_table = effective_route_table(payload[4], &attributes)?;
+    if effective_table != RT_TABLE_MAIN {
+        // Policy-routing tables do not select the physical underlay. In particular, active Client
+        // ingress owns an on-link default in its fixed private table; its routing flags and
+        // attributes must not be interpreted as ambiguity in the main-table default.
+        return Ok(None);
+    }
     if payload[2] != 0 || payload[3] != 0 || read_u32(payload, 8) != Some(0) {
         return Err(UnderlayNetlinkError::Ambiguous);
     }
     let mut destination = None;
     let mut output = None;
-    let mut table = None;
     let mut seen = 0_u64;
     for attribute in attributes {
         reject_unknown_flags(attribute.flags)?;
@@ -755,7 +761,11 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
         match attribute.kind {
             RTA_DST => destination = Some(parse_ip(attribute.value, family)?),
             RTA_OIF => output = Some(exact_u32(attribute.value)?),
-            RTA_TABLE => table = Some(exact_u32(attribute.value)?),
+            RTA_TABLE => {
+                if exact_u32(attribute.value)? != RT_TABLE_MAIN {
+                    return Err(UnderlayNetlinkError::Malformed);
+                }
+            }
             RTA_GATEWAY | RTA_PREFSRC => {
                 let _ = parse_ip(attribute.value, family)?;
             }
@@ -782,16 +792,6 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
     if ifindex == 0 {
         return Err(UnderlayNetlinkError::Ambiguous);
     }
-    let header_table = payload[4];
-    if header_table != RT_TABLE_UNSPEC
-        && table.is_some_and(|value| value != u32::from(header_table))
-    {
-        return Err(UnderlayNetlinkError::Malformed);
-    }
-    let effective_table = table.unwrap_or(u32::from(header_table));
-    if effective_table != RT_TABLE_MAIN {
-        return Ok(None);
-    }
     if payload[7] != RTN_UNICAST || payload[6] != RT_SCOPE_UNIVERSE {
         return Err(UnderlayNetlinkError::Ambiguous);
     }
@@ -803,6 +803,25 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
         main_table: true,
         universe_scope: true,
     }))
+}
+
+fn effective_route_table(
+    header_table: u8,
+    attributes: &[Attribute<'_>],
+) -> Result<u32, UnderlayNetlinkError> {
+    let mut table = None;
+    for attribute in attributes
+        .iter()
+        .filter(|attribute| attribute.kind == RTA_TABLE)
+    {
+        set_once(&mut table, exact_u32(attribute.value)?, attribute.flags)?;
+    }
+    if header_table != RT_TABLE_UNSPEC
+        && table.is_some_and(|value| value != u32::from(header_table))
+    {
+        return Err(UnderlayNetlinkError::Malformed);
+    }
+    Ok(table.unwrap_or(u32::from(header_table)))
 }
 
 #[derive(Clone, Copy)]
@@ -1373,6 +1392,46 @@ mod tests {
                     ),
                     done()
                 ]
+            ),
+            Err(UnderlayNetlinkError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn client_ingress_non_main_onlink_default_is_ignored_before_main_route_validation() {
+        const CLIENT_INGRESS_ROUTE_TABLE: u8 = 101;
+        const RTNH_F_ONLINK: u32 = 4;
+
+        let frame = route(UnderlayFamily::Ipv4, &[]);
+        let payload_length = usize::try_from(read_u32(&frame, 0).expect("length")).expect("usize")
+            - NLMSG_HEADER_LEN;
+        let mut ingress = frame[NLMSG_HEADER_LEN..NLMSG_HEADER_LEN + payload_length].to_vec();
+        ingress[4] = CLIENT_INGRESS_ROUTE_TABLE;
+        ingress[8..12].copy_from_slice(&RTNH_F_ONLINK.to_ne_bytes());
+        let table_attribute_offset = ingress.len();
+        ingress.extend_from_slice(&attr(
+            RTA_TABLE,
+            &u32::from(CLIENT_INGRESS_ROUTE_TABLE).to_ne_bytes(),
+        ));
+        ingress.extend_from_slice(&attr(RTA_GATEWAY, &[169, 254, 240, 2]));
+
+        assert!(
+            parse(
+                DumpKind::Route,
+                &[msg(RTM_NEWROUTE, NLM_F_MULTI, SEQ, &ingress), done()]
+            )
+            .expect("irrelevant policy table")
+            .routes
+            .is_empty()
+        );
+
+        let mut conflicting = ingress;
+        let table_value = table_attribute_offset + ATTRIBUTE_HEADER_LEN;
+        conflicting[table_value..table_value + 4].copy_from_slice(&RT_TABLE_MAIN.to_ne_bytes());
+        assert!(matches!(
+            parse(
+                DumpKind::Route,
+                &[msg(RTM_NEWROUTE, NLM_F_MULTI, SEQ, &conflicting), done()]
             ),
             Err(UnderlayNetlinkError::Malformed)
         ));
