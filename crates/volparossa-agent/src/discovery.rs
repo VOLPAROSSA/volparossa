@@ -4281,32 +4281,24 @@ impl DiscoveryRuntime {
         for (exit_peer, provider_expiry_ms) in exits {
             if self.automatic_exit_fetch_attempts.len() >= self.candidate_limit.max(1)
                 || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+                || self
+                    .forwarded_exits
+                    .keys()
+                    .any(|key| key.exit_peer == exit_peer)
+                || self
+                    .automatic_exit_fetch_attempts
+                    .iter()
+                    .any(|attempt| attempt.key.exit_peer == exit_peer)
             {
                 continue;
             }
-            let Some(control) = controls
-                .iter()
-                .find(|control| control.peer_id != exit_peer)
-                .cloned()
-            else {
+            let Some(control) = self.next_untried_exit_control(&controls, exit_peer, now_ms) else {
                 continue;
             };
             let key = ForwardedExitKey {
                 control_relay_peer: control.peer_id,
                 exit_peer,
             };
-            if self.forwarded_exits.contains_key(&key)
-                || self
-                    .automatic_exit_fetches
-                    .get(&key)
-                    .is_some_and(|expiry| *expiry > now_ms)
-                || self
-                    .automatic_exit_fetch_attempts
-                    .iter()
-                    .any(|pending| pending.key == key)
-            {
-                continue;
-            }
             let deadline_unix_ms = now_ms
                 .saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS)
                 .min(provider_expiry_ms)
@@ -4342,6 +4334,32 @@ impl DiscoveryRuntime {
                     state: AutomaticExitFetchAttemptState::InFlight(receiver),
                 });
         }
+    }
+
+    fn next_untried_exit_control(
+        &self,
+        controls: &[DirectRelayCapability],
+        exit_peer: Libp2pPeerId,
+        now_ms: u64,
+    ) -> Option<DirectRelayCapability> {
+        controls
+            .iter()
+            .find(|control| {
+                let key = ForwardedExitKey {
+                    control_relay_peer: control.peer_id,
+                    exit_peer,
+                };
+                control.peer_id != exit_peer
+                    && self
+                        .automatic_exit_fetches
+                        .get(&key)
+                        .is_none_or(|expiry| *expiry <= now_ms)
+                    && !self
+                        .automatic_exit_fetch_attempts
+                        .iter()
+                        .any(|pending| pending.key == key)
+            })
+            .cloned()
     }
 
     fn drive_automatic_exit_fetch_attempts(&mut self, now_ms: u64) {
@@ -4457,12 +4475,14 @@ impl DiscoveryRuntime {
                     .complete_client_forward(request_id, peer, &response, state)
                     .await;
                 log_outbound_event(state, outcome).await;
+                self.schedule_exit_advertisement_fetches();
             }
             request_response::Event::OutboundFailure {
                 peer, request_id, ..
             } => {
                 let outcome = self.fail_client_forward(request_id, peer);
                 log_outbound_event(state, outcome).await;
+                self.schedule_exit_advertisement_fetches();
             }
             request_response::Event::InboundFailure { .. }
             | request_response::Event::ResponseSent { .. } => {}
@@ -16328,6 +16348,7 @@ mod tests {
             forward_id,
             deadline_unix_ms,
         );
+        let alternate_control = install_control(&mut fixture, &Identity::generate(), now_ms);
         let key = ForwardedExitKey {
             control_relay_peer: control.peer_id,
             exit_peer,
@@ -16376,6 +16397,15 @@ mod tests {
             fixture.runtime.automatic_exit_fetch_attempts[0].state,
             AutomaticExitFetchAttemptState::RetryNotBefore(value) if value == retry_at_ms
         ));
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert!(fixture.runtime.pending_client_forwards.is_empty());
+        assert!(
+            fixture
+                .runtime
+                .automatic_exit_fetch_attempts
+                .iter()
+                .all(|attempt| attempt.key.control_relay_peer != alternate_control.peer_id)
+        );
 
         fixture
             .runtime
@@ -16407,6 +16437,100 @@ mod tests {
             attempt.state,
             AutomaticExitFetchAttemptState::InFlight(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn exhausted_automatic_exit_fetch_lineages_rotate_to_an_untried_control() {
+        let mut fixture = fixture(RolesConfig::default());
+        let now_ms = unix_millis();
+        let deadline_unix_ms = now_ms.saturating_add(25_000);
+        let exit_peer = Identity::generate().peer_id().to_owned();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, deadline_unix_ms);
+
+        let mut controls = (1_u64..=3)
+            .map(|sequence| {
+                direct_capability(
+                    &Identity::generate(),
+                    &fixture.policy,
+                    sequence,
+                    now_ms.saturating_add(60_000),
+                )
+            })
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        for control in &controls {
+            fixture
+                .runtime
+                .direct_relays
+                .insert(control.peer_id, control.clone());
+        }
+
+        for control in &controls[..2] {
+            fixture.runtime.automatic_exit_fetches.insert(
+                ForwardedExitKey {
+                    control_relay_peer: control.peer_id,
+                    exit_peer,
+                },
+                deadline_unix_ms,
+            );
+        }
+
+        fixture.runtime.schedule_exit_advertisement_fetches();
+
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert_eq!(
+            fixture.runtime.automatic_exit_fetch_attempts[0].key,
+            ForwardedExitKey {
+                control_relay_peer: controls[2].peer_id,
+                exit_peer,
+            }
+        );
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+        assert!(
+            fixture
+                .runtime
+                .pending_client_forwards
+                .values()
+                .all(|pending| {
+                    pending.key.control_relay_peer == controls[2].peer_id
+                        && pending.expected_exit_peer == exit_peer
+                        && pending.operation == ExitForwardOperation::FetchExitAdvertisement
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_exit_fetch_stops_after_one_control_binds_the_exit() {
+        let mut fixture = fixture(RolesConfig::default());
+        let now_ms = unix_millis();
+        let exit = Identity::generate();
+        let exit_peer = exit.peer_id().to_owned();
+        let first_control = install_control(&mut fixture, &Identity::generate(), now_ms);
+        let _second_control = install_control(&mut fixture, &Identity::generate(), now_ms);
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, now_ms.saturating_add(25_000));
+        fixture.runtime.forwarded_exits.insert(
+            ForwardedExitKey {
+                control_relay_peer: first_control.peer_id,
+                exit_peer,
+            },
+            forwarded_capability_for_identity(
+                &first_control,
+                &exit,
+                1,
+                now_ms.saturating_add(25_000),
+            ),
+        );
+
+        fixture.runtime.schedule_exit_advertisement_fetches();
+
+        assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
+        assert!(fixture.runtime.pending_client_forwards.is_empty());
     }
 
     #[tokio::test]
