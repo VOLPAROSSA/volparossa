@@ -1,8 +1,8 @@
-//! Authenticated direct-relay responder for one exact preselection observation request.
+//! Authenticated, role-gated Relay and Exit responders for one exact preselection request.
 //!
 //! This module signs no measurement and mints no selection, reservation, route, or session
-//! authority. It only proves that the currently advertised relay identity received one exact,
-//! short-lived request over the event's still-current authenticated connection lineage.
+//! authority. It only proves that the current advertised Relay or Exit identity received one
+//! exact, short-lived request over the event's still-current authenticated connection lineage.
 
 use std::{
     collections::HashMap,
@@ -32,7 +32,7 @@ const REQUEST_TOMBSTONE_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_REQUEST_TOMBSTONES: usize = 1_024;
 const MAX_REQUEST_TOMBSTONES_PER_PEER: usize = 16;
 
-/// Exact active-policy snapshot required before a relay may sign an observation receipt.
+/// Exact active-policy snapshot required before a Relay or Exit may sign an observation receipt.
 ///
 /// Construction alone grants no authority. The responder additionally requires an exact current
 /// locally served advertisement, its valid signature, the local libp2p identity, an enabled relay
@@ -686,7 +686,13 @@ impl DiscoveryService {
         {
             return Err(UpstreamPreselectionResponderError::Request);
         }
-        let authority = self.local_exit_authority(policy, signer_public_key, scope, now_ms)?;
+        let authority = self.local_exit_authority(
+            policy,
+            signer_public_key,
+            scope,
+            control.capability_expires_at_ms,
+            now_ms,
+        )?;
         if typed.actor.as_ref() != Some(&authority.actor)
             || scope.policy_version != policy.version
             || scope.policy_hash.as_slice() != policy.hash
@@ -716,6 +722,7 @@ impl DiscoveryService {
         let valid_until_ms = typed
             .expires_at_ms
             .min(authority.advertisement.expires_at_ms)
+            .min(authority.actor.capability_expires_at_ms)
             .min(policy.expires_at_ms);
         if valid_until_ms <= now_ms {
             return Err(UpstreamPreselectionResponderError::Time);
@@ -770,16 +777,23 @@ impl DiscoveryService {
         policy: LocalPreselectionPolicy,
         signer_public_key: [u8; 32],
         scope: &PreselectionObservationScope,
+        control_capability_expires_at_ms: u64,
         now_ms: u64,
     ) -> Result<LocalPreselectionAuthority, UpstreamPreselectionResponderError> {
-        self.local_preselection_authority(
-            policy,
-            signer_public_key,
-            scope,
-            now_ms,
-            LocalResponderRole::Exit,
-        )
-        .ok_or(UpstreamPreselectionResponderError::Authority)
+        let mut authority = self
+            .local_preselection_authority(
+                policy,
+                signer_public_key,
+                scope,
+                now_ms,
+                LocalResponderRole::Exit,
+            )
+            .ok_or(UpstreamPreselectionResponderError::Authority)?;
+        authority.actor.capability_expires_at_ms = authority
+            .actor
+            .capability_expires_at_ms
+            .min(control_capability_expires_at_ms);
+        Ok(authority)
     }
 
     fn local_preselection_authority(
@@ -960,6 +974,7 @@ mod tests {
     const POLICY_HASH: [u8; 32] = [71; 32];
     const POLICY_EXPIRY_MS: u64 = NOW_MS + 60_000;
     const ADVERTISEMENT_EXPIRY_MS: u64 = NOW_MS + 30_000;
+    const CONTROL_ADVERTISEMENT_EXPIRY_MS: u64 = ADVERTISEMENT_EXPIRY_MS - 1_000;
 
     async fn next_other(service: &mut DiscoveryService) -> SwarmEvent<BehaviourEvent> {
         loop {
@@ -1209,7 +1224,7 @@ mod tests {
         .expect("signed local Exit advertisement");
         let envelope: SignedEnvelope =
             decode_canonical(&signed, MAX_CONTROL_MESSAGE_SIZE).expect("signed envelope");
-        let exit_actor = actor_for(
+        let mut exit_actor = actor_for(
             &exit_key,
             exit_public_key,
             advertisement.sequence_number,
@@ -1220,6 +1235,7 @@ mod tests {
                 .expect("payload hash"),
             ADVERTISEMENT_EXPIRY_MS,
         );
+        exit_actor.capability_expires_at_ms = CONTROL_ADVERTISEMENT_EXPIRY_MS;
         let relay_key = identity::Keypair::generate_ed25519();
         let relay_public_key = raw_public_key(&relay_key);
         let relay_peer = relay_key.public().to_peer_id();
@@ -1228,7 +1244,7 @@ mod tests {
             relay_public_key,
             13,
             [62; 32],
-            ADVERTISEMENT_EXPIRY_MS,
+            CONTROL_ADVERTISEMENT_EXPIRY_MS,
         );
         let mut service = DiscoveryService::new_with_protocol_roles(
             exit_key.clone(),
@@ -1551,6 +1567,14 @@ mod tests {
     #[tokio::test]
     async fn exact_current_upstream_request_is_exit_signed_and_request_bound() {
         let mut fixture = upstream_fixture().await;
+        assert!(
+            fixture.control_actor.capability_expires_at_ms
+                < fixture.exit_actor.advertisement_expires_at_ms
+        );
+        assert_eq!(
+            fixture.exit_actor.capability_expires_at_ms,
+            fixture.control_actor.capability_expires_at_ms
+        );
         let request = upstream_request(
             fixture.exit_actor.clone(),
             fixture.control_actor.clone(),
