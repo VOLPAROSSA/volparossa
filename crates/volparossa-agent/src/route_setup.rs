@@ -107,7 +107,7 @@ use crate::{
     },
     mpquic_runtime::{ProductionMpquicPreflight, ProductionMpquicSession},
     mptcp_flow_runtime::{ActiveProductionMptcpClientFlow, activate_production_mptcp_client_flow},
-    mptcp_transport::{ClientMptcpTransport, ExitMptcpListenerSignal},
+    mptcp_transport::{ClientMptcpTransport, ExitMptcpListenerSignal, PRODUCTION_MPTCP_EXIT_PORT},
     paths::DEFAULT_MPQUIC_SOCKET,
     state::AgentState,
 };
@@ -131,6 +131,7 @@ const MPQUIC_READY_WAIT: Duration = Duration::from_secs(10);
 #[derive(Clone)]
 pub(crate) struct ClientRouteControl {
     state: Arc<Mutex<ClientRouteControlState>>,
+    tcp_connect: Arc<Mutex<()>>,
     mpquic_socket: Arc<PathBuf>,
     agent_state: Option<Arc<tokio::sync::RwLock<AgentState>>>,
 }
@@ -151,6 +152,7 @@ enum ClientRouteControlState {
 
 struct EstablishedClientRoute {
     transport: ClientTransportState,
+    tcp_flow: Option<ActiveProductionMptcpClientFlow>,
     route: Option<ProductionRoute>,
     orchestrator: ProductionRouteOrchestrator,
     helper: HelperClient,
@@ -158,7 +160,6 @@ struct EstablishedClientRoute {
 
 enum ClientTransportState {
     TcpMptcp(ClientMptcpTransport),
-    TcpActive(ActiveProductionMptcpClientFlow),
     UdpReady(CertificateBoundProductionUdpRoute),
     UdpActive(ActiveProductionUdpRoute),
     Mpquic(Box<ActiveProductionMpquicRoute>),
@@ -188,19 +189,18 @@ impl EstablishedClientRoute {
         match &self.transport {
             ClientTransportState::UdpReady(_) => ClientRouteProgress::UdpRouteReady,
             ClientTransportState::TcpMptcp(_)
-            | ClientTransportState::TcpActive(_)
             | ClientTransportState::UdpActive(_)
             | ClientTransportState::Mpquic(_) => ClientRouteProgress::TransportActive,
         }
     }
 
     async fn shutdown(self) {
+        if let Some(flow) = self.tcp_flow {
+            flow.shutdown();
+        }
         match self.transport {
             ClientTransportState::TcpMptcp(transport) => {
                 let _ = transport.shutdown(&self.helper).await;
-            }
-            ClientTransportState::TcpActive(flow) => {
-                let _ = flow.shutdown(&self.helper).await;
             }
             ClientTransportState::UdpReady(route) => {
                 let _ = Box::pin(route.disconnect()).await;
@@ -324,6 +324,7 @@ impl ClientRouteControl {
     pub(crate) fn new(mpquic_socket: PathBuf) -> Self {
         Self {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
+            tcp_connect: Arc::new(Mutex::new(())),
             mpquic_socket: Arc::new(mpquic_socket),
             agent_state: None,
         }
@@ -335,6 +336,7 @@ impl ClientRouteControl {
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
+            tcp_connect: Arc::new(Mutex::new(())),
             mpquic_socket: Arc::new(mpquic_socket),
             agent_state: Some(agent_state),
         }
@@ -355,6 +357,21 @@ impl ClientRouteControl {
             || config.tcp.allow_plain_tcp_fallback
         {
             return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        let _connect = self.tcp_connect.lock().await;
+        {
+            let state = self.state.lock().await;
+            match &*state {
+                ClientRouteControlState::Established(established)
+                    if matches!(established.transport, ClientTransportState::TcpMptcp(_)) =>
+                {
+                    return Ok(ClientRouteProgress::TransportActive);
+                }
+                ClientRouteControlState::Idle => {}
+                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
+                    return Err(ClientRouteConnectError::Busy);
+                }
+            }
         }
         let mut tcp_profile = config.clone();
         tcp_profile.udp.enabled = false;
@@ -531,51 +548,10 @@ impl ClientRouteControl {
         port: u16,
         now_ms: u64,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
-        let previous = {
-            let mut state = self.state.lock().await;
-            std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
-        };
-        let established = match previous {
-            ClientRouteControlState::Established(established) => established,
-            other => {
-                let mut state = self.state.lock().await;
-                *state = other;
-                return Err(ClientRouteConnectError::Busy);
-            }
-        };
-        let EstablishedClientRoute {
-            transport,
-            route,
-            orchestrator,
-            helper,
-        } = *established;
-        let (transport, route) = match (transport, route) {
-            (ClientTransportState::TcpMptcp(transport), Some(route)) => (transport, route),
-            (transport, route) => {
-                let mut state = self.state.lock().await;
-                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
-                    transport,
-                    route,
-                    orchestrator,
-                    helper,
-                }));
-                return Err(ClientRouteConnectError::Busy);
-            }
-        };
-        let material = match client_open_tcp_material(&route, policy, &destination, port, now_ms) {
-            Ok(material) => material,
-            Err(error) => {
-                let mut state = self.state.lock().await;
-                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
-                    transport: ClientTransportState::TcpMptcp(transport),
-                    route: Some(route),
-                    orchestrator,
-                    helper,
-                }));
-                return Err(error);
-            }
-        };
-        let activation = activate_production_mptcp_client_flow(
+        let (transport, material) = self
+            .acquire_tcp_flow_transport(policy, &destination, port, now_ms)
+            .await?;
+        let flow = activate_production_mptcp_client_flow(
             transport,
             &material.route,
             &material.certificate_sha256,
@@ -583,28 +559,59 @@ impl ClientRouteControl {
             &material.signed_open_tcp,
             now_ms,
         )
-        .await;
-        match activation {
-            Ok(flow) => {
-                let mut state = self.state.lock().await;
-                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
-                    transport: ClientTransportState::TcpActive(flow),
-                    route: Some(route),
-                    orchestrator,
-                    helper,
-                }));
-                Ok(ClientRouteProgress::TransportActive)
-            }
-            Err(failure) => {
-                let _cause = failure.cause();
-                failure.cleanup(&helper).await;
-                let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
-                let mut state = self.state.lock().await;
-                *state = ClientRouteControlState::Idle;
-                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        .await
+        .map_err(|failure| {
+            let _ = failure.cause();
+            ClientRouteConnectError::TransportRuntimeUnavailable
+        })?;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            flow.shutdown();
+            return Err(ClientRouteConnectError::Busy);
+        };
+        if established.tcp_flow.is_some() {
+            flow.shutdown();
+            return Err(ClientRouteConnectError::Busy);
+        }
+        established.tcp_flow = Some(flow);
+        Ok(ClientRouteProgress::TransportActive)
+    }
+
+    async fn acquire_tcp_flow_transport(
+        &self,
+        policy: &VerifiedManifest,
+        destination: &ClientTcpDestination,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<
+        (
+            crate::mptcp_transport::ClientMptcpFlowTransport,
+            ClientOpenTcpMaterial,
+        ),
+        ClientRouteConnectError,
+    > {
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let route = established
+            .route
+            .as_ref()
+            .ok_or(ClientRouteConnectError::Busy)?;
+        let material = client_open_tcp_material(route, policy, destination, port, now_ms)?;
+        let ClientTransportState::TcpMptcp(transport) = &mut established.transport else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        for _ in 0..8 {
+            let local_port = random_mptcp_source_port(PRODUCTION_MPTCP_EXIT_PORT)?;
+            if let Ok(flow) = transport
+                .acquire_flow(&established.helper, local_port)
+                .await
+            {
+                return Ok((flow, material));
             }
         }
+        Err(ClientRouteConnectError::TransportRuntimeUnavailable)
     }
 
     /// Bind one accepted kernel-observed TCP stream and proxy it over the selected genuine
@@ -626,56 +633,26 @@ impl ClientRouteControl {
                     address: destination.ip(),
                 }
             });
-        self.activate_tcp_destination(policy, destination_scope, destination.port(), now_ms)
+        let (transport, material) = self
+            .acquire_tcp_flow_transport(policy, &destination_scope, destination.port(), now_ms)
             .await?;
-        self.proxy_tcp_application(application).await
-    }
-
-    async fn proxy_tcp_application(
-        &self,
-        application: tokio::net::TcpStream,
-    ) -> Result<(), ClientRouteConnectError> {
-        let previous = {
-            let mut state = self.state.lock().await;
-            std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
-        };
-        let established = match previous {
-            ClientRouteControlState::Established(established) => established,
-            other => {
-                let mut state = self.state.lock().await;
-                *state = other;
-                return Err(ClientRouteConnectError::Busy);
-            }
-        };
-        let EstablishedClientRoute {
+        let flow = activate_production_mptcp_client_flow(
             transport,
-            route,
-            orchestrator,
-            helper,
-        } = *established;
-        let (flow, route) = match (transport, route) {
-            (ClientTransportState::TcpActive(flow), Some(route)) => (flow, route),
-            (transport, route) => {
-                let mut state = self.state.lock().await;
-                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
-                    transport,
-                    route,
-                    orchestrator,
-                    helper,
-                }));
-                return Err(ClientRouteConnectError::Busy);
-            }
-        };
-
-        let transfer = flow.proxy_application(&helper, application).await;
-        let route_cleanup = route.disconnect().await;
-        let orchestrator_cleanup = orchestrator.shutdown().await;
-        let mut state = self.state.lock().await;
-        *state = ClientRouteControlState::Idle;
-        if transfer.is_err() || route_cleanup.is_err() || orchestrator_cleanup.is_err() {
-            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
-        }
-        Ok(())
+            &material.route,
+            &material.certificate_sha256,
+            &material.tls_server_name,
+            &material.signed_open_tcp,
+            now_ms,
+        )
+        .await
+        .map_err(|failure| {
+            let _ = failure.cause();
+            ClientRouteConnectError::TransportRuntimeUnavailable
+        })?;
+        flow.proxy_application(application)
+            .await
+            .map(|_| ())
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
     }
 
     /// Write one bounded payload chunk to the active protected TCP stream.
@@ -690,7 +667,7 @@ impl ClientRouteControl {
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Err(ClientRouteConnectError::Busy);
         };
-        let ClientTransportState::TcpActive(flow) = &mut established.transport else {
+        let Some(flow) = &mut established.tcp_flow else {
             return Err(ClientRouteConnectError::Busy);
         };
         timeout(MAXIMUM_CALL_DURATION, flow.stream_mut().write_all(payload))
@@ -709,7 +686,7 @@ impl ClientRouteControl {
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Err(ClientRouteConnectError::Busy);
         };
-        let ClientTransportState::TcpActive(flow) = &mut established.transport else {
+        let Some(flow) = &mut established.tcp_flow else {
             return Err(ClientRouteConnectError::Busy);
         };
         let mut payload = vec![0_u8; MAXIMUM_TCP_STREAM_CHUNK_BYTES];
@@ -742,6 +719,7 @@ impl ClientRouteControl {
         };
         let EstablishedClientRoute {
             transport,
+            tcp_flow,
             route,
             orchestrator,
             helper,
@@ -750,6 +728,7 @@ impl ClientRouteControl {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
                 transport,
+                tcp_flow,
                 route,
                 orchestrator,
                 helper,
@@ -770,6 +749,7 @@ impl ClientRouteControl {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
                 transport: ClientTransportState::UdpReady(ready),
+                tcp_flow: None,
                 route: None,
                 orchestrator,
                 helper,
@@ -796,6 +776,7 @@ impl ClientRouteControl {
                 let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
                     transport: ClientTransportState::UdpActive(active),
+                    tcp_flow: None,
                     route: None,
                     orchestrator,
                     helper,
@@ -1161,6 +1142,7 @@ async fn admit_completed_native_route(
                 {
                     Ok(ready) => Ok(EstablishedClientRoute {
                         transport: ClientTransportState::UdpReady(ready),
+                        tcp_flow: None,
                         route: None,
                         orchestrator,
                         helper: helper.clone(),
@@ -1196,6 +1178,7 @@ async fn admit_completed_native_route(
             match activate_committed_transport(&route, helper, Some(signal)).await {
                 Ok(transport) => Ok(EstablishedClientRoute {
                     transport,
+                    tcp_flow: None,
                     route: Some(route),
                     orchestrator,
                     helper: helper.clone(),
@@ -1261,6 +1244,7 @@ async fn admit_completed_native_route(
                             browser_flow: None,
                         },
                     )),
+                    tcp_flow: None,
                     route: Some(route),
                     orchestrator,
                     helper: helper.clone(),

@@ -20,30 +20,24 @@ const MAXIMUM_EXIT_CERTIFICATE_DER_BYTES: usize = 64 * 1_024;
 
 /// A genuinely negotiated client MPTCP stream plus the exact helper-owned selected paths.
 pub struct ClientMptcpTransport {
-    stream: MptcpStream,
+    initial_stream: Option<MptcpStream>,
+    signal: Option<ExitMptcpListenerSignal>,
     route_context_id: Vec<u8>,
     context_handle: Vec<u8>,
     active_paths: Vec<u32>,
     certificate_der: Option<Vec<u8>>,
 }
 
-/// Endpoint-removal capability retained after the connected MPTCP stream enters TLS.
-#[must_use = "active MPTCP endpoints must be removed after the TLS flow"]
-pub(crate) struct ClientMptcpEndpointCleanup {
-    route_context_id: Vec<u8>,
-    context_handle: Vec<u8>,
-    active_paths: Vec<u32>,
+/// One independently owned connected stream borrowed from a live route-level MPTCP transport.
+#[must_use = "the connected MPTCP flow must enter TLS or be dropped"]
+pub(crate) struct ClientMptcpFlowTransport {
+    stream: MptcpStream,
+    certificate_der: Vec<u8>,
 }
 
-impl ClientMptcpEndpointCleanup {
-    pub(crate) async fn shutdown(self, helper: &HelperClient) -> Result<(), MptcpTransportError> {
-        remove_paths(
-            helper,
-            &self.route_context_id,
-            &self.context_handle,
-            &self.active_paths,
-        )
-        .await
+impl ClientMptcpFlowTransport {
+    pub(crate) fn into_tls_parts(self) -> (MptcpStream, Vec<u8>) {
+        (self.stream, self.certificate_der)
     }
 }
 
@@ -164,6 +158,7 @@ impl ClientMptcpTransport {
         )
         .await?;
         transport.certificate_der = Some(certificate_der);
+        transport.signal = Some(signal);
         Ok(transport)
     }
 
@@ -181,15 +176,7 @@ impl ClientMptcpTransport {
         selected_paths: impl IntoIterator<Item = u32>,
     ) -> Result<Self, MptcpTransportError> {
         let paths = selected_path_ids(selected_paths)?;
-        let (descriptor, metadata) = acquired.into_parts();
-        if metadata.role != WireguardRole::Client as i32
-            || metadata.descriptor_kind != TransportSocketKind::MptcpConnected as i32
-        {
-            return Err(MptcpTransportError::InvalidMetadata);
-        }
-        let local = socket_address(metadata.local.as_ref())?;
-        let remote = socket_address(metadata.remote.as_ref())?;
-        let stream = MptcpStream::from_connected_owned_fd(descriptor, local, remote)?;
+        let stream = adopt_client_stream(acquired)?;
         let mut active_paths = Vec::with_capacity(paths.len());
         for path_id in paths {
             let request = AddMptcpEndpoint {
@@ -207,7 +194,8 @@ impl ClientMptcpTransport {
         }
         stream.require_negotiated()?;
         Ok(Self {
-            stream,
+            initial_stream: Some(stream),
+            signal: None,
             route_context_id,
             context_handle,
             active_paths,
@@ -217,26 +205,38 @@ impl ClientMptcpTransport {
 
     /// Borrows the adopted, genuinely negotiated MPTCP stream.
     #[must_use]
-    pub const fn stream(&self) -> &MptcpStream {
-        &self.stream
+    pub fn stream(&self) -> &MptcpStream {
+        self.initial_stream
+            .as_ref()
+            .expect("initial MPTCP stream has not been acquired by a flow")
     }
 
-    /// Consume the connected stream into TLS while retaining exact endpoint cleanup authority.
-    pub(crate) fn into_tls_parts(
-        self,
-    ) -> Result<(MptcpStream, Vec<u8>, ClientMptcpEndpointCleanup), MptcpTransportError> {
+    /// Acquire one independent connected MPTCP socket while retaining route-level path ownership.
+    pub(crate) async fn acquire_flow(
+        &mut self,
+        helper: &HelperClient,
+        local_port: u16,
+    ) -> Result<ClientMptcpFlowTransport, MptcpTransportError> {
         let certificate_der = self
             .certificate_der
+            .clone()
             .ok_or(MptcpTransportError::InvalidMetadata)?;
-        Ok((
-            self.stream,
+        let stream = if let Some(stream) = self.initial_stream.take() {
+            stream
+        } else {
+            let signal = self
+                .signal
+                .as_ref()
+                .ok_or(MptcpTransportError::InvalidMetadata)?;
+            let request = client_acquire_request(signal, self.context_handle.clone(), local_port)?;
+            let acquired = helper.acquire_transport_socket(request).await?;
+            adopt_client_stream(acquired)?
+        };
+        stream.require_negotiated()?;
+        Ok(ClientMptcpFlowTransport {
+            stream,
             certificate_der,
-            ClientMptcpEndpointCleanup {
-                route_context_id: self.route_context_id,
-                context_handle: self.context_handle,
-                active_paths: self.active_paths,
-            },
-        ))
+        })
     }
 
     /// Removes all selected endpoints before releasing the adopted stream.
@@ -348,6 +348,20 @@ pub fn adopt_exit_listener(
     }
     let local = socket_address(metadata.local.as_ref())?;
     MptcpListener::from_bound_owned_fd(descriptor, local).map_err(Into::into)
+}
+
+fn adopt_client_stream(
+    acquired: AcquiredTransportSocket,
+) -> Result<MptcpStream, MptcpTransportError> {
+    let (descriptor, metadata) = acquired.into_parts();
+    if metadata.role != WireguardRole::Client as i32
+        || metadata.descriptor_kind != TransportSocketKind::MptcpConnected as i32
+    {
+        return Err(MptcpTransportError::InvalidMetadata);
+    }
+    let local = socket_address(metadata.local.as_ref())?;
+    let remote = socket_address(metadata.remote.as_ref())?;
+    MptcpStream::from_connected_owned_fd(descriptor, local, remote).map_err(Into::into)
 }
 
 async fn rollback_paths(

@@ -40,6 +40,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpStream, lookup_host},
+    sync::Mutex,
     time,
 };
 use volparossa_core::{
@@ -810,7 +811,7 @@ impl ExitService {
         }
     }
 
-    /// Consume one activated TCP route into a self-contained one-flow egress owner.
+    /// Consume one activated TCP route into a self-contained multi-flow egress owner.
     ///
     /// The returned owner keeps the verified multipath route, current threshold-signed policy,
     /// independent bounded replay state, and metrics needed by a background datapath task. The
@@ -832,7 +833,7 @@ impl ExitService {
             route: route.route,
             reservation_id: route.reservation_id,
             policy: self.policy.clone(),
-            flow_replay: ReplayCache::new(self.config.replay_capacity)?,
+            flow_replay: Mutex::new(ReplayCache::new(self.config.replay_capacity)?),
             metrics: self.metrics.clone(),
         })
     }
@@ -1584,7 +1585,7 @@ pub struct ActiveTcpEgressRoute {
     route: VerifiedMptcpRoute,
     reservation_id: [u8; ID_BYTES],
     policy: VerifiedManifest,
-    flow_replay: ReplayCache,
+    flow_replay: Mutex<ReplayCache>,
     metrics: Option<MetricsRegistry>,
 }
 
@@ -1602,7 +1603,7 @@ impl ActiveTcpEgressRoute {
     /// Malformed framing, timeout, invalid signature, replay, route/policy mismatch and denied
     /// destinations all fail closed before any ordinary Internet connection is opened.
     pub async fn read_authorized_open_tcp<R>(
-        &mut self,
+        &self,
         reader: &mut R,
         now_ms: u64,
         timeout: Duration,
@@ -1613,12 +1614,13 @@ impl ActiveTcpEgressRoute {
         self.route.ensure_active_at(now_ms)?;
         self.policy.ensure_active_at(now_ms)?;
         let scope = TcpAuthorizationScope::new(&self.route, &self.policy);
+        let mut flow_replay = self.flow_replay.lock().await;
         let result = read_authorized_open_tcp(
             reader,
             &scope,
             now_ms,
             TimePolicy::default(),
-            &mut self.flow_replay,
+            &mut flow_replay,
             timeout,
         )
         .await;
@@ -2433,6 +2435,7 @@ mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
     use std::{
         net::{IpAddr, Ipv4Addr},
+        sync::Arc,
         time::Duration,
     };
 
@@ -3844,7 +3847,7 @@ mod tests {
             .unwrap();
         let reservation_id = *active.reservation_id();
         let signed_open = admitted.sign_open_tcp(service.policy_hash(), "allowed.example", 80);
-        let mut detached = service
+        let detached = service
             .detach_tcp_egress_route(active, NOW_MS)
             .expect("detached route");
         assert_eq!(detached.reservation_id(), &reservation_id);
@@ -3862,6 +3865,62 @@ mod tests {
         assert_eq!(flow.hostname(), Some("allowed.example"));
         assert_eq!(flow.port(), 80);
         service.release(&reservation_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn detached_tcp_egress_owner_authorizes_independent_concurrent_flows() {
+        let rule = DestinationRule::exact_domain(
+            "allowed.example",
+            [80_u16, 81].map(|port| ProtocolPort::new(TransportProtocol::Tcp, port).unwrap()),
+        )
+        .unwrap();
+        let (mut service, admitted) = admit_route(
+            2,
+            &[Transport::TcpMptcp],
+            vec![rule],
+            MetricsRegistry::new(),
+        );
+        let relays = admitted
+            .signed_relays
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let route = service
+            .bind_tcp_route(&admitted.accepted, &relays, NOW_MS)
+            .unwrap();
+        let detached = Arc::new(
+            service
+                .detach_tcp_egress_route(route, NOW_MS)
+                .expect("detached route"),
+        );
+        let mut readers = Vec::new();
+        for port in [80_u16, 81] {
+            let signed = admitted.sign_open_tcp(service.policy_hash(), "allowed.example", port);
+            let (mut writer, mut reader) = tokio::io::duplex(MAX_CONTROL_MESSAGE_SIZE * 2);
+            let route = Arc::clone(&detached);
+            readers.push(tokio::spawn(async move {
+                let send = tokio::spawn(async move {
+                    volparossa_tcp_proxy::write_open_tcp(
+                        &mut writer,
+                        &signed,
+                        Duration::from_secs(1),
+                    )
+                    .await
+                });
+                let flow = route
+                    .read_authorized_open_tcp(&mut reader, NOW_MS, Duration::from_secs(1))
+                    .await
+                    .expect("authorized concurrent flow");
+                send.await.unwrap().unwrap();
+                flow.port()
+            }));
+        }
+        let mut ports = Vec::new();
+        for reader in readers {
+            ports.push(reader.await.unwrap());
+        }
+        ports.sort_unstable();
+        assert_eq!(ports, [80, 81]);
     }
 
     #[test]

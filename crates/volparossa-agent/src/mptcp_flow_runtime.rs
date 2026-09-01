@@ -1,13 +1,13 @@
-//! One-flow TLS 1.3 and signed `OPEN_TCP` runtime over committed MPTCP routes.
+//! Concurrent TLS 1.3 and signed `OPEN_TCP` flows over committed MPTCP routes.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use pem::parse;
 use rustls::RootCertStore;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{net::TcpStream, time};
+use tokio::{net::TcpStream, task::JoinSet, time};
 use volparossa_exit::{
     ActiveTcpEgressRoute, ActiveTcpRoute, ExitNativeRouteAuthorization, ExitService,
     TcpEgressLimits,
@@ -19,27 +19,25 @@ use volparossa_tcp_proxy::{
 
 use crate::{
     helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
-    mptcp_transport::{
-        ClientMptcpEndpointCleanup, ClientMptcpTransport, ExitMptcpTransport, MptcpTransportError,
-    },
+    mptcp_transport::{ClientMptcpFlowTransport, ExitMptcpTransport},
     udp_exit_provider::route_certificate_der,
     unix_millis,
 };
 
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(12);
 const OPEN_TCP_TIMEOUT: Duration = Duration::from_secs(12);
-const EXIT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 const DNS_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_BUFFER_BYTES: usize = 64 * 1_024;
 const MAXIMUM_DIRECTIONAL_BYTES: u64 = 512 * 1_024 * 1_024;
+const MAXIMUM_CONCURRENT_MPTCP_FLOWS: usize = 64;
 
-/// A one-shot Exit listener, TLS identity, signed-flow verifier and Internet egress owner.
+/// A reusable Exit listener, TLS identity, signed-flow verifier and Internet egress owner.
 ///
 /// Construction consumes the activated TCP route and helper owner. `run` accepts only genuine
-/// MPTCP, negotiates TLS 1.3 with the route certificate, verifies one bounded `OPEN_TCP`, and only
+/// MPTCP, negotiates TLS 1.3 with the route certificate, verifies each bounded `OPEN_TCP`, and only
 /// then opens policy-approved ordinary TCP at the Exit.
 #[must_use = "the active MPTCP Exit runtime must be run or shut down"]
 pub(crate) struct ProductionMptcpExitRuntime {
@@ -49,6 +47,7 @@ pub(crate) struct ProductionMptcpExitRuntime {
     tls: Tls13MptcpServer,
     egress: ActiveTcpEgressRoute,
     limits: TcpEgressLimits,
+    expires_at_ms: u64,
 }
 
 impl ProductionMptcpExitRuntime {
@@ -85,6 +84,7 @@ impl ProductionMptcpExitRuntime {
         };
         let private_key =
             PrivateKeyDer::from(PrivatePkcs8KeyDer::from(private_key.into_contents()));
+        let expires_at_ms = authorization.expires_at_ms();
         drop(authorization);
         let Ok(tls) =
             Tls13MptcpServer::new(vec![CertificateDer::from(certificate_der)], private_key)
@@ -104,6 +104,7 @@ impl ProductionMptcpExitRuntime {
             tls,
             egress,
             limits,
+            expires_at_ms,
         })
     }
 
@@ -111,7 +112,7 @@ impl ProductionMptcpExitRuntime {
         *self.egress.reservation_id()
     }
 
-    /// Run one complete `MPTCP/TLS/OPEN_TCP/egress` flow and always attempt exact helper cleanup.
+    /// Accept independent `MPTCP/TLS/OPEN_TCP/egress` flows until route expiry.
     pub(crate) async fn run(self) -> ProductionMptcpExitCompletion {
         let reservation_id = self.reservation_id();
         let Self {
@@ -119,28 +120,78 @@ impl ProductionMptcpExitRuntime {
             helper_owner,
             transport,
             tls,
-            mut egress,
+            egress,
             limits,
+            expires_at_ms,
         } = self;
-        let flow_result = async {
-            let (mptcp, _peer) = time::timeout(EXIT_ACCEPT_TIMEOUT, transport.listener().accept())
-                .await
-                .map_err(|_| ProductionMptcpExitError::Accept)?
-                .map_err(|_| ProductionMptcpExitError::Accept)?;
-            let mut protected = tls
-                .accept(mptcp, TLS_HANDSHAKE_TIMEOUT)
-                .await
-                .map_err(|_| ProductionMptcpExitError::TlsHandshake)?;
-            let authorized = egress
-                .read_authorized_open_tcp(&mut protected, unix_millis(), OPEN_TCP_TIMEOUT)
-                .await
-                .map_err(|_| ProductionMptcpExitError::Authorization)?;
-            egress
-                .run_tcp_egress(&authorized, protected, unix_millis(), limits)
-                .await
-                .map_err(|_| ProductionMptcpExitError::Egress)
+        let egress = Arc::new(egress);
+        let mut flows = JoinSet::new();
+        let mut accepted_any = false;
+        let mut failed = false;
+        loop {
+            if flows.len() >= MAXIMUM_CONCURRENT_MPTCP_FLOWS {
+                if let Some(result) = flows.join_next().await
+                    && !matches!(result, Ok(Ok(_)))
+                {
+                    failed = true;
+                }
+                continue;
+            }
+            let remaining = expires_at_ms.saturating_sub(unix_millis());
+            if remaining == 0 {
+                break;
+            }
+            match time::timeout(
+                Duration::from_millis(remaining),
+                transport.listener().accept(),
+            )
+            .await
+            {
+                Ok(Ok((mptcp, _peer))) => {
+                    accepted_any = true;
+                    let tls = tls.clone();
+                    let egress = Arc::clone(&egress);
+                    flows.spawn(async move {
+                        let mut protected = tls
+                            .accept(mptcp, TLS_HANDSHAKE_TIMEOUT)
+                            .await
+                            .map_err(|_| ProductionMptcpExitError::TlsHandshake)?;
+                        let authorized = egress
+                            .read_authorized_open_tcp(
+                                &mut protected,
+                                unix_millis(),
+                                OPEN_TCP_TIMEOUT,
+                            )
+                            .await
+                            .map_err(|_| ProductionMptcpExitError::Authorization)?;
+                        egress
+                            .run_tcp_egress(&authorized, protected, unix_millis(), limits)
+                            .await
+                            .map_err(|_| ProductionMptcpExitError::Egress)
+                    });
+                }
+                Ok(Err(_)) => {
+                    failed = true;
+                    break;
+                }
+                Err(_) => break,
+            }
+            while let Some(result) = flows.try_join_next() {
+                if !matches!(result, Ok(Ok(_))) {
+                    failed = true;
+                }
+            }
         }
-        .await;
+        while let Some(result) = flows.join_next().await {
+            if !matches!(result, Ok(Ok(_))) {
+                failed = true;
+            }
+        }
+        let flow_result = if accepted_any && !failed {
+            Ok(())
+        } else {
+            Err(ProductionMptcpExitError::Accept)
+        };
 
         let _ = transport.shutdown(&helper).await;
         let cleanup = ProductionMptcpExitCleanup {
@@ -183,7 +234,7 @@ impl ProductionMptcpExitRuntime {
 /// Completion returned to the actor so it can release the exact reservation.
 pub(crate) struct ProductionMptcpExitCompletion {
     reservation_id: [u8; 16],
-    result: Result<StreamTransferStats, ProductionMptcpExitError>,
+    result: Result<(), ProductionMptcpExitError>,
     cleanup: Option<ProductionMptcpExitCleanup>,
 }
 
@@ -268,11 +319,10 @@ pub(crate) enum ProductionMptcpExitError {
     CleanupPending,
 }
 
-/// Live TLS 1.3 stream plus endpoint cleanup after a client `OPEN_TCP` was written.
+/// Live TLS 1.3 stream after a client `OPEN_TCP` was written.
 #[must_use = "the active MPTCP client flow must be used or shut down"]
 pub(crate) struct ActiveProductionMptcpClientFlow {
     stream: Tls13MptcpStream,
-    endpoint_cleanup: ClientMptcpEndpointCleanup,
 }
 
 impl ActiveProductionMptcpClientFlow {
@@ -280,16 +330,14 @@ impl ActiveProductionMptcpClientFlow {
         &mut self.stream
     }
 
-    pub(crate) async fn shutdown(self, helper: &HelperClient) -> Result<(), MptcpTransportError> {
+    pub(crate) fn shutdown(self) {
         drop(self.stream);
-        self.endpoint_cleanup.shutdown(helper).await
     }
 
     /// Proxy one accepted local application stream over the already authenticated MPTCP/TLS
     /// connection with the same fixed buffer, byte and idle limits enforced at the Exit.
     pub(crate) async fn proxy_application(
         self,
-        helper: &HelperClient,
         application: TcpStream,
     ) -> Result<StreamTransferStats, ProductionMptcpClientError> {
         let limits = StreamTransferLimits::new(
@@ -299,18 +347,9 @@ impl ActiveProductionMptcpClientFlow {
             STREAM_IDLE_TIMEOUT,
         )
         .map_err(|_| ProductionMptcpClientError::Stream)?;
-        let Self {
-            stream,
-            endpoint_cleanup,
-        } = self;
-        let transfer = proxy_bidirectional(application, stream, limits)
+        proxy_bidirectional(application, self.stream, limits)
             .await
-            .map_err(|_| ProductionMptcpClientError::Stream);
-        endpoint_cleanup
-            .shutdown(helper)
-            .await
-            .map_err(|_| ProductionMptcpClientError::Transport)?;
-        transfer
+            .map_err(|_| ProductionMptcpClientError::Stream)
     }
 }
 
@@ -320,106 +359,73 @@ impl ActiveProductionMptcpClientFlow {
     reason = "complete authenticated client flow scope"
 )]
 pub(crate) async fn activate_production_mptcp_client_flow(
-    transport: ClientMptcpTransport,
+    transport: ClientMptcpFlowTransport,
     route: &VerifiedMptcpRoute,
     expected_certificate_sha256: &[u8],
     tls_server_name: &str,
     signed_open_tcp: &[u8],
     now_ms: u64,
 ) -> Result<ActiveProductionMptcpClientFlow, ProductionMptcpClientFailure> {
-    let (mptcp, certificate_der, endpoint_cleanup) = transport
-        .into_tls_parts()
-        .map_err(|error| ProductionMptcpClientFailure::without_cleanup(error.into()))?;
+    let (mptcp, certificate_der) = transport.into_tls_parts();
     if expected_certificate_sha256.len() != 32
         || Sha256::digest(&certificate_der).as_slice() != expected_certificate_sha256
     {
-        return Err(ProductionMptcpClientFailure::with_cleanup(
+        return Err(ProductionMptcpClientFailure::new(
             ProductionMptcpClientError::Certificate,
-            endpoint_cleanup,
         ));
     }
     let mut roots = RootCertStore::empty();
     if roots.add(CertificateDer::from(certificate_der)).is_err() {
-        return Err(ProductionMptcpClientFailure::with_cleanup(
+        return Err(ProductionMptcpClientFailure::new(
             ProductionMptcpClientError::Certificate,
-            endpoint_cleanup,
         ));
     }
     let Ok(server_name) = ServerName::try_from(tls_server_name.to_owned()) else {
-        return Err(ProductionMptcpClientFailure::with_cleanup(
+        return Err(ProductionMptcpClientFailure::new(
             ProductionMptcpClientError::Certificate,
-            endpoint_cleanup,
         ));
     };
     let Ok(client) = Tls13MptcpClient::new(roots) else {
-        return Err(ProductionMptcpClientFailure::with_cleanup(
+        return Err(ProductionMptcpClientFailure::new(
             ProductionMptcpClientError::Tls,
-            endpoint_cleanup,
         ));
     };
     let Ok(mut stream) = client
         .connect_preconnected(route, mptcp, server_name, now_ms, TLS_HANDSHAKE_TIMEOUT)
         .await
     else {
-        return Err(ProductionMptcpClientFailure::with_cleanup(
+        return Err(ProductionMptcpClientFailure::new(
             ProductionMptcpClientError::Tls,
-            endpoint_cleanup,
         ));
     };
     if write_open_tcp(&mut stream, signed_open_tcp, OPEN_TCP_TIMEOUT)
         .await
         .is_err()
     {
-        return Err(ProductionMptcpClientFailure::with_cleanup(
+        return Err(ProductionMptcpClientFailure::new(
             ProductionMptcpClientError::OpenTcp,
-            endpoint_cleanup,
         ));
     }
-    Ok(ActiveProductionMptcpClientFlow {
-        stream,
-        endpoint_cleanup,
-    })
+    Ok(ActiveProductionMptcpClientFlow { stream })
 }
 
-#[must_use = "failed MPTCP client activation may still require endpoint cleanup"]
+#[must_use = "failed MPTCP client activation must be handled"]
 pub(crate) struct ProductionMptcpClientFailure {
     cause: ProductionMptcpClientError,
-    endpoint_cleanup: Option<ClientMptcpEndpointCleanup>,
 }
 
 impl ProductionMptcpClientFailure {
-    fn with_cleanup(
-        cause: ProductionMptcpClientError,
-        endpoint_cleanup: ClientMptcpEndpointCleanup,
-    ) -> Self {
-        Self {
-            cause,
-            endpoint_cleanup: Some(endpoint_cleanup),
-        }
-    }
-
-    fn without_cleanup(cause: ProductionMptcpClientError) -> Self {
-        Self {
-            cause,
-            endpoint_cleanup: None,
-        }
+    const fn new(cause: ProductionMptcpClientError) -> Self {
+        Self { cause }
     }
 
     pub(crate) const fn cause(&self) -> ProductionMptcpClientError {
         self.cause
     }
-
-    pub(crate) async fn cleanup(self, helper: &HelperClient) {
-        if let Some(cleanup) = self.endpoint_cleanup {
-            let _ = cleanup.shutdown(helper).await;
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum ProductionMptcpClientError {
-    #[error("helper MPTCP transport metadata is invalid")]
-    Transport,
     #[error("Exit route certificate binding is invalid")]
     Certificate,
     #[error("TLS 1.3 activation failed")]
@@ -428,12 +434,6 @@ pub(crate) enum ProductionMptcpClientError {
     OpenTcp,
     #[error("bounded application stream proxy failed")]
     Stream,
-}
-
-impl From<MptcpTransportError> for ProductionMptcpClientError {
-    fn from(_: MptcpTransportError) -> Self {
-        Self::Transport
-    }
 }
 
 fn production_tcp_limits() -> Result<TcpEgressLimits, volparossa_exit::ExitError> {

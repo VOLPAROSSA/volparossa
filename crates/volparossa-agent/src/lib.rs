@@ -38,8 +38,8 @@ use std::{
 use thiserror::Error;
 use tokio::{
     io::unix::AsyncFd,
-    sync::{RwLock, watch},
-    task::JoinHandle,
+    sync::{RwLock, Semaphore, watch},
+    task::{JoinHandle, JoinSet},
 };
 use volparossa_config::Config;
 use volparossa_identity::IdentityStore;
@@ -336,12 +336,24 @@ async fn run_client_tcp_ingress(
         );
         return;
     };
+    let flow_limit = Arc::new(Semaphore::new(config.routing.maximum_active_contexts));
+    let mut flows = JoinSet::new();
 
     loop {
         let observed = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     return;
+                }
+                continue;
+            }
+            completed = flows.join_next(), if !flows.is_empty() => {
+                if !matches!(completed, Some(Ok(()))) {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_TCP_FLOW_TASK_FAILED",
+                        unix_millis(),
+                    );
                 }
                 continue;
             }
@@ -407,39 +419,42 @@ async fn run_client_tcp_ingress(
             }
         };
 
-        if Box::pin(routes.connect_tcp(&config, &discovery, &helper))
-            .await
-            .is_err()
-        {
-            state.write().await.log(
-                LogLevel::Warn,
-                "INGRESS_TCP_ROUTE_UNAVAILABLE",
-                unix_millis(),
-            );
-            continue;
-        }
-        let activation_ms = unix_millis();
-        let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
-            routes.disconnect().await;
-            continue;
+        let Ok(permit) = Arc::clone(&flow_limit).acquire_owned().await else {
+            return;
         };
-        if routes
-            .run_tcp_ingress(ingress, &active_policy, activation_ms)
-            .await
-            .is_ok()
-        {
-            state.write().await.log(
-                LogLevel::Info,
-                "INGRESS_TCP_STREAM_COMPLETED",
-                unix_millis(),
-            );
-        } else {
-            routes.disconnect().await;
-            state
-                .write()
+        let state = Arc::clone(&state);
+        let config = Arc::clone(&config);
+        let discovery = discovery.clone();
+        let helper = helper.clone();
+        let routes = routes.clone();
+        flows.spawn(async move {
+            let _permit = permit;
+            if Box::pin(routes.connect_tcp(&config, &discovery, &helper))
                 .await
-                .log(LogLevel::Warn, "INGRESS_TCP_STREAM_FAILED", unix_millis());
-        }
+                .is_err()
+            {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_TCP_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                return;
+            }
+            let activation_ms = unix_millis();
+            let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+                return;
+            };
+            let (level, message) = if routes
+                .run_tcp_ingress(ingress, &active_policy, activation_ms)
+                .await
+                .is_ok()
+            {
+                (LogLevel::Info, "INGRESS_TCP_STREAM_COMPLETED")
+            } else {
+                (LogLevel::Warn, "INGRESS_TCP_STREAM_FAILED")
+            };
+            state.write().await.log(level, message, unix_millis());
+        });
     }
 }
 
