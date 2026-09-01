@@ -1751,7 +1751,7 @@ counters = {
     "ipv4_frames": 0,
     "routed_transport_packets": 0,
     "internet_destination_outer_packets": 0,
-    "unexpected_outer_transport_packets": 0,
+    "unexpected_outer_packets": 0,
     "client_public_packets": 0,
     "direct_client_exit_packets": 0,
     "control_relay_packets": 0,
@@ -1882,10 +1882,8 @@ while running and time.monotonic() < deadline:
                     counters["client_leg_packets"] += 1
                 if interface == exit_interface:
                     counters["exit_leg_packets"] += 1
-                if protocol in {socket.IPPROTO_TCP, socket.IPPROTO_UDP} and (
-                    source not in allowed or destination not in allowed
-                ):
-                    counters["unexpected_outer_transport_packets"] += 1
+                if source not in allowed or destination not in allowed:
+                    counters["unexpected_outer_packets"] += 1
                 if is_wireguard_data and {source, destination} == {
                     "43.159.1.1",
                     relay_public,
@@ -3686,8 +3684,8 @@ jq -S -c -n \
         and ($r2.exit_leg_wireguard_data_datagrams > 0)
         and ($r1.internet_destination_outer_packets == 0)
         and ($r2.internet_destination_outer_packets == 0)
-        and ($r1.unexpected_outer_transport_packets == 0)
-        and ($r2.unexpected_outer_transport_packets == 0)) as $success
+        and ($r1.unexpected_outer_packets == 0)
+        and ($r2.unexpected_outer_packets == 0)) as $success
     | {schema_version:1,acceptance_id:"A11",success:$success,
        scope:"routed IPv4 outer headers on both physical legs of each data Relay",
        internet_destination:"47.163.4.2",relay1:$r1,relay2:$r2,
@@ -3745,6 +3743,10 @@ jq -S -c -n \
         and ($client.relay2_wireguard_data_datagrams > 0)
         and ($client.direct_client_exit_packets == 0)
         and ($direct_routes | length) == 0
+        and ($exit_route_before | test("dev (cr0|cr1|cr2)( |$)") | not)
+        and ($exit_route_after | test("dev (cr0|cr1|cr2)( |$)") | not)
+        and ($destination_route_before | test("dev (cr0|cr1|cr2)( |$)") | not)
+        and ($destination_route_after | test("dev (cr0|cr1|cr2)( |$)") | not)
         and ($destination_route_before | contains("dev underlay"))) as $success
     | {schema_version:1,acceptance_id:"A13",success:$success,
        topology:{direct_client_exit_adjacency:false,peerless_fallback_underlay:true},
