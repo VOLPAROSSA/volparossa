@@ -83,7 +83,13 @@ impl<'a> TcpAuthorizationScope<'a> {
 
         let port = u16::try_from(message.port)
             .map_err(|_| TcpProxyError::InvalidBinding("destination port"))?;
-        let (hostname, destination_ip) = if !message.hostname.is_empty() {
+        let (hostname, destination_ip) = if message.hostname.is_empty() {
+            let destination_ip = parse_ip_bytes(&message.destination_ip)
+                .ok_or(TcpProxyError::InvalidBinding("destination IP"))?;
+            self.policy
+                .authorize_ip(now_ms, destination_ip, TransportProtocol::Tcp, port)?;
+            (None, Some(destination_ip))
+        } else {
             self.policy.authorize_domain(
                 now_ms,
                 &message.hostname,
@@ -99,12 +105,6 @@ impl<'a> TcpAuthorizationScope<'a> {
                 )
             };
             (Some(message.hostname.clone()), destination_ip)
-        } else {
-            let destination_ip = parse_ip_bytes(&message.destination_ip)
-                .ok_or(TcpProxyError::InvalidBinding("destination IP"))?;
-            self.policy
-                .authorize_ip(now_ms, destination_ip, TransportProtocol::Tcp, port)?;
-            (None, Some(destination_ip))
         };
 
         Ok(AuthorizedTcpFlow {
