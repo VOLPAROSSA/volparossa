@@ -185,6 +185,22 @@ dispatch authority. The wire messages contain no capacity value; dormant A1a ind
 a conservative local preselection ceiling as caller-supplied input. A future production
 client-side owner must derive that ceiling independently.
 
+Before A1a, a separate discovery-private affine sampler can now narrow the exact actor-built
+candidate snapshot to one forwarded Exit, its exact control Relay, and one to eight other Relay
+prospects. It rechecks the complete advertisement/capability/policy/identity and forwarding shape,
+filters by requested role, transport, address family, advertised capacity and free slots, then uses
+an internal fallible CSPRNG with weighted 70/20/10 high, diverse-middle and exploration bands. Exit
+selection is randomized across all eligible forwarded pairs; it is never an implicit first sorted
+Exit. The result keeps the Exit forwarded and the control at direct index zero, so the sampler
+cannot create a normal client-to-Exit hop. Sampling failure returns the exact original snapshot
+affinely.
+
+The sampler applies strict operator-ID, ASN and requested-family advertised-prefix-hint diversity
+across the Exit, control and Relay slate. Those signed canonical public `/24` or `/48` hints are not
+authenticated network origins and do not satisfy A1c. Only the later exact-set transport join may
+substitute direct connection-derived or control-attested prefixes, re-enforce actual origin
+diversity and mint Fresh evidence. No product actor invokes the sampler or connects it to dispatch.
+
 The agent now has a separate dormant A1a consumer around this protocol boundary. Its
 discovery-private `pub(super)` affine `PreselectionAttemptGate` validates one endpoint-free reduced
 snapshot and a caller-supplied non-zero conservative local bandwidth ceiling before entropy. It
@@ -215,7 +231,7 @@ the endpoint-free subject/scope binding, opaque bound transcript tokens, process
 correlation, and attempt ceilings. It has no getter or decomposition surface and contains no local
 socket, connection ID, send/arrival event, prefix-derived direct origin, RTT, reachability,
 `FreshPeerEvidence`, route-session, reservation, or dispatch authority. There is still no
-production client-side attempt owner, outbound orchestrator, or sampler; A1a therefore does not
+production client-side attempt owner or outbound orchestrator; A1a therefore does not
 alter production discovery behavior.
 
 The completed A1a owner now has one dormant, affine A1c join. It accepts exactly one
@@ -281,8 +297,8 @@ transport; only a normalized prefix for the Relay-signed upstream wrapper; only 
 ceiling for a direct transcript; or the earlier joint signed ceiling and control-signed normalized
 prefix for a forwarded transcript. These projections contain no request, actor identity, signature,
 nonce, full endpoint, connection or reusable dispatch/evidence authority. There is still no
-production outbound client attempt actor/owner, sampler or exact-set join into a
-`FreshEvidenceBatch`, and no route-readiness claim follows. A still-current inbound client-hop
+production outbound client attempt actor/owner, and no route-readiness claim follows. A
+still-current inbound client-hop
 request is withheld unless it
 targets the local relay/control and its authenticated remote differs from both local peer and actor;
 requester-anonymous A0 has no client identity to bind. Upstream instead requires the authenticated
@@ -350,8 +366,8 @@ deadline and responder-disable cleanup. Its `/24` derives from explicitly inject
 lineage; it is not an external-network measurement. This is still control-plane transcript
 production only: it makes no Fresh, readiness, capacity, reservation, route or datapath claim.
 
-A future client-side outbound owner must drive the existing exact A1a/A1c join and private
-Fresh-evidence mint. There is still no production client attempt owner, sampler, native
+A future client-side outbound owner must drive the existing sampler, exact A1a/A1c join and private
+Fresh-evidence mint. There is still no production client attempt owner, native
 dataplane-usability proof, route admission, or runtime caller. The fixed alpha score remains
 **11/100 (11%)**.
 

@@ -159,12 +159,13 @@ field directly into the shared normalized prefix type and checks its public rang
 constructs a representative host IP. That normalized value alone proves neither provenance nor
 origin truth.
 
-A0 still has no production client-side outbound attempt owner or sampler. A dormant affine join can
-now consume the completed A1a owner together with one exact service-bound client transport per
-request, purpose-consume both proof kinds, and mint the route-selection child's existing private
-`FreshEvidenceBatch`. No actor calls that bridge, and its conservative batch deliberately leaves
-native dataplane-address usability false, so it cannot yet produce a selectable `CandidateEvidence`
-or route. Discovery composes request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
+A0 still has no production client-side outbound attempt owner. A separate dormant affine sampler
+can narrow the actor-built snapshot, and a dormant affine join can consume the completed A1a owner
+together with one exact service-bound client transport per request, purpose-consume both proof
+kinds, and mint the route-selection child's existing private `FreshEvidenceBatch`. No actor calls
+either boundary, and the conservative batch deliberately leaves native dataplane-address usability
+false, so it cannot yet produce a selectable `CandidateEvidence` or route. Discovery composes
+request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
 dispatch one request, bind an opaque matching response arrival sealed and timestamped by the
 originating service's private pump to a current unique connection proof, or cancel that exact
 dispatch; the affine Relay forwarding wrapper owns upstream sending separately.
@@ -214,6 +215,25 @@ Peer identities, public key, required role/control-exit shape, advertisement seq
 separate local discovery-authority ceiling. It contains no endpoint, origin, history, stored RTT,
 per-peer capacity, operator, or ASN projection.
 
+A separate discovery-private affine sampler now consumes that actor-built candidate snapshot and
+revalidates its exact advertisement, capability, policy, identity, role, transport, family and
+forwarded-control bindings before choosing anything. It chooses one eligible forwarded Exit and
+that Exit's exact control Relay first, then between one and eight other Relay prospects. The
+product entry point owns `OsRng`; weighted choices use bounded 70/20/10 high, diverse-middle and
+exploration bands, so multiple eligible Exits and Relays are sampled rather than silently taking
+the first canonical record. The reduced snapshot keeps the control at direct index zero, one
+forwarded Exit paired to it, and the remaining Relays in sampled order; no direct Exit candidate is
+created. Invalid shape, entropy failure, missing Exit/control, or inadequate diversity fails
+closed while returning the exact original snapshot affinely in the boxed failure.
+
+Preselection diversity is strict across the chosen control, Exit and every other Relay for signed
+operator ID, non-zero ASN and a canonical public advertised IPv4 `/24` or IPv6 `/48` hint in the
+requested family. The hints are inexpensive signed claims, not authenticated network origins;
+they provide no Fresh, route, reservation or reachability authority. The later exact-set transport
+join must replace each hint with the direct connection-derived or control-attested native prefix
+and re-enforce actual network-origin diversity before minting `FreshEvidenceBatch`. The sampler is
+still dormant: it has no production attempt actor, network dispatch or Fresh-evidence caller.
+
 Each discovery-private `pub(super)` affine `PreselectionAttemptGate` lineage admits at most one
 attempt at a time. It validates a batch-wide non-zero conservative local bandwidth ceiling and an
 exact one-forwarded plus one-to-eight-other-relay slate before internally minting a non-zero
@@ -236,7 +256,7 @@ verified transcript against the exact canonical request bytes. Its final
 sanitized subject/request bindings, process-local dispatch ID/request hash, opaque transcript
 tokens and attempt ceilings. It deliberately records no authenticated connection, local send or
 arrival event, socket origin, RTT, reachability, usable address, or Fresh-evidence validity. It
-has no production client root, sampler, transport-join owner, or conversion into phase-A evidence,
+has no production client root, transport-join owner, or conversion into phase-A evidence,
 and creates no `RouteSessionAuthority` or `ReservationSession`. The production request-response
 responders and forwarding wrapper do not consume this A1a value. The completed
 affine A1a owner retains the original, non-cloned `RouteCandidateSnapshot` beside—not inside—the
@@ -318,7 +338,7 @@ upstream connection may yield only the normalized prefix for the Relay-signed wr
 direct or forwarded transcripts yield only their signed validity ceiling, or the earlier joint
 signed ceiling plus the control-signed normalized prefix. None exposes a request, identity,
 signature, nonce, full endpoint, connection, dispatch capability or other reusable authority. No
-production outbound client attempt actor/owner or sampler yet exact-set joins these projections and
+production outbound client attempt actor/owner yet exact-set joins these projections and
 the retained A1a set into a `FreshEvidenceBatch`, so they establish neither Fresh evidence nor route
 readiness. The swarm pump drops a
 still-current client-hop request unless it targets the local relay/control and its authenticated
@@ -372,7 +392,7 @@ connection and all lifecycle cleanup paths above. The test `/24` is derived from
 injected public endpoint lineage and is not external-network evidence. Neither receipt nor wrapper
 claims origin, RTT, capacity, Fresh evidence, reservation, route, admission, readiness, or datapath
 authority. The production agent supplies the policy and permanent signer, but there is still no
-client-side outbound attempt owner or sampler. The dormant exact-set join and private Fresh-evidence
+client-side outbound attempt owner. The dormant sampler, exact-set join and private Fresh-evidence
 mint described below therefore have no runtime caller.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
@@ -380,9 +400,10 @@ Fresh/plan path prefix-native while treating the normalized prefix as untrusted 
 provenance: the path retains no full host IP, sets the legacy candidate-origin field to `None`, and
 uses one opaque /24 or /48 value in the shared hard-filter, exit, prospective-relay and complete-path
 kernels. Legacy full-origin selector entry points remain source-compatible boundary adapters. A1b
-adds no sampler, production caller or usable production candidate. The A1a/A1c bridge now consumes
-the exact opaque transport and transcript proofs, but deliberately cannot prove native dataplane
-usability.
+does not consume the separate snapshot sampler and adds no handler, transport evidence, production
+caller or usable production candidate. The A1a/A1c bridge now consumes the exact opaque transport
+and transcript proofs, but deliberately cannot prove native dataplane usability. Its private Fresh
+batch is still subject to the existing observed-origin diversity hard filter before route planning.
 
 A dormant phase-A boundary consumes one non-cloneable `FreshEvidenceBatch` before it builds a
 `ProspectiveRoutePlan`. In addition to test fixtures, its private production mint now requires the

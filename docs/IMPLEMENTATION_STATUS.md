@@ -1014,10 +1014,20 @@ single clean-build A01--A15 run; the score is not a release claim.
   in-process snapshot only after production signature revalidation and exact persisted
   fingerprint/actor capability/policy joins. Expired, conflicted, self, pending-direct, unpaired,
   direct-only exit, and multiply-control-paired exit records fail closed. The snapshot has no
-  production caller, serialization, or dispatch authority. Control-v4 tags 17 and 18 now define a
-  protocol precursor with no production/network caller for an actor-signed direct observation
-  transcript or an exit-signed receipt nested in a control-signed public-prefix claim. The
-  dedicated verifiers are transactional and return opaque affine transcripts. A separate dormant
+  production caller, serialization, or dispatch authority. A separate discovery-private affine
+  sampler now revalidates that exact snapshot and narrows it to one randomly selected forwarded
+  Exit, its exact control Relay, and one to eight other Relays in weighted 70/20/10 high,
+  diverse-middle and exploration order. It rejects malformed or ambiguous pairings, unsupported
+  role/transport/family, unavailable advertised capacity, active serious faults and insufficient
+  diversity before materialization; failure retains the exact original snapshot in a boxed affine
+  error. It enforces strict operator, non-zero ASN and canonical public advertised `/24` or `/48`
+  hint diversity, but those signed hints are not authenticated origins. A later exact-set join must
+  replace them with connection-derived or control-attested prefixes and re-enforce actual
+  network-origin diversity before Fresh evidence. It never creates a direct Exit candidate and has
+  no production attempt actor, dispatch or Fresh-evidence caller. Control-v4 tags 17 and 18 now
+  define a protocol precursor with no production/network caller for an actor-signed direct
+  observation transcript or an exit-signed receipt nested in a control-signed public-prefix claim.
+  The dedicated verifiers are transactional and return opaque affine transcripts. A separate dormant
   A1a owner now validates
   an endpoint-free reduced snapshot and local conservative ceiling, internally mints a 16-byte
   batch ID plus two to nine unique 32-byte request/challenged-relay-or-exit challenges (the control
@@ -1064,7 +1074,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   transcript; or the earlier joint signed validity and control-signed normalized prefix for a
   forwarded transcript. No projection contains a request, identity, signature, nonce, full
   endpoint, connection, dispatch capability or other reusable authority. No production outbound
-  client attempt actor/owner, sampler or exact-set `FreshEvidenceBatch` join consumes these values,
+  client attempt actor/owner or exact-set `FreshEvidenceBatch` join consumes these values,
   and they make no Fresh-evidence or route-readiness claim. The
   swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
@@ -1131,7 +1141,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   record. This remains control-plane
   transcript production only and claims no Freshness, readiness, capacity, reservation, route or
   datapath.
-  There is still no outbound production client attempt owner or sampler. A dormant affine join now
+  There is still no outbound production client attempt owner. The dormant snapshot sampler and
+  affine join have no runtime caller. The join now
   consumes the completed A1a owner plus one exact `BoundClientPreselectionTransport` per canonical
   request and purpose-consumes both opaque proof types. It rejects count, order, duplicate or wrong
   request hash, actor/role/forwarded-control shape, transport, family, wall-window and independent
