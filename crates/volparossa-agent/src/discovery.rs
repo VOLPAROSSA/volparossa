@@ -19007,6 +19007,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_client_preselection_accepts_same_lineage_control_refresh() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        });
+        let initial_ms = unix_millis().saturating_sub(2_000);
+        let control_identity = Identity::generate();
+        let exit_identity = Identity::generate();
+        let original_control = install_valid_snapshot_route_for(
+            &mut fixture,
+            &control_identity,
+            &exit_identity,
+            initial_ms,
+        )
+        .await;
+
+        let refresh_ms = unix_millis();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &control_identity,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                2,
+                [163; 32],
+                refresh_ms,
+            )
+            .await
+            .is_some()
+        );
+        let refreshed_control = fixture
+            .runtime
+            .direct_relays
+            .get(control_identity.peer_id())
+            .expect("refreshed control capability")
+            .clone();
+        assert_eq!(refreshed_control.node_id, original_control.node_id);
+        assert_eq!(refreshed_control.peer_id, original_control.peer_id);
+        assert_eq!(refreshed_control.public_key, original_control.public_key);
+        assert_eq!(refreshed_control.policy_hash, original_control.policy_hash);
+        assert_ne!(
+            refreshed_control.advertisement_sequence,
+            original_control.advertisement_sequence
+        );
+        assert_ne!(
+            refreshed_control.advertisement_expires_at_ms,
+            original_control.advertisement_expires_at_ms
+        );
+        assert_ne!(
+            refreshed_control.advertisement_payload_hash,
+            original_control.advertisement_payload_hash
+        );
+
+        let retained_exit = fixture
+            .runtime
+            .forwarded_exits
+            .values()
+            .next()
+            .expect("same-lineage forwarded exit survives refresh");
+        assert_eq!(
+            retained_exit.control_relay_advertisement_sequence,
+            original_control.advertisement_sequence
+        );
+        assert_eq!(
+            retained_exit.control_relay_advertisement_expires_at_ms,
+            original_control.advertisement_expires_at_ms
+        );
+        assert_eq!(
+            retained_exit.control_relay_advertisement_payload_hash,
+            original_control.advertisement_payload_hash
+        );
+
+        let other_relay = Identity::generate();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &other_relay,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                1,
+                [164; 32],
+                refresh_ms,
+            )
+            .await
+            .is_some()
+        );
+
+        let (reply, response) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_preselection(
+                valid_client_preselection_parameters(),
+                reply,
+                &fixture.state,
+            )
+            .await;
+        assert!(matches!(
+            response.await.expect("terminal dispatch result"),
+            Err(ClientPreselectionError::Transport)
+        ));
+        assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 1);
+    }
+
+    #[tokio::test]
     async fn production_client_preselection_samples_before_request_derived_dispatch_and_cools() {
         let mut fixture = fixture(RolesConfig {
             client: true,

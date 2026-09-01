@@ -2388,13 +2388,12 @@ fn validate_subject_set_matches_snapshot(
                 .min(forwarded.policy_expires_at_ms)
                 .min(control.capability_expires_at_ms)
         || forwarded.expires_at_ms > exit.capability_expires_at_ms
+        || forwarded.expires_at_ms > forwarded.control_relay_advertisement_expires_at_ms
         || control.node_id != forwarded.control_relay_node_id
         || control.peer_id != forwarded.control_relay_peer_id.to_bytes()
         || control.public_key != forwarded.control_relay_public_key
-        || control.advertisement_sequence != forwarded.control_relay_advertisement_sequence
-        || control.advertisement_expires_at_ms
-            != forwarded.control_relay_advertisement_expires_at_ms
-        || control.advertisement_payload_hash != forwarded.control_relay_advertisement_payload_hash
+        || forwarded.control_relay_advertisement_sequence == 0
+        || forwarded.control_relay_advertisement_expires_at_ms <= now_ms
         || control.advertisement_payload_hash
             != nested_control.advertisement().advertisement_payload_hash()
         || control.advertisement_payload_hash

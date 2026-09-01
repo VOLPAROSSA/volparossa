@@ -439,7 +439,8 @@ fn forwarded_binding_is_valid(
     let upper_expiry = capability
         .exit_advertisement_expires_at_ms
         .min(capability.policy_expires_at_ms)
-        .min(control_capability.expires_at_ms);
+        .min(control_capability.expires_at_ms)
+        .min(capability.control_relay_advertisement_expires_at_ms);
     advertisement_projection_is_valid(advertisement, sampled_at_ms)
         && body.roles.exit
         && identity_binding_is_valid(
@@ -455,12 +456,8 @@ fn forwarded_binding_is_valid(
         && capability.control_relay_node_id == control_capability.node_id
         && capability.control_relay_peer_id == control_capability.peer_id
         && capability.control_relay_public_key == control_capability.public_key
-        && capability.control_relay_advertisement_sequence
-            == control_capability.advertisement_sequence
-        && capability.control_relay_advertisement_expires_at_ms
-            == control_capability.advertisement_expires_at_ms
-        && capability.control_relay_advertisement_payload_hash
-            == control_capability.advertisement_payload_hash
+        && capability.control_relay_advertisement_sequence != 0
+        && capability.control_relay_advertisement_expires_at_ms > sampled_at_ms
         && capability.policy_version == snapshot.policy.version()
         && capability.policy_hash == snapshot.policy.hash()
         && capability.policy_expires_at_ms == snapshot.policy.expires_at_ms()
