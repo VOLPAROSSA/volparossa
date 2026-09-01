@@ -152,6 +152,7 @@ grep -F 'a04_mptcp_relay_failover:{requested:$a04_requested,succeeded:$a04_succe
 grep -F 'http3-acceptance-fixture" server' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" client a06' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" client a07' "$GUEST" >/dev/null
+grep -F '"$WORK/client-fixtures/http3-cert.der"' "$GUEST" >/dev/null
 grep -F 'connected: false' "$GUEST" >/dev/null
 grep -F 'active contexts: 0' "$GUEST" >/dev/null
 grep -F 'destination == "47.163.4.2" and destination_port == 443' "$GUEST" \
@@ -171,6 +172,7 @@ grep -F 'a07_http3_relay_failover:{requested:$a07_requested,succeeded:$a07_succe
     >/dev/null
 grep -F 'tls-policy-acceptance-fixture" allowed' "$GUEST" >/dev/null
 grep -F 'tls-policy-acceptance-fixture" denied' "$GUEST" >/dev/null
+grep -F '"$WORK/tls-policy/tls-policy-cert.der"' "$GUEST" >/dev/null
 grep -F 'destination.volparossa.test' "$GUEST" >/dev/null
 grep -F 'INGRESS_TCP_POLICY_DENIED' "$GUEST" >/dev/null
 grep -F 'INGRESS_TCP_ECH_DENIED' "$GUEST" >/dev/null

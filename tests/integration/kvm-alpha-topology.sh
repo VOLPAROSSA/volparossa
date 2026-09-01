@@ -908,6 +908,7 @@ install -o root -g "$AGENT_GID" -m 0555 \
 install -o root -g "$AGENT_GID" -m 0555 \
     "$binary_directory/examples/tls-policy-acceptance-fixture" \
     "$WORK/bin/examples/tls-policy-acceptance-fixture"
+install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/client-fixtures"
 binary_directory=$WORK/bin
 mpquic_binary=$WORK/bin/volparossa-mpquic
 
@@ -3912,6 +3913,8 @@ while [ "$attempt" -lt 100 ]; do
     attempt=$((attempt + 1))
 done
 [ -s "$WORK/destination/http3-server.ready" ] || fail A06_HTTP3_SERVER_UNAVAILABLE
+install -o "$WORKER_UID" -g "$WORKER_GID" -m 0400 \
+    "$WORK/destination/http3-cert.der" "$WORK/client-fixtures/http3-cert.der"
 
 PHASE=a06-http3-mpquic
 A06_REQUESTED=true
@@ -3930,16 +3933,16 @@ start_privacy_observers || fail PRIVACY_CAPTURE_UNAVAILABLE
 start_http3_observers a06 - || fail A06_CAPTURE_UNAVAILABLE
 set +e
 timeout --signal=TERM --kill-after=5s 200s \
-    ip netns exec "$CLIENT" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/http3-acceptance-fixture" client a06 \
-    43.159.1.1:0 47.163.4.2:443 "$WORK/destination/http3-cert.der" \
-    "$RUN_ID" "$WORK/destination/client-a06.json" 2>"$WORK/a06-client.err"
+    43.159.1.1:0 47.163.4.2:443 "$WORK/client-fixtures/http3-cert.der" \
+    "$RUN_ID" "$WORK/client-fixtures/a06-client.json" 2>"$WORK/a06-client.err"
 A06_STATUS=$?
 set -e
-if [ -s "$WORK/destination/client-a06.json" ]; then
-    install -o root -g root -m 0600 "$WORK/destination/client-a06.json" \
+if [ -s "$WORK/client-fixtures/a06-client.json" ]; then
+    install -o root -g root -m 0600 "$WORK/client-fixtures/a06-client.json" \
         "$WORK/a06-client.json"
 fi
 destination_attempt=0
@@ -4034,12 +4037,12 @@ A07_STATUS=1
 start_http3_observers a07 "$WORK/a07-relay-removal.marker" \
     || fail A07_CAPTURE_UNAVAILABLE
 timeout --signal=TERM --kill-after=5s 200s \
-    ip netns exec "$CLIENT" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/http3-acceptance-fixture" client a07 \
-    43.159.1.1:0 47.163.4.2:443 "$WORK/destination/http3-cert.der" \
-    "$RUN_ID" "$WORK/destination/client-a07.json" 2>"$WORK/a07-client.err" &
+    43.159.1.1:0 47.163.4.2:443 "$WORK/client-fixtures/http3-cert.der" \
+    "$RUN_ID" "$WORK/client-fixtures/a07-client.json" 2>"$WORK/a07-client.err" &
 HTTP3_CLIENT_PID=$!
 attempt=0
 while [ "$attempt" -lt 1800 ]; do
@@ -4071,8 +4074,8 @@ wait "$HTTP3_CLIENT_PID"
 A07_STATUS=$?
 set -e
 HTTP3_CLIENT_PID=
-if [ -s "$WORK/destination/client-a07.json" ]; then
-    install -o root -g root -m 0600 "$WORK/destination/client-a07.json" \
+if [ -s "$WORK/client-fixtures/a07-client.json" ]; then
+    install -o root -g root -m 0600 "$WORK/client-fixtures/a07-client.json" \
         "$WORK/a07-client.json"
 fi
 destination_attempt=0
@@ -4203,7 +4206,7 @@ while [ "$attempt" -lt 300 ]; do
 done
 [ "$attempt" -lt 300 ] || fail A08_PREVIOUS_ROUTE_NOT_IDLE
 
-install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/tls-policy"
+install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/tls-policy"
 timeout --signal=TERM --kill-after=5s 330s \
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
@@ -4224,6 +4227,8 @@ while [ "$attempt" -lt 100 ]; do
 done
 [ -s "$WORK/destination/tls-policy.ready" ] \
     || fail A08_TLS_DESTINATION_UNAVAILABLE
+install -o "$WORKER_UID" -g "$WORKER_GID" -m 0400 \
+    "$WORK/destination/tls-policy-cert.der" "$WORK/tls-policy/tls-policy-cert.der"
 
 capture_product_logs
 A08_COMPLETION_BEFORE=$(grep -Fc 'event=INGRESS_TCP_STREAM_COMPLETED' \
@@ -4233,11 +4238,11 @@ A08_REQUESTED=true
 A08_STATUS=1
 set +e
 timeout --signal=TERM --kill-after=5s 180s \
-    ip netns exec "$CLIENT" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     "$WORK/bin/examples/tls-policy-acceptance-fixture" allowed \
-    47.163.4.2:443 "$WORK/destination/tls-policy-cert.der" \
+    47.163.4.2:443 "$WORK/tls-policy/tls-policy-cert.der" \
     "$RUN_ID" "$WORK/tls-policy/a08-client.json" \
     >"$WORK/tls-policy/a08-client.out" 2>"$WORK/tls-policy/a08-client.err"
 A08_STATUS=$?
@@ -4333,7 +4338,7 @@ run_tls_policy_denial() {
     esac
     set +e
     timeout --signal=TERM --kill-after=5s 45s \
-        ip netns exec "$CLIENT" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+        ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
         --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
         --no-new-privs -- \
         "$WORK/bin/examples/tls-policy-acceptance-fixture" denied \
