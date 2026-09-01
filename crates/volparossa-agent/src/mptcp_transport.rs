@@ -2,7 +2,9 @@
 
 use std::{collections::BTreeSet, io, net::SocketAddr};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use volparossa_discovery::ExitMptcpSessionSignal as DiscoveryExitMptcpSessionSignal;
 use volparossa_mptcp::{MptcpListener, MptcpStream};
 use volparossa_routing::{
     AcquireTransportSocket, AddMptcpEndpoint, MptcpEndpointMode, RemoveMptcpEndpoint,
@@ -11,6 +13,10 @@ use volparossa_routing::{
 use volparossa_wireguard::{WireGuardError, overlay_addresses};
 
 use crate::helper::{AcquiredTransportSocket, HelperClient, HelperClientError};
+
+/// Route-local Exit listener port shared by the authenticated readiness signal and helper request.
+pub(crate) const PRODUCTION_MPTCP_EXIT_PORT: u16 = 44_443;
+const MAXIMUM_EXIT_CERTIFICATE_DER_BYTES: usize = 64 * 1_024;
 
 /// A genuinely negotiated client MPTCP stream plus the exact helper-owned selected paths.
 pub struct ClientMptcpTransport {
@@ -25,45 +31,90 @@ pub struct ClientMptcpTransport {
 /// Construction is crate-private so an untrusted local caller cannot turn an arbitrary overlay
 /// tuple into transport authority. The production Exit response verifier is the intended owner of
 /// this constructor once its wire signal is connected.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExitMptcpListenerSignal {
     route_context_id: [u8; 16],
-    path_id: u32,
     port: u16,
+    selected_path_ids: Vec<u32>,
+    certificate_der: Vec<u8>,
 }
 
 impl ExitMptcpListenerSignal {
-    #[allow(
-        dead_code,
-        reason = "the authenticated Exit wire verifier is the next bounded caller"
-    )]
     pub(crate) fn new(
         route_context_id: [u8; 16],
-        path_id: u32,
         port: u16,
+        paths: impl IntoIterator<Item = u32>,
+        certificate_der: Vec<u8>,
     ) -> Result<Self, MptcpTransportError> {
-        let path_id_u8 = u8::try_from(path_id).map_err(|_| MptcpTransportError::InvalidMetadata)?;
-        overlay_addresses(route_context_id, path_id_u8)?;
-        if port == 0 {
+        if port == 0
+            || certificate_der.is_empty()
+            || certificate_der.len() > MAXIMUM_EXIT_CERTIFICATE_DER_BYTES
+        {
             return Err(MptcpTransportError::InvalidMetadata);
+        }
+        let selected_path_ids = selected_path_ids(paths)?;
+        for path_id in &selected_path_ids {
+            let path_id =
+                u8::try_from(*path_id).map_err(|_| MptcpTransportError::InvalidMetadata)?;
+            overlay_addresses(route_context_id, path_id)?;
         }
         Ok(Self {
             route_context_id,
-            path_id,
             port,
+            selected_path_ids,
+            certificate_der,
         })
     }
 
-    pub(crate) const fn route_context_id(self) -> [u8; 16] {
+    /// Convert only a fully validated authenticated discovery readiness signal.
+    pub(crate) fn try_from_discovery(
+        signal: &DiscoveryExitMptcpSessionSignal,
+        expected_certificate_sha256: &[u8],
+    ) -> Result<Self, MptcpTransportError> {
+        signal
+            .validate()
+            .map_err(|_| MptcpTransportError::InvalidMetadata)?;
+        let route_context_id = signal
+            .route_context_id()
+            .try_into()
+            .map_err(|_| MptcpTransportError::InvalidMetadata)?;
+        let port = u16::try_from(signal.listener_port())
+            .map_err(|_| MptcpTransportError::InvalidMetadata)?;
+        if expected_certificate_sha256.len() != 32
+            || Sha256::digest(signal.certificate_der()).as_slice() != expected_certificate_sha256
+        {
+            return Err(MptcpTransportError::InvalidMetadata);
+        }
+        Self::new(
+            route_context_id,
+            port,
+            signal.selected_path_ids().iter().copied(),
+            signal.certificate_der().to_vec(),
+        )
+    }
+
+    pub(crate) const fn route_context_id(&self) -> [u8; 16] {
         self.route_context_id
     }
 
-    pub(crate) const fn path_id(self) -> u32 {
-        self.path_id
+    pub(crate) fn path_id(&self) -> u32 {
+        self.selected_path_ids[0]
     }
 
-    pub(crate) const fn port(self) -> u16 {
+    pub(crate) const fn port(&self) -> u16 {
         self.port
+    }
+
+    pub(crate) fn selected_path_ids(&self) -> &[u32] {
+        &self.selected_path_ids
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the Client TLS activation consumes these digest-bound roots in the next slice"
+    )]
+    pub(crate) fn certificate_der(&self) -> &[u8] {
+        &self.certificate_der
     }
 }
 
@@ -78,10 +129,9 @@ impl ClientMptcpTransport {
         signal: ExitMptcpListenerSignal,
         context_handle: Vec<u8>,
         local_port: u16,
-        selected_paths: impl IntoIterator<Item = u32>,
     ) -> Result<Self, MptcpTransportError> {
-        let selected_paths = selected_path_ids(selected_paths)?;
-        let request = client_acquire_request(signal, context_handle.clone(), local_port)?;
+        let selected_paths = signal.selected_path_ids.clone();
+        let request = client_acquire_request(&signal, context_handle.clone(), local_port)?;
         let acquired = helper.acquire_transport_socket(request).await?;
         Self::activate(
             helper,
@@ -187,10 +237,9 @@ impl ExitMptcpTransport {
         helper: &HelperClient,
         signal: ExitMptcpListenerSignal,
         context_handle: Vec<u8>,
-        selected_paths: impl IntoIterator<Item = u32>,
     ) -> Result<Self, MptcpTransportError> {
-        let paths = selected_path_ids(selected_paths)?;
-        let request = exit_acquire_request(signal, context_handle.clone())?;
+        let paths = signal.selected_path_ids.clone();
+        let request = exit_acquire_request(&signal, context_handle.clone())?;
         let acquired = helper.acquire_transport_socket(request).await?;
         let listener = adopt_exit_listener(acquired)?;
         let mut active_paths = Vec::with_capacity(paths.len());
@@ -302,19 +351,20 @@ fn socket_address(
 }
 
 fn client_acquire_request(
-    signal: ExitMptcpListenerSignal,
+    signal: &ExitMptcpListenerSignal,
     context_handle: Vec<u8>,
     local_port: u16,
 ) -> Result<AcquireTransportSocket, MptcpTransportError> {
     if local_port == 0 || local_port == signal.port {
         return Err(MptcpTransportError::InvalidMetadata);
     }
-    let path_id = u8::try_from(signal.path_id).map_err(|_| MptcpTransportError::InvalidMetadata)?;
+    let path_id =
+        u8::try_from(signal.path_id()).map_err(|_| MptcpTransportError::InvalidMetadata)?;
     let addresses = overlay_addresses(signal.route_context_id, path_id)?;
     Ok(AcquireTransportSocket {
         route_context_id: signal.route_context_id.to_vec(),
         context_handle,
-        path_id: signal.path_id,
+        path_id: signal.path_id(),
         role: WireguardRole::Client as i32,
         descriptor_kind: TransportSocketKind::MptcpConnected as i32,
         expected_local: Some(transport_address(addresses.client, local_port)),
@@ -327,15 +377,16 @@ fn client_acquire_request(
     reason = "the standard Exit responder calls this through ExitMptcpTransport"
 )]
 fn exit_acquire_request(
-    signal: ExitMptcpListenerSignal,
+    signal: &ExitMptcpListenerSignal,
     context_handle: Vec<u8>,
 ) -> Result<AcquireTransportSocket, MptcpTransportError> {
-    let path_id = u8::try_from(signal.path_id).map_err(|_| MptcpTransportError::InvalidMetadata)?;
+    let path_id =
+        u8::try_from(signal.path_id()).map_err(|_| MptcpTransportError::InvalidMetadata)?;
     let addresses = overlay_addresses(signal.route_context_id, path_id)?;
     Ok(AcquireTransportSocket {
         route_context_id: signal.route_context_id.to_vec(),
         context_handle,
-        path_id: signal.path_id,
+        path_id: signal.path_id(),
         role: WireguardRole::Exit as i32,
         descriptor_kind: TransportSocketKind::MptcpListener as i32,
         expected_local: Some(transport_address(addresses.exit, signal.port)),
@@ -418,9 +469,10 @@ mod tests {
     #[test]
     fn client_and_exit_acquisition_share_one_canonical_listener_signal() {
         let route_context_id = [71; 16];
-        let signal = ExitMptcpListenerSignal::new(route_context_id, 2, 44_443).expect("signal");
-        let client = client_acquire_request(signal, vec![9; 32], 52_001).expect("client");
-        let exit = exit_acquire_request(signal, vec![8; 32]).expect("exit");
+        let signal = ExitMptcpListenerSignal::new(route_context_id, 44_443, [2, 3], vec![0x30, 1])
+            .expect("signal");
+        let client = client_acquire_request(&signal, vec![9; 32], 52_001).expect("client");
+        let exit = exit_acquire_request(&signal, vec![8; 32]).expect("exit");
         let addresses = overlay_addresses(route_context_id, 2).expect("overlay");
 
         assert_eq!(client.route_context_id, route_context_id);
@@ -446,11 +498,31 @@ mod tests {
 
     #[test]
     fn listener_signal_and_client_source_port_fail_closed() {
-        assert!(ExitMptcpListenerSignal::new([0; 16], 1, 44_443).is_err());
-        assert!(ExitMptcpListenerSignal::new([7; 16], 0, 44_443).is_err());
-        assert!(ExitMptcpListenerSignal::new([7; 16], 1, 0).is_err());
-        let signal = ExitMptcpListenerSignal::new([7; 16], 1, 44_443).expect("signal");
-        assert!(client_acquire_request(signal, vec![1; 32], 0).is_err());
-        assert!(client_acquire_request(signal, vec![1; 32], 44_443).is_err());
+        assert!(ExitMptcpListenerSignal::new([0; 16], 44_443, [1, 2], vec![1]).is_err());
+        assert!(ExitMptcpListenerSignal::new([7; 16], 44_443, [0, 1], vec![1]).is_err());
+        assert!(ExitMptcpListenerSignal::new([7; 16], 0, [1, 2], vec![1]).is_err());
+        let signal =
+            ExitMptcpListenerSignal::new([7; 16], 44_443, [1, 2], vec![0x30, 1]).expect("signal");
+        assert!(client_acquire_request(&signal, vec![1; 32], 0).is_err());
+        assert!(client_acquire_request(&signal, vec![1; 32], 44_443).is_err());
+    }
+
+    #[test]
+    fn discovery_signal_retains_only_digest_bound_certificate_and_exact_set() {
+        let certificate_der = vec![0x30, 0x82, 1, 2, 3];
+        let digest = Sha256::digest(&certificate_der);
+        let wire = DiscoveryExitMptcpSessionSignal::new(
+            [5; 16],
+            [7; 16],
+            PRODUCTION_MPTCP_EXIT_PORT,
+            vec![1, 3],
+            certificate_der.clone(),
+        )
+        .expect("wire signal");
+        let local = ExitMptcpListenerSignal::try_from_discovery(&wire, digest.as_slice())
+            .expect("digest-bound signal");
+        assert_eq!(local.selected_path_ids(), [1, 3]);
+        assert_eq!(local.certificate_der(), certificate_der);
+        assert!(ExitMptcpListenerSignal::try_from_discovery(&wire, &[9; 32]).is_err());
     }
 }

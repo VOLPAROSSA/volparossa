@@ -12,6 +12,7 @@ const ID_BYTES: usize = 16;
 const NODE_ID_BYTES: usize = 32;
 const MIN_MPTCP_PATHS: usize = 2;
 const MAX_MPTCP_PATHS: usize = 8;
+const MAX_CERTIFICATE_DER_BYTES: usize = 64 * 1_024;
 
 /// One exact Relay acceptance, Client confirmation, and Exit receipt tuple.
 #[derive(Clone, PartialEq, Message)]
@@ -172,6 +173,8 @@ pub struct ExitMptcpSessionSignal {
     listener_port: u32,
     #[prost(uint32, repeated, tag = "4")]
     selected_path_ids: Vec<u32>,
+    #[prost(bytes = "vec", tag = "5")]
+    certificate_der: Vec<u8>,
 }
 
 impl ExitMptcpSessionSignal {
@@ -179,18 +182,20 @@ impl ExitMptcpSessionSignal {
     ///
     /// # Errors
     ///
-    /// Rejects zero route identifiers/port or a non-canonical path set.
+    /// Rejects zero route identifiers/port, a non-canonical path set, or an unsafe certificate.
     pub fn new(
         reservation_id: [u8; ID_BYTES],
         route_context_id: [u8; ID_BYTES],
         listener_port: u16,
         selected_path_ids: Vec<u32>,
+        certificate_der: Vec<u8>,
     ) -> Result<Self, MptcpSessionFrameError> {
         let value = Self {
             reservation_id: reservation_id.to_vec(),
             route_context_id: route_context_id.to_vec(),
             listener_port: u32::from(listener_port),
             selected_path_ids,
+            certificate_der,
         };
         value.validate()?;
         Ok(value)
@@ -200,7 +205,8 @@ impl ExitMptcpSessionSignal {
     ///
     /// # Errors
     ///
-    /// Rejects malformed IDs, an invalid TCP port, fewer than two paths, duplicates, or path zero.
+    /// Rejects malformed IDs, an invalid TCP port, fewer than two paths, duplicates, path zero, or
+    /// an empty/oversized public certificate.
     pub fn validate(&self) -> Result<(), MptcpSessionFrameError> {
         if fixed_nonzero::<ID_BYTES>(&self.reservation_id).is_none()
             || fixed_nonzero::<ID_BYTES>(&self.route_context_id).is_none()
@@ -208,6 +214,8 @@ impl ExitMptcpSessionSignal {
                 .ok()
                 .is_none_or(|port| port == 0)
             || !(MIN_MPTCP_PATHS..=MAX_MPTCP_PATHS).contains(&self.selected_path_ids.len())
+            || self.certificate_der.is_empty()
+            || self.certificate_der.len() > MAX_CERTIFICATE_DER_BYTES
         {
             return Err(MptcpSessionFrameError::Invalid);
         }
@@ -245,6 +253,12 @@ impl ExitMptcpSessionSignal {
     #[must_use]
     pub fn selected_path_ids(&self) -> &[u32] {
         &self.selected_path_ids
+    }
+
+    /// Public route certificate whose SHA-256 digest is committed by the Exit reservation.
+    #[must_use]
+    pub fn certificate_der(&self) -> &[u8] {
+        &self.certificate_der
     }
 }
 
@@ -443,8 +457,8 @@ mod tests {
         decoded.validate().expect("exact start scope");
         assert_eq!(decoded.paths().len(), 2);
 
-        let signal =
-            ExitMptcpSessionSignal::new([1; 16], [2; 16], 443, vec![1, 2]).expect("bounded signal");
+        let signal = ExitMptcpSessionSignal::new([1; 16], [2; 16], 443, vec![1, 2], vec![0x30, 1])
+            .expect("bounded signal");
         let encoded = encode_canonical(&signal, MAX_CONTROL_MESSAGE_SIZE).expect("signal encode");
         let decoded =
             decode_canonical::<ExitMptcpSessionSignal>(&encoded, MAX_CONTROL_MESSAGE_SIZE)
@@ -513,10 +527,13 @@ mod tests {
     fn signal_rejects_non_multipath_or_noncanonical_selected_sets() {
         for paths in [vec![1], vec![1, 1], vec![2, 1], vec![0, 1]] {
             assert_eq!(
-                ExitMptcpSessionSignal::new([1; 16], [2; 16], 443, paths),
+                ExitMptcpSessionSignal::new([1; 16], [2; 16], 443, paths, vec![0x30, 1],),
                 Err(MptcpSessionFrameError::Invalid)
             );
         }
+        assert!(
+            ExitMptcpSessionSignal::new([1; 16], [2; 16], 443, vec![1, 2], Vec::new()).is_err()
+        );
     }
 
     #[test]
@@ -524,7 +541,8 @@ mod tests {
         let start = encode_canonical(&correlated_start(&[1, 2]), MAX_CONTROL_MESSAGE_SIZE)
             .expect("start frame");
         let signal = encode_canonical(
-            &ExitMptcpSessionSignal::new([1; 16], [2; 16], 443, vec![1, 2]).expect("signal"),
+            &ExitMptcpSessionSignal::new([1; 16], [2; 16], 443, vec![1, 2], vec![0x30, 1])
+                .expect("signal"),
             MAX_CONTROL_MESSAGE_SIZE,
         )
         .expect("signal frame");

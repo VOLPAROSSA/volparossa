@@ -60,12 +60,13 @@ use volparossa_discovery::{
     ClientPreselectionResponseArrival, DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation,
     DatapathRelayRequest, DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles,
     DiscoveryService, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT,
-    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
-    LocalPreselectionPolicy, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
-    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, NativeProbeReadyForwardRequest,
-    PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink, UdpExitSessionSignal,
-    UdpSessionStartRequest, UpstreamExitForwardRequest, UpstreamExitForwardResponse,
-    advertisement_envelope_matches_peer, capability, signed_envelope_matches_peer,
+    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ExitMptcpSessionSignal,
+    ForwardStatus, LocalPreselectionPolicy, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
+    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, MptcpSessionStartRequest,
+    NativeProbeReadyForwardRequest, PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink,
+    UdpExitSessionSignal, UdpSessionStartRequest, UpstreamExitForwardRequest,
+    UpstreamExitForwardResponse, advertisement_envelope_matches_peer, capability,
+    signed_envelope_matches_peer,
 };
 use volparossa_exit::{
     AcceptedExitConfirmation, AcceptedExitReservationBundle, ExitService, ExitServiceConfig,
@@ -115,10 +116,13 @@ use crate::{
         protocol_endpoint_for_native,
     },
     helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
+    mptcp_transport::{ExitMptcpListenerSignal, ExitMptcpTransport, PRODUCTION_MPTCP_EXIT_PORT},
     roles::RoleStore,
     route_setup::{PreparedPreselectionEvidence, prepare_preselection_evidence},
     state::AgentState,
-    udp_exit_provider::{ProductionExitNativeRouteIdentityProvider, start_production_udp_exit},
+    udp_exit_provider::{
+        ProductionExitNativeRouteIdentityProvider, route_certificate_der, start_production_udp_exit,
+    },
     unix_millis, unix_seconds,
 };
 
@@ -584,6 +588,7 @@ struct PendingRelayForward {
     native_authorization: Option<PendingNativeProbeAuthorization>,
     native_result: Option<PendingNativeProbeResult>,
     udp_session: Option<PendingUdpSessionStart>,
+    mptcp_session: Option<PendingMptcpSessionStart>,
 }
 
 struct PendingNativeProbeReady {
@@ -765,12 +770,33 @@ struct PendingUdpSessionStart {
     route: PreparedProductionRelayRoute,
 }
 
+struct PendingMptcpSessionStart {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<DatapathRelayResponse>>,
+    canonical_start: Vec<u8>,
+    selected_path_ids: Vec<u32>,
+    route: PreparedProductionRelayRoute,
+}
+
+struct PendingMptcpExitRelay {
+    forward_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<UpstreamExitForwardResponse>>,
+}
+
+struct PendingMptcpExitSession {
+    canonical_start: Vec<u8>,
+    selected_path_ids: Vec<u32>,
+    relays: HashMap<u32, PendingMptcpExitRelay>,
+    expires_at_ms: u64,
+}
+
 /// Exit-owned helper context and finalized grant awaiting exact Relay confirmations.
 ///
 /// The helper leases are prepared before their public endpoints are signed. Activation happens
 /// only after `ExitService` has authenticated each Relay reservation and exposed its exact public
-/// relay-to-Exit endpoint. Commit and transport-socket adoption remain deferred to
-/// `UdpSessionStart`.
+/// relay-to-Exit endpoint. Commit and transport-socket adoption remain deferred to the exact
+/// transport-specific session Start.
 struct PreparedProductionExitRoute {
     canonical_finalize_request: Vec<u8>,
     bundle: AcceptedExitReservationBundle,
@@ -779,6 +805,42 @@ struct PreparedProductionExitRoute {
     pending_activations: HashMap<u32, LeaseActivation>,
     commit: Option<CommitLeaseBatch>,
     expires_at_ms: u64,
+}
+
+/// A genuine helper-owned Exit MPTCP listener retained with its reservation and TLS identity.
+///
+/// The stream/TLS proxy consumes these owners in the next vertical slice. Until then the actor
+/// keeps them affine, answers only exact idempotent Start retries, and destroys the helper context
+/// at signed expiry.
+pub(crate) struct ActiveProductionMptcpExitRoute {
+    canonical_start: Vec<u8>,
+    encoded_signal: Vec<u8>,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+    transport: Option<ExitMptcpTransport>,
+    tcp_route: volparossa_exit::ActiveTcpRoute,
+    native_authorization: volparossa_exit::ExitNativeRouteAuthorization,
+    reservation_id: [u8; FORWARD_ID_BYTES],
+    expires_at_ms: u64,
+}
+
+#[allow(
+    dead_code,
+    reason = "the TLS13 OPEN_TCP runner consumes this retained owner in the next vertical slice"
+)]
+impl ActiveProductionMptcpExitRoute {
+    pub(crate) fn transport(&self) -> Option<&ExitMptcpTransport> {
+        self.transport.as_ref()
+    }
+
+    pub(crate) const fn tcp_route(&self) -> &volparossa_exit::ActiveTcpRoute {
+        &self.tcp_route
+    }
+
+    pub(crate) const fn native_authorization(
+        &self,
+    ) -> &volparossa_exit::ExitNativeRouteAuthorization {
+        &self.native_authorization
+    }
 }
 
 #[derive(Clone)]
@@ -1502,6 +1564,9 @@ pub struct DiscoveryRuntime {
     recent_native_exit_evidence: Vec<RecentNativeExitEvidence>,
     prepared_production_relay_routes: HashMap<[u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute>,
     prepared_production_exit_routes: HashMap<[u8; FORWARD_ID_BYTES], PreparedProductionExitRoute>,
+    pending_mptcp_exit_sessions: HashMap<[u8; FORWARD_ID_BYTES], PendingMptcpExitSession>,
+    active_production_mptcp_exit_routes:
+        HashMap<[u8; FORWARD_ID_BYTES], ActiveProductionMptcpExitRoute>,
     exit_native_ready_attempts: HashMap<[u8; FORWARD_ID_BYTES], ExitNativeReadyAttempt>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
     datapath_index: HashMap<DatapathKey, request_response::OutboundRequestId>,
@@ -1633,6 +1698,8 @@ impl DiscoveryRuntime {
             recent_native_exit_evidence: Vec::new(),
             prepared_production_relay_routes: HashMap::new(),
             prepared_production_exit_routes: HashMap::new(),
+            pending_mptcp_exit_sessions: HashMap::new(),
+            active_production_mptcp_exit_routes: HashMap::new(),
             exit_native_ready_attempts: HashMap::new(),
             pending_datapath: HashMap::new(),
             datapath_index: HashMap::new(),
@@ -1697,7 +1764,9 @@ impl DiscoveryRuntime {
                     let now_ms = unix_millis();
                     self.destroy_expired_exit_native_attempts(now_ms).await;
                     self.destroy_expired_production_relay_routes(now_ms).await;
+                    self.expire_pending_mptcp_exit_sessions(now_ms).await;
                     self.destroy_expired_production_exit_routes(now_ms).await;
+                    self.destroy_expired_active_mptcp_exit_routes(now_ms).await;
                     let relay_purged = self
                         .relay_service
                         .as_mut()
@@ -1721,7 +1790,9 @@ impl DiscoveryRuntime {
                     let now_ms = unix_millis();
                     self.destroy_expired_exit_native_attempts(now_ms).await;
                     self.destroy_expired_production_relay_routes(now_ms).await;
+                    self.expire_pending_mptcp_exit_sessions(now_ms).await;
                     self.destroy_expired_production_exit_routes(now_ms).await;
+                    self.destroy_expired_active_mptcp_exit_routes(now_ms).await;
                     let relay_purged = self
                         .relay_service
                         .as_mut()
@@ -1771,9 +1842,12 @@ impl DiscoveryRuntime {
             }
         }
         self.destroy_expired_exit_native_attempts(u64::MAX).await;
-        Box::pin(self.fail_all_pending_udp_sessions()).await;
+        Box::pin(self.fail_all_pending_route_sessions()).await;
         self.destroy_expired_production_relay_routes(u64::MAX).await;
+        self.expire_pending_mptcp_exit_sessions(u64::MAX).await;
         self.destroy_expired_production_exit_routes(u64::MAX).await;
+        self.destroy_expired_active_mptcp_exit_routes(u64::MAX)
+            .await;
         self.cancel_client_preselection(ClientPreselectionError::Closed);
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
         self.reject_queued_outbound_commands();
@@ -3094,11 +3168,13 @@ impl DiscoveryRuntime {
         self.retry_relay_forwards.clear();
     }
 
-    async fn fail_all_pending_udp_sessions(&mut self) {
+    async fn fail_all_pending_route_sessions(&mut self) {
         let pending_ids = self
             .pending_relay_forwards
             .iter()
-            .filter_map(|(id, pending)| pending.udp_session.is_some().then_some(*id))
+            .filter_map(|(id, pending)| {
+                (pending.udp_session.is_some() || pending.mptcp_session.is_some()).then_some(*id)
+            })
             .collect::<Vec<_>>();
         for id in pending_ids {
             let Some(mut pending) = self.pending_relay_forwards.remove(&id) else {
@@ -3107,6 +3183,8 @@ impl DiscoveryRuntime {
             self.relay_forward_index.remove(&pending.key);
             if let Some(udp) = pending.udp_session.take() {
                 self.finish_udp_session_unavailable(udp).await;
+            } else if let Some(mptcp) = pending.mptcp_session.take() {
+                self.finish_mptcp_session_unavailable(mptcp).await;
             }
         }
     }
@@ -4465,6 +4543,16 @@ impl DiscoveryRuntime {
                         .await;
                         return;
                     }
+                    Ok(DatapathRelayOperation::MptcpSessionStart) => {
+                        self.begin_mptcp_session_start(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
                     _ => {}
                 }
                 let local_peer = *self.service.local_peer_id();
@@ -5105,9 +5193,278 @@ impl DiscoveryRuntime {
                     canonical_start: request.client_signed_request().to_vec(),
                     route,
                 }),
+                mptcp_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "UDP_SESSION_RELAY_DISPATCHED");
+    }
+
+    /// Commit this Relay's one exact helper route and forward the byte-identical complete MPTCP
+    /// proof set to the signed Exit. Other selected Relay routes remain owned by their own actors.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine per-Relay Commit and exact-set Exit dispatch transaction"
+    )]
+    async fn begin_mptcp_session_start(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Some((route_context_id, route)) = cleanup.take() {
+                    self.retire_production_relay_route(route_context_id, route)
+                        .await;
+                }
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::MptcpSessionStart,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let Some(datapath_request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id())
+        else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::MptcpSessionStart,
+                now_ms,
+            )
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("MPTCP_SESSION_RELAY_SCOPE_REJECTED");
+        }
+        let Some(scope) =
+            verified_mptcp_session_start_scope(request.client_signed_request(), now_ms)
+        else {
+            reject!("MPTCP_SESSION_RELAY_SCOPE_REJECTED");
+        };
+        let Ok(start) = decode_canonical::<MptcpSessionStartRequest>(
+            request.client_signed_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(route_context_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)
+        else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&scope.exit.exit_peer_id) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&scope.exit.exit_node_id) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let local_matches = scope
+            .paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| {
+                path.relay.relay_node_id == self.local_node_id
+                    && path.relay.relay_peer_id == local_peer.to_bytes()
+                    && datapath_request_id == path.confirmation_nonce[..FORWARD_ID_BYTES]
+            })
+            .collect::<Vec<_>>();
+        let [(local_index, local_path)] = local_matches.as_slice() else {
+            reject!("MPTCP_SESSION_RELAY_PATH_SET_REJECTED");
+        };
+        let Some(local_proof) = start.paths().get(*local_index) else {
+            reject!("MPTCP_SESSION_RELAY_PATH_SET_REJECTED");
+        };
+        let selected_path_ids = scope
+            .paths
+            .iter()
+            .map(|path| path.relay.path_id)
+            .collect::<Vec<_>>();
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: datapath_request_id,
+        };
+        if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
+            if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id) {
+                if let Some(mptcp) = pending.mptcp_session.as_mut() {
+                    if pending.operation == ExitForwardOperation::MptcpSessionStart
+                        && mptcp.canonical_start == request.client_signed_request()
+                        && mptcp.channels.len() < MAX_COALESCED_WAITERS
+                    {
+                        mptcp.channels.push(channel);
+                        return;
+                    }
+                }
+            }
+            reject!("MPTCP_SESSION_RELAY_RETRY_CONFLICT");
+        }
+        if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
+            if existing.usable
+                && existing.authenticated_client_peer == authenticated_client_peer
+                && existing.accepted.encoded() == local_proof.signed_relay_reservation()
+                && existing.accepted.path_id() == local_path.relay.path_id
+                && existing.expires_at_ms > now_ms
+                && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            {
+                if let Some(signal) = existing.committed_signal.clone() {
+                    if let Ok(response) = DatapathRelayResponse::granted(
+                        datapath_request_id.to_vec(),
+                        DatapathRelayOperation::MptcpSessionStart,
+                        self.local_node_id.to_vec(),
+                        local_peer.to_bytes(),
+                        signal,
+                    ) {
+                        let _ = self.service.send_datapath_relay_response(channel, response);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(route) = self
+            .prepared_production_relay_routes
+            .remove(&route_context_id)
+        else {
+            reject!("MPTCP_SESSION_RELAY_OWNER_UNAVAILABLE");
+        };
+        cleanup = Some((route_context_id, route));
+        let route = cleanup
+            .as_ref()
+            .map(|(_, route)| route)
+            .expect("installed MPTCP Relay cleanup owner");
+        if !route.usable
+            || route.authenticated_client_peer != authenticated_client_peer
+            || route.accepted.encoded() != local_proof.signed_relay_reservation()
+            || route.accepted.route_context_id() != &route_context_id
+            || route.accepted.path_id() != local_path.relay.path_id
+            || route.accepted.reservation_id().as_slice() != scope.exit.reservation_id
+            || route.accepted.exit_node_id().as_slice() != scope.exit.exit_node_id
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.committed_signal.is_some()
+            || exit_peer == local_peer
+        {
+            reject!("MPTCP_SESSION_RELAY_OWNER_MISMATCH");
+        }
+        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+            reject!("MPTCP_SESSION_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        let authorized_exit = self
+            .forwarded_exits
+            .get(&ForwardedExitKey {
+                control_relay_peer: local_peer,
+                exit_peer,
+            })
+            .filter(|capability| {
+                forwarded_exit_capability_matches(
+                    capability,
+                    &authorized_control,
+                    self.local_node_id,
+                    local_peer,
+                    self.local_public_key,
+                    exit_node_id,
+                    exit_peer,
+                    request.deadline_unix_ms(),
+                )
+            })
+            .cloned();
+        let Some(authorized_exit) = authorized_exit else {
+            reject!("MPTCP_SESSION_RELAY_EXIT_AUTHORITY_UNAVAILABLE");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            datapath_request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::MptcpSessionStart,
+            request.client_signed_request().to_vec(),
+        ) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            reject!("MPTCP_SESSION_RELAY_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
+        {
+            reject!("MPTCP_SESSION_RELAY_CAPACITY");
+        }
+        let route = cleanup
+            .as_mut()
+            .map(|(_, route)| route)
+            .expect("installed MPTCP Relay cleanup owner");
+        let commit = route
+            .commit
+            .take()
+            .expect("validated prepared MPTCP Relay commit");
+        if self
+            .helper
+            .commit_lease_batch(&mut route.helper_owner, commit)
+            .await
+            .is_err()
+        {
+            reject!("MPTCP_SESSION_RELAY_HELPER_COMMIT_REJECTED");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            reject!("MPTCP_SESSION_RELAY_TRANSPORT_UNAVAILABLE");
+        };
+        let (_, route) = cleanup.take().expect("committed MPTCP Relay owner");
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::MptcpSessionStart,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: Some(authorized_exit),
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: Some(PendingMptcpSessionStart {
+                    datapath_request_id,
+                    route_context_id,
+                    channels: vec![channel],
+                    canonical_start: request.client_signed_request().to_vec(),
+                    selected_path_ids,
+                    route,
+                }),
+            },
+        );
+        log_relay_forward_admission(Some(state), "MPTCP_SESSION_RELAY_DISPATCHED");
     }
 
     #[allow(
@@ -5304,6 +5661,7 @@ impl DiscoveryRuntime {
                 native_authorization: None,
                 native_result: None,
                 udp_session: None,
+                mptcp_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_DISPATCHED");
@@ -5618,6 +5976,7 @@ impl DiscoveryRuntime {
                 }),
                 native_result: None,
                 udp_session: None,
+                mptcp_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_AUTHORIZATION_DISPATCHED");
@@ -5822,6 +6181,7 @@ impl DiscoveryRuntime {
                     helper_owner: active.helper_owner,
                 }),
                 udp_session: None,
+                mptcp_session: None,
             },
         );
         log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_DISPATCHED");
@@ -6014,6 +6374,7 @@ impl DiscoveryRuntime {
                 native_authorization: None,
                 native_result: None,
                 udp_session: None,
+                mptcp_session: None,
             },
         );
         log_relay_forward_admission(state, "EXIT_FORWARD_RELAY_DISPATCHED");
@@ -6055,6 +6416,8 @@ impl DiscoveryRuntime {
         if !valid_before_ingest {
             if let Some(udp) = pending.udp_session.take() {
                 self.finish_udp_session_unavailable(udp).await;
+            } else if let Some(mptcp) = pending.mptcp_session.take() {
+                self.finish_mptcp_session_unavailable(mptcp).await;
             } else {
                 self.finish_relay_definitive(pending);
             }
@@ -6125,6 +6488,75 @@ impl DiscoveryRuntime {
                 }
             }
             log_reservation_event(state, "UDP_SESSION_RELAY_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
+        }
+        if let Some(mut mptcp) = pending.mptcp_session.take() {
+            let signal = response
+                .signed_responses()
+                .first()
+                .filter(|_| response.validated_status() == Ok(ForwardStatus::Granted))
+                .and_then(|encoded| {
+                    decode_canonical::<ExitMptcpSessionSignal>(
+                        encoded,
+                        usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                    )
+                    .ok()
+                    .map(|signal| (encoded.clone(), signal))
+                });
+            let Some((encoded_signal, signal)) = signal else {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            if signal.validate().is_err()
+                || signal.reservation_id() != mptcp.route.accepted.reservation_id()
+                || signal.route_context_id() != mptcp.route.accepted.route_context_id()
+                || signal.selected_path_ids() != mptcp.selected_path_ids
+                || !signal
+                    .selected_path_ids()
+                    .contains(&mptcp.route.accepted.path_id())
+            {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+                return OutboundEventOutcome::InvalidResponse;
+            }
+            let Ok(datapath_response) = DatapathRelayResponse::granted(
+                mptcp.datapath_request_id.to_vec(),
+                DatapathRelayOperation::MptcpSessionStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                encoded_signal.clone(),
+            ) else {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+                return OutboundEventOutcome::Failed;
+            };
+            mptcp.route.committed_start = Some(mptcp.canonical_start.clone());
+            mptcp.route.committed_signal = Some(encoded_signal);
+            let route_context_id = mptcp.route_context_id;
+            if self
+                .prepared_production_relay_routes
+                .contains_key(&route_context_id)
+            {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+                return OutboundEventOutcome::Failed;
+            }
+            self.prepared_production_relay_routes
+                .insert(route_context_id, mptcp.route);
+            for channel in mptcp.channels {
+                if self
+                    .service
+                    .send_datapath_relay_response(channel, datapath_response.clone())
+                    .is_err()
+                {
+                    if let Some(route) = self
+                        .prepared_production_relay_routes
+                        .remove(&route_context_id)
+                    {
+                        self.retire_production_relay_route(route_context_id, route)
+                            .await;
+                    }
+                    return OutboundEventOutcome::Failed;
+                }
+            }
+            log_reservation_event(state, "MPTCP_SESSION_RELAY_COMPLETED").await;
             return OutboundEventOutcome::Completed;
         }
         if let Some(native) = pending.native_ready.take() {
@@ -6663,6 +7095,31 @@ impl DiscoveryRuntime {
         }
     }
 
+    async fn finish_mptcp_session_unavailable(&mut self, mptcp: PendingMptcpSessionStart) {
+        let PendingMptcpSessionStart {
+            datapath_request_id,
+            route_context_id,
+            channels,
+            canonical_start: _,
+            selected_path_ids: _,
+            route,
+        } = mptcp;
+        self.retire_production_relay_route(route_context_id, route)
+            .await;
+        if let Ok(response) = DatapathRelayResponse::unavailable(
+            datapath_request_id.to_vec(),
+            DatapathRelayOperation::MptcpSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            for channel in channels {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(channel, response.clone());
+            }
+        }
+    }
+
     /// Destroy before releasing the Relay reservation. A failed Destroy keeps the exact affine
     /// owner quarantined for the actor's bounded maintenance retry and never makes it reusable.
     async fn retire_production_relay_route(
@@ -6694,8 +7151,8 @@ impl DiscoveryRuntime {
 
     fn finish_relay_definitive(&mut self, mut pending: PendingRelayForward) {
         debug_assert!(
-            pending.udp_session.is_none(),
-            "UDP session cleanup must use the awaited affine path"
+            pending.udp_session.is_none() && pending.mptcp_session.is_none(),
+            "session cleanup must use the awaited affine path"
         );
         if let Some(native) = pending.native_ready.take() {
             if let Ok(response) = DatapathRelayResponse::unavailable(
@@ -6776,6 +7233,8 @@ impl DiscoveryRuntime {
     async fn finish_relay_ambiguity_awaited(&mut self, mut pending: PendingRelayForward) {
         if let Some(udp) = pending.udp_session.take() {
             self.finish_udp_session_unavailable(udp).await;
+        } else if let Some(mptcp) = pending.mptcp_session.take() {
+            self.finish_mptcp_session_unavailable(mptcp).await;
         } else {
             self.finish_relay_ambiguity(pending);
         }
@@ -6885,6 +7344,51 @@ impl DiscoveryRuntime {
                     .prepared_production_exit_routes
                     .insert(route_context_id, route);
                 debug_assert!(previous.is_none(), "expired Exit route was removed above");
+            }
+        }
+        destroyed
+    }
+
+    async fn expire_pending_mptcp_exit_sessions(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .pending_mptcp_exit_sessions
+            .iter()
+            .filter_map(|(route_context_id, pending)| {
+                (pending.expires_at_ms <= now_ms).then_some(*route_context_id)
+            })
+            .collect::<Vec<_>>();
+        let count = expired.len();
+        for route_context_id in expired {
+            let Some(pending) = self.pending_mptcp_exit_sessions.remove(&route_context_id) else {
+                continue;
+            };
+            self.finish_mptcp_exit_session_unavailable(route_context_id, pending)
+                .await;
+        }
+        count
+    }
+
+    async fn destroy_expired_active_mptcp_exit_routes(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .active_production_mptcp_exit_routes
+            .iter()
+            .filter_map(|(route_context_id, route)| {
+                (route.expires_at_ms <= now_ms).then_some(*route_context_id)
+            })
+            .collect::<Vec<_>>();
+        let mut destroyed = 0;
+        for route_context_id in expired {
+            let Some(route) = self
+                .active_production_mptcp_exit_routes
+                .remove(&route_context_id)
+            else {
+                continue;
+            };
+            if self
+                .retire_active_mptcp_exit_route(route_context_id, route)
+                .await
+            {
+                destroyed += 1;
             }
         }
         destroyed
@@ -7070,6 +7574,16 @@ impl DiscoveryRuntime {
         {
             reject!("EXIT_FORWARD_EXIT_SCOPE_REJECTED");
         }
+        if operation == ExitForwardOperation::MptcpSessionStart {
+            self.begin_production_mptcp_exit_session(
+                authenticated_control_relay,
+                &request,
+                channel,
+                state,
+            )
+            .await;
+            return;
+        }
         let local_peer_bytes = local_peer.to_bytes();
         let responses = match operation {
             ExitForwardOperation::FetchExitAdvertisement => self
@@ -7211,7 +7725,7 @@ impl DiscoveryRuntime {
     }
 
     /// Prepare truthful Exit helper endpoints, finalize through one exact evidence verifier and
-    /// retain every affine owner needed by confirmation and `UdpSessionStart`.
+    /// retain every affine owner needed by confirmation and a transport-specific session Start.
     ///
     /// The current caller supplies a fail-closed verifier. The native-evidence bridge replaces
     /// only that argument with its short-lived exact ticket; this transaction never accepts
@@ -7238,9 +7752,14 @@ impl DiscoveryRuntime {
         let capability =
             decoded_signed_payload::<ClientSessionCapability>(&finalize.client_session_capability)?;
 
-        // This vertical slice owns an in-process Quinn Exit. A userspace MPQUIC Exit must supply
-        // the real native preflight incarnation instead of borrowing this route-runtime seam.
-        if capability.allowed_transports.as_slice() != [Transport::UdpSinglePath as i32] {
+        // These in-process UDP and kernel-MPTCP transports own a fresh per-route incarnation. A
+        // userspace MPQUIC Exit must instead supply its real native preflight incarnation.
+        if !matches!(
+            capability.allowed_transports.as_slice(),
+            [transport]
+                if *transport == Transport::UdpSinglePath as i32
+                    || *transport == Transport::TcpMptcp as i32
+        ) {
             return None;
         }
         if let Some(existing) = self.prepared_production_exit_routes.get(&route_context_id) {
@@ -7268,7 +7787,7 @@ impl DiscoveryRuntime {
             return None;
         };
         let exit_leases = exit_batch.exit_leases().to_vec();
-        let exit_native_instance_id = fresh_udp_exit_runtime_instance_id()?;
+        let exit_native_instance_id = fresh_exit_route_runtime_instance_id()?;
         let mut identity_provider = ProductionExitNativeRouteIdentityProvider;
         let identity = &self.identity;
         let finalized = self
@@ -7510,6 +8029,457 @@ impl DiscoveryRuntime {
             let _ = active.run(now_ms).await;
         });
         Some(encoded)
+    }
+
+    /// Coalesce one byte-identical complete MPTCP Start from every authenticated selected Relay.
+    ///
+    /// The first Relay cannot force an early listener. Only after the exact 2..=8 path set has
+    /// arrived do we consume the finalized Exit owner, commit all leases, adopt a real
+    /// `IPPROTO_MPTCP` listener, and register every selected Exit path.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exact-set coalescing and affine Exit activation are one fail-atomic transaction"
+    )]
+    async fn begin_production_mptcp_exit_session(
+        &mut self,
+        authenticated_control_relay: Libp2pPeerId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal, $channel:expr) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_mptcp_exit_unavailable(request.forward_id(), $channel);
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let Some(scope) = verified_mptcp_session_start_scope(request.canonical_request(), now_ms)
+        else {
+            reject!("MPTCP_SESSION_EXIT_SCOPE_REJECTED", channel);
+        };
+        let Ok(start) = decode_canonical::<MptcpSessionStartRequest>(
+            request.canonical_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPTCP_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        let Some(route_context_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)
+        else {
+            reject!("MPTCP_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        let Some(forward_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.forward_id()) else {
+            reject!("MPTCP_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        let relay_matches = scope
+            .paths
+            .iter()
+            .filter(|path| {
+                path.relay.relay_node_id == request.control_relay_node_id()
+                    && path.relay.relay_peer_id == authenticated_control_relay.to_bytes()
+                    && forward_id == path.confirmation_nonce[..FORWARD_ID_BYTES]
+            })
+            .collect::<Vec<_>>();
+        let [relay_path] = relay_matches.as_slice() else {
+            reject!("MPTCP_SESSION_EXIT_RELAY_SET_REJECTED", channel);
+        };
+        let selected_path_ids = scope
+            .paths
+            .iter()
+            .map(|path| path.relay.path_id)
+            .collect::<Vec<_>>();
+        let pending_expiry = scope
+            .paths
+            .iter()
+            .map(|path| path.expires_at_ms)
+            .min()
+            .unwrap_or(0)
+            .min(request.deadline_unix_ms());
+
+        if let Some(active) = self
+            .active_production_mptcp_exit_routes
+            .get(&route_context_id)
+        {
+            if active.transport.is_some()
+                && active.expires_at_ms > now_ms
+                && active.canonical_start == request.canonical_request()
+            {
+                self.send_mptcp_exit_granted(
+                    request.forward_id(),
+                    active.encoded_signal.clone(),
+                    channel,
+                );
+                return;
+            }
+            reject!("MPTCP_SESSION_EXIT_ACTIVE_CONFLICT", channel);
+        }
+
+        let prepared_matches = self
+            .prepared_production_exit_routes
+            .get(&route_context_id)
+            .is_some_and(|route| {
+                route.bundle.signed_exit_reservation() == start.signed_exit_reservation()
+                    && route.bundle.accepted().reservation_id().as_slice()
+                        == scope.exit.reservation_id
+                    && route.bundle.accepted().route_context_id() == &route_context_id
+                    && usize::try_from(route.bundle.accepted().maximum_paths()).ok()
+                        == Some(selected_path_ids.len())
+                    && route.expires_at_ms > now_ms
+                    && route.commit.is_some()
+                    && route.exit_leases.len() == selected_path_ids.len()
+                    && route.pending_activations.len() == selected_path_ids.len()
+                    && scope.paths.iter().zip(start.paths()).all(|(path, proof)| {
+                        route
+                            .pending_activations
+                            .get(&path.relay.path_id)
+                            .is_some_and(|activation| {
+                                activation.signed_relay_reservation
+                                    == proof.signed_relay_reservation()
+                            })
+                    })
+            });
+        if !prepared_matches {
+            reject!("MPTCP_SESSION_EXIT_OWNER_MISMATCH", channel);
+        }
+
+        if let Some(existing) = self.pending_mptcp_exit_sessions.get(&route_context_id) {
+            if existing.canonical_start != request.canonical_request()
+                || existing.selected_path_ids != selected_path_ids
+                || existing.expires_at_ms != pending_expiry
+            {
+                let pending = self
+                    .pending_mptcp_exit_sessions
+                    .remove(&route_context_id)
+                    .expect("observed MPTCP Exit session");
+                self.finish_mptcp_exit_session_unavailable(route_context_id, pending)
+                    .await;
+                reject!("MPTCP_SESSION_EXIT_SET_CONFLICT", channel);
+            }
+        }
+
+        if let Some(pending) = self.pending_mptcp_exit_sessions.get_mut(&route_context_id) {
+            match pending.relays.entry(relay_path.relay.path_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry)
+                    if entry.get().forward_id == forward_id
+                        && entry.get().channels.len() < MAX_COALESCED_WAITERS =>
+                {
+                    entry.get_mut().channels.push(channel);
+                    return;
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    reject!("MPTCP_SESSION_EXIT_RELAY_RETRY_CONFLICT", channel);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(PendingMptcpExitRelay {
+                        forward_id,
+                        channels: vec![channel],
+                    });
+                }
+            }
+        } else {
+            self.pending_mptcp_exit_sessions.insert(
+                route_context_id,
+                PendingMptcpExitSession {
+                    canonical_start: request.canonical_request().to_vec(),
+                    selected_path_ids: selected_path_ids.clone(),
+                    relays: HashMap::from([(
+                        relay_path.relay.path_id,
+                        PendingMptcpExitRelay {
+                            forward_id,
+                            channels: vec![channel],
+                        },
+                    )]),
+                    expires_at_ms: pending_expiry,
+                },
+            );
+        }
+        let complete = self
+            .pending_mptcp_exit_sessions
+            .get(&route_context_id)
+            .is_some_and(|pending| {
+                pending.relays.len() == pending.selected_path_ids.len()
+                    && pending
+                        .selected_path_ids
+                        .iter()
+                        .all(|path_id| pending.relays.contains_key(path_id))
+            });
+        if !complete {
+            log_relay_forward_admission(Some(state), "MPTCP_SESSION_EXIT_WAITING_EXACT_SET");
+            return;
+        }
+        let pending = self
+            .pending_mptcp_exit_sessions
+            .remove(&route_context_id)
+            .expect("complete MPTCP Exit session");
+        let Some(mut route) = self
+            .prepared_production_exit_routes
+            .remove(&route_context_id)
+        else {
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+
+        let relay_reservations = start
+            .paths()
+            .iter()
+            .map(volparossa_discovery::MptcpSessionPathProof::signed_relay_reservation)
+            .collect::<Vec<_>>();
+        let native_scope = route.bundle.accepted().native_route_authorization_scope();
+        let active_route = self.exit_service.as_mut().and_then(|service| {
+            service
+                .bind_tcp_route(route.bundle.accepted(), &relay_reservations, now_ms)
+                .ok()
+        });
+        let native_authorization = self.exit_service.as_mut().and_then(|service| {
+            service
+                .take_native_route_authorization(&native_scope, now_ms)
+                .ok()
+        });
+        let (Some(active_route), Some(native_authorization), Some(commit)) =
+            (active_route, native_authorization, route.commit.take())
+        else {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        if !exact_mptcp_exit_commit(&route, &commit, &selected_path_ids) {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        }
+        let Some(reservation_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.reservation_id)
+        else {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let Ok(certificate_der) = route_certificate_der(&native_authorization) else {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let Ok(wire_signal) = ExitMptcpSessionSignal::new(
+            reservation_id,
+            route_context_id,
+            PRODUCTION_MPTCP_EXIT_PORT,
+            selected_path_ids,
+            certificate_der,
+        ) else {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let Ok(listener_signal) = ExitMptcpListenerSignal::try_from_discovery(
+            &wire_signal,
+            &native_authorization.public_identity().certificate_sha256,
+        ) else {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let Some(encoded_signal) = encode_canonical(
+            &wire_signal,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        )
+        .ok() else {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let context_handle = route.helper_owner.prepared().context_handle.clone();
+        if self
+            .helper
+            .commit_lease_batch(&mut route.helper_owner, commit)
+            .await
+            .is_err()
+        {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        }
+        let Ok(transport) =
+            ExitMptcpTransport::acquire_and_activate(&self.helper, listener_signal, context_handle)
+                .await
+        else {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        if !transport
+            .listener()
+            .local_addr()
+            .is_ok_and(|address| address.port() == PRODUCTION_MPTCP_EXIT_PORT)
+        {
+            let _ = transport.shutdown(&self.helper).await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        }
+        let active = ActiveProductionMptcpExitRoute {
+            canonical_start: pending.canonical_start.clone(),
+            encoded_signal: encoded_signal.clone(),
+            helper_owner: route.helper_owner,
+            transport: Some(transport),
+            tcp_route: active_route,
+            native_authorization,
+            reservation_id,
+            expires_at_ms: route.expires_at_ms,
+        };
+        if self
+            .active_production_mptcp_exit_routes
+            .contains_key(&route_context_id)
+        {
+            self.retire_active_mptcp_exit_route(route_context_id, active)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        }
+        self.active_production_mptcp_exit_routes
+            .insert(route_context_id, active);
+        self.send_pending_mptcp_exit_granted(pending, &encoded_signal);
+        log_relay_forward_admission(Some(state), "MPTCP_SESSION_EXIT_LISTENER_READY");
+    }
+
+    fn send_mptcp_exit_unavailable(
+        &mut self,
+        forward_id: &[u8],
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    ) {
+        if let Ok(response) = ExitForwardResponse::unavailable(
+            forward_id.to_vec(),
+            ExitForwardOperation::MptcpSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            let _ = self
+                .service
+                .send_exit_forward_upstream_response(channel, response.into());
+        }
+    }
+
+    fn send_mptcp_exit_granted(
+        &mut self,
+        forward_id: &[u8],
+        encoded_signal: Vec<u8>,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    ) {
+        if let Ok(response) = ExitForwardResponse::granted(
+            forward_id.to_vec(),
+            ExitForwardOperation::MptcpSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+            vec![encoded_signal],
+        ) {
+            let _ = self
+                .service
+                .send_exit_forward_upstream_response(channel, response.into());
+        }
+    }
+
+    fn send_pending_mptcp_exit_unavailable(&mut self, pending: PendingMptcpExitSession) {
+        for relay in pending.relays.into_values() {
+            for channel in relay.channels {
+                self.send_mptcp_exit_unavailable(&relay.forward_id, channel);
+            }
+        }
+    }
+
+    fn send_pending_mptcp_exit_granted(
+        &mut self,
+        pending: PendingMptcpExitSession,
+        encoded_signal: &[u8],
+    ) {
+        for relay in pending.relays.into_values() {
+            for channel in relay.channels {
+                self.send_mptcp_exit_granted(&relay.forward_id, encoded_signal.to_vec(), channel);
+            }
+        }
+    }
+
+    async fn finish_mptcp_exit_session_unavailable(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        pending: PendingMptcpExitSession,
+    ) {
+        if let Some(route) = self
+            .prepared_production_exit_routes
+            .remove(&route_context_id)
+        {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+        }
+        self.send_pending_mptcp_exit_unavailable(pending);
+    }
+
+    /// Destroy helper state before releasing the signed Exit allocation. A failed Destroy keeps
+    /// the owner quarantined for the actor's next bounded maintenance pass.
+    async fn retire_production_exit_route(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        mut route: PreparedProductionExitRoute,
+    ) -> bool {
+        route.expires_at_ms = 0;
+        if self
+            .helper
+            .destroy_context(&route.helper_owner)
+            .await
+            .is_ok()
+        {
+            let _ = self
+                .exit_service
+                .as_mut()
+                .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+            true
+        } else {
+            let previous = self
+                .prepared_production_exit_routes
+                .insert(route_context_id, route);
+            debug_assert!(previous.is_none(), "MPTCP Exit cleanup owner collision");
+            false
+        }
+    }
+
+    async fn retire_active_mptcp_exit_route(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        mut route: ActiveProductionMptcpExitRoute,
+    ) -> bool {
+        route.expires_at_ms = 0;
+        if let Some(transport) = route.transport.take() {
+            let _ = transport.shutdown(&self.helper).await;
+        }
+        if self
+            .helper
+            .destroy_context(&route.helper_owner)
+            .await
+            .is_ok()
+        {
+            let _ = self
+                .exit_service
+                .as_mut()
+                .and_then(|service| service.release(&route.reservation_id).ok());
+            true
+        } else {
+            let previous = self
+                .active_production_mptcp_exit_routes
+                .insert(route_context_id, route);
+            debug_assert!(
+                previous.is_none(),
+                "active MPTCP Exit cleanup owner collision"
+            );
+            false
+        }
     }
 
     /// Validate one native-Permit request and prepare its exact connection-owned response.
@@ -9261,6 +10231,7 @@ impl DiscoveryRuntime {
             .iter()
             .filter_map(|(id, pending)| {
                 (pending.udp_session.is_none()
+                    && pending.mptcp_session.is_none()
                     && (!preserve_fetch_attempts
                         || pending.operation != ExitForwardOperation::FetchExitAdvertisement)
                     && keys.contains(&ForwardedExitKey {
@@ -10136,8 +11107,21 @@ fn datapath_request_scope_matches(
                 },
             )
         }
-        // Wire framing exists; production scope/signature admission is a separate runtime hook.
-        DatapathRelayOperation::MptcpSessionStart | DatapathRelayOperation::Unspecified => false,
+        DatapathRelayOperation::MptcpSessionStart => {
+            verified_mptcp_session_start_scope(request.client_signed_request(), now_ms)
+                .and_then(|scope| {
+                    scope.paths.into_iter().find(|path| {
+                        request.relay_node_id() == path.relay.relay_node_id
+                            && request.relay_peer_id() == path.relay.relay_peer_id
+                    })
+                })
+                .is_some_and(|path| {
+                    request.exit_signed_authorization().is_empty()
+                        && request.request_id() == &path.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= path.expires_at_ms
+                })
+        }
+        DatapathRelayOperation::Unspecified => false,
     }
 }
 
@@ -10717,7 +11701,7 @@ fn exit_finalize_response(bundle: &AcceptedExitReservationBundle) -> Vec<Vec<u8>
         .collect()
 }
 
-fn fresh_udp_exit_runtime_instance_id() -> Option<[u8; 32]> {
+fn fresh_exit_route_runtime_instance_id() -> Option<[u8; 32]> {
     loop {
         let mut instance_id = [0_u8; 32];
         OsRng.try_fill_bytes(&mut instance_id).ok()?;
@@ -10844,6 +11828,44 @@ fn commit_lease_batch(activation: &ActivateLeaseBatch) -> CommitLeaseBatch {
             })
             .collect(),
     }
+}
+
+fn exact_mptcp_exit_commit(
+    route: &PreparedProductionExitRoute,
+    commit: &CommitLeaseBatch,
+    selected_path_ids: &[u32],
+) -> bool {
+    let prepare = route.helper_owner.prepare();
+    if ContextRole::try_from(prepare.role).ok() != Some(ContextRole::Exit)
+        || prepare.route_context_id != route.bundle.accepted().route_context_id()
+        || commit.route_context_id != prepare.route_context_id
+        || commit.context_handle != route.helper_owner.prepared().context_handle
+        || selected_path_ids.len() < 2
+        || selected_path_ids.len() > usize::from(volparossa_wireguard::MAX_PATHS)
+        || prepare.leases.len() != selected_path_ids.len()
+        || commit.leases.len() != selected_path_ids.len()
+    {
+        return false;
+    }
+    let prepared = prepare
+        .leases
+        .iter()
+        .map(|lease| (lease.path_id, lease.role))
+        .collect::<BTreeSet<_>>();
+    let committed = commit
+        .leases
+        .iter()
+        .map(|lease| (lease.path_id, lease.role))
+        .collect::<BTreeSet<_>>();
+    let expected = selected_path_ids
+        .iter()
+        .copied()
+        .map(|path_id| (path_id, WireguardRole::Exit as i32))
+        .collect::<BTreeSet<_>>();
+    prepared.len() == selected_path_ids.len()
+        && committed.len() == selected_path_ids.len()
+        && prepared == expected
+        && committed == expected
 }
 
 fn native_service_prepare_request(
@@ -11193,10 +12215,25 @@ fn forward_request_scope_matches(
                 },
             )
         }
-        // Wire framing exists; production scope/signature admission is a separate runtime hook.
-        ExitForwardOperation::MptcpSessionStart
-        | ExitForwardOperation::FetchExitAdvertisement
-        | ExitForwardOperation::Unspecified => false,
+        ExitForwardOperation::MptcpSessionStart => {
+            verified_mptcp_session_start_scope(request.canonical_request(), now_ms)
+                .and_then(|scope| {
+                    (request.exit_node_id() == scope.exit.exit_node_id
+                        && request.exit_peer_id() == scope.exit.exit_peer_id)
+                        .then(|| {
+                            scope.paths.into_iter().find(|path| {
+                                request.control_relay_node_id() == path.relay.relay_node_id
+                                    && request.control_relay_peer_id() == path.relay.relay_peer_id
+                            })
+                        })
+                        .flatten()
+                })
+                .is_some_and(|path| {
+                    request.forward_id() == &path.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= path.expires_at_ms
+                })
+        }
+        ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
     }
 }
 
@@ -11292,6 +12329,108 @@ fn verified_udp_session_start_scope(
         confirmation_nonce,
         expires_at_ms,
     })
+}
+
+struct VerifiedMptcpSessionPathScope {
+    relay: RelayReservation,
+    confirmation_nonce: [u8; 32],
+    expires_at_ms: u64,
+}
+
+struct VerifiedMptcpSessionStartScope {
+    exit: ExitReservation,
+    paths: Vec<VerifiedMptcpSessionPathScope>,
+}
+
+/// Verify every signature in one complete MPTCP activation set before actor lineage is matched.
+fn verified_mptcp_session_start_scope(
+    encoded: &[u8],
+    now_ms: u64,
+) -> Option<VerifiedMptcpSessionStartScope> {
+    let request = decode_canonical::<MptcpSessionStartRequest>(
+        encoded,
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+    )
+    .ok()?;
+    request.validate().ok()?;
+    let replay_capacity = request.paths().len().checked_mul(3)?.checked_add(1)?;
+    let mut verification_cache = ReplayCache::new(replay_capacity).ok()?;
+    let exit_verified = verify_control_message::<ExitReservation>(
+        request.signed_exit_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_cache,
+    )
+    .ok()?;
+    let exit_sender = *exit_verified.sender_id();
+    let exit_expiry = exit_verified.expires_at_ms();
+    let exit = exit_verified.into_message();
+    if exit_sender.as_slice() != exit.exit_node_id {
+        return None;
+    }
+    let mut paths = Vec::with_capacity(request.paths().len());
+    for proof in request.paths() {
+        let relay_verified = verify_control_message::<RelayReservation>(
+            proof.signed_relay_reservation(),
+            now_ms,
+            TimePolicy::default(),
+            &mut verification_cache,
+        )
+        .ok()?;
+        let relay_sender = *relay_verified.sender_id();
+        let relay_expiry = relay_verified.expires_at_ms();
+        let relay = relay_verified.into_message();
+        let confirmation_verified = verify_control_message::<ExitReservationConfirmation>(
+            proof.signed_confirmation(),
+            now_ms,
+            TimePolicy::default(),
+            &mut verification_cache,
+        )
+        .ok()?;
+        let confirmation_sender = *confirmation_verified.sender_id();
+        let confirmation_public_key = *confirmation_verified.sender_public_key();
+        let confirmation_nonce = *confirmation_verified.nonce();
+        let confirmation_expiry = confirmation_verified.expires_at_ms();
+        let confirmation = confirmation_verified.into_message();
+        let receipt_verified = verify_control_message::<ExitConfirmationReceipt>(
+            proof.signed_confirmation_receipt(),
+            now_ms,
+            TimePolicy::default(),
+            &mut verification_cache,
+        )
+        .ok()?;
+        let receipt_sender = *receipt_verified.sender_id();
+        let receipt_expiry = receipt_verified.expires_at_ms();
+        let receipt = receipt_verified.into_message();
+        let confirmation_hash =
+            exit_confirmation_envelope_hash(proof.signed_confirmation()).ok()?;
+        if relay_sender.as_slice() != relay.relay_node_id
+            || confirmation_sender.as_slice() != exit.client_session_id
+            || confirmation_public_key.as_slice() != relay.client_session_public_key
+            || receipt_sender != exit_sender
+            || receipt.confirmation_envelope_hash.as_slice() != confirmation_hash
+            || receipt.client_session_id != confirmation.client_session_id
+            || receipt.capability_id != confirmation.capability_id
+            || receipt.hold_id != confirmation.hold_id
+            || receipt.finalize_id != confirmation.finalize_id
+            || receipt.control_relay_node_id != confirmation.control_relay_node_id
+            || receipt.control_relay_peer_id != confirmation.control_relay_peer_id
+            || receipt.exit_node_id != confirmation.exit_node_id
+            || receipt.exit_peer_id != confirmation.exit_peer_id
+            || receipt.exit_boot_id != confirmation.exit_boot_id
+        {
+            return None;
+        }
+        paths.push(VerifiedMptcpSessionPathScope {
+            relay,
+            confirmation_nonce,
+            expires_at_ms: exit_expiry
+                .min(relay_expiry)
+                .min(confirmation_expiry)
+                .min(receipt_expiry),
+        });
+    }
+    Some(VerifiedMptcpSessionStartScope { exit, paths })
 }
 
 /// Test-only access to the production exit-forward scope validator.
@@ -15263,6 +16402,7 @@ mod tests {
                 native_authorization: None,
                 native_result: None,
                 udp_session: None,
+                mptcp_session: None,
             },
         );
 
@@ -17781,6 +18921,7 @@ mod tests {
                 native_authorization: None,
                 native_result: None,
                 udp_session: None,
+                mptcp_session: None,
             },
         );
         fixture.runtime.forwarded_exits.insert(
@@ -18056,6 +19197,7 @@ mod tests {
                 native_authorization: None,
                 native_result: None,
                 udp_session: None,
+                mptcp_session: None,
             },
         );
         let advertisement = service_advertisement(

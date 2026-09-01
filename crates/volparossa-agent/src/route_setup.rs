@@ -497,7 +497,7 @@ async fn activate_committed_transport(
         Some(Transport::TcpMptcp) => {
             let signal = mptcp_listener
                 .ok_or(ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
-            if !route.accepts_mptcp_listener(signal) {
+            if !route.accepts_mptcp_listener(&signal) {
                 return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
             }
             let local_port = random_mptcp_source_port(signal.port())?;
@@ -506,7 +506,6 @@ async fn activate_committed_transport(
                 signal,
                 route.context_handle().to_vec(),
                 local_port,
-                route.active_path_ids().iter().copied(),
             )
             .await
             .map(ClientTransportState::TcpMptcp)
@@ -2898,13 +2897,19 @@ impl ProductionRoute {
 
     /// Whether an authenticated Exit listener signal belongs to this committed path set.
     #[must_use]
-    pub(crate) fn accepts_mptcp_listener(&self, signal: ExitMptcpListenerSignal) -> bool {
+    pub(crate) fn accepts_mptcp_listener(&self, signal: &ExitMptcpListenerSignal) -> bool {
+        let expected_paths = self
+            .established
+            .relay_grants
+            .iter()
+            .map(ReservationSession::grant_path_id)
+            .collect::<BTreeSet<_>>();
         signal.route_context_id() == self.established.request.parameters.route_context_id
-            && self
-                .established
-                .relay_grants
+            && expected_paths.len() == self.established.relay_grants.len()
+            && expected_paths
                 .iter()
-                .any(|grant| ReservationSession::grant_path_id(grant) == signal.path_id())
+                .copied()
+                .eq(signal.selected_path_ids().iter().copied())
     }
 
     /// Consume an exact committed UDP route and acquire its Client QUIC descriptor from helper.

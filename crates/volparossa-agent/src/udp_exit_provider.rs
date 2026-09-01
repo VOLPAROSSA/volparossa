@@ -1,8 +1,8 @@
-//! Route-scoped production TLS ownership for the single-relay UDP Exit.
+//! Route-scoped production TLS ownership shared by UDP and MPTCP Exit transports.
 
 #![allow(
     dead_code,
-    reason = "the discovery responder consumes this affine provider after verified native-instance handoff lands"
+    reason = "the discovery responder owns this affine provider and its transport-specific consumers"
 )]
 
 use std::time::Duration;
@@ -69,10 +69,23 @@ impl ExitNativeRouteIdentityProvider for ProductionExitNativeRouteIdentityProvid
 pub(crate) fn udp_server_config(
     authorization: &ExitNativeRouteAuthorization,
 ) -> Result<(quinn::ServerConfig, Vec<u8>), ExitNativeRouteIdentityError> {
-    let certificate = parse(authorization.tls_certificate_pem())
-        .map_err(|_| ExitNativeRouteIdentityError::Rejected("invalid retained certificate PEM"))?;
+    let certificate_der = route_certificate_der(authorization)?;
     let private_key = parse(authorization.tls_private_key_pem())
         .map_err(|_| ExitNativeRouteIdentityError::Rejected("invalid retained private-key PEM"))?;
+    let config = quinn::ServerConfig::with_single_cert(
+        vec![CertificateDer::from(certificate_der.clone())],
+        PrivatePkcs8KeyDer::from(private_key.into_contents()).into(),
+    )
+    .map_err(|_| ExitNativeRouteIdentityError::Rejected("invalid retained TLS key pair"))?;
+    Ok((config, certificate_der))
+}
+
+/// Parse the retained public certificate and re-check its signed route digest.
+pub(crate) fn route_certificate_der(
+    authorization: &ExitNativeRouteAuthorization,
+) -> Result<Vec<u8>, ExitNativeRouteIdentityError> {
+    let certificate = parse(authorization.tls_certificate_pem())
+        .map_err(|_| ExitNativeRouteIdentityError::Rejected("invalid retained certificate PEM"))?;
     let certificate_der = certificate.into_contents();
     let certificate_hash = Sha256::digest(&certificate_der);
     if authorization.public_identity().certificate_sha256 != certificate_hash.as_slice() {
@@ -80,12 +93,7 @@ pub(crate) fn udp_server_config(
             "retained certificate contradicts signed identity",
         ));
     }
-    let config = quinn::ServerConfig::with_single_cert(
-        vec![CertificateDer::from(certificate_der.clone())],
-        PrivatePkcs8KeyDer::from(private_key.into_contents()).into(),
-    )
-    .map_err(|_| ExitNativeRouteIdentityError::Rejected("invalid retained TLS key pair"))?;
-    Ok((config, certificate_der))
+    Ok(certificate_der)
 }
 
 /// Exact reason why an activated Exit helper route could not become a listener.
