@@ -11,11 +11,14 @@
 //! Relay forwarding; it does not yet claim a complete client-to-destination datapath or
 //! crash/restart recovery. Production Prepare now completes the durable journal plus systemd
 //! descriptor-store handoff before child/kernel mutation, and same-runtime clean teardown settles
-//! that exact custody. Inherited-custody recovery after a helper restart remains fail-closed.
+//! that exact custody. An exact committed Client or Exit singleton can additionally hand off one
+//! bound, explicitly unconnected QUIC UDP descriptor. MPTCP, Relay transport handoff and all route
+//! manager/datapath callers remain unavailable. Inherited-custody recovery after a helper restart
+//! remains fail-closed.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    os::fd::AsRawFd as _,
+    os::fd::{AsRawFd as _, OwnedFd},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -29,7 +32,8 @@ use volparossa_protocol::{
 use volparossa_routing::{
     AcquireTransportSocket, ActivateLeaseBatch, ClosedPreparePlan, ContextRole,
     HELPER_HANDLE_BYTES, LeasePlan as RoutingLeasePlan, PrepareIntent, PrepareLeaseBatch,
-    PublicUdpEndpoint, UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
+    PublicUdpEndpoint, TransportSocketAddress, TransportSocketKind,
+    UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
 };
 
 use crate::{
@@ -41,11 +45,13 @@ use crate::{
         KernelCounters, OperationKind, PreparedKernelLease,
     },
     internal_protocol::{
-        ActivateLeases, DestroyContext, INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION,
-        InitialiseContext, InternalContextRole, InternalEndpointRole, InternalIpPrefix,
-        InternalUdpEndpoint, InternalWorkerRequest, InternalWorkerResult,
-        LeaseActivation as InternalLeaseActivation, LeasePlan as InternalLeasePlan, LeaseProbe,
-        PrepareLeases, ProbeCommitLeases, internal_worker_request, internal_worker_response,
+        AcquireTransportSocket as InternalAcquireTransportSocket, ActivateLeases, DestroyContext,
+        INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext,
+        InternalContextRole, InternalEndpointRole, InternalIpPrefix, InternalSocketAddress,
+        InternalTransportSocketKind, InternalUdpEndpoint, InternalWorkerRequest,
+        InternalWorkerResult, LeaseActivation as InternalLeaseActivation,
+        LeasePlan as InternalLeasePlan, LeaseProbe, PrepareLeases, ProbeCommitLeases,
+        internal_worker_request, internal_worker_response,
     },
     kernel::{BirthLinkError, BirthNamespaceKernel, LiveWireguardLeaseOwner},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
@@ -74,6 +80,7 @@ const STAGE_PREPARE: u8 = 2;
 const STAGE_ACTIVATE: u8 = 3;
 const STAGE_DESTROY: u8 = 4;
 const STAGE_PROBE_COMMIT: u8 = 5;
+const STAGE_ACQUIRE_TRANSPORT: u8 = 6;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
@@ -1000,6 +1007,62 @@ impl FunctionalAlphaLeaseBackend {
         }
     }
 
+    async fn acquire_transport_one(
+        &self,
+        binding: BackendBinding,
+        value: AcquireTransportSocket,
+    ) -> Result<OwnedFd, BackendError> {
+        let (key, internal) = validate_acquire_transport_binding(binding, &value)?;
+        let deadline = prepare_deadline(binding)?;
+        let operation_deadline = worker_operation_deadline(deadline)?;
+        let generation = {
+            let state = lock_state(&self.state);
+            validate_committed_acquire_entry(exact_entry(state.as_ref(), key)?, &value, &internal)?
+        };
+        let request = worker_request(
+            worker_attempt_request_id(key, STAGE_ACQUIRE_TRANSPORT, binding),
+            internal_worker_request::Operation::AcquireTransportSocket(internal.clone()),
+        );
+        let execution = self
+            .coordinator
+            .execute_until(key.context_id, generation, request, operation_deadline)
+            .await;
+        let descriptor = match execution {
+            Ok(execution) => match classify_acquire_transport_execution(execution, &internal) {
+                AcquireTransportExecution::Ready(descriptor) => descriptor,
+                AcquireTransportExecution::Definite(error) => return Err(error),
+                AcquireTransportExecution::RequiresCleanup(error) => {
+                    return Err(self.cleanup_after_failure(key, deadline, error).await);
+                }
+            },
+            Err(WorkerV3Error::Capacity) => return Err(BackendError::Capacity),
+            Err(_) => {
+                return Err(self
+                    .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                    .await);
+            }
+        };
+
+        let still_exact = {
+            let state = lock_state(&self.state);
+            exact_entry(state.as_ref(), key).is_ok_and(|entry| {
+                validate_committed_acquire_entry(entry, &value, &internal) == Ok(generation)
+            })
+        };
+        if !still_exact || deadline.ensure_remaining().is_err() || ensure_hard_is_live(key).is_err()
+        {
+            drop(descriptor);
+            return Err(self
+                .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                .await);
+        }
+        deadline.complete(descriptor).map_err(|_| {
+            // The descriptor is consumed and closed by `complete` on the elapsed branch. The
+            // reserved tail remains available to the engine's exact rollback/destroy call.
+            BackendError::CleanupIncomplete
+        })
+    }
+
     async fn cleanup_after_failure(
         &self,
         key: OpenLineageKey,
@@ -1569,16 +1632,33 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
     fn acquire_transport_socket(
         self: Arc<Self>,
         request: BackendRequest<AcquireTransportSocket>,
-    ) -> BackendFuture<BackendCompletion<std::os::fd::OwnedFd>> {
-        let (completion, _) = request.into_parts();
-        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    ) -> BackendFuture<BackendCompletion<OwnedFd>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(
+            async move { completion.complete(self.acquire_transport_one(binding, value).await) },
+        )
     }
 
     fn transport_socket_supported(
         self: Arc<Self>,
         request: BackendRuntimeRequest,
     ) -> BackendFuture<BackendRuntimeCompletion<bool>> {
-        Box::pin(async move { request.complete(Ok(false)) })
+        Box::pin(async move {
+            let binding = request.binding();
+            let deadline = HardDeadline::at(binding.call_deadline.into_std())
+                .map_err(|_| BackendError::Unavailable);
+            let runtime_matches = binding.helper_runtime_id.iter().any(|byte| *byte != 0)
+                && lock_state(&self.state)
+                    .as_ref()
+                    .is_none_or(|entry| entry.key.helper_runtime_id == binding.helper_runtime_id);
+            if binding.action != crate::engine::BackendRuntimeAction::QueryTransportSocket
+                || !runtime_matches
+            {
+                return request.complete(Err(BackendError::Invalid));
+            }
+            request.complete(deadline.map(|_| true))
+        })
     }
 
     fn shutdown(
@@ -1918,6 +1998,230 @@ fn validate_probe_batch_binding(
         value.commit.leases.clone(),
         value.activated_at_unix,
     ))
+}
+
+fn validate_acquire_transport_binding(
+    binding: BackendBinding,
+    value: &AcquireTransportSocket,
+) -> Result<(OpenLineageKey, InternalAcquireTransportSocket), BackendError> {
+    let lineage = binding.lineage;
+    let context_id: [u8; 16] = value
+        .route_context_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    let role = functional_lease_role_for_wireguard(value.role).ok_or(BackendError::Invalid)?;
+    let descriptor_kind =
+        TransportSocketKind::try_from(value.descriptor_kind).map_err(|_| BackendError::Invalid)?;
+    if descriptor_kind != TransportSocketKind::QuicUdpUnconnected
+        || !matches!(role.context, ContextRole::Client | ContextRole::Exit)
+    {
+        return Err(BackendError::Unavailable);
+    }
+    let (local_address, local_port) =
+        parse_quic_overlay_socket_address(value.expected_local.as_ref())?;
+    // `operation_generation` is the engine's exact current Committed-context generation. The
+    // lineage's `backend_generation` deliberately remains the stable Prepare generation across
+    // Activate and Probe/Commit. The engine owns exact current-generation checks before dispatch
+    // and again before accepting the completion; this adapter must validate both identities
+    // without incorrectly requiring them to be equal.
+    if binding.action != BackendAction::AcquireTransportSocket
+        || binding.phase != BackendPhase::Committed
+        || binding.operation_kind != OperationKind::Acquire
+        || binding.prior_phase != Some(ContextPhase::Committed)
+        || binding.operation_sequence == 0
+        || binding.operation_generation == 0
+        || binding.request_id.iter().all(|byte| *byte == 0)
+        || binding.request_digest.iter().all(|byte| *byte == 0)
+        || lineage.helper_runtime_id.iter().all(|byte| *byte == 0)
+        || lineage.context_id.iter().all(|byte| *byte == 0)
+        || lineage.backend_generation == 0
+        || lineage.prepare_request_id.iter().all(|byte| *byte == 0)
+        || lineage
+            .prepare_operation_digest
+            .iter()
+            .all(|byte| *byte == 0)
+        || lineage.setup_expires_at_unix == 0
+        || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
+        || context_id != lineage.context_id
+        || value.context_handle.len() != HELPER_HANDLE_BYTES
+        || value.context_handle.iter().all(|byte| *byte == 0)
+        || !(1..=8).contains(&value.path_id)
+        || value.expected_remote.is_some()
+    {
+        return Err(BackendError::Invalid);
+    }
+    prepare_deadline(binding)?;
+    let key = OpenLineageKey::from(lineage);
+    ensure_hard_is_live(key)?;
+    Ok((
+        key,
+        InternalAcquireTransportSocket {
+            route_context_id: context_id.to_vec(),
+            path_id: value.path_id,
+            role: role.internal_endpoint as i32,
+            descriptor_kind: InternalTransportSocketKind::QuicUdpUnconnected as i32,
+            expected_local: Some(InternalSocketAddress {
+                address: local_address.octets().to_vec(),
+                port: u32::from(local_port),
+            }),
+            expected_remote: None,
+        },
+    ))
+}
+
+#[cfg(test)]
+pub(super) fn validate_acquire_transport_binding_for_engine_test(
+    binding: BackendBinding,
+    value: &AcquireTransportSocket,
+) -> Result<(), BackendError> {
+    validate_acquire_transport_binding(binding, value).map(|_| ())
+}
+
+fn parse_quic_overlay_socket_address(
+    value: Option<&TransportSocketAddress>,
+) -> Result<(Ipv6Addr, u16), BackendError> {
+    let value = value.ok_or(BackendError::Invalid)?;
+    let address = Ipv6Addr::from(
+        <[u8; 16]>::try_from(value.address.as_slice()).map_err(|_| BackendError::Invalid)?,
+    );
+    let port = u16::try_from(value.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(BackendError::Invalid)?;
+    if address.is_unspecified() || address.is_multicast() || address.is_loopback() {
+        return Err(BackendError::Invalid);
+    }
+    Ok((address, port))
+}
+
+fn ensure_hard_is_live(key: OpenLineageKey) -> Result<(), BackendError> {
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| BackendError::Unavailable)?
+        .as_secs();
+    let now_boottime_ns = current_boottime_nanos()?;
+    if now_unix >= key.hard_expires_at_unix || now_boottime_ns >= key.hard_expires_at_boottime_ns {
+        return Err(BackendError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate_committed_acquire_entry(
+    entry: &OpenLeaseEntry,
+    value: &AcquireTransportSocket,
+    internal: &InternalAcquireTransportSocket,
+) -> Result<u64, BackendError> {
+    let role = functional_lease_role_for_wireguard(value.role).ok_or(BackendError::Invalid)?;
+    let [wireguard] = entry.wireguard.as_slice() else {
+        return Err(BackendError::Invalid);
+    };
+    let [prepare] = entry.prepare.leases.as_slice() else {
+        return Err(BackendError::Invalid);
+    };
+    let [prepared] = entry.prepared.as_slice() else {
+        return Err(BackendError::Invalid);
+    };
+    let [activated] = entry.activated.as_slice() else {
+        return Err(BackendError::Invalid);
+    };
+    let [birth_may_exist] = entry.birth_may_exist.as_slice() else {
+        return Err(BackendError::Invalid);
+    };
+    let worker = entry
+        .worker
+        .as_ref()
+        .ok_or(BackendError::CleanupIncomplete)?;
+    let expected_overlay = wireguard.resource().local_address();
+    let expected_overlay_bytes = expected_overlay.octets();
+    let exact_internal_local = internal
+        .expected_local
+        .as_ref()
+        .is_some_and(|local| local.address.as_slice() == expected_overlay_bytes && local.port != 0);
+    let exact_prepare_local = prepare.local_overlay_address.as_ref().is_some_and(|local| {
+        local.prefix_length == 128 && local.address.as_slice() == expected_overlay_bytes
+    });
+    if !matches!(role.context, ContextRole::Client | ContextRole::Exit)
+        || entry.context_role != role.context
+        || entry.phase != OpenLeasePhase::Committed
+        || entry.child_cleanup.is_some()
+        || entry.worker_cleanup.is_some()
+        || entry.durable_prepare_terminal.is_some()
+        || entry.prepare.route_context_id.as_slice() != entry.key.context_id
+        || internal.route_context_id.as_slice() != entry.key.context_id
+        || internal.path_id != value.path_id
+        || internal.role != role.internal_endpoint as i32
+        || internal.descriptor_kind != InternalTransportSocketKind::QuicUdpUnconnected as i32
+        || internal.expected_remote.is_some()
+        || !exact_internal_local
+        || wireguard.resource().key() != (u8::try_from(value.path_id).unwrap_or(0), value.role)
+        || wireguard.resource().hard_expires_at_unix() != entry.key.hard_expires_at_unix
+        || prepare.path_id != value.path_id
+        || prepare.role != role.internal_endpoint as i32
+        || prepare.setup_expires_at_unix != entry.key.setup_expires_at_unix
+        || prepare.hard_expires_at_unix != entry.key.hard_expires_at_unix
+        || !exact_prepare_local
+        || prepared.path_id != value.path_id
+        || prepared.role != value.role
+        || activated.prepared != *prepared
+        || !*birth_may_exist
+        || worker.coordinates.context_id != entry.key.context_id
+    {
+        return Err(BackendError::Invalid);
+    }
+    ensure_hard_is_live(entry.key)?;
+    Ok(worker.coordinates.worker_generation.get())
+}
+
+enum AcquireTransportExecution {
+    Ready(OwnedFd),
+    Definite(BackendError),
+    RequiresCleanup(BackendError),
+}
+
+fn classify_acquire_transport_execution(
+    mut execution: crate::worker_transport::CredentialedWorkerExecution,
+    request: &InternalAcquireTransportSocket,
+) -> AcquireTransportExecution {
+    let result = InternalWorkerResult::try_from(execution.response.result).ok();
+    if result == Some(InternalWorkerResult::Ok) {
+        let exact = matches!(
+            execution.response.outcome.as_ref(),
+            Some(internal_worker_response::Outcome::TransportSocketReady(ready))
+                if ready.path_id == request.path_id
+                    && ready.role == request.role
+                    && ready.descriptor_kind == request.descriptor_kind
+                    && ready.local == request.expected_local
+                    && ready.remote.is_none()
+        );
+        return match (exact, execution.descriptor.take()) {
+            (true, Some(descriptor)) => AcquireTransportExecution::Ready(descriptor),
+            (true | false, descriptor) => {
+                drop(descriptor);
+                AcquireTransportExecution::RequiresCleanup(BackendError::CleanupIncomplete)
+            }
+        };
+    }
+    if execution.descriptor.is_some() || execution.response.outcome.is_some() {
+        return AcquireTransportExecution::RequiresCleanup(BackendError::CleanupIncomplete);
+    }
+    match result {
+        Some(InternalWorkerResult::Invalid) => {
+            AcquireTransportExecution::Definite(BackendError::Invalid)
+        }
+        Some(InternalWorkerResult::Kernel) => {
+            AcquireTransportExecution::Definite(BackendError::Kernel)
+        }
+        Some(
+            InternalWorkerResult::Conflict
+            | InternalWorkerResult::NotFound
+            | InternalWorkerResult::CleanupIncomplete
+            | InternalWorkerResult::Unspecified
+            | InternalWorkerResult::Ok,
+        )
+        | None => AcquireTransportExecution::RequiresCleanup(BackendError::CleanupIncomplete),
+    }
 }
 
 #[cfg(test)]
@@ -3277,7 +3581,14 @@ fn parse_public_udp_endpoint(value: Option<&PublicUdpEndpoint>) -> Option<(IpAdd
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::{
+        env,
+        io::{Read as _, Seek as _, SeekFrom},
+        net::SocketAddr,
+        os::fd::OwnedFd,
+        process::{Command, ExitStatus, Stdio},
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     use ed25519_dalek::SigningKey;
     use nix::unistd::{getegid, geteuid};
@@ -3544,6 +3855,849 @@ mod tests {
             child_cleanup: None,
             worker_cleanup: None,
         }
+    }
+
+    fn acquire_binding(key: OpenLineageKey, deadline: tokio::time::Instant) -> BackendBinding {
+        let mut binding = binding(
+            key,
+            OperationKind::Acquire,
+            BackendPhase::Committed,
+            BackendAction::AcquireTransportSocket,
+            deadline,
+        );
+        binding.prior_phase = Some(ContextPhase::Committed);
+        // Prepare owns the stable backend generation. Activate and Probe/Commit rotate the
+        // engine's operation generation before a production Acquire can be dispatched.
+        binding.operation_generation = key.backend_generation.saturating_add(2);
+        binding
+    }
+
+    fn acquire_value(
+        key: OpenLineageKey,
+        role: WireguardRole,
+        local_address: Ipv6Addr,
+        port: u16,
+    ) -> AcquireTransportSocket {
+        AcquireTransportSocket {
+            route_context_id: key.context_id.to_vec(),
+            context_handle: vec![0x71; HELPER_HANDLE_BYTES],
+            path_id: 1,
+            role: role as i32,
+            descriptor_kind: TransportSocketKind::QuicUdpUnconnected as i32,
+            expected_local: Some(TransportSocketAddress {
+                address: local_address.octets().to_vec(),
+                port: u32::from(port),
+            }),
+            expected_remote: None,
+        }
+    }
+
+    fn committed_transport_backend(
+        key: OpenLineageKey,
+        role: WireguardRole,
+    ) -> (
+        Arc<FunctionalAlphaLeaseBackend>,
+        socket2::Socket,
+        Arc<AtomicBool>,
+        Ipv6Addr,
+    ) {
+        let (parent, peer) =
+            private_credential_worker_channel().expect("credentialed fake worker channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let mut process = WorkerProcess::fake(parent, std::process::id(), Arc::clone(&alive));
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let ownership = match coordinator.reserve_spawn_register_with_until(
+            key.context_id,
+            Duration::from_secs(30),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xd5; 32]),
+                })
+            },
+        ) {
+            WorkerLifecycleAdmission::Registered(ownership) => ownership,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("fake worker registration rejected: {error}")
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("fake worker registration unresolved: {error}")
+            }
+        };
+        {
+            let mut registry = coordinator
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry
+                .records
+                .get_mut(&key.context_id)
+                .expect("registered fake worker")
+                .stable_phase = StablePhase::Committed;
+        }
+
+        let mut entry = open_entry_for_role(key, role);
+        let prepared = PreparedWorkerLease {
+            path_id: 1,
+            role: role as i32,
+            public_key: [0x72; 32],
+            listen_port: 31_337,
+        };
+        entry.prepared = vec![prepared];
+        entry.activated = vec![ActivatedWorkerLease {
+            prepared,
+            peer_public_key: [0x73; 32],
+            baseline: KernelCounters {
+                path_id: 1,
+                role: role as i32,
+                latest_handshake_unix: 1,
+                received_bytes: 2,
+                transmitted_bytes: 3,
+            },
+        }];
+        entry.phase = OpenLeasePhase::Committed;
+        entry.birth_may_exist = vec![true];
+        entry.worker = Some(ownership);
+        let overlay = entry.wireguard[0].resource().local_address();
+        (
+            Arc::new(FunctionalAlphaLeaseBackend {
+                coordinator,
+                relay_replay: Mutex::new(functional_alpha_replay_cache()),
+                state: Mutex::new(Some(entry)),
+                durable_ownership: None,
+            }),
+            peer,
+            alive,
+            overlay,
+        )
+    }
+
+    fn bound_freebind_udp(address: Ipv6Addr) -> (OwnedFd, u16) {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM.nonblocking().cloexec(),
+            Some(socket2::Protocol::UDP),
+        )
+        .expect("fixture UDP socket");
+        socket.set_only_v6(true).expect("IPv6-only fixture");
+        // This per-socket fixture option changes no host network policy. Production never enables
+        // freebind: its worker binds only an address already installed on the exact WireGuard leg.
+        socket
+            .set_freebind_v6(true)
+            .expect("enable per-socket IPV6_FREEBIND");
+        socket
+            .bind(&socket2::SockAddr::from(SocketAddr::from((address, 0))))
+            .expect("bind fixture overlay UDP");
+        let port = socket
+            .local_addr()
+            .expect("fixture local address")
+            .as_socket_ipv6()
+            .expect("IPv6 fixture")
+            .port();
+        assert_ne!(port, 0);
+        (socket.into(), port)
+    }
+
+    fn transport_ready_response(
+        request: &InternalWorkerRequest,
+    ) -> crate::internal_protocol::InternalWorkerResponse {
+        let Some(internal_worker_request::Operation::AcquireTransportSocket(acquire)) =
+            request.operation.as_ref()
+        else {
+            panic!("Acquire request")
+        };
+        correlated_response(
+            request,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::TransportSocketReady(
+                crate::internal_protocol::TransportSocketReady {
+                    path_id: acquire.path_id,
+                    role: acquire.role,
+                    descriptor_kind: acquire.descriptor_kind,
+                    local: acquire.expected_local.clone(),
+                    remote: None,
+                },
+            )),
+        )
+        .expect("correlated transport response")
+    }
+
+    fn assert_fixture_descriptor_is_adoptable(
+        backend: &FunctionalAlphaLeaseBackend,
+        binding: BackendBinding,
+        value: &AcquireTransportSocket,
+        descriptor: &OwnedFd,
+    ) {
+        let (_, internal) =
+            validate_acquire_transport_binding(binding, value).expect("fixture Acquire binding");
+        let pin = {
+            let registry = backend
+                .coordinator
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry
+                .records
+                .get(&binding.lineage.context_id)
+                .and_then(|record| record.process.as_ref())
+                .expect("fixture worker process")
+                .duplicate_network_namespace_pin(
+                    HardDeadline::after(Duration::from_secs(1)).expect("pin deadline"),
+                )
+                .expect("fixture namespace pin")
+        };
+        let duplicate = rustix::io::fcntl_dupfd_cloexec(descriptor, 3)
+            .expect("duplicate fixture transport descriptor");
+        drop(
+            crate::worker_transport::validate_adopted_transport_socket(&pin, &internal, duplicate)
+                .expect("fixture descriptor satisfies production adoption"),
+        );
+    }
+
+    fn run_inside_disposable_user_network_namespace(test_name: &str, marker: &str) -> bool {
+        if env::var(marker).ok().as_deref() == Some("1") {
+            return true;
+        }
+        let executable = env::current_exe().expect("current Rust test image");
+        let (status, stdout, stderr) =
+            bounded_disposable_namespace_child(&executable, test_name, marker);
+        if unprivileged_user_namespace_policy_denied(status.code(), &stdout, &stderr) {
+            eprintln!("skipped live functional QUIC UDP proof: user namespaces denied by policy");
+            return false;
+        }
+        let stdout = String::from_utf8_lossy(&stdout);
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(
+            status.success(),
+            "disposable namespace child failed\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        false
+    }
+
+    fn bounded_disposable_namespace_child(
+        executable: &std::path::Path,
+        test_name: &str,
+        marker: &str,
+    ) -> (ExitStatus, Vec<u8>, Vec<u8>) {
+        const OUTPUT_LIMIT_BYTES: u64 = 65_536;
+        let mut stdout_file = tempfile::tempfile().expect("anonymous bounded child stdout");
+        let mut stderr_file = tempfile::tempfile().expect("anonymous bounded child stderr");
+        let stdout_sink = stdout_file.try_clone().expect("clone child stdout");
+        let stderr_sink = stderr_file.try_clone().expect("clone child stderr");
+        let status = Command::new("/usr/bin/prlimit")
+            .args([
+                "--core=0:0",
+                "--fsize=65536:65536",
+                "--",
+                "/usr/bin/timeout",
+                "--preserve-status",
+                "--signal=TERM",
+                "--kill-after=5s",
+                "30s",
+                "/usr/bin/unshare",
+                "--user",
+                "--map-root-user",
+                "--net",
+            ])
+            .arg(executable)
+            .args(["--exact", test_name, "--nocapture"])
+            .arg("--test-threads=1")
+            .env(marker, "1")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_sink))
+            .stderr(Stdio::from(stderr_sink))
+            .status()
+            .expect("launch disposable user/network namespace test");
+        let stdout = read_bounded_child_output(&mut stdout_file, OUTPUT_LIMIT_BYTES, "stdout");
+        let stderr = read_bounded_child_output(&mut stderr_file, OUTPUT_LIMIT_BYTES, "stderr");
+        (status, stdout, stderr)
+    }
+
+    fn read_bounded_child_output(file: &mut std::fs::File, limit: u64, stream: &str) -> Vec<u8> {
+        file.seek(SeekFrom::Start(0))
+            .unwrap_or_else(|error| panic!("seek bounded child {stream}: {error}"));
+        let mut bytes = Vec::new();
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .unwrap_or_else(|error| panic!("read bounded child {stream}: {error}"));
+        assert!(
+            u64::try_from(bytes.len()).expect("captured length fits u64") <= limit,
+            "disposable namespace child exceeded bounded {stream}"
+        );
+        bytes
+    }
+
+    fn unprivileged_user_namespace_policy_denied(
+        status_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> bool {
+        status_code == Some(1)
+            && stdout.is_empty()
+            && matches!(
+                stderr,
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/gid_map: Operation not permitted\n"
+            )
+    }
+
+    #[test]
+    fn disposable_namespace_policy_skip_is_byte_exact_and_fail_closed() {
+        for stderr in [
+            b"unshare: unshare failed: Operation not permitted\n".as_slice(),
+            b"unshare: write failed /proc/self/uid_map: Operation not permitted\n".as_slice(),
+            b"unshare: write failed /proc/self/gid_map: Operation not permitted\n".as_slice(),
+        ] {
+            assert!(unprivileged_user_namespace_policy_denied(
+                Some(1),
+                b"",
+                stderr
+            ));
+            assert!(!unprivileged_user_namespace_policy_denied(
+                Some(2),
+                b"",
+                stderr
+            ));
+            assert!(!unprivileged_user_namespace_policy_denied(
+                Some(1),
+                b"unexpected output\n",
+                stderr
+            ));
+        }
+        for stderr in [
+            b"unshare: write failed /proc/self/uid_map: Permission denied\n".as_slice(),
+            b"unshare: write failed /proc/self/uid_map: Operation not permitted\nextra\n"
+                .as_slice(),
+            b"functional child failed\n".as_slice(),
+        ] {
+            assert!(!unprivileged_user_namespace_policy_denied(
+                Some(1),
+                b"",
+                stderr
+            ));
+        }
+    }
+
+    async fn retire_transport_fixture(backend: &FunctionalAlphaLeaseBackend, key: OpenLineageKey) {
+        if let Some(entry) = lock_state(&backend.state).as_mut() {
+            entry.birth_may_exist.fill(false);
+        }
+        assert!(
+            backend
+                .cleanup_exact(
+                    key,
+                    HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+                    false,
+                )
+                .await
+        );
+    }
+
+    fn assert_acquire_binding_fail_closed(binding: BackendBinding, value: &AcquireTransportSocket) {
+        for changed in [
+            BackendBinding {
+                action: BackendAction::Activate,
+                ..binding
+            },
+            BackendBinding {
+                phase: BackendPhase::Activated,
+                ..binding
+            },
+            BackendBinding {
+                prior_phase: Some(ContextPhase::Activated),
+                ..binding
+            },
+            BackendBinding {
+                operation_kind: OperationKind::Probe,
+                ..binding
+            },
+            BackendBinding {
+                operation_generation: 0,
+                ..binding
+            },
+            BackendBinding {
+                request_id: [0; 16],
+                ..binding
+            },
+            BackendBinding {
+                request_digest: [0; 32],
+                ..binding
+            },
+            BackendBinding {
+                lineage: BackendLineage {
+                    helper_runtime_id: [0; 32],
+                    ..binding.lineage
+                },
+                ..binding
+            },
+        ] {
+            assert_eq!(
+                validate_acquire_transport_binding(changed, value),
+                Err(BackendError::Invalid)
+            );
+        }
+        let mut expired_call = binding;
+        expired_call.call_deadline = tokio::time::Instant::now();
+        assert_eq!(
+            validate_acquire_transport_binding(expired_call, value),
+            Err(BackendError::Unavailable)
+        );
+    }
+
+    fn assert_acquire_shape_fail_closed(
+        backend: &FunctionalAlphaLeaseBackend,
+        binding: BackendBinding,
+        value: &AcquireTransportSocket,
+        overlay: Ipv6Addr,
+    ) {
+        for changed in [
+            AcquireTransportSocket {
+                path_id: 2,
+                ..value.clone()
+            },
+            AcquireTransportSocket {
+                role: WireguardRole::Exit as i32,
+                ..value.clone()
+            },
+            AcquireTransportSocket {
+                expected_local: Some(TransportSocketAddress {
+                    address: {
+                        let mut changed = overlay.octets();
+                        changed[15] ^= 1;
+                        changed.to_vec()
+                    },
+                    port: 41_001,
+                }),
+                ..value.clone()
+            },
+        ] {
+            let (_, changed_internal) = validate_acquire_transport_binding(binding, &changed)
+                .expect("well-formed but different Acquire request");
+            let state = lock_state(&backend.state);
+            assert_eq!(
+                validate_committed_acquire_entry(
+                    state.as_ref().expect("committed entry"),
+                    &changed,
+                    &changed_internal,
+                ),
+                Err(BackendError::Invalid)
+            );
+        }
+
+        let unsupported_mptcp = AcquireTransportSocket {
+            descriptor_kind: TransportSocketKind::MptcpConnected as i32,
+            expected_remote: Some(TransportSocketAddress {
+                address: {
+                    let mut remote = overlay.octets();
+                    remote[15] ^= 1;
+                    remote.to_vec()
+                },
+                port: 443,
+            }),
+            ..value.clone()
+        };
+        assert_eq!(
+            validate_acquire_transport_binding(binding, &unsupported_mptcp),
+            Err(BackendError::Unavailable)
+        );
+        let unsupported_relay = AcquireTransportSocket {
+            role: WireguardRole::RelayClient as i32,
+            ..value.clone()
+        };
+        assert_eq!(
+            validate_acquire_transport_binding(binding, &unsupported_relay),
+            Err(BackendError::Unavailable)
+        );
+        for changed in [
+            AcquireTransportSocket {
+                expected_remote: value.expected_local.clone(),
+                ..value.clone()
+            },
+            AcquireTransportSocket {
+                context_handle: vec![0; HELPER_HANDLE_BYTES],
+                ..value.clone()
+            },
+        ] {
+            assert_eq!(
+                validate_acquire_transport_binding(binding, &changed),
+                Err(BackendError::Invalid)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn quic_udp_acquire_binding_and_committed_singleton_state_are_exact() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = live_key([0x81; 16], now);
+        let (backend, peer, _alive, overlay) =
+            committed_transport_backend(key, WireguardRole::Client);
+        let binding = acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+        let value = acquire_value(key, WireguardRole::Client, overlay, 41_001);
+        let (_, internal) =
+            validate_acquire_transport_binding(binding, &value).expect("exact Acquire binding");
+        let generation = {
+            let state = lock_state(&backend.state);
+            validate_committed_acquire_entry(
+                state.as_ref().expect("committed entry"),
+                &value,
+                &internal,
+            )
+            .expect("exact committed singleton")
+        };
+        assert_ne!(generation, 0);
+        assert_acquire_binding_fail_closed(binding, &value);
+        assert_acquire_shape_fail_closed(&backend, binding, &value, overlay);
+
+        {
+            let mut state = lock_state(&backend.state);
+            state.as_mut().expect("committed entry").phase = OpenLeasePhase::Activated;
+            assert_eq!(
+                validate_committed_acquire_entry(state.as_ref().expect("entry"), &value, &internal,),
+                Err(BackendError::Invalid)
+            );
+            state.as_mut().expect("committed entry").phase = OpenLeasePhase::Committed;
+        }
+        drop(peer);
+        retire_transport_fixture(&backend, key).await;
+    }
+
+    #[tokio::test]
+    async fn functional_backend_truthfully_advertises_only_its_transport_factory_seam() {
+        let backend = Arc::new(backend_with_state(None));
+        let exact = crate::engine::BackendRuntimeBinding {
+            helper_runtime_id: [0x82; 32],
+            action: crate::engine::BackendRuntimeAction::QueryTransportSocket,
+            call_deadline: tokio::time::Instant::now() + Duration::from_secs(1),
+        };
+        let completion = Arc::clone(&backend)
+            .transport_socket_supported(BackendRuntimeRequest::new(exact))
+            .await;
+        assert_eq!(completion.binding, exact);
+        assert_eq!(completion.result, Ok(true));
+
+        let wrong = crate::engine::BackendRuntimeBinding {
+            action: crate::engine::BackendRuntimeAction::Shutdown,
+            ..exact
+        };
+        assert_eq!(
+            Arc::clone(&backend)
+                .transport_socket_supported(BackendRuntimeRequest::new(wrong))
+                .await
+                .result,
+            Err(BackendError::Invalid)
+        );
+        let expired = crate::engine::BackendRuntimeBinding {
+            call_deadline: tokio::time::Instant::now(),
+            ..exact
+        };
+        assert_eq!(
+            backend
+                .transport_socket_supported(BackendRuntimeRequest::new(expired))
+                .await
+                .result,
+            Err(BackendError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_client_and_exit_handoff_one_validated_quic_udp_descriptor() {
+        if !run_inside_disposable_user_network_namespace(
+            "worker_v3::functional_backend::tests::committed_client_and_exit_handoff_one_validated_quic_udp_descriptor",
+            "VOLPAROSSA_TEST_FUNCTIONAL_QUIC_UDP_SUCCESS_NETNS",
+        ) {
+            return;
+        }
+        for (index, role) in [WireguardRole::Client, WireguardRole::Exit]
+            .into_iter()
+            .enumerate()
+        {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("fixture time")
+                .as_secs();
+            let key = live_key([0x83 + u8::try_from(index).expect("small index"); 16], now);
+            let (backend, peer, alive, overlay) = committed_transport_backend(key, role);
+            let (source, port) = bound_freebind_udp(overlay);
+            let value = acquire_value(key, role, overlay, port);
+            let binding =
+                acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+            assert_fixture_descriptor_is_adoptable(&backend, binding, &value, &source);
+            let expected_worker = ExpectedUnixCredentials::new(
+                std::process::id(),
+                geteuid().as_raw(),
+                getegid().as_raw(),
+            )
+            .expect("current worker credentials");
+            let worker = std::thread::spawn(move || {
+                let received = receive_credential_worker_request(&peer, expected_worker)
+                    .expect("dispatched Acquire request");
+                let response = transport_ready_response(&received.request);
+                send_credential_worker_response(&peer, &received.request, &response, Some(source))
+                    .expect("credentialed transport handoff");
+            });
+
+            let completion = Arc::clone(&backend)
+                .acquire_transport_socket(BackendRequest::new(binding, value))
+                .await;
+            assert_eq!(completion.binding, binding);
+            let descriptor = completion.result.expect("one adopted UDP descriptor");
+            let socket = socket2::Socket::from(descriptor);
+            assert_eq!(
+                socket.local_addr().expect("local address").as_socket(),
+                Some(SocketAddr::from((overlay, port)))
+            );
+            drop(socket);
+            worker.join().expect("fake worker thread");
+            assert!(alive.load(Ordering::SeqCst));
+            {
+                let registry = backend
+                    .coordinator
+                    .registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert!(
+                    registry.cache.is_empty(),
+                    "Acquire is never descriptor-cached"
+                );
+                assert_eq!(registry.tombstones.len(), 1);
+            }
+            assert_eq!(
+                lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+                Some(OpenLeasePhase::Committed)
+            );
+            retire_transport_fixture(&backend, key).await;
+            assert!(!alive.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn definite_worker_socket_error_retains_the_exact_committed_context() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = live_key([0x85; 16], now);
+        let (backend, peer, alive, overlay) =
+            committed_transport_backend(key, WireguardRole::Client);
+        let binding = acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+        let value = acquire_value(key, WireguardRole::Client, overlay, 41_085);
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let received = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Acquire request");
+            let response =
+                correlated_response(&received.request, InternalWorkerResult::Kernel, None)
+                    .expect("correlated kernel error");
+            send_credential_worker_response(&peer, &received.request, &response, None)
+                .expect("credentialed kernel error");
+        });
+        let completion = Arc::clone(&backend)
+            .acquire_transport_socket(BackendRequest::new(binding, value))
+            .await;
+        assert_eq!(completion.result.err(), Some(BackendError::Kernel));
+        worker.join().expect("fake worker thread");
+        assert!(alive.load(Ordering::SeqCst));
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::Committed)
+        );
+        retire_transport_fixture(&backend, key).await;
+    }
+
+    #[tokio::test]
+    async fn descriptor_shape_mismatch_is_closed_and_cleans_the_ambiguous_generation() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = live_key([0x86; 16], now);
+        let (backend, peer, alive, overlay) =
+            committed_transport_backend(key, WireguardRole::Client);
+        let binding = acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+        let value = acquire_value(key, WireguardRole::Client, overlay, 41_086);
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker_backend = Arc::clone(&backend);
+        let (wrong, mut observer) =
+            std::os::unix::net::UnixStream::pair().expect("wrong descriptor pair");
+        let worker = std::thread::spawn(move || {
+            let received = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Acquire request");
+            lock_state(&worker_backend.state)
+                .as_mut()
+                .expect("owned entry")
+                .birth_may_exist
+                .fill(false);
+            let response = transport_ready_response(&received.request);
+            send_credential_worker_response(
+                &peer,
+                &received.request,
+                &response,
+                Some(wrong.into()),
+            )
+            .expect("credentialed mismatched descriptor");
+        });
+        let completion = Arc::clone(&backend)
+            .acquire_transport_socket(BackendRequest::new(binding, value))
+            .await;
+        assert_eq!(
+            completion.result.err(),
+            Some(BackendError::CleanupIncomplete)
+        );
+        worker.join().expect("fake worker thread");
+        observer
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("observer timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            observer
+                .read(&mut byte)
+                .expect("rejected descriptor closed"),
+            0
+        );
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[tokio::test]
+    async fn dropped_acquire_future_leaves_no_descriptor_cache_or_in_flight_call() {
+        if !run_inside_disposable_user_network_namespace(
+            "worker_v3::functional_backend::tests::dropped_acquire_future_leaves_no_descriptor_cache_or_in_flight_call",
+            "VOLPAROSSA_TEST_FUNCTIONAL_QUIC_UDP_CANCEL_NETNS",
+        ) {
+            return;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = live_key([0x87; 16], now);
+        let (backend, peer, alive, overlay) =
+            committed_transport_backend(key, WireguardRole::Client);
+        let (source, port) = bound_freebind_udp(overlay);
+        let value = acquire_value(key, WireguardRole::Client, overlay, port);
+        let binding = acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+        assert_fixture_descriptor_is_adoptable(&backend, binding, &value, &source);
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let (reached_sender, reached_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let worker = std::thread::spawn(move || {
+            let received = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Acquire request");
+            reached_sender.send(()).expect("announce dispatch");
+            release_receiver.blocking_recv().expect("release response");
+            let response = transport_ready_response(&received.request);
+            send_credential_worker_response(&peer, &received.request, &response, Some(source))
+                .expect("credentialed transport handoff");
+        });
+        let executing = Arc::clone(&backend);
+        let task = tokio::spawn(async move {
+            executing
+                .acquire_transport_socket(BackendRequest::new(binding, value))
+                .await
+        });
+        reached_receiver.await.expect("Acquire reached worker");
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        release_sender.send(()).expect("release worker response");
+        worker.join().expect("fake worker thread");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let settled = {
+                    let registry = backend
+                        .coordinator
+                        .registry
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    registry.records.get(&key.context_id).is_some_and(|record| {
+                        record.stable_phase == StablePhase::Committed
+                            && record.in_flight.is_none()
+                            && !record.quarantined
+                    }) && registry.cache.is_empty()
+                        && registry.tombstones.len() == 1
+                };
+                if settled {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled Acquire settlement");
+        assert!(alive.load(Ordering::SeqCst));
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::Committed)
+        );
+        retire_transport_fixture(&backend, key).await;
+    }
+
+    #[tokio::test]
+    async fn worker_channel_ambiguity_closes_generation_under_exact_cleanup_authority() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = live_key([0x88; 16], now);
+        let (backend, peer, alive, overlay) =
+            committed_transport_backend(key, WireguardRole::Client);
+        let binding = acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+        let value = acquire_value(key, WireguardRole::Client, overlay, 41_088);
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker_backend = Arc::clone(&backend);
+        let worker = std::thread::spawn(move || {
+            let _received = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Acquire request");
+            lock_state(&worker_backend.state)
+                .as_mut()
+                .expect("owned entry")
+                .birth_may_exist
+                .fill(false);
+            drop(peer);
+        });
+        let completion = Arc::clone(&backend)
+            .acquire_transport_socket(BackendRequest::new(binding, value))
+            .await;
+        assert_eq!(
+            completion.result.err(),
+            Some(BackendError::CleanupIncomplete)
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
     }
 
     fn live_prepare_fixture() -> (BackendBinding, PrepareLeaseBatch) {

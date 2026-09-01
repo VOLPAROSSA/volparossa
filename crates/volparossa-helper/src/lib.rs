@@ -37,7 +37,7 @@ mod systemd_fdstore;
 mod underlay;
 #[allow(dead_code)] // Narrow sandbox bootstrap; broader lifecycle operations remain unavailable.
 mod worker_sandbox;
-#[allow(dead_code)] // V3 transport foundation; descriptor/datapath operations remain unavailable.
+#[allow(dead_code)] // Committed Client/Exit QUIC UDP is wired; MPTCP and datapaths remain absent.
 mod worker_transport;
 #[allow(dead_code)] // Functional-alpha uses one lease; broader authenticated lifecycle remains.
 mod worker_v3;

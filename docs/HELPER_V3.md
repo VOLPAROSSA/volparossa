@@ -50,7 +50,9 @@ The v3 route-context lifecycle is:
    the same operation.
 4. `AcquireTransportSocket` requests one descriptor for an exact committed context, lease path,
    endpoint role, closed transport kind and concrete address tuple. The descriptor is transferred
-   separately and is not representable in protobuf.
+   separately and is not representable in protobuf. Production currently accepts only explicitly
+   unconnected QUIC UDP for an exact Client or Exit singleton; Relay and both MPTCP forms remain
+   unavailable.
 5. `DestroyContext` removes one exact owned context. Relay Destroy first restores policy-drop and
    proves the active fence absent before deleting the links and retiring the baseline. Repeated
    destruction is successful and reports whether a context existed. Cleanup ambiguity quarantines
@@ -197,10 +199,12 @@ engine independently revalidate that proof before returning the exact `Committed
 identical external Commit retry is served by the bounded exact-response cache. Destroy sends the
 exact child operation from either Activated or Committed state, first restores Relay policy-drop,
 deletes the complete lease set, proves fence absence, and succeeds only after worker termination,
-reap and registry purge. The backend permits no second live context. This is one helper-internal,
-single-path Relay-forwarding seam. Transport
-acquisition, multi-path routing and every usable datapath remain explicitly `Unavailable`; shutdown
-succeeds only with empty backend state and confirmed coordinator cleanup. The periodic driver uses an owned,
+reap and registry purge. The backend permits no second live context. This remains a helper-internal,
+single-path seam. For a committed Client or Exit singleton, the production server can satisfy a
+valid unconnected-QUIC-UDP `AcquireTransportSocket` request and hand off exactly one descriptor for
+that request. MPTCP and Relay acquisition, multi-path routing, every production transport caller and
+every usable datapath remain `Unavailable`; shutdown succeeds only with empty backend state and
+confirmed coordinator cleanup. The periodic driver uses an owned,
 cancellation-safe engine supervisor with nonzero domain-separated exact-lineage correlation; it
 retries cleanup-pending Quarantined contexts and orphan Pending preparations, and unexpected driver
 exit stops the server. Shutdown first stops and joins this driver, then cleans the engine, then joins
@@ -1233,7 +1237,10 @@ described above, and rolls back the complete pair on failure. Every lease instal
 `/128` link route and retains the activation counters. Commit requires a recent handshake plus strict
 RX/TX growth for every lease and both Relay forwarding counters; neither leg can commit alone.
 Destroy restores policy-drop before deleting and proving absence of the complete pair and fence.
-Transport socket factories, ingress/interception and every usable product datapath remain rejected.
+A committed Client or Exit singleton may satisfy each valid request by handing off exactly one
+helper-internal unconnected QUIC UDP descriptor;
+MPTCP and Relay factories, a production route-manager caller, ingress/interception and every usable
+product datapath remain rejected.
 The public `HelperEngine::new`
 constructor remains unavailable and does not select this backend.
 
@@ -1243,9 +1250,11 @@ and expire within the 15-minute maximum. Spawn consumes the token and either ret
 failure for exact abandon, or packages it with the authenticated child for one exact registration
 commit. Abandon, expiry and binding mismatch burn the generation; overflow fails closed and stale
 tokens cannot remove or register a replacement. The registry also bounds both exact-response cache
-entries and request-ID/digest tombstones at 1024. Tombstones cover descriptor-returning operations,
-which are never replayed. Expiry, detected child death, digest collision and ambiguous IPC
-quarantine the exact generation.
+entries and request-ID/digest tombstones at 1024. Nonterminal operations may consume at most 1023
+tombstones: transition classification precedes capacity admission and permanently reserves the
+final slot for exact terminal `DestroyContext`. Tombstones cover descriptor-returning operations,
+which are never replayed. Confirmed terminal retirement purges every exact generation index.
+Expiry, detected child death, digest collision and ambiguous IPC quarantine the exact generation.
 
 The registry uses one short synchronous mutex so shutdown can install its fence and detach every
 process owner before returning a wait future. Code under that mutex only validates or moves state
@@ -1395,16 +1404,17 @@ around PLAN, generation ABA, late/dead commit rejection, descriptor closure, tom
 registry-lock availability.
 
 The production server's functional-alpha backend now calls this worker path for one Client/Exit
-singleton lease or one exact Relay endpoint pair;
-no production route manager calls it. The production engine supervises cancellation-safe
+singleton lease or one exact Relay endpoint pair; no production route manager calls it. The
+production engine supervises cancellation-safe
 PLAN -> CALL -> COMMIT/rollback transactions: it
 reserves and revalidates state under `EngineState`, while every backend call runs without that mutex
 held. The narrow backend implements real complete-batch Prepare, Activate, correlated Probe/Commit,
-and Destroy. Relay operations are fail-atomic, install the exact two-direction fence, and both lease
-and forwarding proofs must pass before pair Commit. It returns `Unavailable` for transport
-acquisition, and the engine rejects client ingress as `Unavailable` before backend dispatch. It has
-no production route-manager caller. This scoped helper-internal forwarding composition is not full
-production readiness.
+and Destroy. It also acquires one bound unconnected QUIC UDP socket per successfully committed valid
+request for a committed Client/Exit singleton. Relay operations are fail-atomic, install the exact
+two-direction fence, and
+both lease and forwarding proofs must pass before pair Commit. MPTCP and Relay transport acquisition
+remain `Unavailable`, and the engine rejects client ingress as `Unavailable` before backend
+dispatch. This scoped helper-internal composition is not full production readiness.
 
 ### Affine asynchronous engine/backend boundary
 
@@ -1430,8 +1440,11 @@ deadline internally and reach a terminal result or transfer exact ownership to a
 reaper. `CleanupIncomplete` is not a definitive error: Probe and Acquire uncertainty trigger exact
 rollback, and failed absence proof leaves the lineage quarantined. Destroy accepts the stable
 lineage plus the current operation binding, and `ConfirmedAbsent` means that exact worker and its
-pins, journal authority and descriptors are gone. Runtime shutdown is correlated by runtime ID and
-deadline and starts only after every per-context Destroy and all engine cleanup state are confirmed.
+helper-/worker-owned pins, journal authority and descriptors are gone. A successfully handed-off
+descriptor is caller-owned and must be closed by its affine receiver before Destroy; neither Destroy
+nor `ConfirmedAbsent` can revoke an external `OwnedFd`. Runtime shutdown is correlated by runtime ID
+and deadline and starts only after every per-context Destroy and all engine cleanup state are
+confirmed.
 
 Fake/adversarial tests cover factory and poll panic, caller cancellation, missing state-binding
 recovery, stale-owner rejection, generation overflow, deadline and completion substitution, runtime
@@ -1639,9 +1652,13 @@ executor, and cross-runtime proof needed to settle that case do not exist.
 
 This same-runtime reconciliation path remains containment rather than crash recovery. The
 functional-alpha production adapter can Prepare, Activate, Probe/Commit and Destroy one Client/Exit
-singleton or one exact Relay endpoint pair, but no production route-manager caller drives it and
-there is no transport descriptor, simultaneous production Client/Relay/Exit route, ingress or
-usable VPN datapath. Cross-leg forwarding exists only inside the isolated single-path Relay worker.
+singleton or one exact Relay endpoint pair. A valid Acquire request for an exact committed
+Client/Exit singleton can also hand off exactly one bound unconnected QUIC UDP descriptor. This
+at-most-once rule is scoped only to the outer request ID and digest: an exact retry returns
+descriptorless `TRANSPORT_SOCKET_ALREADY_ACQUIRED`, while a fresh request ID is not rejected as a
+per-context/path/role replay. No production route-manager or transport caller adopts the descriptor,
+and no simultaneous production Client/Relay/Exit route, ingress or usable VPN datapath exists.
+Cross-leg forwarding exists only inside the isolated single-path Relay worker.
 
 ## Namespace-local transport descriptor
 
@@ -1651,7 +1668,8 @@ handle, path 1–8, exact WireGuard endpoint role, and one of:
 
 - already-connected MPTCP with concrete local and remote IP:port values;
 - an MPTCP listener with a concrete local IP:port and no remote value;
-- an explicitly unconnected Quinn UDP socket with a concrete local IP:port and no remote value.
+- an explicitly unconnected UDP socket intended to carry QUIC, with a concrete local IP:port and no
+  remote value.
 
 Addresses are raw four- or sixteen-byte IP values with a non-zero port. Wildcard, loopback,
 multicast, IPv4 broadcast, IPv6 link-local, mixed-family and identical connected pairs are rejected.
@@ -1684,8 +1702,8 @@ peer tuples, `O_NONBLOCK`, `FD_CLOEXEC`, IPv6-only family closure, `SO_ACCEPTCON
 genuine negotiated `MPTCP_INFO` where applicable. Rejection drops the only supplied owner. The
 audited Linux-UAPI also
 provides fixed `SIOCGSKNS` namespace-FD acquisition with immediate RAII ownership and readback of
-`FD_CLOEXEC`, read-only mode, and `CLONE_NEWNET`. For every planned Acquire call the disconnected
-coordinator now takes an affine CLOEXEC duplicate of the already attested worker namespace pin
+`FD_CLOEXEC`, read-only mode, and `CLONE_NEWNET`. For every planned Acquire call the worker
+coordinator takes an affine CLOEXEC duplicate of the already attested worker namespace pin
 before it records this request's tombstone or in-flight transition. Expired cache and tombstone
 housekeeping may run earlier but carries no socket or namespace authority. The duplicate keeps the
 expected namespace alive independently of concurrent worker retirement and performs no process
@@ -1696,8 +1714,9 @@ non-zero nsfs device/inode equality with that retained duplicate in addition to 
 socket-shape proof. Every post-PLAN error, mismatch or late result closes the socket and quarantines
 the generation; no descriptor can be published first and checked afterwards.
 
-Socketpair and fake-kernel tests cover the three metadata kinds, response/digest binding, retry-cache
-cleanup on context destruction, missing/wrong binding, FD-on-error, worker EOF, unexpected
+Socketpair and fake-kernel tests cover the three metadata kinds, response/digest binding,
+same-request-ID descriptorless retry refusal after committed backend success, cleanup on context
+destruction, missing/wrong binding, FD-on-error, worker EOF, unexpected
 ancillary data and close-on-reject. Credentialed-channel tests separately cover exact credential and
 descriptor counts, wrong-binding closure, shared-deadline receipt, successful consuming raw-owner
 adoption, injected adoption-failure closure, consumed worker-source ownership, exact/missing/late
@@ -1711,10 +1730,25 @@ regressions prove invalid source rejection, `F_DUPFD_CLOEXEC` with minimum 3, in
 namespace test proves the fixed `SIOCGSKNS` wrapper and exact same/different-namespace comparison
 without changing host networking. Other socket
 tests perform read-only kernel revalidation; no route, link, firewall or sysctl was changed. The
-production backend still advertises the operation as unsupported and returns
-`Unavailable/TRANSPORT_SOCKET_UNAVAILABLE` before context lookup or any socket/network work. The
-factories are not invoked by a production v3 namespace worker, and the agent transport stacks do
-not yet consume this helper API. No working namespace datapath is claimed.
+production functional backend now advertises its narrow transport capability and independently
+requires the complete committed lineage, Client/Exit singleton role/path, worker-derived overlay
+address, unconnected-UDP shape and live wall/boottime/call deadlines. Its authenticated production
+v3 child invokes only the existing unconnected-UDP factory, drops the source before the release
+record, and returns exactly one descriptor through the consuming namespace validator. MPTCP and
+Relay requests remain unavailable. Once backend descriptor validation and engine COMMIT succeed, the
+helper records the request ID/digest in a separate bounded same-runtime context-generation ledger,
+before outer response/FD delivery can be known. The ledger retains no descriptor and survives generic
+cache expiry/eviction; an exact retry returns descriptorless
+`TRANSPORT_SOCKET_ALREADY_ACQUIRED` before any backend call, including after ambiguous or lost outer
+delivery, while digest reuse conflicts.
+This prevents descriptor replay only for the same request ID/digest; it does not enforce one
+acquisition per context/path/role, so a future production caller must authorize and bound each fresh
+association request. Only confirmed Destroy of that generation purges its records, and ledger
+saturation rejects new Acquire requests without restricting terminal Destroy. Unit tests run
+successful Client and Exit transfers inside disposable user/network namespaces and cover binding,
+role, path, address, phase, worker-error, descriptor-rejection, cancellation and channel-ambiguity
+closure. The agent transport stacks do not yet consume this helper API, and no live WireGuard route
+or working namespace datapath is claimed.
 
 ## Pre-route client ingress boundary
 
@@ -1784,13 +1818,15 @@ transport or ingress, and does not change the alpha score.
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
   the final worker must retain only `CAP_NET_ADMIN`;
 - extend the asynchronous `HelperEngine` backend beyond the current
-  Client/Exit-singleton-or-Relay-pair
-  Prepare/Activate/Probe-Commit/Destroy path: descriptor acquisition, cached-descriptor cleanup and
-  complete shutdown need the same plan/call/commit discipline and exact
-  context/generation/phase/handle revalidation;
-- wire descriptor retries to the live production generation registry. The coordinator purges caches
-  on death and never retries ambiguous IPC, but the functional-alpha backend advertises descriptor
-  acquisition as unsupported;
+  Client/Exit-singleton-or-Relay-pair Prepare/Activate/Probe-Commit/Destroy path and narrow committed
+  Client/Exit unconnected-QUIC-UDP acquisition: connected/listening MPTCP for the exact Client/Exit
+  roles still needs the same plan/call/commit discipline and exact
+  context/generation/phase/handle revalidation; Relay application transport acquisition remains
+  intentionally unavailable;
+- wire the handed-off descriptor into a live production route runtime whose affine receiver closes
+  every socket on Destroy, helper loss or route rollback. Same-request retry refusal is already
+  descriptorless and same-runtime generation-bound, but `HelperClient` currently creates a fresh ID
+  for each call and no agent/runtime transport caller adopts the descriptor;
 - extend the bounded `DirectAssigned` parent snapshot from the current one direct underlay to the
   exact multi-path evidence required by complete route setup, retaining rejection of multipath,
   duplicate, truncated or ambiguous dumps;
@@ -1807,10 +1843,9 @@ transport or ingress, and does not change the alpha score.
   same-name link carrying a non-exact marker but grants no journal-phase or cleanup authority;
 - add the cross-runtime tag-28 proof plus restart reaper; until then a runtime mismatch must
   remain quarantined and the runtime-lifetime `Absent` ledger cannot be acknowledged or pruned;
-- invoke the implemented factories inside the correct committed child namespace and feed their
-  descriptors through the private channel into the implemented external ancillary handoff;
-- make agent context cleanup close all handed-off `OwnedFd` values: an external socket can keep an
-  anonymous network namespace alive after the worker and helper cache have dropped their copies;
+- exercise the wired Client/Exit QUIC UDP factory, credentialed private-channel transfer, parent
+  namespace/shape validation and outer ancillary handoff in one disposable live-WireGuard route;
+  current unit tests use synthetic committed state and do not prove a live route;
 - adopt those descriptors in the TCP/QUIC datapaths and prove the exact tuple and real transport;
 - connect the implemented pre-route client-ingress protocol to a distinct privileged
   runtime/profile namespace transaction. It must create and revalidate all four socket kinds for

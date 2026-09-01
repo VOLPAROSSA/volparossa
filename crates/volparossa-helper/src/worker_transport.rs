@@ -1,8 +1,8 @@
 //! Phase-3a private worker transport channel and closed socket factories.
 //!
-//! This module is deliberately not selected by the production engine yet. It provides the
-//! blocking code that must run inside the route namespace worker once v3 Prepare owns the worker
-//! lifecycle. The production engine remains fail-closed until that lifecycle is connected.
+//! The production helper selects its credentialed channel and unconnected QUIC UDP factory only
+//! for a committed Client or Exit lease inside the owned route namespace. MPTCP factories, Relay
+//! transport handoff, a route-manager caller and every usable datapath remain disconnected.
 
 use std::{
     io::{self, IoSlice, IoSliceMut},

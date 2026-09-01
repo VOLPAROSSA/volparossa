@@ -419,7 +419,7 @@ rejected before dispatch.
 | `DestroyContext` | idempotently remove one context and all contained state; Relay first restores policy-drop and proves the active fence absent |
 | `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
 | `RemoveMptcpEndpoint` | remove one exact owned MPTCP endpoint; currently returns `Unavailable` in production |
-| `AcquireTransportSocket` | tag 27: bind one committed context/path/role to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production currently returns `Unavailable` before network work |
+| `AcquireTransportSocket` | tag 27: bind one committed context/path/role to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts only unconnected QUIC UDP for an exact committed Client/Exit singleton, while MPTCP and Relay remain unavailable |
 | `ReconcileExpiredPrepare` | tag 28: after setup expiry, re-evaluate one exact same-runtime ambiguous Prepare lineage and succeed only after its exact generation is proven absent |
 | `CleanupOwned` | remove only resources matching a random 32-byte process-start ownership token |
 | `PrepareClientIngress` | tag 31: request a pre-route client runtime with exactly four closed socket kinds crossed with IPv4/IPv6; production returns `Unavailable` before state or network work |
@@ -563,11 +563,11 @@ housekeeping may precede pinning but carries no socket or namespace authority. P
 validation failure or expiry closes the descriptor and quarantines the generation. Closed worker-side
 factories create and revalidate connected MPTCP, listening MPTCP and unconnected UDP sockets,
 including genuine `MPTCP_INFO` negotiation evidence for a connected stream. The production
-functional-alpha path uses the coordinator only for one Client/Exit singleton or one exact Relay
+functional-alpha path uses the coordinator for one Client/Exit singleton or one exact Relay
 endpoint pair's Initialise, Prepare, signed-authority-bound Activate, correlated Probe/Commit and
-Destroy operations; the socket
-factories remain disconnected, so their socketpair/fake-kernel
-tests do not prove a production namespace socket or datapath.
+Destroy operations, and for one committed Client/Exit singleton's helper-internal unconnected QUIC
+UDP socket. MPTCP and Relay socket acquisition, a production route-manager caller and every usable
+datapath remain disconnected.
 
 Internal worker protocol v4 makes the canonical, role-complete `PrepareLeases` plan mandatory in
 `InitialiseContext`. Its route context and exact ordered resources are validated before
@@ -604,10 +604,23 @@ correlated internal Probe/Commit, requires every handshake to be no older than a
 RX/TX growth for every lease and, for Relay, growth of both exact forwarding-rule counters. It
 independently revalidates the complete proof, transitions only the exact singleton or pair to
 Committed and caches the successful receipt for an identical retry. Destroy restores policy-drop
-before removing the interfaces and proves the fence absent. `AcquireTransportSocket` remains
-`Unavailable`; this is an isolated helper-internal single-path seam, and no production route
-manager, transport or ingress calls it. The exact proof contract and remaining live-kernel work are
-recorded in [Privileged helper protocol v3](HELPER_V3.md).
+before removing the interfaces and proves the fence absent. For an exact committed Client/Exit
+singleton, each successfully committed valid `AcquireTransportSocket` request creates one bound
+unconnected QUIC UDP socket in that worker namespace, consumes the credentialed source-release
+record, and independently validates socket shape and exact namespace. After backend descriptor
+validation and engine COMMIT—but before outer response/FD delivery can be known—the helper binds the
+request ID/digest in a bounded, descriptorless same-helper-runtime context-generation ledger rather
+than the evictable response cache. Identical replay returns `TRANSPORT_SOCKET_ALREADY_ACQUIRED` before a
+backend call even after generic cache expiry/eviction or ambiguous outer delivery; digest
+substitution conflicts.
+This is same-request-ID/digest replay refusal, not a per-context/path/role one-shot receipt; a fresh
+request ID can reach the backend again. Confirmed Destroy purges the generation's ledger, while
+ledger saturation can reject only new Acquire and cannot block Destroy. The worker registry
+separately reserves its final tombstone slot for terminal
+Destroy before admitting nonterminal operations. MPTCP, Relay
+transport handoff and every production route-manager, transport or ingress caller remain absent;
+this is still an isolated helper-internal single-path seam. The exact proof contract and remaining
+live-kernel work are recorded in [Privileged helper protocol v3](HELPER_V3.md).
 
 The disposable production-IPC producer exercises that implemented subset sequentially. Its first
 cycle runs Client Bind/Prepare/Activate, including an identical cached Activate retry, then pauses at

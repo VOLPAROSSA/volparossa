@@ -10,8 +10,9 @@
 //! activates only two exact reservation-bound directions after both links are proven, and commits
 //! only after both forwarding counters grow. Indeterminate fence ownership terminates the worker
 //! and its namespace. Retirement owns only the exact leader, and bootstrap does not independently
-//! attest descendant absence. Durable restart recovery, transports and end-to-end datapaths remain
-//! disconnected.
+//! attest descendant absence. A committed Client or Exit singleton can hand off one explicitly
+//! unconnected QUIC UDP socket through the credentialed descriptor path. Durable restart recovery,
+//! MPTCP, Relay transport handoff and every usable end-to-end datapath remain disconnected.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -58,12 +59,14 @@ use tokio::{
 use crate::{
     deadline::HardDeadline,
     internal_protocol::{
-        ActivateLeases, ActivatedLease, ActivatedLeases, ContextDestroyed, ContextInitialised,
-        DestroyContext, INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext,
-        InternalContextRole, InternalEndpointRole, InternalUdpEndpoint, InternalWorkerRequest,
-        InternalWorkerResponse, InternalWorkerResult, PrepareLeases, PreparedLease, PreparedLeases,
-        ProbeCommitLeases, ProbedLease, ProbedLeases, encode_request, internal_worker_request,
-        internal_worker_response, validate_response_for_request,
+        AcquireTransportSocket, ActivateLeases, ActivatedLease, ActivatedLeases, ContextDestroyed,
+        ContextInitialised, DestroyContext, INTERNAL_WORKER_MAGIC,
+        INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext, InternalContextRole,
+        InternalEndpointRole, InternalTransportSocketKind, InternalUdpEndpoint,
+        InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult, PrepareLeases,
+        PreparedLease, PreparedLeases, ProbeCommitLeases, ProbedLease, ProbedLeases,
+        TransportSocketReady, encode_request, internal_worker_request, internal_worker_response,
+        validate_response_for_request,
     },
     kernel::{
         KernelError, NamespaceKernel, PreparedWireguardKernelProof, WireguardV3PeerConfiguration,
@@ -79,8 +82,9 @@ use crate::{
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
-        CredentialedWorkerExecution, ExpectedUnixCredentials, WorkerTransportError,
-        enable_passcred_receiver, private_credential_worker_channel, receive_credential_record,
+        CommittedSocketLease, CredentialedWorkerExecution, ExpectedUnixCredentials,
+        WorkerTransportError, create_transport_socket, enable_passcred_receiver,
+        private_credential_worker_channel, receive_credential_record,
         receive_credential_record_with_deadline,
         receive_credential_worker_destroy_response_reconciling_initialise_with_deadline,
         receive_credential_worker_request, receive_credential_worker_response_with_deadline,
@@ -106,6 +110,14 @@ pub(crate) use functional_backend::{
 pub(crate) use functional_backend::{
     exact_same_runtime_cleanup_proof_for_test, exact_same_runtime_manager_absence_proof_for_test,
 };
+
+#[cfg(test)]
+pub(crate) fn validate_functional_acquire_binding_for_test(
+    binding: crate::engine::BackendBinding,
+    value: &volparossa_routing::AcquireTransportSocket,
+) -> Result<(), crate::engine::BackendError> {
+    functional_backend::validate_acquire_transport_binding_for_engine_test(binding, value)
+}
 
 pub(crate) const INTERNAL_WORKER_V3_ARGUMENT: &str = "--internal-worker-v3";
 pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-worker-v3-live-proof";
@@ -1550,7 +1562,7 @@ fn fixture_memory_child_loop(
         #[cfg(test)]
         let deadline = fixture_initialise_response_deadline(operation, deadline)?;
         if !send_child_response_preserving_initialise_cleanup(
-            channel, &request, &response, deadline,
+            channel, &request, &response, None, deadline,
         )? {
             continue;
         }
@@ -2244,6 +2256,64 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         };
         self.lease = Some(WorkerLeaseLifecycle::Committed(ownerships));
         WorkerProbeOutcome::Committed(probed)
+    }
+
+    /// Project the one immutable committed Client/Exit lease accepted by the transport factory.
+    ///
+    /// The later request supplies only a tuple to check. The route, endpoint role and overlay
+    /// address remain derived from the already committed worker-owned `WireGuard` resource.
+    fn committed_quic_udp_lease(
+        &self,
+        operation: &AcquireTransportSocket,
+    ) -> Result<CommittedSocketLease, InternalWorkerResult> {
+        let expected_role = match self.role {
+            RoutingContextRole::Client => InternalEndpointRole::Client,
+            RoutingContextRole::Exit => InternalEndpointRole::Exit,
+            RoutingContextRole::Relay | RoutingContextRole::Unspecified => {
+                return Err(InternalWorkerResult::Invalid);
+            }
+        };
+        let Some(WorkerLeaseLifecycle::Committed(ownerships)) = self.lease.as_ref() else {
+            return Err(if self.lease.is_some() {
+                InternalWorkerResult::Conflict
+            } else {
+                InternalWorkerResult::NotFound
+            });
+        };
+        let [ownership] = ownerships.as_slice() else {
+            return Err(InternalWorkerResult::Invalid);
+        };
+        let Some(proof) = ownership.proof else {
+            return Err(InternalWorkerResult::Invalid);
+        };
+        let path_id = u8::try_from(operation.path_id)
+            .ok()
+            .filter(|path_id| (1..=8).contains(path_id))
+            .ok_or(InternalWorkerResult::Invalid)?;
+        let role = InternalEndpointRole::try_from(operation.role)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        let kind = InternalTransportSocketKind::try_from(operation.descriptor_kind)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        let expected_routing_role =
+            routing_endpoint_role(operation.role).ok_or(InternalWorkerResult::Invalid)?;
+        let wall_deadline_is_live = current_unix_seconds()
+            .is_some_and(|now| now < ownership.resource.hard_expires_at_unix());
+        if role != expected_role
+            || kind != InternalTransportSocketKind::QuicUdpUnconnected
+            || operation.expected_remote.is_some()
+            || self.bound_path_id.is_some_and(|bound| bound != path_id)
+            || ownership.resource.key() != (path_id, expected_routing_role)
+            || proof.local_overlay_address != IpAddr::V6(ownership.resource.local_address())
+            || !wall_deadline_is_live
+        {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        Ok(CommittedSocketLease {
+            route_context_id: self.route_context_id,
+            path_id: operation.path_id,
+            role,
+            overlay_address: proof.local_overlay_address,
+        })
     }
 
     fn prove_relay_forwarding_growth(&self, deadline: HardDeadline) -> RelayForwardingGrowth {
@@ -3010,6 +3080,59 @@ fn destroy_child_context(
     })
 }
 
+type ChildTransportOutcome = (
+    InternalWorkerResult,
+    Option<internal_worker_response::Outcome>,
+    Option<OwnedFd>,
+);
+
+fn acquire_transport_child_context(
+    context: Option<&WorkerContext<NamespaceKernel>>,
+    acquire: &AcquireTransportSocket,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildTransportOutcome, WorkerV3Error> {
+    ensure_worker_deadline(deadline)?;
+    let route_context_id = context_id(&acquire.route_context_id)?;
+    let Some(context) = context.filter(|context| {
+        context.route_context_id == route_context_id && route_context_id == bound_context
+    }) else {
+        return Ok((InternalWorkerResult::NotFound, None, None));
+    };
+    let lease = match context.committed_quic_udp_lease(acquire) {
+        Ok(lease) => lease,
+        Err(result) => return Ok((result, None, None)),
+    };
+    let descriptor = match create_transport_socket(lease, acquire) {
+        Ok(descriptor) => descriptor,
+        Err(WorkerTransportError::Invalid | WorkerTransportError::Protocol) => {
+            return Ok((InternalWorkerResult::Invalid, None, None));
+        }
+        Err(
+            WorkerTransportError::Timeout
+            | WorkerTransportError::Io(_)
+            | WorkerTransportError::Sandbox(_),
+        ) => return Ok((InternalWorkerResult::Kernel, None, None)),
+    };
+    if ensure_worker_deadline(deadline).is_err() {
+        drop(descriptor);
+        return Err(WorkerV3Error::Deadline);
+    }
+    Ok((
+        InternalWorkerResult::Ok,
+        Some(internal_worker_response::Outcome::TransportSocketReady(
+            TransportSocketReady {
+                path_id: acquire.path_id,
+                role: acquire.role,
+                descriptor_kind: acquire.descriptor_kind,
+                local: acquire.expected_local.clone(),
+                remote: None,
+            },
+        )),
+        Some(descriptor),
+    ))
+}
+
 fn child_loop(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
@@ -3024,33 +3147,58 @@ fn child_loop(
     loop {
         let (request, deadline) = receive_deadline_bound_worker_request(channel, expected_parent)?;
         let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
-        let (result, outcome, exit) = match operation {
-            internal_worker_request::Operation::Initialise(initialise) => initialise_child_context(
-                &mut context,
-                &mut network_bootstrap,
-                initialise,
-                bound_context,
-                bound_role,
-                bound_path_id,
-                deadline,
-            )?,
+        let (result, outcome, exit, descriptor) = match operation {
+            internal_worker_request::Operation::Initialise(initialise) => {
+                let (result, outcome, exit) = initialise_child_context(
+                    &mut context,
+                    &mut network_bootstrap,
+                    initialise,
+                    bound_context,
+                    bound_role,
+                    bound_path_id,
+                    deadline,
+                )?;
+                (result, outcome, exit, None)
+            }
             internal_worker_request::Operation::PrepareLeases(prepare) => {
-                prepare_child_context(&mut context, prepare, &mut keys, bound_context, deadline)?
+                let (result, outcome, exit) = prepare_child_context(
+                    &mut context,
+                    prepare,
+                    &mut keys,
+                    bound_context,
+                    deadline,
+                )?;
+                (result, outcome, exit, None)
             }
             internal_worker_request::Operation::ActivateLeases(activate) => {
-                activate_child_context(&mut context, activate, bound_context, deadline)?
+                let (result, outcome, exit) =
+                    activate_child_context(&mut context, activate, bound_context, deadline)?;
+                (result, outcome, exit, None)
             }
             internal_worker_request::Operation::ProbeCommitLeases(probe) => {
-                probe_commit_child_context(&mut context, probe, bound_context, deadline)?
+                let (result, outcome, exit) =
+                    probe_commit_child_context(&mut context, probe, bound_context, deadline)?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::AcquireTransportSocket(acquire) => {
+                let (result, outcome, descriptor) = acquire_transport_child_context(
+                    context.as_ref(),
+                    acquire,
+                    bound_context,
+                    deadline,
+                )?;
+                (result, outcome, false, descriptor)
             }
             internal_worker_request::Operation::DestroyContext(destroy) => {
-                destroy_child_context(&mut context, destroy, bound_context, deadline)?
+                let (result, outcome, exit) =
+                    destroy_child_context(&mut context, destroy, bound_context, deadline)?;
+                (result, outcome, exit, None)
             }
-            _ => (InternalWorkerResult::Invalid, None, false),
+            _ => (InternalWorkerResult::Invalid, None, false, None),
         };
         let response = correlated_response(&request, result, outcome)?;
         if !send_child_response_preserving_initialise_cleanup(
-            channel, &request, &response, deadline,
+            channel, &request, &response, descriptor, deadline,
         )? {
             continue;
         }
@@ -3072,10 +3220,12 @@ fn send_child_response_preserving_initialise_cleanup(
     channel: &Socket,
     request: &InternalWorkerRequest,
     response: &InternalWorkerResponse,
+    descriptor: Option<OwnedFd>,
     deadline: HardDeadline,
 ) -> Result<bool, WorkerV3Error> {
-    match send_credential_worker_response_with_deadline(channel, request, response, None, deadline)
-    {
+    match send_credential_worker_response_with_deadline(
+        channel, request, response, descriptor, deadline,
+    ) {
         Ok(()) => Ok(true),
         Err(_)
             if matches!(
@@ -5912,11 +6062,19 @@ impl WorkerRegistry {
             request.operation.as_ref(),
             initialise_reconciliation,
         )?;
-        if self.tombstones.len() >= self.maximum_cache_entries {
+        // Classify terminal authority before capacity admission. Nonterminal requests may consume
+        // at most `maximum_cache_entries - 1` tombstones, permanently reserving the final bounded
+        // slot for an exact Destroy. Without this ordering, descriptor-returning Acquire calls can
+        // fill the non-evictable generation-lifetime tombstone ledger and make the only terminal
+        // cleanup operation impossible to dispatch.
+        let (success_phase, terminal) = transition(phase, request)?;
+        let admission_limit = self
+            .maximum_cache_entries
+            .saturating_sub(usize::from(!terminal));
+        if self.tombstones.len() >= admission_limit {
             return Err(WorkerV3Error::Capacity);
         }
 
-        let (success_phase, terminal) = transition(phase, request)?;
         let (channel, pinned_network_namespace) =
             self.prepare_call_owners(context_id, generation, request, deadline)?;
         ensure_worker_deadline(deadline)?;
@@ -13087,6 +13245,165 @@ mod tests {
                 "absent"
             ]
         );
+    }
+
+    fn committed_quic_udp_worker_fixture(
+        context_seed: u8,
+        context_role: RoutingContextRole,
+        endpoint_role: InternalEndpointRole,
+    ) -> (
+        WorkerContext<FakeWorkerKernel>,
+        AcquireTransportSocket,
+        Ipv6Addr,
+    ) {
+        let route_context_id = [context_seed; 16];
+        let baseline = WireguardV3PeerProof {
+            latest_handshake_unix: 100,
+            latest_handshake_nanoseconds: 0,
+            received_bytes: 10,
+            transmitted_bytes: 20,
+        };
+        let mut context = WorkerContext::new(
+            route_context_id,
+            context_role,
+            FakeWorkerKernel {
+                activation_proof: Some(baseline),
+                probe_proof: Some(WireguardV3PeerProof {
+                    latest_handshake_unix: 150,
+                    latest_handshake_nanoseconds: 0,
+                    received_bytes: 11,
+                    transmitted_bytes: 21,
+                }),
+                ..FakeWorkerKernel::default()
+            },
+        );
+        let now = current_unix_seconds().expect("fixture wall clock");
+        let mut prepare = if context_role == RoutingContextRole::Client {
+            worker_prepare(route_context_id, context_seed)
+        } else {
+            worker_exit_prepare(route_context_id, context_seed)
+        };
+        prepare.leases[0].setup_expires_at_unix = now + 30;
+        prepare.leases[0].hard_expires_at_unix = now + 120;
+        let mut activate = if context_role == RoutingContextRole::Client {
+            worker_activate(route_context_id)
+        } else {
+            worker_exit_activate(route_context_id)
+        };
+        activate.leases[0].hard_expires_at_unix = now + 120;
+        let probe = if context_role == RoutingContextRole::Client {
+            worker_probe(route_context_id, 149)
+        } else {
+            worker_exit_probe(route_context_id, 149)
+        };
+        let mut keys = FixedWorkerKeySource {
+            private_key: Some([context_seed.wrapping_add(1); 32]),
+        };
+        assert!(matches!(
+            context.prepare(&prepare, &mut keys, worker_deadline()),
+            WorkerPrepareOutcome::Prepared(_)
+        ));
+        assert!(matches!(
+            context.activate(&activate, worker_deadline()),
+            WorkerActivateOutcome::Activated(_)
+        ));
+        assert!(matches!(
+            context.probe_commit(&probe, worker_deadline()),
+            WorkerProbeOutcome::Committed(_)
+        ));
+        let overlay = match context.lease.as_ref() {
+            Some(WorkerLeaseLifecycle::Committed(ownerships)) => {
+                ownerships[0].resource.local_address()
+            }
+            _ => panic!("committed worker lease"),
+        };
+        let exact = AcquireTransportSocket {
+            route_context_id: route_context_id.to_vec(),
+            path_id: 1,
+            role: endpoint_role as i32,
+            descriptor_kind: InternalTransportSocketKind::QuicUdpUnconnected as i32,
+            expected_local: Some(InternalSocketAddress {
+                address: overlay.octets().to_vec(),
+                port: 42_091,
+            }),
+            expected_remote: None,
+        };
+        (context, exact, overlay)
+    }
+
+    #[test]
+    fn committed_client_and_exit_project_only_their_exact_quic_udp_lease() {
+        for (context_seed, context_role, endpoint_role) in [
+            (
+                0x91,
+                RoutingContextRole::Client,
+                InternalEndpointRole::Client,
+            ),
+            (0x92, RoutingContextRole::Exit, InternalEndpointRole::Exit),
+        ] {
+            let route_context_id = [context_seed; 16];
+            let (context, exact, overlay) =
+                committed_quic_udp_worker_fixture(context_seed, context_role, endpoint_role);
+            assert_eq!(
+                context.committed_quic_udp_lease(&exact),
+                Ok(CommittedSocketLease {
+                    route_context_id,
+                    path_id: 1,
+                    role: endpoint_role,
+                    overlay_address: IpAddr::V6(overlay),
+                })
+            );
+            for changed in [
+                AcquireTransportSocket {
+                    path_id: 2,
+                    ..exact.clone()
+                },
+                AcquireTransportSocket {
+                    role: InternalEndpointRole::RelayClient as i32,
+                    ..exact.clone()
+                },
+                AcquireTransportSocket {
+                    descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
+                    expected_remote: exact.expected_local.clone(),
+                    ..exact.clone()
+                },
+            ] {
+                assert_eq!(
+                    context.committed_quic_udp_lease(&changed),
+                    Err(InternalWorkerResult::Invalid)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_child_acquire_reaches_only_the_closed_socket_factory_and_fd_sender() {
+        let source = include_str!("worker_v3.rs");
+        let acquire_start = source
+            .find("fn acquire_transport_child_context(")
+            .expect("production child Acquire function");
+        let acquire_end = source[acquire_start..]
+            .find("\nfn child_loop(")
+            .map(|offset| acquire_start + offset)
+            .expect("production child Acquire end");
+        let acquire = &source[acquire_start..acquire_end];
+        assert!(acquire.contains("context.committed_quic_udp_lease(acquire)"));
+        assert!(acquire.contains("create_transport_socket(lease, acquire)"));
+        assert!(acquire.contains("Some(descriptor)"));
+
+        let loop_start = source
+            .find("fn child_loop(")
+            .expect("production child loop");
+        let loop_end = source[loop_start..]
+            .find("\n/// Preserve the only authenticated cleanup executor")
+            .map(|offset| loop_start + offset)
+            .expect("production child loop end");
+        let child_loop = &source[loop_start..loop_end];
+        assert!(child_loop.contains("Operation::AcquireTransportSocket(acquire)"));
+        assert!(child_loop.contains("acquire_transport_child_context("));
+        assert!(child_loop.contains("send_child_response_preserving_initialise_cleanup("));
+        assert!(!child_loop.contains("send_credential_worker_response_with_deadline("));
+        assert!(child_loop.contains("&response, descriptor, deadline"));
     }
 
     #[test]
@@ -21369,11 +21686,12 @@ mod tests {
     }
 
     #[test]
-    fn fd_operation_tombstone_is_bounded_and_never_replayed() {
+    fn fd_tombstone_saturation_reserves_destroy_and_retirement_purges_generation() {
         let now = Instant::now();
         let context_id = [6; 16];
-        let mut registry = WorkerRegistry::new(1, 1, Duration::from_secs(10));
-        let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        // One nonterminal slot plus one permanently reserved terminal slot.
+        let mut registry = WorkerRegistry::new(1, 2, Duration::from_secs(10));
+        let (process, _peer, alive) = fake_process(Duration::from_secs(1));
         let generation = registry
             .register(context_id, process, Duration::from_secs(5), now)
             .expect("register");
@@ -21405,23 +21723,32 @@ mod tests {
             Err(WorkerV3Error::Conflict)
         ));
 
-        let mut collision = request;
-        let Some(internal_worker_request::Operation::AcquireTransportSocket(acquire)) =
-            collision.operation.as_mut()
-        else {
-            panic!("Acquire operation")
-        };
-        acquire.path_id = 2;
-        assert!(matches!(
-            registry.plan(context_id, generation, &collision, now),
-            Err(WorkerV3Error::Conflict)
-        ));
-        assert_eq!(
+        let destroy = destroy(context_id, 14);
+        let planned = call(
             registry
-                .visible_phase(context_id, generation)
-                .expect("phase"),
-            VisiblePhase::Quarantined
+                .plan(context_id, generation, &destroy, now)
+                .expect("reserved terminal Destroy plan"),
         );
+        assert!(planned.pinned_network_namespace.is_none());
+        assert_eq!(registry.tombstones.len(), 2);
+        let response = correlated_response(
+            &destroy,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        let response = response.expect("canonical Destroy response");
+        let FinishOutcome::Terminal(detached) =
+            registry.finish(planned.token, &destroy, &response, now, true)
+        else {
+            panic!("reserved Destroy did not retire the exact generation")
+        };
+        stop_and_purge(&mut registry, detached);
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(registry.records.is_empty());
+        assert!(registry.cache.is_empty() && registry.cache_order.is_empty());
+        assert!(registry.tombstones.is_empty() && registry.tombstone_order.is_empty());
     }
 
     #[test]

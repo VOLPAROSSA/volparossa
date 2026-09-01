@@ -244,8 +244,10 @@ timeout set and realtime cutoff, followed by terminal drop. Commit re-proves the
 requires a handshake no older than activation plus strict RX/TX growth for every lease and, for
 Relay, growth of both forwarding counters; neither leg commits alone. Destroy restores policy-drop
 before removing the interfaces and proves the complete pair and fence absent. This remains an
-isolated helper-internal single-path seam. Multi-path routing, a production route-manager caller,
-transport, ingress and every usable product datapath remain unavailable.
+isolated helper-internal single-path seam. Each successfully committed valid request for a committed
+Client or Exit singleton can acquire one helper-internal unconnected QUIC UDP socket; MPTCP and Relay socket
+acquisition, multi-path routing, a production route-manager caller, ingress and every usable product
+datapath remain unavailable.
 
 The disposable helper-boundary gate exercises these singleton roles sequentially in private
 namespaces. The Client cycle creates a temporary relay-side peer, carries bounded ICMPv6 across the
