@@ -47,7 +47,9 @@ use volparossa_core::{
 use volparossa_discovery::{
     DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation, DatapathRelayRequest,
     DatapathRelayResponse, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
-    ForwardStatus, UdpExitSessionSignal as DiscoveryUdpExitSessionSignal, UdpSessionStartRequest,
+    ExitMptcpSessionSignal as DiscoveryExitMptcpSessionSignal, ForwardStatus,
+    MptcpSessionPathProof, MptcpSessionStartRequest,
+    UdpExitSessionSignal as DiscoveryUdpExitSessionSignal, UdpSessionStartRequest,
 };
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
@@ -458,12 +460,14 @@ async fn admit_completed_native_route(
                 }
             }
         }
-        Ok(route) => {
-            // The listener tuple must come from an authenticated Exit response after its helper
-            // context has committed. Passing `None` keeps Connect fail closed until that exact
-            // wire signal is implemented; `activate_committed_transport` already owns the real
-            // helper-FD adoption seam used once the verifier supplies it.
-            match activate_committed_transport(&route, helper, None).await {
+        Ok(route) if route.selected_transport() == Some(Transport::TcpMptcp) => {
+            let signal = start_mptcp_exit_session(&route, discovery, crate::unix_millis()).await;
+            let Ok(signal) = signal else {
+                let _ = route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+            };
+            match activate_committed_transport(&route, helper, Some(signal)).await {
                 Ok(transport) => Ok(EstablishedClientRoute {
                     transport,
                     route: Some(route),
@@ -476,6 +480,11 @@ async fn admit_completed_native_route(
                     Err(error)
                 }
             }
+        }
+        Ok(route) => {
+            let _ = route.disconnect().await;
+            let _ = orchestrator.shutdown().await;
+            Err(ClientRouteConnectError::NativeTransportIdentityUnavailable)
         }
         Err(ProductionRouteError::NativeTransportIdentityUnavailable) => {
             let _ = orchestrator.shutdown().await;
@@ -3310,6 +3319,216 @@ fn verified_udp_exit_session_signal(
         return Err(ProductionUdpRouteError::SessionStart);
     }
     UdpExitSessionSignal::from_certificate_der(signal.certificate_der().to_vec())
+}
+
+struct MptcpSessionStartDispatch {
+    relay: DirectRelayCapability,
+    request: DatapathRelayRequest,
+}
+
+/// Commit every finalized data Relay concurrently, then require one byte-identical Exit signal.
+///
+/// Dispatch must be concurrent: the Exit deliberately withholds readiness until every Relay in
+/// the canonical proof set has committed and arrived. No request targets the Exit directly.
+async fn start_mptcp_exit_session(
+    route: &ProductionRoute,
+    discovery: &DiscoveryControlHandle,
+    now_ms: u64,
+) -> Result<ExitMptcpListenerSignal, ClientRouteConnectError> {
+    let dispatches = mptcp_session_start_dispatches(&route.established, now_ms)
+        .map_err(|()| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+    let expected_responses = dispatches.len();
+    let mut tasks = tokio::task::JoinSet::new();
+    for dispatch in dispatches {
+        let discovery = discovery.clone();
+        tasks.spawn(async move {
+            let response = discovery
+                .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
+                .await;
+            (dispatch, response)
+        });
+    }
+
+    let mut canonical_signal = None;
+    let mut received = 0_usize;
+    while let Some(joined) = tasks.join_next().await {
+        let (dispatch, response) =
+            joined.map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+        let response =
+            response.map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+        let encoded = accepted_datapath_response(
+            &dispatch.request,
+            &response,
+            &dispatch.relay,
+            RouteSetupPhase::Committing,
+        )
+        .map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+        if canonical_signal
+            .as_ref()
+            .is_some_and(|first: &Vec<u8>| first != &encoded)
+        {
+            return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+        }
+        canonical_signal.get_or_insert(encoded);
+        received = received.saturating_add(1);
+    }
+    if received != expected_responses {
+        return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+    }
+    verified_mptcp_exit_session_signal(
+        canonical_signal
+            .as_deref()
+            .ok_or(ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?,
+        &route.established,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-atomic exact-set validation and byte-identical dispatch construction"
+)]
+fn mptcp_session_start_dispatches(
+    route: &EstablishedRoute<ReservationSession>,
+    now_ms: u64,
+) -> Result<Vec<MptcpSessionStartDispatch>, ()> {
+    let path_count = route.relay_grants.len();
+    if route.request.parameters.allowed_transports != [Transport::TcpMptcp]
+        || !(2..=usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)).contains(&path_count)
+        || route.relay_authorities.len() != path_count
+        || route.confirmations.len() != path_count
+        || route.commit_proof.leases.len() != path_count
+        || route.signed_exit_reservation.is_empty()
+        || route.active_path_ids.len() < 2
+    {
+        return Err(());
+    }
+
+    let mut selected_path_ids = route
+        .active_path_ids
+        .iter()
+        .chain(&route.warm_path_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    selected_path_ids.sort_unstable();
+    if selected_path_ids.len() != path_count
+        || selected_path_ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(());
+    }
+
+    let mut indexes = (0..path_count).collect::<Vec<_>>();
+    indexes.sort_unstable_by_key(|index| route.relay_grants[*index].path_id());
+    let grant_path_ids = indexes
+        .iter()
+        .map(|index| route.relay_grants[*index].path_id())
+        .collect::<Vec<_>>();
+    if grant_path_ids != selected_path_ids {
+        return Err(());
+    }
+
+    let exit_envelope = decode_canonical::<SignedEnvelope>(
+        &route.signed_exit_reservation,
+        MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .map_err(|_| ())?;
+    let mut proofs = Vec::with_capacity(path_count);
+    let mut wrappers = Vec::with_capacity(path_count);
+    let mut request_ids = BTreeSet::new();
+    for index in indexes {
+        let grant = &route.relay_grants[index];
+        let relay = &route.relay_authorities[index];
+        let confirmation = &route.confirmations[index];
+        if grant.relay_node_id() != &relay.node_id {
+            return Err(());
+        }
+        let confirmation_envelope = decode_canonical::<SignedEnvelope>(
+            &confirmation.signed_confirmation,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .map_err(|_| ())?;
+        let receipt_envelope = decode_canonical::<SignedEnvelope>(
+            &confirmation.signed_receipt,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .map_err(|_| ())?;
+        let request_id: [u8; ID_BYTES] = confirmation_envelope
+            .nonce
+            .get(..ID_BYTES)
+            .and_then(|value| value.try_into().ok())
+            .filter(|value: &[u8; ID_BYTES]| value.iter().any(|byte| *byte != 0))
+            .ok_or(())?;
+        if !request_ids.insert(request_id) {
+            return Err(());
+        }
+        let call_ms = u64::try_from(DATAPATH_RELAY_REQUEST_TIMEOUT.as_millis()).map_err(|_| ())?;
+        let deadline_unix_ms = now_ms
+            .checked_add(call_ms)
+            .ok_or(())?
+            .min(route.request.parameters.expires_at_ms)
+            .min(grant.expires_at_ms())
+            .min(exit_envelope.expires_at_ms)
+            .min(confirmation_envelope.expires_at_ms)
+            .min(receipt_envelope.expires_at_ms);
+        if deadline_unix_ms <= now_ms {
+            return Err(());
+        }
+        proofs.push(MptcpSessionPathProof::new(
+            grant.signed_relay_reservation().to_vec(),
+            confirmation.signed_confirmation.clone(),
+            confirmation.signed_receipt.clone(),
+        ));
+        wrappers.push((relay.clone(), request_id, deadline_unix_ms));
+    }
+
+    let start = MptcpSessionStartRequest::new(route.signed_exit_reservation.clone(), proofs)
+        .map_err(|_| ())?;
+    let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE).map_err(|_| ())?;
+    wrappers
+        .into_iter()
+        .map(|(relay, request_id, deadline_unix_ms)| {
+            let request = DatapathRelayRequest::new(
+                request_id.to_vec(),
+                relay.node_id.to_vec(),
+                relay.peer_id.to_bytes(),
+                deadline_unix_ms,
+                DatapathRelayOperation::MptcpSessionStart,
+                encoded.clone(),
+                Vec::new(),
+            )
+            .map_err(|_| ())?;
+            Ok(MptcpSessionStartDispatch { relay, request })
+        })
+        .collect()
+}
+
+fn verified_mptcp_exit_session_signal(
+    encoded: &[u8],
+    route: &EstablishedRoute<ReservationSession>,
+) -> Result<ExitMptcpListenerSignal, ClientRouteConnectError> {
+    let signal =
+        decode_canonical::<DiscoveryExitMptcpSessionSignal>(encoded, MAX_CONTROL_MESSAGE_SIZE)
+            .map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+    let mut selected_path_ids = route
+        .relay_grants
+        .iter()
+        .map(VerifiedRelayGrant::path_id)
+        .collect::<Vec<_>>();
+    selected_path_ids.sort_unstable();
+    if signal.validate().is_err()
+        || signal.reservation_id() != route.request.parameters.reservation_id
+        || signal.route_context_id() != route.request.parameters.route_context_id
+        || signal.selected_path_ids() != selected_path_ids
+    {
+        return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+    }
+    ExitMptcpListenerSignal::try_from_discovery(
+        &signal,
+        &route
+            .native_authorization
+            .native_route_identity()
+            .certificate_sha256,
+    )
+    .map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)
 }
 
 impl<P, L> RouteSetupManager<P, L>
