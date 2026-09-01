@@ -1,6 +1,6 @@
 //! Concurrent TLS 1.3 and signed `OPEN_TCP` flows over committed MPTCP routes.
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use pem::parse;
 use rustls::RootCertStore;
@@ -33,6 +33,19 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_BUFFER_BYTES: usize = 64 * 1_024;
 const MAXIMUM_DIRECTIONAL_BYTES: u64 = 512 * 1_024 * 1_024;
 const MAXIMUM_CONCURRENT_MPTCP_FLOWS: usize = 64;
+
+async fn report_exit_flow_result<T, E, F, Fut>(
+    result: Result<Result<T, E>, tokio::task::JoinError>,
+    failed: &mut bool,
+    flow_completed: &mut F,
+) where
+    F: FnMut(bool) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let succeeded = matches!(result, Ok(Ok(_)));
+    *failed |= !succeeded;
+    flow_completed(succeeded).await;
+}
 
 /// A reusable Exit listener, TLS identity, signed-flow verifier and Internet egress owner.
 ///
@@ -113,7 +126,15 @@ impl ProductionMptcpExitRuntime {
     }
 
     /// Accept independent `MPTCP/TLS/OPEN_TCP/egress` flows until route expiry.
-    pub(crate) async fn run(self) -> ProductionMptcpExitCompletion {
+    ///
+    /// `flow_completed` reports each independently settled flow while this reusable listener
+    /// remains active. Route completion alone cannot represent flow completion because a valid
+    /// route commonly outlives its first stream by several minutes.
+    pub(crate) async fn run<F, Fut>(self, mut flow_completed: F) -> ProductionMptcpExitCompletion
+    where
+        F: FnMut(bool) -> Fut,
+        Fut: Future<Output = ()>,
+    {
         let reservation_id = self.reservation_id();
         let Self {
             helper,
@@ -131,9 +152,7 @@ impl ProductionMptcpExitRuntime {
         loop {
             if flows.len() >= MAXIMUM_CONCURRENT_MPTCP_FLOWS {
                 if let Some(result) = flows.join_next().await {
-                    if !matches!(result, Ok(Ok(_))) {
-                        failed = true;
-                    }
+                    report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
                 }
                 continue;
             }
@@ -177,15 +196,11 @@ impl ProductionMptcpExitRuntime {
                 Err(_) => break,
             }
             while let Some(result) = flows.try_join_next() {
-                if !matches!(result, Ok(Ok(_))) {
-                    failed = true;
-                }
+                report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
             }
         }
         while let Some(result) = flows.join_next().await {
-            if !matches!(result, Ok(Ok(_))) {
-                failed = true;
-            }
+            report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
         }
         let flow_result = if accepted_any && !failed {
             Ok(())

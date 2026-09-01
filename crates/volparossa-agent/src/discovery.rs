@@ -862,9 +862,18 @@ pub(crate) struct ActiveProductionMptcpExitRoute {
     expires_at_ms: u64,
 }
 
-struct MptcpExitRuntimeEvent {
+struct MptcpExitRuntimeCompletionEvent {
     route_context_id: [u8; FORWARD_ID_BYTES],
     completion: ProductionMptcpExitCompletion,
+}
+
+enum MptcpExitRuntimeEvent {
+    FlowCompleted {
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        reservation_id: [u8; FORWARD_ID_BYTES],
+        succeeded: bool,
+    },
+    RuntimeCompleted(MptcpExitRuntimeCompletionEvent),
 }
 
 #[derive(Clone)]
@@ -1878,7 +1887,21 @@ impl DiscoveryRuntime {
                 }
                 completion = self.mptcp_exit_runtime_completions.recv() => {
                     if let Some(completion) = completion {
-                        self.finish_mptcp_exit_runtime(completion, &state).await;
+                        match completion {
+                            MptcpExitRuntimeEvent::FlowCompleted {
+                                route_context_id,
+                                reservation_id,
+                                succeeded,
+                            } => self.finish_mptcp_exit_flow(
+                                route_context_id,
+                                reservation_id,
+                                succeeded,
+                                &state,
+                            ).await,
+                            MptcpExitRuntimeEvent::RuntimeCompleted(completion) => {
+                                self.finish_mptcp_exit_runtime(completion, &state).await;
+                            }
+                        }
                     }
                 }
             }
@@ -9356,24 +9379,82 @@ impl DiscoveryRuntime {
             return;
         };
         active.runtime_started = true;
-        let completions = self.mptcp_exit_runtime_events.clone();
+        let events = self.mptcp_exit_runtime_events.clone();
+        let reservation_id = active.reservation_id;
         tokio::spawn(async move {
-            let completion = runtime.run().await;
-            let event = MptcpExitRuntimeEvent {
+            let completion = runtime
+                .run(|succeeded| {
+                    let events = events.clone();
+                    async move {
+                        let _ = events
+                            .send(MptcpExitRuntimeEvent::FlowCompleted {
+                                route_context_id,
+                                reservation_id,
+                                succeeded,
+                            })
+                            .await;
+                    }
+                })
+                .await;
+            let event = MptcpExitRuntimeEvent::RuntimeCompleted(MptcpExitRuntimeCompletionEvent {
                 route_context_id,
                 completion,
-            };
-            if let Err(error) = completions.send(event).await {
-                if let Some(cleanup) = error.0.completion.into_cleanup() {
+            });
+            if let Err(error) = events.send(event).await {
+                let MptcpExitRuntimeEvent::RuntimeCompleted(completion) = error.0 else {
+                    return;
+                };
+                if let Some(cleanup) = completion.completion.into_cleanup() {
                     let _ = cleanup.destroy().await;
                 }
             }
         });
     }
 
+    async fn finish_mptcp_exit_flow(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        reservation_id: [u8; FORWARD_ID_BYTES],
+        succeeded: bool,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let Some(active) = self
+            .active_production_mptcp_exit_routes
+            .get(&route_context_id)
+        else {
+            state.write().await.log(
+                LogLevel::Error,
+                "MPTCP_EXIT_FLOW_OWNER_MISSING",
+                unix_millis(),
+            );
+            return;
+        };
+        if !active.runtime_started || active.reservation_id != reservation_id {
+            state.write().await.log(
+                LogLevel::Error,
+                "MPTCP_EXIT_FLOW_SCOPE_MISMATCH",
+                unix_millis(),
+            );
+            return;
+        }
+        state.write().await.log(
+            if succeeded {
+                LogLevel::Info
+            } else {
+                LogLevel::Warn
+            },
+            if succeeded {
+                "MPTCP_EXIT_FLOW_COMPLETED"
+            } else {
+                "MPTCP_EXIT_FLOW_FAILED"
+            },
+            unix_millis(),
+        );
+    }
+
     async fn finish_mptcp_exit_runtime(
         &mut self,
-        event: MptcpExitRuntimeEvent,
+        event: MptcpExitRuntimeCompletionEvent,
         state: &Arc<RwLock<AgentState>>,
     ) {
         let Some(mut active) = self
@@ -9434,9 +9515,9 @@ impl DiscoveryRuntime {
                 LogLevel::Warn
             },
             if succeeded {
-                "MPTCP_EXIT_FLOW_COMPLETED"
+                "MPTCP_EXIT_RUNTIME_COMPLETED"
             } else {
-                "MPTCP_EXIT_FLOW_FAILED"
+                "MPTCP_EXIT_RUNTIME_FAILED"
             },
             unix_millis(),
         );
