@@ -1890,6 +1890,7 @@ for non_retained_production_stage in \
     functional-exit-cleanup-parent-custody-procfd \
     functional-exit-cleanup-parent-custody-foreign-netns \
     functional-exit-cleanup-parent-custody-fd-scan \
+    functional-exit-cleanup-parent-custody-clear \
     functional-relay-pair-ready functional-relay-pair-worker-observation \
     functional-relay-pair-fixtures functional-relay-pair-traffic \
     functional-relay-pair-cleanup \

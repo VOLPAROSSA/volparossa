@@ -592,6 +592,7 @@ printf '%s\n' \
     functional-exit-cleanup-parent-custody-procfd \
     functional-exit-cleanup-parent-custody-foreign-netns \
     functional-exit-cleanup-parent-custody-fd-scan \
+    functional-exit-cleanup-parent-custody-clear \
     functional-relay-pair-ready \
     functional-relay-pair-worker-observation \
     functional-relay-pair-fixtures \
@@ -6229,7 +6230,7 @@ cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
 start_failure_stage=
 hook_stage_index=0
 expected_production_monotone_start_stages=$temporary_directory/expected-production-monotone-start-stages
-grep -Ev '^functional-exit-cleanup-parent-custody-(pidfd|procfd|foreign-netns|fd-scan)$' \
+grep -Ev '^functional-exit-cleanup-parent-custody-(pidfd|procfd|foreign-netns|fd-scan|clear)$' \
     "$expected_production_start_stages" \
     >"$expected_production_monotone_start_stages"
 while IFS= read -r hook_start_stage; do
@@ -6249,7 +6250,7 @@ done <"$expected_production_monotone_start_stages"
     printf '%s\n' 'production hook start stage did not reach publication' >&2
     exit 1
 }
-for hook_custody_failure_stage in pidfd procfd foreign-netns fd-scan; do
+for hook_custody_failure_stage in pidfd procfd foreign-netns fd-scan clear; do
     start_failure_stage=functional-exit-cleanup-parent-custody
     advance_start_failure_stage \
         "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" \
@@ -8301,7 +8302,7 @@ no_custody_wait_source_is_exact "$no_custody_wait_contract" || {
     exit 1
 }
 sh -n "$no_custody_wait_contract"
-# shellcheck disable=SC1090,SC2317
+# shellcheck disable=SC1090,SC2030,SC2317
 exercise_no_custody_wait_contract() (
     . "$no_custody_wait_contract"
     number_is_safe() { [ "$#" -eq 1 ] && [ "$1" = 4242 ]; }
@@ -8393,79 +8394,157 @@ do
     fi
 done
 
-exit_custody_diagnostic_contract=$temporary_directory/exit-custody-diagnostic-contract.sh
-{
-    printf '%s\n' 'exit_custody_diagnostic_probe() {'
-    # This is a literal hook-source range; expansion here would defeat it.
-    # shellcheck disable=SC2016
-    sed -n \
-        '/^    if ! wait_for_helper_no_worker_custody "\$hook_functional_main_pid"; then$/,/^    fi$/p' \
-        "$ipc_hook"
-    printf '%s\n' '}'
-} >"$exit_custody_diagnostic_contract"
-# This is a literal hook-source contract; expansion here would defeat it.
+parent_custody_diagnostic_contract=$temporary_directory/parent-custody-diagnostic-contract.sh
+sed -n '/^advance_parent_custody_failure_diagnostic() {$/,/^}$/p' \
+    "$ipc_hook" >"$parent_custody_diagnostic_contract"
+# These are literal hook-source contracts; expansion here would defeat them.
 # shellcheck disable=SC2016
-exit_custody_diagnostic_source_is_exact() {
+parent_custody_diagnostic_source_is_exact() {
     [ "$#" -eq 1 ] || return 1
-    [ "$(grep -Fc 'pidfd|procfd|foreign-netns|fd-scan) ;;' "$1")" -eq 1 ] \
+    [ "$(grep -Fc \
+        'functional-exit-cleanup-parent-custody ] || return 1' \
+        "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '[ "$hook_custody_current_parent_pid" = ' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            '"$hook_custody_expected_parent_pid" ]; then' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'helper_holds_no_worker_custody' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_failure_stage=clear' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'pidfd|procfd|foreign-netns|fd-scan|clear) ;;' "$1")" -eq 1 ] \
         && [ "$(grep -Fc \
             '"functional-exit-cleanup-parent-custody-$hook_custody_failure_stage"' \
             "$1")" -eq 1 ] \
-        && [ "$(grep -Fc '|| true' "$1")" -eq 0 ]
+        && [ "$(grep -Fc '|| true' "$1")" -eq 0 ] \
+        && [ "$(grep -Ec '(^|[[:space:]])(echo|logger|printf)([[:space:]]|$)' \
+            "$1")" -eq 0 ]
 }
-exit_custody_diagnostic_source_is_exact "$exit_custody_diagnostic_contract" || {
-    printf '%s\n' 'exit-custody failure diagnostic is not fixed and value-free' >&2
-    exit 1
-}
-sh -n "$exit_custody_diagnostic_contract"
-# shellcheck disable=SC1090,SC2034,SC2317
-exercise_exit_custody_diagnostic_contract() (
-    . "$exit_custody_diagnostic_contract"
-    hook_functional_main_pid=4242
-    wait_for_helper_no_worker_custody() { return 1; }
-    advance_start_failure_stage() {
-        [ "$#" -eq 1 ] || return 1
-        observed_custody_failure_stage=$1
-    }
-    for hook_custody_failure_stage in pidfd procfd foreign-netns fd-scan; do
-        observed_custody_failure_stage=
-        if exit_custody_diagnostic_probe; then
-            exit 1
-        fi
-        [ "$observed_custody_failure_stage" = \
-            "functional-exit-cleanup-parent-custody-$hook_custody_failure_stage" ] \
-            || exit 1
-    done
-    hook_custody_failure_stage=private-value
-    observed_custody_failure_stage=
-    if exit_custody_diagnostic_probe; then
+parent_custody_diagnostic_source_is_exact \
+    "$parent_custody_diagnostic_contract" || {
+        printf '%s\n' \
+            'parent-custody failure diagnostic is not bound and value-free' >&2
         exit 1
-    fi
-    [ -z "$observed_custody_failure_stage" ]
-)
-exercise_exit_custody_diagnostic_contract || {
-    printf '%s\n' 'exit-custody diagnostic is not bounded to fixed categories' >&2
-    exit 1
-}
-exit_custody_category_mutant=$temporary_directory/exit-custody-category-mutant.sh
-sed 's/pidfd|procfd|foreign-netns|fd-scan/pidfd|procfd|foreign-netns|fd-scan|private-value/' \
-    "$exit_custody_diagnostic_contract" >"$exit_custody_category_mutant"
-exit_custody_binding_mutant=$temporary_directory/exit-custody-binding-mutant.sh
+    }
+sh -n "$parent_custody_diagnostic_contract"
+parent_custody_binding_mutant=$temporary_directory/parent-custody-binding-mutant.sh
+# This is a literal hook-source mutation; expansion here would defeat it.
+# shellcheck disable=SC2016
+sed 's/"$hook_custody_current_parent_pid" =/"$hook_custody_current_parent_pid" !=/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_binding_mutant"
+parent_custody_predicate_mutant=$temporary_directory/parent-custody-predicate-mutant.sh
+sed 's/helper_holds_no_worker_custody/true/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_predicate_mutant"
+parent_custody_category_mutant=$temporary_directory/parent-custody-category-mutant.sh
+sed 's/pidfd|procfd|foreign-netns|fd-scan|clear/pidfd|procfd|foreign-netns|fd-scan|clear|private-value/' \
+    "$parent_custody_diagnostic_contract" >"$parent_custody_category_mutant"
+parent_custody_stage_mutant=$temporary_directory/parent-custody-stage-mutant.sh
 # This is a literal hook-source mutation; expansion here would defeat it.
 # shellcheck disable=SC2016
 sed 's/parent-custody-\$hook_custody_failure_stage/parent-custody-fd-scan/' \
-    "$exit_custody_diagnostic_contract" >"$exit_custody_binding_mutant"
-for exit_custody_diagnostic_mutant in \
-    "$exit_custody_category_mutant" "$exit_custody_binding_mutant"
+    "$parent_custody_diagnostic_contract" >"$parent_custody_stage_mutant"
+for parent_custody_diagnostic_mutant in \
+    "$parent_custody_binding_mutant" "$parent_custody_predicate_mutant" \
+    "$parent_custody_category_mutant" "$parent_custody_stage_mutant"
 do
-    sh -n "$exit_custody_diagnostic_mutant"
-    if exit_custody_diagnostic_source_is_exact \
-        "$exit_custody_diagnostic_mutant"; then
-        printf 'exit-custody diagnostic accepted mutant: %s\n' \
-            "${exit_custody_diagnostic_mutant##*/}" >&2
+    sh -n "$parent_custody_diagnostic_mutant"
+    if parent_custody_diagnostic_source_is_exact \
+        "$parent_custody_diagnostic_mutant"; then
+        printf 'parent-custody diagnostic accepted mutant: %s\n' \
+            "${parent_custody_diagnostic_mutant##*/}" >&2
         exit 1
     fi
 done
+
+parent_custody_runtime_contract=$temporary_directory/parent-custody-runtime-contract.sh
+for parent_custody_runtime_function in \
+    number_is_safe fd_number_is_safe kernel_object_number_is_safe \
+    kernel_object_identity_is_safe namespace_number_from_target \
+    capture_parent_namespace_fd_identity helper_holds_no_worker_custody \
+    wait_for_helper_no_worker_custody advance_start_failure_stage \
+    advance_parent_custody_failure_diagnostic
+do
+    sed -n \
+        "/^$parent_custody_runtime_function() {\$/,/^}\$/p" \
+        "$ipc_hook" >>"$parent_custody_runtime_contract"
+done
+sh -n "$parent_custody_runtime_contract"
+# This subshell uses the hook's real functions and a real process-held /proc
+# descriptor. No predicate, wait, sleep, stage advance, or PID binding is stubbed.
+# shellcheck disable=SC1090,SC2031
+exercise_parent_custody_runtime_contract() (
+    . "$parent_custody_runtime_contract"
+    custody_runtime_child=
+    cleanup_custody_runtime_child() {
+        if [ -n "$custody_runtime_child" ]; then
+            kill "$custody_runtime_child" 2>/dev/null || :
+            wait "$custody_runtime_child" 2>/dev/null || :
+        fi
+    }
+    trap cleanup_custody_runtime_child EXIT HUP INT TERM
+    /bin/sh -c 'exec 9</proc/self/status; sleep 15' \
+        </dev/null >/dev/null 2>&1 &
+    custody_runtime_child=$!
+    number_is_safe "$custody_runtime_child"
+    custody_runtime_ready_attempt=0
+    while [ "$(readlink "/proc/$custody_runtime_child/fd/9" \
+        2>/dev/null || true)" != "/proc/$custody_runtime_child/status" ]; do
+        custody_runtime_ready_attempt=$((custody_runtime_ready_attempt + 1))
+        [ "$custody_runtime_ready_attempt" -lt 100 ] || exit 1
+        sleep 0.01
+    done
+    start_failure_stage=functional-exit-cleanup-parent-custody
+    if wait_for_helper_no_worker_custody "$custody_runtime_child"; then
+        exit 1
+    fi
+    [ "$hook_custody_failure_stage" = procfd ]
+    advance_parent_custody_failure_diagnostic \
+        "$custody_runtime_child" "$custody_runtime_child"
+    [ "$start_failure_stage" = \
+        functional-exit-cleanup-parent-custody-procfd ]
+    start_failure_stage=identity-socket
+    if advance_parent_custody_failure_diagnostic \
+        "$custody_runtime_child" "$custody_runtime_child"; then
+        exit 1
+    fi
+    start_failure_stage=functional-exit-cleanup-parent-custody
+    advance_parent_custody_failure_diagnostic "$custody_runtime_child" 1
+    [ "$start_failure_stage" = \
+        functional-exit-cleanup-parent-custody-fd-scan ]
+    cleanup_custody_runtime_child
+    custody_runtime_child=
+    trap - EXIT HUP INT TERM
+)
+exercise_parent_custody_runtime_contract || {
+    printf '%s\n' \
+        'real worker-custody wait did not propagate to the bound failure stage' >&2
+    exit 1
+}
+
+start_failure_exit_contract=$temporary_directory/start-failure-exit-contract.sh
+sed -n '/^start_failure_exit() {$/,/^}$/p' "$ipc_hook" \
+    >"$start_failure_exit_contract"
+if ! awk '
+    /functional-exit-cleanup-parent-custody ]; then/ {
+        custody_guard = NR
+    }
+    /hook_functional_current_main_pid=.*unit_main_pid/ { main_binding = NR }
+    /advance_parent_custody_failure_diagnostic/ { custody_diagnostic = NR }
+    /restart_initial_cleanup_succeeded=yes/ { cleanup = NR }
+    /publish_start_failure/ { publication = NR }
+    END {
+        valid = custody_guard && main_binding && custody_diagnostic
+        valid = valid && cleanup && publication
+        valid = valid && custody_guard < main_binding
+        valid = valid && main_binding < custody_diagnostic
+        valid = valid && custody_diagnostic < cleanup
+        valid = valid && cleanup < publication
+        if (!valid) exit 1
+    }
+' "$start_failure_exit_contract"; then
+    printf '%s\n' \
+        'parent-custody trap diagnostic is not before cleanup and publication' >&2
+    exit 1
+fi
 
 if ! awk '
     /^run_functional_client_lease_probe\(\) \{$/ { in_functional = 1; next }
