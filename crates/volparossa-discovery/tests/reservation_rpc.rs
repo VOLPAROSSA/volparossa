@@ -5,7 +5,7 @@ use std::time::Duration;
 use libp2p::{Multiaddr, identity, request_response, swarm::SwarmEvent};
 use tokio::time;
 use volparossa_discovery::{
-    BehaviourEvent, DatapathRelayOperation, DatapathRelayRequest, DiscoveryError,
+    BehaviourEvent, DatapathRelayOperation, DatapathRelayRequest, DiscoveryError, DiscoveryEvent,
     DiscoveryProtocolRoles, DiscoveryService, ExitForwardOperation, ExitForwardRequest,
     ExitForwardResponse, ForwardStatus, PeerLink,
 };
@@ -16,6 +16,14 @@ use volparossa_protocol::{
 
 const DEADLINE_MS: u64 = 1_700_000_012_000;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn next_other(service: &mut DiscoveryService) -> SwarmEvent<BehaviourEvent> {
+    loop {
+        if let DiscoveryEvent::Other(event) = service.next_event().await {
+            return event;
+        }
+    }
+}
 
 #[tokio::test]
 #[allow(
@@ -79,7 +87,7 @@ async fn exit_requests_cross_exactly_one_control_relay_without_direct_exit_fallb
     let response = time::timeout(TEST_TIMEOUT, async {
         loop {
             tokio::select! {
-                event = client.next_event() => {
+                event = next_other(&mut client) => {
                     match event {
                         SwarmEvent::Behaviour(BehaviourEvent::ExitForward(
                             request_response::Event::Message {
@@ -106,7 +114,7 @@ async fn exit_requests_cross_exactly_one_control_relay_without_direct_exit_fallb
                         _ => {}
                     }
                 }
-                event = relay.next_event() => {
+                event = next_other(&mut relay) => {
                     match event {
                         SwarmEvent::Behaviour(BehaviourEvent::ExitForward(
                             request_response::Event::Message {
@@ -161,7 +169,7 @@ async fn exit_requests_cross_exactly_one_control_relay_without_direct_exit_fallb
                         _ => {}
                     }
                 }
-                event = exit.next_event() => {
+                event = next_other(&mut exit) => {
                     if let SwarmEvent::Behaviour(BehaviourEvent::ExitForwardUpstream(
                         request_response::Event::Message {
                             peer,
@@ -209,6 +217,138 @@ async fn exit_requests_cross_exactly_one_control_relay_without_direct_exit_fallb
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exact connection-bound Relay-to-Exit Permit transport exchange"
+)]
+async fn native_permit_response_consumes_the_exact_inbound_control_connection() {
+    let relay_key = identity::Keypair::generate_ed25519();
+    let exit_key = identity::Keypair::generate_ed25519();
+    let relay_peer = relay_key.public().to_peer_id();
+    let exit_peer = exit_key.public().to_peer_id();
+    let relay_public = raw_public_key(&relay_key);
+    let relay_node = node_id_from_public_key(&relay_public);
+
+    let mut relay = DiscoveryService::new_with_protocol_roles(
+        relay_key,
+        DiscoveryProtocolRoles::new(false, true, false),
+    )
+    .expect("relay discovery");
+    let mut exit = DiscoveryService::new_with_protocol_roles(
+        exit_key,
+        DiscoveryProtocolRoles::new(false, false, true),
+    )
+    .expect("exit discovery");
+    connect(&mut relay, &mut exit).await;
+
+    let signed_request = signed_envelope(ControlMessageType::NativeProbePermitRequest);
+    let request = ExitForwardRequest::new(
+        vec![21; 16],
+        relay_node.to_vec(),
+        relay_peer.to_bytes(),
+        relay_public.to_vec(),
+        exit_peer.to_bytes(),
+        vec![22; 32],
+        DEADLINE_MS,
+        ExitForwardOperation::NativeProbePermit,
+        signed_request.clone(),
+    )
+    .expect("canonical native Permit forwarding request");
+    let outbound = relay
+        .request_exit_forward_upstream(&exit_peer, request.clone().into())
+        .expect("control-Relay-to-Exit native Permit request");
+    let signed_permit = signed_envelope(ControlMessageType::NativeProbePermit);
+
+    let response = time::timeout(TEST_TIMEOUT, async {
+        loop {
+            tokio::select! {
+                event = next_other(&mut relay) => {
+                    match event {
+                        SwarmEvent::Behaviour(BehaviourEvent::ExitForwardUpstream(
+                            request_response::Event::Message {
+                                peer,
+                                message: request_response::Message::Response {
+                                    request_id,
+                                    response,
+                                },
+                                ..
+                            },
+                        )) if request_id == outbound => {
+                            assert_eq!(peer, exit_peer);
+                            break response;
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::ExitForwardUpstream(
+                            request_response::Event::OutboundFailure {
+                                request_id,
+                                error,
+                                ..
+                            },
+                        )) if request_id == outbound => {
+                            panic!("native Permit forwarding failed: {error}");
+                        }
+                        _ => {}
+                    }
+                }
+                event = next_other(&mut exit) => {
+                    if let SwarmEvent::Behaviour(BehaviourEvent::ExitForwardUpstream(
+                        request_response::Event::Message {
+                            peer,
+                            connection_id,
+                            message: request_response::Message::Request {
+                                request: received,
+                                channel,
+                                ..
+                            },
+                        },
+                    )) = event
+                    {
+                        assert_eq!(peer, relay_peer);
+                        assert_eq!(received.as_forward_request(), &request);
+                        let connection = exit
+                            .bind_native_probe_control_connection(peer, connection_id)
+                            .expect("exact inbound control connection");
+                        let canonical = received.as_forward_request();
+                        let response = ExitForwardResponse::granted(
+                            canonical.forward_id().to_vec(),
+                            ExitForwardOperation::NativeProbePermit,
+                            canonical.exit_node_id().to_vec(),
+                            exit_peer.to_bytes(),
+                            vec![signed_permit.clone()],
+                        )
+                        .expect("native Permit response");
+                        exit
+                            .send_native_probe_permit_response(
+                                connection,
+                                peer,
+                                channel,
+                                response.into(),
+                            )
+                            .expect("connection-bound native Permit response");
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("native Permit response timeout");
+
+    response
+        .validate()
+        .expect("canonical native Permit response");
+    assert_eq!(
+        response
+            .as_forward_response()
+            .validated_operation()
+            .expect("operation"),
+        ExitForwardOperation::NativeProbePermit
+    );
+    assert_eq!(
+        response.as_forward_response().signed_responses(),
+        &[signed_permit]
+    );
+}
+
+#[tokio::test]
 async fn execute_probe_is_transport_valid_but_production_handler_is_unavailable() {
     let client_key = identity::Keypair::generate_ed25519();
     let relay_key = identity::Keypair::generate_ed25519();
@@ -244,7 +384,7 @@ async fn execute_probe_is_transport_valid_but_production_handler_is_unavailable(
     let response = time::timeout(TEST_TIMEOUT, async {
         loop {
             tokio::select! {
-                event = client.next_event() => {
+                event = next_other(&mut client) => {
                     match event {
                         SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
                             request_response::Event::Message {
@@ -271,7 +411,7 @@ async fn execute_probe_is_transport_valid_but_production_handler_is_unavailable(
                         _ => {}
                     }
                 }
-                event = relay.next_event() => {
+                event = next_other(&mut relay) => {
                     if matches!(
                         event,
                         SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
@@ -308,7 +448,7 @@ async fn connect(dialer: &mut DiscoveryService, listener: &mut DiscoveryService)
         .expect("memory listener");
     let address = time::timeout(TEST_TIMEOUT, async {
         loop {
-            if let SwarmEvent::NewListenAddr { address, .. } = listener.next_event().await {
+            if let SwarmEvent::NewListenAddr { address, .. } = next_other(listener).await {
                 break address;
             }
         }
@@ -327,7 +467,7 @@ async fn connect(dialer: &mut DiscoveryService, listener: &mut DiscoveryService)
         let mut listener_connected = false;
         while !dialer_connected || !listener_connected {
             tokio::select! {
-                event = dialer.next_event() => {
+                event = next_other(dialer) => {
                     if matches!(
                         event,
                         SwarmEvent::ConnectionEstablished { peer_id, .. }
@@ -336,7 +476,7 @@ async fn connect(dialer: &mut DiscoveryService, listener: &mut DiscoveryService)
                         dialer_connected = true;
                     }
                 }
-                event = listener.next_event() => {
+                event = next_other(listener) => {
                     if matches!(
                         event,
                         SwarmEvent::ConnectionEstablished { peer_id, .. }

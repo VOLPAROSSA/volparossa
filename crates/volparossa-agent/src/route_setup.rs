@@ -13,6 +13,8 @@
 mod retirement;
 mod selection_bridge;
 
+pub(crate) use selection_bridge::{PreparedPreselectionEvidence, prepare_preselection_evidence};
+
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
@@ -4194,6 +4196,7 @@ mod tests {
                     )]
                 }
                 ExitForwardOperation::FetchExitAdvertisement
+                | ExitForwardOperation::NativeProbePermit
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -4522,6 +4525,7 @@ mod tests {
                     vec![accepted.signed_receipt().to_vec()]
                 }
                 ExitForwardOperation::FetchExitAdvertisement
+                | ExitForwardOperation::NativeProbePermit
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(

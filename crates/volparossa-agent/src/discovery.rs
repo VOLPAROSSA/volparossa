@@ -1,6 +1,23 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
 mod preselection_observation;
+mod preselection_sampler;
+
+pub(crate) use preselection_observation::{
+    BoundPreselectionFreshnessProofBatch, CompletedPreselectionFreshnessAttempt,
+    CoolingPreselectionAttemptGate, PreselectionTranscriptFreshnessFacts,
+    PreselectionTransportFreshnessFacts,
+};
+use preselection_observation::{
+    DispatchedPreselectionAttempt, PreselectionAttemptGate, PreselectionGateRecovery,
+    PreselectionLocalRecovery, PreselectionOwnerTransitionFailure, PreselectionResponseOutcome,
+    consume_local_preselection_attempt_failure, consume_preselection_begin_failure,
+};
+#[cfg(test)]
+use preselection_sampler::MAXIMUM_OTHER_RELAYS;
+use preselection_sampler::{
+    PreselectionSamplingError, PreselectionSamplingScope, narrow_route_candidate_snapshot,
+};
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -13,8 +30,10 @@ use std::{
 };
 
 use libp2p::{
-    Multiaddr, PeerId as Libp2pPeerId, kad, multiaddr::Protocol, request_response,
-    swarm::SwarmEvent,
+    Multiaddr, PeerId as Libp2pPeerId, kad,
+    multiaddr::Protocol,
+    request_response,
+    swarm::{ConnectionId, SwarmEvent},
 };
 #[cfg(test)]
 use std::cell::Cell;
@@ -32,11 +51,14 @@ use volparossa_core::{
     UnixTime,
 };
 use volparossa_discovery::{
-    AdvertisementResponse, BehaviourEvent, DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation,
-    DatapathRelayRequest, DatapathRelayResponse, DiscoveryProtocolRoles, DiscoveryService,
+    AdvertisementResponse, BehaviourEvent, BoundClientPreselectionTransport,
+    BoundNativeProbeControlConnection, ClientPreselectionResponseArrival,
+    DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation, DatapathRelayRequest,
+    DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles, DiscoveryService,
     EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation,
-    ExitForwardRequest, ExitForwardResponse, ForwardStatus, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
-    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, PeerLink,
+    ExitForwardRequest, ExitForwardResponse, ForwardStatus, LocalPreselectionPolicy,
+    MAX_CONCURRENT_DATAPATH_RELAY_STREAMS, MAX_CONCURRENT_FORWARDING_STREAMS,
+    MAX_FORWARDING_FRAME_BYTES, PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink,
     UpstreamExitForwardRequest, UpstreamExitForwardResponse, advertisement_envelope_matches_peer,
     capability, signed_envelope_matches_peer,
 };
@@ -49,11 +71,13 @@ use volparossa_metrics::MetricsRegistry;
 use volparossa_peerstore::PeerStore;
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
-    ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
-    ExitReservationConfirmation, ExitReservationFinalizeRequest,
-    NodeAdvertisement as WireAdvertisement, RelayAuthorization, RelayProbePermit,
-    RelayProbePermitRequest, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy,
-    decode_canonical, encode_canonical, node_id_from_public_key, verify_control_message,
+    AdvertisementCapabilities, ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest,
+    ExitReservation, ExitReservationConfirmation, ExitReservationFinalizeRequest,
+    MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbePathScope, NativeProbePermitRequest,
+    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, PreselectionActorBinding,
+    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservationRequest,
+    ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
+    node_id_from_public_key, verify_control_message,
 };
 use volparossa_relay::{RelayService, RelayServiceConfig};
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
@@ -61,6 +85,7 @@ use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
 use crate::{
     advertisement::{AdvertisementPublisher, LocalAdvertisementInput},
     roles::RoleStore,
+    route_setup::{PreparedPreselectionEvidence, prepare_preselection_evidence},
     state::AgentState,
     unix_millis, unix_seconds,
 };
@@ -83,6 +108,7 @@ const MAX_LEDGER_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
 const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
 const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
 const PROVIDER_OBSERVATION_TTL_MS: u64 = 120_000;
+const CLIENT_PRESELECTION_TIMEOUT: Duration = Duration::from_secs(TUNNEL_SETUP_TIMEOUT_SECONDS);
 
 /// Single-owner resources installed into the discovery actor at startup.
 pub(crate) struct DiscoveryRuntimeResources {
@@ -90,6 +116,65 @@ pub(crate) struct DiscoveryRuntimeResources {
     pub(crate) policy: Option<VerifiedManifest>,
     pub(crate) role_store: RoleStore,
     pub(crate) metrics: MetricsRegistry,
+}
+
+/// Route-policy-only input for one actor-owned client preselection attempt.
+///
+/// No peer, target, endpoint, Exit, request, or dispatch identity can cross this boundary. The
+/// discovery actor derives every network target from its own freshly revalidated snapshot.
+pub(crate) struct ClientPreselectionParameters {
+    transport: Transport,
+    address_family: ObservationAddressFamily,
+    minimum_capacity: Bandwidth,
+    local_profile_capacity: Bandwidth,
+    conservative_capacity_ceiling: Bandwidth,
+    minimum_other_relays: usize,
+    maximum_other_relays: usize,
+    requested_candidate_bound: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "the typed route-orchestrator boundary is intentionally crate-private"
+)]
+impl ClientPreselectionParameters {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the typed boundary keeps every bounded route-policy input explicit"
+    )]
+    pub(crate) const fn new(
+        transport: Transport,
+        address_family: ObservationAddressFamily,
+        minimum_capacity: Bandwidth,
+        local_profile_capacity: Bandwidth,
+        conservative_capacity_ceiling: Bandwidth,
+        minimum_other_relays: usize,
+        maximum_other_relays: usize,
+        requested_candidate_bound: usize,
+    ) -> Self {
+        Self {
+            transport,
+            address_family,
+            minimum_capacity,
+            local_profile_capacity,
+            conservative_capacity_ceiling,
+            minimum_other_relays,
+            maximum_other_relays,
+            requested_candidate_bound,
+        }
+    }
+}
+
+/// Detail-free terminal result at the production client-preselection handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientPreselectionError {
+    Busy,
+    Closed,
+    Timeout,
+    InvalidParameters,
+    Unavailable,
+    Invalidated,
+    Transport,
 }
 
 /// Bounded typed control path into the single-owner discovery actor.
@@ -159,6 +244,25 @@ impl DiscoveryControlHandle {
             .await
             .map_err(|_| RouteCandidateSnapshotError::Timeout)?
             .map_err(|_| RouteCandidateSnapshotError::Closed)?
+    }
+
+    pub(crate) async fn prepare_client_preselection(
+        &self,
+        parameters: ClientPreselectionParameters,
+    ) -> Result<PreparedPreselectionEvidence, ClientPreselectionError> {
+        let (reply, response) = oneshot::channel();
+        timeout(
+            CLIENT_PRESELECTION_TIMEOUT,
+            self.sender
+                .send(DiscoveryCommand::BeginClientPreselection { parameters, reply }),
+        )
+        .await
+        .map_err(|_| ClientPreselectionError::Busy)?
+        .map_err(|_| ClientPreselectionError::Closed)?;
+        timeout(CLIENT_PRESELECTION_TIMEOUT, response)
+            .await
+            .map_err(|_| ClientPreselectionError::Timeout)?
+            .map_err(|_| ClientPreselectionError::Closed)?
     }
 
     pub(crate) async fn resolve_direct_relay(
@@ -290,6 +394,10 @@ enum DiscoveryCommand {
     RouteCandidateSnapshot {
         requested_candidates: usize,
         reply: oneshot::Sender<Result<RouteCandidateSnapshot, RouteCandidateSnapshotError>>,
+    },
+    BeginClientPreselection {
+        parameters: ClientPreselectionParameters,
+        reply: oneshot::Sender<Result<PreparedPreselectionEvidence, ClientPreselectionError>>,
     },
     ResolveDirectRelay {
         expected_node_id: [u8; 32],
@@ -460,6 +568,19 @@ struct RetryLedgerEntry {
     target_peer: Libp2pPeerId,
 }
 
+/// Exact service-local handoff for one authenticated native-Permit response.
+///
+/// The opaque connection proof and behaviour-local response channel stay together until the
+/// immediate synchronous send boundary. Signed Permit bytes are only a response projection; the
+/// affine phase owner remains inside `ExitService` across a closed or ambiguous channel.
+#[must_use = "a prepared native-Permit response must be sent or dropped as one owner"]
+struct PreparedNativeProbePermitResponse {
+    connection: BoundNativeProbeControlConnection,
+    authenticated_control_relay: Libp2pPeerId,
+    channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    response: UpstreamExitForwardResponse,
+}
+
 /// Opaque identity of one freshly verified canonical advertisement payload.
 ///
 /// The bytes never cross the agent's public API. Equality is carried through discovery,
@@ -472,6 +593,21 @@ pub(crate) struct AdvertisementPayloadHash([u8; 32]);
 impl AdvertisementPayloadHash {
     fn from_fresh_fingerprint(value: [u8; 32]) -> Option<Self> {
         value.iter().any(|byte| *byte != 0).then_some(Self(value))
+    }
+
+    /// Append this exact authenticated digest to an endpoint-free native-probe commitment.
+    ///
+    /// This purpose-limited writer avoids introducing a general byte accessor for the opaque
+    /// equality token. The digest remains non-authoritative and never reveals an endpoint.
+    pub(crate) fn append_native_probe_commitment(&self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.0);
+    }
+
+    /// Compare one untrusted wire digest to this exact authenticated native-probe commitment.
+    ///
+    /// This purpose-limited equality check avoids exposing the opaque digest bytes to the caller.
+    fn matches_native_probe_commitment(&self, wire_digest: &[u8]) -> bool {
+        self.0.as_slice() == wire_digest
     }
 
     #[cfg(test)]
@@ -554,16 +690,17 @@ impl RouteCandidatePolicySnapshot {
 /// Revalidated advertisement projection safe to hand to in-process selection.
 ///
 /// The signed envelope, fingerprint signature and encoded length, persisted endpoint, and stored
-/// RTT/capacity history stay inside discovery. Only the opaque, redacted payload-hash equality
-/// binding leaves discovery; it grants no authority. Historical reputation and a serious-fault
-/// cooldown are the only peerstore evidence projected; neither is fresh route reachability or
-/// capacity evidence.
+/// RTT/capacity values stay inside discovery. Only the opaque, redacted payload-hash equality
+/// binding leaves discovery; it grants no authority. A bounded local measurement count,
+/// historical reputation and a serious-fault cooldown are the only peerstore evidence projected;
+/// none is fresh route reachability or capacity evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RouteCandidateAdvertisement {
     advertisement: CoreAdvertisement,
     signed_measured_at_ms: u64,
     signed_expires_at_ms: u64,
     advertisement_payload_hash: AdvertisementPayloadHash,
+    local_measurement_count: usize,
     historical_reputation_score: f64,
     serious_protocol_fault_until: Option<UnixTime>,
 }
@@ -585,6 +722,10 @@ impl RouteCandidateAdvertisement {
         self.advertisement_payload_hash
     }
 
+    pub(crate) const fn local_measurement_count(&self) -> usize {
+        self.local_measurement_count
+    }
+
     pub(crate) const fn historical_reputation_score(&self) -> f64 {
         self.historical_reputation_score
     }
@@ -604,6 +745,7 @@ impl RouteCandidateAdvertisement {
             signed_measured_at_ms: exact.signed_measured_at_ms,
             signed_expires_at_ms: exact.signed_expires_at_ms,
             advertisement_payload_hash: exact.fingerprint.payload_hash,
+            local_measurement_count: stored.evidence.measurement_count,
             historical_reputation_score: stored.evidence.reputation_score(),
             serious_protocol_fault_until: stored.evidence.serious_protocol_fault_until,
         })
@@ -679,13 +821,6 @@ pub(crate) struct RouteCandidateSnapshot {
     policy: RouteCandidatePolicySnapshot,
     direct_relays: Vec<DirectRelayCandidateSnapshot>,
     forwarded_exits: Vec<ForwardedExitCandidateSnapshot>,
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "callerless A1a prerequisite; no production caller"
-        )
-    )]
     preselection_subjects: preselection_observation::PreselectionSubjectSet,
 }
 
@@ -1012,6 +1147,27 @@ pub(crate) enum RoleApplyError {
     RestartRequired,
 }
 
+struct ActiveClientPreselection {
+    dispatch: DispatchedPreselectionAttempt,
+    transports: Vec<BoundClientPreselectionTransport>,
+    reply: oneshot::Sender<Result<PreparedPreselectionEvidence, ClientPreselectionError>>,
+    request_deadline: Instant,
+    attempt_deadline: Instant,
+    terminal_error: Option<ClientPreselectionError>,
+}
+
+/// Single affine owner for the complete client preselection lifecycle.
+///
+/// `Lost` is a private move sentinel only. Every transition replaces it synchronously with exact
+/// retained authority, cooling authority, or permanent closure before returning to the actor loop.
+enum ClientPreselectionOwner {
+    Available(PreselectionAttemptGate),
+    Active(ActiveClientPreselection),
+    Cooling(CoolingPreselectionAttemptGate),
+    Closed,
+    Lost,
+}
+
 /// Owns non-`Sync` discovery and `SQLite` values inside one async actor.
 pub struct DiscoveryRuntime {
     service: DiscoveryService,
@@ -1028,6 +1184,7 @@ pub struct DiscoveryRuntime {
     exit_service: Option<ExitService>,
     metrics: MetricsRegistry,
     role_commands: mpsc::Receiver<DiscoveryCommand>,
+    client_preselection: ClientPreselectionOwner,
     provider_queries: HashMap<kad::QueryId, ProviderQueryKind>,
     relay_advertisement_requests: HashMap<request_response::OutboundRequestId, Libp2pPeerId>,
     exit_provider_peers: HashMap<Libp2pPeerId, u64>,
@@ -1067,6 +1224,10 @@ pub struct DiscoveryRuntime {
 impl DiscoveryRuntime {
     /// Builds and configures the real libp2p swarm without altering host routes,
     /// firewall, DNS, or interfaces.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "construction installs all actor-owned services and affine preselection state"
+    )]
     pub fn new(
         identity: Identity,
         config: &Config,
@@ -1118,6 +1279,14 @@ impl DiscoveryRuntime {
             None
         };
         let (role_sender, role_commands) = mpsc::channel(ROLE_COMMAND_CAPACITY);
+        let client_preselection = if roles.client {
+            PreselectionAttemptGate::new().map_or(
+                ClientPreselectionOwner::Closed,
+                ClientPreselectionOwner::Available,
+            )
+        } else {
+            ClientPreselectionOwner::Closed
+        };
         let runtime = Self {
             service,
             store,
@@ -1133,6 +1302,7 @@ impl DiscoveryRuntime {
             exit_service,
             metrics,
             role_commands,
+            client_preselection,
             provider_queries: HashMap::new(),
             relay_advertisement_requests: HashMap::new(),
             exit_provider_peers: HashMap::new(),
@@ -1190,6 +1360,12 @@ impl DiscoveryRuntime {
         let mut reservation_maintenance = tokio::time::interval(RESERVATION_MAINTENANCE_INTERVAL);
         reservation_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
+            self.maintain_client_preselection();
+            let responder_policy = {
+                let now_ms = unix_millis();
+                let policy = state.read().await.policy_snapshot(now_ms);
+                preselection_responder_policy(self.roles, &policy, now_ms)
+            };
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -1246,8 +1422,13 @@ impl DiscoveryRuntime {
                         ).await;
                     }
                 }
-                event = self.service.next_event() => {
-                    self.handle_event(event, &state).await;
+                event = next_actor_discovery_event(
+                    &mut self.service,
+                    &self.identity,
+                    self.local_public_key,
+                    responder_policy,
+                ) => {
+                    self.handle_sanitized_event(event, &state).await;
                 }
                 command = self.role_commands.recv() => {
                     let Some(command) = command else {
@@ -1258,6 +1439,7 @@ impl DiscoveryRuntime {
                 }
             }
         }
+        self.cancel_client_preselection(ClientPreselectionError::Closed);
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
         self.reject_queued_outbound_commands();
         self.withdraw_local();
@@ -1265,7 +1447,37 @@ impl DiscoveryRuntime {
         clear_exit_metric(&self.metrics);
     }
 
+    async fn handle_sanitized_event(
+        &mut self,
+        event: DiscoveryEvent,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        match event {
+            DiscoveryEvent::Other(event) => self.handle_event(event, state).await,
+            DiscoveryEvent::ClientPreselectionResponse(arrival) => {
+                if let Some(code) = self.handle_client_preselection_response(arrival) {
+                    state.write().await.log(LogLevel::Warn, code, unix_millis());
+                }
+            }
+            DiscoveryEvent::UpstreamPreselectionResponse(_) => {
+                state.write().await.log(
+                    LogLevel::Error,
+                    "PRESELECTION_RESPONSE_WITHOUT_OWNER",
+                    unix_millis(),
+                );
+            }
+            _ => {
+                state.write().await.log(
+                    LogLevel::Error,
+                    "UNSUPPORTED_SANITIZED_DISCOVERY_EVENT",
+                    unix_millis(),
+                );
+            }
+        }
+    }
+
     async fn handle_command(&mut self, command: DiscoveryCommand, state: &Arc<RwLock<AgentState>>) {
+        self.maintain_client_preselection();
         match command {
             DiscoveryCommand::SetRoles {
                 expected,
@@ -1276,6 +1488,10 @@ impl DiscoveryRuntime {
                 let _ = reply.send(result);
             }
             DiscoveryCommand::ApplyPolicy { policy, reply } => {
+                // Policy replacement/revocation invalidates every retained Relay authority input.
+                // Cancel both affine owners before publishing the new actor state.
+                self.cancel_client_preselection(ClientPreselectionError::Invalidated);
+                self.service.cancel_preselection_forwarding();
                 state.write().await.set_policy(policy);
                 self.synchronize_exit_policy(state).await;
                 self.publish_local(state).await;
@@ -1288,6 +1504,10 @@ impl DiscoveryRuntime {
                 reply,
             } => {
                 self.reply_route_candidate_snapshot(requested_candidates, reply, state)
+                    .await;
+            }
+            DiscoveryCommand::BeginClientPreselection { parameters, reply } => {
+                self.begin_client_preselection(parameters, reply, state)
                     .await;
             }
             DiscoveryCommand::ResolveDirectRelay {
@@ -1373,6 +1593,497 @@ impl DiscoveryRuntime {
         let snapshot =
             self.build_route_candidate_snapshot(requested_candidates, captured_at_ms, &policy);
         let _ = reply.send(snapshot);
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one auditable affine admission path retains every failure authority"
+    )]
+    async fn begin_client_preselection(
+        &mut self,
+        parameters: ClientPreselectionParameters,
+        reply: oneshot::Sender<Result<PreparedPreselectionEvidence, ClientPreselectionError>>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        match &self.client_preselection {
+            ClientPreselectionOwner::Available(_) => {}
+            ClientPreselectionOwner::Active(_) | ClientPreselectionOwner::Cooling(_) => {
+                let _ = reply.send(Err(ClientPreselectionError::Busy));
+                return;
+            }
+            ClientPreselectionOwner::Closed | ClientPreselectionOwner::Lost => {
+                let _ = reply.send(Err(ClientPreselectionError::Closed));
+                return;
+            }
+        }
+
+        if !client_preselection_parameters_are_valid(&parameters) {
+            let _ = reply.send(Err(ClientPreselectionError::InvalidParameters));
+            return;
+        }
+
+        let ClientPreselectionParameters {
+            transport,
+            address_family,
+            minimum_capacity,
+            local_profile_capacity,
+            conservative_capacity_ceiling,
+            minimum_other_relays,
+            maximum_other_relays,
+            requested_candidate_bound,
+        } = parameters;
+
+        let captured_at_ms = unix_millis();
+        self.purge_completed_at(captured_at_ms);
+        let policy = state.read().await.policy_snapshot(captured_at_ms);
+        if reply.is_closed() {
+            return;
+        }
+        let snapshot = match self.build_route_candidate_snapshot(
+            requested_candidate_bound,
+            captured_at_ms,
+            &policy,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(RouteCandidateSnapshotError::InvalidLimit) => {
+                let _ = reply.send(Err(ClientPreselectionError::InvalidParameters));
+                return;
+            }
+            Err(
+                RouteCandidateSnapshotError::Busy
+                | RouteCandidateSnapshotError::Closed
+                | RouteCandidateSnapshotError::Timeout
+                | RouteCandidateSnapshotError::PolicyUnavailable
+                | RouteCandidateSnapshotError::StoreUnavailable,
+            ) => {
+                let _ = reply.send(Err(ClientPreselectionError::Unavailable));
+                return;
+            }
+        };
+        let scope = PreselectionSamplingScope::new(
+            transport,
+            address_family,
+            minimum_capacity,
+            minimum_other_relays,
+            maximum_other_relays,
+        );
+        let snapshot = match narrow_route_candidate_snapshot(snapshot, scope) {
+            Ok(snapshot) => snapshot,
+            Err(failure) => {
+                let error = if failure.error == PreselectionSamplingError::InvalidPolicy {
+                    ClientPreselectionError::InvalidParameters
+                } else {
+                    ClientPreselectionError::Unavailable
+                };
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        if reply.is_closed() {
+            return;
+        }
+        let Some(attempt_deadline) = Instant::now().checked_add(CLIENT_PRESELECTION_TIMEOUT) else {
+            let _ = reply.send(Err(ClientPreselectionError::Closed));
+            return;
+        };
+        let Some(request_deadline) = Instant::now()
+            .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)
+            .map(|deadline| deadline.min(attempt_deadline))
+        else {
+            let _ = reply.send(Err(ClientPreselectionError::Closed));
+            return;
+        };
+
+        let owner = std::mem::replace(&mut self.client_preselection, ClientPreselectionOwner::Lost);
+        let ClientPreselectionOwner::Available(gate) = owner else {
+            self.client_preselection = owner;
+            let _ = reply.send(Err(ClientPreselectionError::Busy));
+            return;
+        };
+        let pending = match gate.begin(
+            snapshot,
+            transport,
+            address_family,
+            minimum_capacity,
+            local_profile_capacity,
+            conservative_capacity_ceiling,
+        ) {
+            Ok(pending) => pending,
+            Err(failure) => {
+                self.install_client_preselection_gate_recovery(consume_preselection_begin_failure(
+                    failure,
+                ));
+                let _ = reply.send(Err(ClientPreselectionError::Unavailable));
+                return;
+            }
+        };
+        if reply.is_closed() {
+            match pending.cancel() {
+                Ok(gate) => self.client_preselection = ClientPreselectionOwner::Cooling(gate),
+                Err(failure) => self.install_local_client_preselection_failure(
+                    consume_local_preselection_attempt_failure(failure),
+                    reply,
+                    ClientPreselectionError::Closed,
+                ),
+            }
+            return;
+        }
+        match pending.dispatch(&mut self.service) {
+            Ok(dispatch) => {
+                let active = ActiveClientPreselection {
+                    dispatch,
+                    transports: Vec::with_capacity(maximum_other_relays.saturating_add(1)),
+                    reply,
+                    request_deadline,
+                    attempt_deadline,
+                    terminal_error: None,
+                };
+                if active.reply.is_closed()
+                    || Instant::now() >= active.request_deadline
+                    || Instant::now() >= active.attempt_deadline
+                {
+                    let error = if active.reply.is_closed() {
+                        ClientPreselectionError::Closed
+                    } else {
+                        ClientPreselectionError::Timeout
+                    };
+                    self.cancel_active_client_preselection(active, error);
+                } else {
+                    self.client_preselection = ClientPreselectionOwner::Active(active);
+                }
+            }
+            Err(failure) => self.install_client_preselection_transition_failure(
+                failure,
+                Vec::new(),
+                reply,
+                request_deadline,
+                attempt_deadline,
+                ClientPreselectionError::Transport,
+                Some(ClientPreselectionError::Transport),
+            ),
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one auditable affine response path binds, joins and cools exact ownership"
+    )]
+    fn handle_client_preselection_response(
+        &mut self,
+        arrival: ClientPreselectionResponseArrival,
+    ) -> Option<&'static str> {
+        let owner = std::mem::replace(&mut self.client_preselection, ClientPreselectionOwner::Lost);
+        let ClientPreselectionOwner::Active(active) = owner else {
+            self.client_preselection = owner;
+            return Some("PRESELECTION_RESPONSE_WITHOUT_OWNER");
+        };
+        if let Some(error) = active.terminal_error {
+            self.cancel_active_client_preselection(active, error);
+            return Some("PRESELECTION_RESPONSE_AFTER_TERMINAL");
+        }
+        if active.reply.is_closed()
+            || Instant::now() >= active.request_deadline
+            || Instant::now() >= active.attempt_deadline
+        {
+            let error = if active.reply.is_closed() {
+                ClientPreselectionError::Closed
+            } else {
+                ClientPreselectionError::Timeout
+            };
+            self.cancel_active_client_preselection(active, error);
+            return Some("PRESELECTION_RESPONSE_AFTER_TERMINAL");
+        }
+
+        let ActiveClientPreselection {
+            dispatch,
+            mut transports,
+            reply,
+            request_deadline,
+            attempt_deadline,
+            terminal_error: _,
+        } = active;
+        let transition_started_at = Instant::now();
+        let (outcome, transport) = match dispatch.bind_response(&mut self.service, arrival) {
+            Ok(bound) => bound,
+            Err(failure) => {
+                self.install_client_preselection_transition_failure(
+                    failure,
+                    transports,
+                    reply,
+                    request_deadline,
+                    attempt_deadline,
+                    ClientPreselectionError::Transport,
+                    None,
+                );
+                return Some("PRESELECTION_RESPONSE_REJECTED");
+            }
+        };
+        transports.push(transport);
+        match outcome {
+            PreselectionResponseOutcome::Pending(pending) => {
+                if reply.is_closed() || Instant::now() >= attempt_deadline {
+                    let error = if reply.is_closed() {
+                        ClientPreselectionError::Closed
+                    } else {
+                        ClientPreselectionError::Timeout
+                    };
+                    match pending.cancel() {
+                        Ok(gate) => {
+                            self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                            let _ = reply.send(Err(error));
+                        }
+                        Err(failure) => self.install_local_client_preselection_failure(
+                            consume_local_preselection_attempt_failure(failure),
+                            reply,
+                            error,
+                        ),
+                    }
+                    return Some("PRESELECTION_ATTEMPT_TERMINATED");
+                }
+                let Some(request_deadline) = transition_started_at
+                    .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)
+                    .map(|deadline| deadline.min(attempt_deadline))
+                else {
+                    match pending.cancel() {
+                        Ok(gate) => {
+                            self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                            let _ = reply.send(Err(ClientPreselectionError::Closed));
+                        }
+                        Err(failure) => self.install_local_client_preselection_failure(
+                            consume_local_preselection_attempt_failure(failure),
+                            reply,
+                            ClientPreselectionError::Closed,
+                        ),
+                    }
+                    return Some("PRESELECTION_CLOCK_UNAVAILABLE");
+                };
+                match pending.dispatch(&mut self.service) {
+                    Ok(dispatch) => {
+                        let active = ActiveClientPreselection {
+                            dispatch,
+                            transports,
+                            reply,
+                            request_deadline,
+                            attempt_deadline,
+                            terminal_error: None,
+                        };
+                        if active.reply.is_closed()
+                            || Instant::now() >= active.request_deadline
+                            || Instant::now() >= active.attempt_deadline
+                        {
+                            let error = if active.reply.is_closed() {
+                                ClientPreselectionError::Closed
+                            } else {
+                                ClientPreselectionError::Timeout
+                            };
+                            self.cancel_active_client_preselection(active, error);
+                        } else {
+                            self.client_preselection = ClientPreselectionOwner::Active(active);
+                        }
+                        None
+                    }
+                    Err(failure) => {
+                        self.install_client_preselection_transition_failure(
+                            failure,
+                            transports,
+                            reply,
+                            request_deadline,
+                            attempt_deadline,
+                            ClientPreselectionError::Transport,
+                            Some(ClientPreselectionError::Transport),
+                        );
+                        Some("PRESELECTION_REDISPATCH_FAILED")
+                    }
+                }
+            }
+            PreselectionResponseOutcome::Ready(ready) => {
+                if reply.is_closed() || Instant::now() >= attempt_deadline {
+                    let error = if reply.is_closed() {
+                        ClientPreselectionError::Closed
+                    } else {
+                        ClientPreselectionError::Timeout
+                    };
+                    match ready.cancel() {
+                        Ok(gate) => {
+                            self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                            let _ = reply.send(Err(error));
+                        }
+                        Err(failure) => self.install_local_client_preselection_failure(
+                            consume_local_preselection_attempt_failure(failure),
+                            reply,
+                            error,
+                        ),
+                    }
+                    return Some("PRESELECTION_ATTEMPT_TERMINATED");
+                }
+                let completed = match ready.finish() {
+                    Ok(completed) => completed,
+                    Err(failure) => {
+                        self.install_local_client_preselection_failure(
+                            consume_local_preselection_attempt_failure(failure),
+                            reply,
+                            ClientPreselectionError::Transport,
+                        );
+                        return Some("PRESELECTION_FINISH_FAILED");
+                    }
+                };
+                let fresh = match completed.join_transport_proofs(transports) {
+                    Ok(fresh) => fresh,
+                    Err(failure) => {
+                        let _ = failure.error();
+                        self.client_preselection =
+                            ClientPreselectionOwner::Cooling(failure.into_gate());
+                        let _ = reply.send(Err(ClientPreselectionError::Transport));
+                        return Some("PRESELECTION_EXACT_SET_JOIN_FAILED");
+                    }
+                };
+                match prepare_preselection_evidence(fresh) {
+                    Ok((prepared, gate)) => {
+                        self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                        let _ = reply.send(Ok(prepared));
+                        None
+                    }
+                    Err(gate) => {
+                        self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                        let _ = reply.send(Err(ClientPreselectionError::Unavailable));
+                        Some("PRESELECTION_FRESH_EVIDENCE_REJECTED")
+                    }
+                }
+            }
+        }
+    }
+
+    fn maintain_client_preselection(&mut self) {
+        let owner = std::mem::replace(&mut self.client_preselection, ClientPreselectionOwner::Lost);
+        match owner {
+            ClientPreselectionOwner::Cooling(gate) => match gate.resume() {
+                Ok(gate) => self.client_preselection = ClientPreselectionOwner::Available(gate),
+                Err(gate) => self.client_preselection = ClientPreselectionOwner::Cooling(gate),
+            },
+            ClientPreselectionOwner::Active(active) if active.terminal_error.is_some() => {
+                let error = active
+                    .terminal_error
+                    .unwrap_or(ClientPreselectionError::Closed);
+                self.cancel_active_client_preselection(active, error);
+            }
+            ClientPreselectionOwner::Active(active) if active.reply.is_closed() => {
+                self.cancel_active_client_preselection(active, ClientPreselectionError::Closed);
+            }
+            ClientPreselectionOwner::Active(active)
+                if Instant::now() >= active.request_deadline
+                    || Instant::now() >= active.attempt_deadline =>
+            {
+                self.cancel_active_client_preselection(active, ClientPreselectionError::Timeout);
+            }
+            ClientPreselectionOwner::Lost => {
+                self.client_preselection = ClientPreselectionOwner::Closed;
+            }
+            owner => self.client_preselection = owner,
+        }
+    }
+
+    fn cancel_client_preselection(&mut self, error: ClientPreselectionError) {
+        let owner = std::mem::replace(&mut self.client_preselection, ClientPreselectionOwner::Lost);
+        match owner {
+            ClientPreselectionOwner::Active(active) => {
+                self.cancel_active_client_preselection(active, error);
+            }
+            ClientPreselectionOwner::Lost => {
+                self.client_preselection = ClientPreselectionOwner::Closed;
+            }
+            owner => self.client_preselection = owner,
+        }
+    }
+
+    fn cancel_active_client_preselection(
+        &mut self,
+        active: ActiveClientPreselection,
+        error: ClientPreselectionError,
+    ) {
+        let ActiveClientPreselection {
+            dispatch,
+            transports,
+            reply,
+            request_deadline,
+            attempt_deadline,
+            terminal_error: _,
+        } = active;
+        match dispatch.cancel(&mut self.service) {
+            Ok(gate) => {
+                self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                let _ = reply.send(Err(error));
+            }
+            Err(failure) => self.install_client_preselection_transition_failure(
+                failure,
+                transports,
+                reply,
+                request_deadline,
+                attempt_deadline,
+                error,
+                Some(error),
+            ),
+        }
+    }
+
+    fn install_client_preselection_gate_recovery(&mut self, recovery: PreselectionGateRecovery) {
+        self.client_preselection = match recovery {
+            PreselectionGateRecovery::Available(gate) => ClientPreselectionOwner::Available(*gate),
+            PreselectionGateRecovery::Cooling(gate) => ClientPreselectionOwner::Cooling(*gate),
+            PreselectionGateRecovery::Closed => ClientPreselectionOwner::Closed,
+        };
+    }
+
+    fn install_local_client_preselection_failure(
+        &mut self,
+        failure: PreselectionLocalRecovery,
+        reply: oneshot::Sender<Result<PreparedPreselectionEvidence, ClientPreselectionError>>,
+        error: ClientPreselectionError,
+    ) {
+        self.client_preselection = match failure {
+            PreselectionLocalRecovery::Cooling(gate) => ClientPreselectionOwner::Cooling(gate),
+            PreselectionLocalRecovery::Closed => ClientPreselectionOwner::Closed,
+        };
+        let _ = reply.send(Err(error));
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the exact retained dispatch state is restored without a getter or clone"
+    )]
+    fn install_client_preselection_transition_failure(
+        &mut self,
+        failure: PreselectionOwnerTransitionFailure,
+        transports: Vec<BoundClientPreselectionTransport>,
+        reply: oneshot::Sender<Result<PreparedPreselectionEvidence, ClientPreselectionError>>,
+        request_deadline: Instant,
+        attempt_deadline: Instant,
+        error: ClientPreselectionError,
+        retained_terminal_error: Option<ClientPreselectionError>,
+    ) {
+        match failure {
+            PreselectionOwnerTransitionFailure::Retained(dispatch) => {
+                self.client_preselection =
+                    ClientPreselectionOwner::Active(ActiveClientPreselection {
+                        dispatch: *dispatch,
+                        transports,
+                        reply,
+                        request_deadline,
+                        attempt_deadline,
+                        terminal_error: retained_terminal_error,
+                    });
+            }
+            PreselectionOwnerTransitionFailure::Cooling(gate) => {
+                self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                let _ = reply.send(Err(error));
+            }
+            PreselectionOwnerTransitionFailure::Closed => {
+                self.client_preselection = ClientPreselectionOwner::Closed;
+                let _ = reply.send(Err(error));
+            }
+        }
     }
 
     #[allow(clippy::too_many_lines, reason = "single-owner admission transaction")]
@@ -2014,6 +2725,9 @@ impl DiscoveryRuntime {
                 }
                 DiscoveryCommand::RouteCandidateSnapshot { reply, .. } => {
                     let _ = reply.send(Err(RouteCandidateSnapshotError::Closed));
+                }
+                DiscoveryCommand::BeginClientPreselection { reply, .. } => {
+                    let _ = reply.send(Err(ClientPreselectionError::Closed));
                 }
                 DiscoveryCommand::SetRoles { .. } | DiscoveryCommand::ApplyPolicy { .. } => {}
             }
@@ -2766,6 +3480,17 @@ impl DiscoveryRuntime {
             )) => {
                 self.relay_advertisement_requests.remove(&request_id);
             }
+            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
+                request_response::Event::OutboundFailure { .. },
+            )) => {
+                // The opaque service slot remains active until its local timer consumes the exact
+                // transaction. A raw failure cannot safely identify or cancel an affine owner.
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "PRESELECTION_OUTBOUND_FAILED",
+                    unix_millis(),
+                );
+            }
             SwarmEvent::Behaviour(BehaviourEvent::ExitForward(event)) => {
                 self.handle_exit_forward_event(event, state).await;
             }
@@ -2873,12 +3598,13 @@ impl DiscoveryRuntime {
         match event {
             request_response::Event::Message {
                 peer,
+                connection_id,
                 message:
                     request_response::Message::Request {
                         request, channel, ..
                     },
                 ..
-            } => self.answer_exit_forward_upstream(peer, request, channel),
+            } => self.answer_exit_forward_upstream(peer, connection_id, request, channel),
             request_response::Event::Message {
                 peer,
                 message:
@@ -3321,6 +4047,7 @@ impl DiscoveryRuntime {
     fn answer_exit_forward_upstream(
         &mut self,
         authenticated_control_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
         request: UpstreamExitForwardRequest,
         channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
     ) {
@@ -3328,6 +4055,17 @@ impl DiscoveryRuntime {
         let Ok(operation) = request.validated_operation() else {
             return;
         };
+        if operation == ExitForwardOperation::NativeProbePermit {
+            if let Some(prepared) = self.prepare_native_probe_permit_response(
+                authenticated_control_relay,
+                connection_id,
+                &request,
+                channel,
+            ) {
+                self.send_prepared_native_probe_permit_response(prepared);
+            }
+            return;
+        }
         let Some(control_relay_node_id) = fixed_bytes::<32>(request.control_relay_node_id()) else {
             return;
         };
@@ -3406,6 +4144,119 @@ impl DiscoveryRuntime {
                 .service
                 .send_exit_forward_upstream_response(channel, response.into());
         }
+    }
+
+    /// Validate one native-Permit request and prepare its exact connection-owned response.
+    ///
+    /// Every state-free wrapper, signature, current-capability and local-advertisement check runs
+    /// before connection provenance is bound. The bind itself precedes the only Exit replay/sign
+    /// call. There is no suspension point from that bind through the returned response owner. The
+    /// current product deliberately publishes no local Exit advertisement, so this composed
+    /// handler remains fail-closed until a later truthful Exit-capability producer exists.
+    fn prepare_native_probe_permit_response(
+        &mut self,
+        authenticated_control_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    ) -> Option<PreparedNativeProbePermitResponse> {
+        let now_ms = unix_millis();
+        if request.validate().is_err() || !self.roles.exit {
+            return None;
+        }
+        let scope = verified_native_probe_forward_scope(request, now_ms)?;
+        let control = scope.control.as_ref()?;
+        let exit = scope.exit.as_ref()?;
+        let control_relay_node_id = fixed_bytes::<32>(request.control_relay_node_id())?;
+        let control_relay_public_key = fixed_bytes::<32>(request.control_relay_public_key())?;
+        let control_relay_peer = Libp2pPeerId::from_bytes(request.control_relay_peer_id()).ok()?;
+        let exit_node_id = fixed_bytes::<32>(request.exit_node_id())?;
+        let exit_peer = Libp2pPeerId::from_bytes(request.exit_peer_id()).ok()?;
+        let local_peer = *self.service.local_peer_id();
+        let current_control = self.direct_relays.get(&authenticated_control_relay)?;
+        if control_relay_peer != authenticated_control_relay
+            || control_relay_public_key != current_control.public_key
+            || exit_node_id != self.local_node_id
+            || exit_peer != local_peer
+            || exit_peer == authenticated_control_relay
+            || !native_probe_control_capability_matches(
+                current_control,
+                control,
+                &scope,
+                authenticated_control_relay,
+                request.deadline_unix_ms(),
+            )
+            || !self
+                .served_local_advertisement
+                .as_ref()
+                .is_some_and(|advertisement| {
+                    local_native_probe_exit_actor_matches(
+                        advertisement,
+                        exit,
+                        &scope,
+                        self.local_node_id,
+                        local_peer,
+                        self.local_public_key,
+                        now_ms,
+                    )
+                })
+        {
+            return None;
+        }
+
+        // This purpose token comes from the exact inbound event's authenticated PeerId and
+        // behaviour-local ConnectionId. Bind before the Exit can consume replay or invoke its
+        // signer; a closed, stale, foreign-service or substituted lineage therefore fails first.
+        let connection = self
+            .service
+            .bind_native_probe_control_connection(authenticated_control_relay, connection_id)
+            .ok()?;
+        let authenticated_control_peer = authenticated_control_relay.to_bytes();
+        let identity = &self.identity;
+        let accepted = self
+            .exit_service
+            .as_mut()?
+            .issue_native_probe_permit_with(
+                request.canonical_request(),
+                &control_relay_node_id,
+                &authenticated_control_peer,
+                now_ms,
+                self.local_public_key,
+                |message| identity.sign(message).ok(),
+            )
+            .ok()?;
+        let response = ExitForwardResponse::granted(
+            request.forward_id().to_vec(),
+            ExitForwardOperation::NativeProbePermit,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            vec![accepted.encoded().to_vec()],
+        )
+        .ok()?;
+        Some(PreparedNativeProbePermitResponse {
+            connection,
+            authenticated_control_relay,
+            channel,
+            response: response.into(),
+        })
+    }
+
+    fn send_prepared_native_probe_permit_response(
+        &mut self,
+        prepared: PreparedNativeProbePermitResponse,
+    ) {
+        let PreparedNativeProbePermitResponse {
+            connection,
+            authenticated_control_relay,
+            channel,
+            response,
+        } = prepared;
+        let _ = self.service.send_native_probe_permit_response(
+            connection,
+            authenticated_control_relay,
+            channel,
+            response,
+        );
     }
 
     async fn ingest_client_forwarded_advertisement(
@@ -4491,6 +5342,7 @@ impl DiscoveryRuntime {
                     signed_measured_at_ms: exact.signed_measured_at_ms,
                     signed_expires_at_ms: exact.signed_expires_at_ms,
                     advertisement_payload_hash: exact.fingerprint.payload_hash,
+                    local_measurement_count: stored.evidence.measurement_count,
                     historical_reputation_score: stored.evidence.reputation_score(),
                     serious_protocol_fault_until: stored.evidence.serious_protocol_fault_until,
                 },
@@ -4739,6 +5591,34 @@ impl DiscoveryRuntime {
     }
 }
 
+fn preselection_responder_policy(
+    roles: RolesConfig,
+    policy: &AgentPolicySnapshot,
+    now_ms: u64,
+) -> Option<LocalPreselectionPolicy> {
+    if !(roles.relay || roles.exit) || !policy.active || policy.expires_at_ms <= now_ms {
+        return None;
+    }
+    let hash = fixed_bytes::<32>(&policy.policy_hash)?;
+    LocalPreselectionPolicy::new(policy.manifest_version, hash, policy.expires_at_ms).ok()
+}
+
+async fn next_actor_discovery_event(
+    service: &mut DiscoveryService,
+    identity: &Identity,
+    public_key: [u8; 32],
+    responder_policy: Option<LocalPreselectionPolicy>,
+) -> DiscoveryEvent {
+    let Some(policy) = responder_policy else {
+        service.cancel_preselection_forwarding();
+        return service.next_event().await;
+    };
+    let mut signer = |message: &[u8]| identity.sign(message).ok();
+    service
+        .next_event_with_preselection_responders(policy, public_key, &mut signer)
+        .await
+}
+
 async fn log_reservation_event(state: &Arc<RwLock<AgentState>>, event_code: &'static str) {
     state
         .write()
@@ -4832,6 +5712,38 @@ fn forwarded_exit_capability_matches(
         && capability.policy_expires_at_ms == control.policy_expires_at_ms
         && control.expires_at_ms >= required_until_ms
         && capability.expires_at_ms >= required_until_ms
+}
+
+fn client_preselection_capacities_are_valid(
+    minimum: Bandwidth,
+    local_profile: Bandwidth,
+    conservative_ceiling: Bandwidth,
+) -> bool {
+    minimum.validate().is_ok()
+        && minimum.up_mbps > 0
+        && minimum.down_mbps > 0
+        && local_profile.validate().is_ok()
+        && conservative_ceiling.validate().is_ok()
+        && conservative_ceiling.up_mbps > 0
+        && conservative_ceiling.down_mbps > 0
+        && conservative_ceiling.satisfies(minimum)
+        && local_profile.satisfies(conservative_ceiling)
+}
+
+fn client_preselection_parameters_are_valid(parameters: &ClientPreselectionParameters) -> bool {
+    client_preselection_capacities_are_valid(
+        parameters.minimum_capacity,
+        parameters.local_profile_capacity,
+        parameters.conservative_capacity_ceiling,
+    ) && PreselectionSamplingScope::new(
+        parameters.transport,
+        parameters.address_family,
+        parameters.minimum_capacity,
+        parameters.minimum_other_relays,
+        parameters.maximum_other_relays,
+    )
+    .is_valid()
+        && (1..=MAXIMUM_SELECTION_CANDIDATES).contains(&parameters.requested_candidate_bound)
 }
 
 fn fixed_bytes<const N: usize>(bytes: &[u8]) -> Option<[u8; N]> {
@@ -5230,6 +6142,163 @@ fn reservation_authorization_scope_matches(
         && authorization.control_relay_peer_id == exit.control_relay_peer_id
 }
 
+fn verified_native_probe_forward_scope(
+    request: &ExitForwardRequest,
+    now_ms: u64,
+) -> Option<NativeProbePathScope> {
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbePermit
+        || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+    {
+        return None;
+    }
+    let mut replay = ReplayCache::new(1).ok()?;
+    let verified = verify_control_message::<NativeProbePermitRequest>(
+        request.canonical_request(),
+        now_ms,
+        native_probe_time_policy(),
+        &mut replay,
+    )
+    .ok()?;
+    let scope = verified.message().scope.as_ref()?;
+    let control = scope.control.as_ref()?;
+    let exit = scope.exit.as_ref()?;
+    inner_forward_scope_matches(
+        request,
+        verified.nonce(),
+        verified.expires_at_ms(),
+        &control.node_id,
+        &control.peer_id,
+        &exit.node_id,
+        &exit.peer_id,
+    )
+    .then(|| scope.clone())
+}
+
+fn native_probe_control_capability_matches(
+    capability: &DirectRelayCapability,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    required_until_ms: u64,
+) -> bool {
+    scope.control.as_ref() == Some(actor)
+        && actor.node_id.as_slice() == capability.node_id
+        && actor.peer_id == capability.peer_id.to_bytes()
+        && actor.public_key.as_slice() == capability.public_key
+        && actor.advertisement_sequence == capability.advertisement_sequence
+        && actor.advertisement_expires_at_ms == capability.advertisement_expires_at_ms
+        && capability
+            .advertisement_payload_hash
+            .matches_native_probe_commitment(&actor.advertisement_payload_hash)
+        && actor.capability_expires_at_ms == capability.expires_at_ms
+        && capability.peer_id == authenticated_peer
+        && capability.policy_version == scope.policy_version
+        && capability.policy_hash.as_slice() == scope.policy_hash
+        && capability.policy_expires_at_ms == scope.policy_expires_at_ms
+        && capability.expires_at_ms >= required_until_ms
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the local signed advertisement and exact native scope stay explicit"
+)]
+fn local_native_probe_exit_actor_matches(
+    encoded_advertisement: &[u8],
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    local_node_id: [u8; 32],
+    local_peer_id: Libp2pPeerId,
+    local_public_key: [u8; 32],
+    now_ms: u64,
+) -> bool {
+    let Ok(envelope) = decode_canonical::<SignedEnvelope>(
+        encoded_advertisement,
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    ) else {
+        return false;
+    };
+    let Some(payload_hash) = fixed_bytes::<32>(&envelope.payload_hash) else {
+        return false;
+    };
+    let Ok(mut replay) = ReplayCache::new(1) else {
+        return false;
+    };
+    let Ok(verified) = verify_control_message::<WireAdvertisement>(
+        encoded_advertisement,
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    ) else {
+        return false;
+    };
+    let advertisement = verified.message();
+    let Some(roles) = advertisement.roles.as_ref() else {
+        return false;
+    };
+    let Some(capabilities) = advertisement.capabilities.as_ref() else {
+        return false;
+    };
+    let Some(policy) = advertisement.policy.as_ref() else {
+        return false;
+    };
+    let Some(network) = advertisement.network.as_ref() else {
+        return false;
+    };
+    let Some(control) = scope.control.as_ref() else {
+        return false;
+    };
+    let expected_capability_expiry = verified
+        .expires_at_ms()
+        .min(scope.policy_expires_at_ms)
+        .min(control.capability_expires_at_ms);
+    scope.exit.as_ref() == Some(actor)
+        && roles.exit
+        && network.asn != 0
+        && native_probe_capabilities_support_scope(capabilities, scope)
+        && verified.sender_id() == &local_node_id
+        && verified.sender_public_key() == &local_public_key
+        && advertisement.node_id.as_slice() == local_node_id
+        && advertisement.peer_id == local_peer_id.to_bytes()
+        && advertisement.sequence_number != 0
+        && advertisement.expires_at_ms == verified.expires_at_ms()
+        && policy.whitelist_version == scope.policy_version
+        && policy.whitelist_hash == scope.policy_hash
+        && verified.expires_at_ms() <= scope.policy_expires_at_ms
+        && actor.node_id.as_slice() == local_node_id
+        && actor.peer_id == local_peer_id.to_bytes()
+        && actor.public_key.as_slice() == local_public_key
+        && actor.advertisement_sequence == advertisement.sequence_number
+        && actor.advertisement_expires_at_ms == verified.expires_at_ms()
+        && actor.advertisement_payload_hash.as_slice() == payload_hash
+        && actor.capability_expires_at_ms == expected_capability_expiry
+        && expected_capability_expiry > now_ms
+}
+
+fn native_probe_capabilities_support_scope(
+    capabilities: &AdvertisementCapabilities,
+    scope: &NativeProbePathScope,
+) -> bool {
+    let family_supported = match ObservationAddressFamily::try_from(scope.address_family) {
+        Ok(ObservationAddressFamily::Ipv4) => capabilities.ipv4,
+        Ok(ObservationAddressFamily::Ipv6) => capabilities.ipv6,
+        Ok(ObservationAddressFamily::Unspecified) | Err(_) => false,
+    };
+    let transport_supported = match Transport::try_from(scope.transport) {
+        Ok(Transport::TcpMptcp) => capabilities.tcp_mptcp,
+        Ok(Transport::UdpSinglePath) => capabilities.udp_single_path,
+        Ok(Transport::MultipathQuic) => capabilities.multipath_quic,
+        Ok(Transport::Unspecified) | Err(_) => false,
+    };
+    family_supported && transport_supported
+}
+
+fn native_probe_time_policy() -> TimePolicy {
+    TimePolicy {
+        maximum_lifetime_ms: MAX_NATIVE_PROBE_LIFETIME_MS,
+        maximum_clock_skew_ms: TimePolicy::default().maximum_clock_skew_ms,
+    }
+}
+
 fn forward_request_scope_matches(
     request: &ExitForwardRequest,
     operation: ExitForwardOperation,
@@ -5320,6 +6389,9 @@ fn forward_request_scope_matches(
                 &verified.message().exit_node_id,
                 &verified.message().exit_peer_id,
             )
+        }
+        ExitForwardOperation::NativeProbePermit => {
+            verified_native_probe_forward_scope(request, now_ms).is_some()
         }
         ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
     }
@@ -5779,12 +6851,16 @@ mod tests {
         time::Duration,
     };
 
-    use libp2p::Multiaddr;
+    use libp2p::{
+        Multiaddr,
+        core::{ConnectedPoint, Endpoint, transport::PortUse},
+        swarm::SwarmEvent,
+    };
     use tempfile::TempDir;
     use tokio::sync::{RwLock, oneshot};
     use volparossa_protocol::{
-        ControlPayload, ProbeAddressFamily, Transport, generate_nonce, sign_control_message,
-        sign_control_message_with,
+        AdvertisementNetwork, ControlPayload, ProbeAddressFamily, Transport, generate_nonce,
+        sign_control_message, sign_control_message_with,
     };
     use volparossa_test_support::{SignedRouteFixture, verified_development_manifest};
 
@@ -5794,6 +6870,7 @@ mod tests {
 
     struct RuntimeFixture {
         runtime: DiscoveryRuntime,
+        control: DiscoveryControlHandle,
         state: Arc<RwLock<AgentState>>,
         policy: VerifiedManifest,
         role_store: RoleStore,
@@ -5836,7 +6913,7 @@ mod tests {
                 .expect("agent state"),
         ));
         let identity = Identity::generate();
-        let (runtime, _control) = DiscoveryRuntime::new(
+        let (runtime, control) = DiscoveryRuntime::new(
             identity,
             &config,
             peerstore,
@@ -5851,11 +6928,105 @@ mod tests {
         .expect("discovery runtime");
         RuntimeFixture {
             runtime,
+            control,
             state,
             policy,
             role_store,
             directory,
         }
+    }
+
+    fn valid_client_preselection_parameters() -> ClientPreselectionParameters {
+        ClientPreselectionParameters::new(
+            Transport::UdpSinglePath,
+            ObservationAddressFamily::Ipv4,
+            Bandwidth::new(10, 10).expect("minimum capacity"),
+            Bandwidth::new(100, 100).expect("local capacity"),
+            Bandwidth::new(80, 80).expect("conservative ceiling"),
+            1,
+            1,
+            10,
+        )
+    }
+
+    async fn next_service_other(service: &mut DiscoveryService) -> SwarmEvent<BehaviourEvent> {
+        loop {
+            if let DiscoveryEvent::Other(event) = service.next_event().await {
+                return event;
+            }
+        }
+    }
+
+    async fn connect_runtime_client_to_control(
+        runtime: &mut DiscoveryRuntime,
+        control: &mut DiscoveryService,
+    ) {
+        let memory_id = NEXT_MEMORY_ADDRESS.fetch_add(1, Ordering::Relaxed);
+        let address = format!("/memory/{memory_id}")
+            .parse::<Multiaddr>()
+            .expect("control memory address");
+        control.listen_on(address).expect("control memory listener");
+        let address = timeout(Duration::from_secs(10), async {
+            loop {
+                if let SwarmEvent::NewListenAddr { address, .. } = next_service_other(control).await
+                {
+                    break address;
+                }
+            }
+        })
+        .await
+        .expect("control listener timeout");
+
+        let control_peer = *control.local_peer_id();
+        let client_peer = *runtime.service.local_peer_id();
+        runtime
+            .service
+            .dial_peerlink(&PeerLink::new(control_peer, address).expect("control memory peerlink"))
+            .expect("client-control memory dial");
+        let (connection_id, old_endpoint) = timeout(Duration::from_secs(10), async {
+            let mut client_lineage = None;
+            let mut control_connected = false;
+            while client_lineage.is_none() || !control_connected {
+                tokio::select! {
+                    event = next_service_other(&mut runtime.service) => {
+                        if let SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } = event
+                        {
+                            if peer_id == control_peer {
+                                client_lineage = Some((connection_id, endpoint));
+                            }
+                        }
+                    }
+                    event = next_service_other(control) => {
+                        control_connected |= matches!(
+                            event,
+                            SwarmEvent::ConnectionEstablished { peer_id, .. }
+                                if peer_id == client_peer
+                        );
+                    }
+                }
+            }
+            client_lineage.expect("client connection lineage")
+        })
+        .await
+        .expect("client-control connection timeout");
+        let public_endpoint = ConnectedPoint::Dialer {
+            address: "/ip4/44.160.1.8/tcp/443"
+                .parse()
+                .expect("public test endpoint"),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        };
+        runtime.service.install_test_connection_address_change(
+            control_peer,
+            connection_id,
+            &old_endpoint,
+            &public_endpoint,
+        );
     }
 
     fn direct_capability(
@@ -6030,6 +7201,120 @@ mod tests {
     }
 
     #[test]
+    fn preselection_responder_authority_is_role_gated_and_active_policy_scoped() {
+        let now_ms = unix_millis();
+        let active = AgentPolicySnapshot {
+            manifest_version: 7,
+            policy_hash: vec![0x5a; 32],
+            expires_at_ms: now_ms.saturating_add(60_000),
+            verified_signatures: 2,
+            active: true,
+        };
+        let relay_roles = RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        };
+        assert_eq!(
+            preselection_responder_policy(relay_roles, &active, now_ms),
+            LocalPreselectionPolicy::new(
+                active.manifest_version,
+                [0x5a; 32],
+                active.expires_at_ms,
+            )
+            .ok(),
+        );
+        let exit_roles = RolesConfig {
+            client: false,
+            relay: false,
+            exit: true,
+        };
+        assert_eq!(
+            preselection_responder_policy(exit_roles, &active, now_ms),
+            LocalPreselectionPolicy::new(
+                active.manifest_version,
+                [0x5a; 32],
+                active.expires_at_ms,
+            )
+            .ok(),
+        );
+
+        let mut inactive = active.clone();
+        inactive.active = false;
+        let mut malformed = active.clone();
+        malformed.policy_hash.pop();
+        let mut zero_version = active.clone();
+        zero_version.manifest_version = 0;
+        let mut expired = active.clone();
+        expired.expires_at_ms = now_ms;
+        for (roles, policy) in [
+            (RolesConfig::default(), active),
+            (relay_roles, inactive),
+            (relay_roles, malformed),
+            (relay_roles, zero_version),
+            (relay_roles, expired),
+        ] {
+            assert_eq!(preselection_responder_policy(roles, &policy, now_ms), None,);
+        }
+    }
+
+    #[test]
+    fn discovery_actor_polls_only_the_private_role_gated_preselection_responder_seam() {
+        let source = include_str!("discovery.rs");
+        let run = braced_item(source, "pub async fn run(");
+        assert_eq!(
+            run.matches("preselection_responder_policy(self.roles, &policy, now_ms)")
+                .count(),
+            1,
+        );
+        assert_eq!(run.matches("next_actor_discovery_event(").count(), 1);
+        assert!(!run.contains("dispatch_preselection_observation("));
+        assert!(!run.contains("dispatch_preselection_observation_upstream("));
+
+        let actor_pump = braced_item(source, "async fn next_actor_discovery_event(");
+        assert_eq!(
+            actor_pump
+                .matches("next_event_with_preselection_responders")
+                .count(),
+            1,
+        );
+        assert_eq!(actor_pump.matches("identity.sign(message).ok()").count(), 1);
+        assert_eq!(
+            actor_pump
+                .matches("cancel_preselection_forwarding()")
+                .count(),
+            1
+        );
+        assert!(
+            actor_pump
+                .find("cancel_preselection_forwarding()")
+                .expect("policy-off cancellation")
+                < actor_pump
+                    .find("service.next_event()")
+                    .expect("generic pump")
+        );
+        assert!(!actor_pump.contains("request_exit_forward"));
+        assert!(!actor_pump.contains("dispatch_preselection_observation"));
+        assert!(!actor_pump.contains("Fresh"));
+
+        let handle_command = braced_item(source, "async fn handle_command(");
+        assert_eq!(
+            handle_command
+                .matches("self.service.cancel_preselection_forwarding()")
+                .count(),
+            1,
+        );
+        assert!(
+            handle_command
+                .find("self.service.cancel_preselection_forwarding()")
+                .expect("pre-policy cancellation")
+                < handle_command
+                    .find("state.write().await.set_policy(policy)")
+                    .expect("policy publication")
+        );
+    }
+
+    #[test]
     fn advertisement_payload_hash_is_nonzero_and_redacted() {
         assert!(AdvertisementPayloadHash::from_fresh_fingerprint([0; 32]).is_none());
         let token = AdvertisementPayloadHash::from_fresh_fingerprint([0x5a; 32])
@@ -6161,6 +7446,35 @@ mod tests {
         )
     }
 
+    fn populate_test_network(
+        network: &mut AdvertisementNetwork,
+        advertised: PreselectionTestCapabilities,
+        nonce: [u8; 32],
+        sequence_number: u64,
+    ) {
+        network.country_code = "NL".to_owned();
+        network.operator_id = format!("operator-{}-{sequence_number}", nonce[0]);
+        network.asn = 64_512_u32
+            .saturating_add(u32::from(nonce[0]).saturating_mul(16))
+            .saturating_add(u32::try_from(sequence_number % 16).expect("bounded sequence suffix"));
+        network.ipv4_prefix_hint = advertised
+            .families
+            .ipv4
+            .then(|| format!("44.{}.{}.0/24", nonce[0], sequence_number % 255))
+            .unwrap_or_default();
+        network.ipv6_prefix_hint = advertised
+            .families
+            .ipv6
+            .then(|| {
+                format!(
+                    "2606:4700:{:02x}{:02x}::/48",
+                    nonce[0],
+                    sequence_number % 255
+                )
+            })
+            .unwrap_or_default();
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "test fixture preserves the signed advertisement inputs explicitly"
@@ -6241,7 +7555,8 @@ mod tests {
             capacity.estimated_free_up_mbps = 100;
             capacity.estimated_free_down_mbps = 100;
         }
-        wire.network.as_mut().expect("network").country_code = "NL".to_owned();
+        let network = wire.network.as_mut().expect("network");
+        populate_test_network(network, advertised, nonce, sequence_number);
         let public_key = identity
             .ed25519_public_key_bytes()
             .expect("Ed25519 public key");
@@ -6256,6 +7571,466 @@ mod tests {
         )
         .expect("signed service advertisement");
         AdvertisementResponse::new(envelope).expect("bounded advertisement")
+    }
+
+    struct NativePermitForwardFixture {
+        fixture: RuntimeFixture,
+        now_ms: u64,
+        control: DirectRelayCapability,
+        scope: NativeProbePathScope,
+        request: ExitForwardRequest,
+        local_advertisement: Vec<u8>,
+    }
+
+    fn actor_from_direct_capability(
+        capability: &DirectRelayCapability,
+    ) -> PreselectionActorBinding {
+        PreselectionActorBinding {
+            node_id: capability.node_id.to_vec(),
+            peer_id: capability.peer_id.to_bytes(),
+            public_key: capability.public_key.to_vec(),
+            advertisement_sequence: capability.advertisement_sequence,
+            advertisement_expires_at_ms: capability.advertisement_expires_at_ms,
+            advertisement_payload_hash: capability.advertisement_payload_hash.0.to_vec(),
+            capability_expires_at_ms: capability.expires_at_ms,
+        }
+    }
+
+    fn actor_from_signed_advertisement(
+        encoded: &[u8],
+        identity: &Identity,
+        capability_expires_at_ms: u64,
+        now_ms: u64,
+    ) -> PreselectionActorBinding {
+        let envelope: SignedEnvelope =
+            decode_canonical(encoded, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE)
+                .expect("signed advertisement envelope");
+        let payload_hash = fixed_bytes::<32>(&envelope.payload_hash).expect("payload hash");
+        let mut replay = ReplayCache::new(1).expect("advertisement replay");
+        let verified = verify_control_message::<WireAdvertisement>(
+            encoded,
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("verified signed advertisement");
+        let public_key = identity
+            .ed25519_public_key_bytes()
+            .expect("Ed25519 public key");
+        PreselectionActorBinding {
+            node_id: verified.sender_id().to_vec(),
+            peer_id: identity.peer_id().to_bytes(),
+            public_key: public_key.to_vec(),
+            advertisement_sequence: verified.message().sequence_number,
+            advertisement_expires_at_ms: verified.expires_at_ms(),
+            advertisement_payload_hash: payload_hash.to_vec(),
+            capability_expires_at_ms,
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture preserves every signed native-Permit provenance field explicitly"
+    )]
+    fn native_permit_forward_fixture() -> NativePermitForwardFixture {
+        let roles = RolesConfig {
+            client: true,
+            relay: false,
+            exit: true,
+        };
+        let mut fixture = fixture(roles);
+        let now_ms = unix_millis();
+        let request_expires_at_ms = now_ms.saturating_add(5_000);
+        let actor_expires_at_ms = now_ms.saturating_add(20_000);
+
+        let control_identity = Identity::generate();
+        let control =
+            direct_capability(&control_identity, &fixture.policy, 17, actor_expires_at_ms);
+        fixture
+            .runtime
+            .direct_relays
+            .insert(control.peer_id, control.clone());
+        let control_actor = actor_from_direct_capability(&control);
+
+        let data_relay_identity = Identity::generate();
+        let data_relay = direct_capability(
+            &data_relay_identity,
+            &fixture.policy,
+            19,
+            actor_expires_at_ms,
+        );
+        let data_relay_actor = actor_from_direct_capability(&data_relay);
+
+        let local_advertisement = service_advertisement(
+            &fixture.runtime.identity,
+            roles,
+            &fixture.policy,
+            23,
+            [0x73; 32],
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let envelope: SignedEnvelope = decode_canonical(
+            &local_advertisement,
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("local Exit advertisement envelope");
+        let exit_capability_expiry = envelope
+            .expires_at_ms
+            .min(fixture.policy.expires_at_ms())
+            .min(control.expires_at_ms);
+        let exit_actor = actor_from_signed_advertisement(
+            &local_advertisement,
+            &fixture.runtime.identity,
+            exit_capability_expiry,
+            now_ms,
+        );
+
+        let session_identity = Identity::generate();
+        let session_public_key = session_identity
+            .ed25519_public_key_bytes()
+            .expect("session Ed25519 public key");
+        let scope = NativeProbePathScope {
+            attempt_id: vec![0x31; 16],
+            probe_id: vec![0x32; 16],
+            candidate_set_hash: vec![0x33; 32],
+            candidate_ordinal: 1,
+            data_relay: Some(data_relay_actor),
+            control: Some(control_actor),
+            exit: Some(exit_actor),
+            client_session_id: node_id_from_public_key(&session_public_key).to_vec(),
+            client_session_public_key: session_public_key.to_vec(),
+            transport: Transport::UdpSinglePath as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: fixture.policy.manifest_version(),
+            policy_hash: fixture.policy.policy_hash().to_vec(),
+            policy_expires_at_ms: fixture.policy.expires_at_ms(),
+            challenge_hash: vec![0x34; 32],
+            attempt_expires_at_ms: request_expires_at_ms,
+        };
+        let nonce = [0x35; 32];
+        let permit_request = NativeProbePermitRequest {
+            scope: Some(scope.clone()),
+            created_at_ms: now_ms,
+            expires_at_ms: request_expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        let signed_request = sign_control_message_with(
+            &permit_request,
+            session_public_key,
+            now_ms,
+            request_expires_at_ms,
+            nonce,
+            native_probe_time_policy(),
+            |message| session_identity.sign(message).ok(),
+        )
+        .expect("session-signed native Permit request");
+        let request = ExitForwardRequest::new(
+            nonce[..FORWARD_ID_BYTES].to_vec(),
+            control.node_id.to_vec(),
+            control.peer_id.to_bytes(),
+            control.public_key.to_vec(),
+            fixture.runtime.service.local_peer_id().to_bytes(),
+            fixture.runtime.local_node_id.to_vec(),
+            request_expires_at_ms,
+            ExitForwardOperation::NativeProbePermit,
+            signed_request,
+        )
+        .expect("native Permit forward wrapper");
+        fixture.runtime.served_local_advertisement = Some(local_advertisement.clone());
+        NativePermitForwardFixture {
+            fixture,
+            now_ms,
+            control,
+            scope,
+            request,
+            local_advertisement,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_permit_forward_scope_requires_exact_signed_wrapper_lineage() {
+        let fixture = native_permit_forward_fixture();
+        let verified = verified_native_probe_forward_scope(&fixture.request, fixture.now_ms)
+            .expect("exact native Permit scope");
+        assert!(verified == fixture.scope);
+        assert!(forward_request_scope_matches(
+            &fixture.request,
+            ExitForwardOperation::NativeProbePermit,
+            fixture.now_ms,
+        ));
+
+        let rebuild = |forward_id: Vec<u8>, deadline_unix_ms: u64, canonical_request: Vec<u8>| {
+            ExitForwardRequest::new(
+                forward_id,
+                fixture.control.node_id.to_vec(),
+                fixture.control.peer_id.to_bytes(),
+                fixture.control.public_key.to_vec(),
+                fixture.fixture.runtime.service.local_peer_id().to_bytes(),
+                fixture.fixture.runtime.local_node_id.to_vec(),
+                deadline_unix_ms,
+                ExitForwardOperation::NativeProbePermit,
+                canonical_request,
+            )
+            .expect("structurally valid native Permit wrapper")
+        };
+        let wrong_forward = rebuild(
+            vec![0x91; FORWARD_ID_BYTES],
+            fixture.request.deadline_unix_ms(),
+            fixture.request.canonical_request().to_vec(),
+        );
+        assert!(verified_native_probe_forward_scope(&wrong_forward, fixture.now_ms).is_none());
+        let wrong_deadline = rebuild(
+            fixture.request.forward_id().to_vec(),
+            fixture.request.deadline_unix_ms().saturating_sub(1),
+            fixture.request.canonical_request().to_vec(),
+        );
+        assert!(verified_native_probe_forward_scope(&wrong_deadline, fixture.now_ms).is_none());
+
+        let mut envelope: SignedEnvelope = decode_canonical(
+            fixture.request.canonical_request(),
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("native Permit envelope");
+        envelope.signature[0] ^= 1;
+        let tampered = encode_canonical(&envelope, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE)
+            .expect("canonical tampered envelope");
+        let wrong_signature = rebuild(
+            fixture.request.forward_id().to_vec(),
+            fixture.request.deadline_unix_ms(),
+            tampered,
+        );
+        assert!(verified_native_probe_forward_scope(&wrong_signature, fixture.now_ms).is_none());
+    }
+
+    #[tokio::test]
+    async fn native_permit_control_actor_matches_every_current_capability_field() {
+        let fixture = native_permit_forward_fixture();
+        let actor = fixture.scope.control.as_ref().expect("control actor");
+        let peer = fixture.control.peer_id;
+        let deadline = fixture.request.deadline_unix_ms();
+        assert!(native_probe_control_capability_matches(
+            &fixture.control,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+
+        let mut changed = fixture.control.clone();
+        changed.advertisement_sequence = changed.advertisement_sequence.saturating_add(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.advertisement_expires_at_ms = changed.advertisement_expires_at_ms.saturating_add(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.advertisement_payload_hash = changed.advertisement_payload_hash.xor_for_test();
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.policy_version = changed.policy_version.saturating_add(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.policy_hash[0] ^= 1;
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.policy_expires_at_ms = changed.policy_expires_at_ms.saturating_sub(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.expires_at_ms = changed.expires_at_ms.saturating_sub(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        assert!(!native_probe_control_capability_matches(
+            &fixture.control,
+            actor,
+            &fixture.scope,
+            Identity::generate().peer_id().to_owned(),
+            deadline,
+        ));
+
+        let mut substituted_actor = actor.clone();
+        substituted_actor.advertisement_payload_hash[0] ^= 1;
+        let mut substituted_scope = fixture.scope.clone();
+        substituted_scope.control = Some(substituted_actor.clone());
+        assert!(!native_probe_control_capability_matches(
+            &fixture.control,
+            &substituted_actor,
+            &substituted_scope,
+            peer,
+            deadline,
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_permit_local_exit_actor_requires_current_signed_role_and_policy() {
+        let fixture = native_permit_forward_fixture();
+        let runtime = &fixture.fixture.runtime;
+        let actor = fixture.scope.exit.as_ref().expect("Exit actor");
+        let matches = |advertisement: &[u8], actor: &PreselectionActorBinding, scope| {
+            local_native_probe_exit_actor_matches(
+                advertisement,
+                actor,
+                scope,
+                runtime.local_node_id,
+                *runtime.service.local_peer_id(),
+                runtime.local_public_key,
+                fixture.now_ms,
+            )
+        };
+        assert!(matches(&fixture.local_advertisement, actor, &fixture.scope,));
+
+        let mut wrong_actor = actor.clone();
+        wrong_actor.advertisement_sequence = wrong_actor.advertisement_sequence.saturating_add(1);
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.exit = Some(wrong_actor.clone());
+        assert!(!matches(
+            &fixture.local_advertisement,
+            &wrong_actor,
+            &wrong_scope,
+        ));
+        let mut wrong_actor = actor.clone();
+        wrong_actor.advertisement_payload_hash[0] ^= 1;
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.exit = Some(wrong_actor.clone());
+        assert!(!matches(
+            &fixture.local_advertisement,
+            &wrong_actor,
+            &wrong_scope,
+        ));
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.policy_hash[0] ^= 1;
+        assert!(!matches(&fixture.local_advertisement, actor, &wrong_scope,));
+        let mut unsupported = fixture.scope.clone();
+        unsupported.transport = Transport::MultipathQuic as i32;
+        assert!(!matches(&fixture.local_advertisement, actor, &unsupported,));
+
+        let relay_only = service_advertisement(
+            &runtime.identity,
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: false,
+            },
+            &fixture.fixture.policy,
+            actor.advertisement_sequence,
+            [0x74; 32],
+            fixture.now_ms,
+            &fixture.fixture.directory,
+        );
+        assert!(!matches(
+            relay_only.signed_envelope(),
+            actor,
+            &fixture.scope,
+        ));
+    }
+
+    #[test]
+    fn native_permit_production_caller_keeps_connection_owner_until_immediate_send() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+        let handler = braced_item(production, "async fn handle_exit_forward_upstream_event(");
+        assert!(handler.contains("connection_id,"));
+        assert!(
+            handler.contains(
+                "self.answer_exit_forward_upstream(peer, connection_id, request, channel)"
+            )
+        );
+
+        let caller = braced_item(production, "fn prepare_native_probe_permit_response(");
+        assert_eq!(
+            production
+                .matches(".issue_native_probe_permit_with(")
+                .count(),
+            1,
+        );
+        let capability_check = caller
+            .find("native_probe_control_capability_matches(")
+            .expect("current control capability check");
+        let local_advertisement_check = caller
+            .find("local_native_probe_exit_actor_matches(")
+            .expect("current local Exit advertisement check");
+        let connection_bind = caller
+            .find(".bind_native_probe_control_connection(")
+            .expect("event connection bind");
+        let exit_call = caller
+            .find(".issue_native_probe_permit_with(")
+            .expect("Exit Permit call");
+        assert!(capability_check < connection_bind);
+        assert!(local_advertisement_check < connection_bind);
+        assert!(connection_bind < exit_call);
+        assert!(!caller.contains(".await"));
+        assert!(!caller.contains("issue_native_probe_ready"));
+        assert!(!caller.contains("issue_native_probe_result"));
+        assert!(!caller.contains("HelperClient"));
+        assert!(!caller.contains("network_address_usable"));
+
+        let prepared = braced_item(production, "struct PreparedNativeProbePermitResponse {");
+        for retained in [
+            "connection: BoundNativeProbeControlConnection",
+            "channel: request_response::ResponseChannel<UpstreamExitForwardResponse>",
+            "response: UpstreamExitForwardResponse",
+        ] {
+            assert!(prepared.contains(retained));
+        }
+        assert!(!prepared.contains("derive("));
+
+        let sender = braced_item(production, "fn send_prepared_native_probe_permit_response(");
+        assert!(sender.contains("send_native_probe_permit_response("));
+        assert!(!sender.contains(".await"));
+
+        let publisher = braced_item(production, "async fn publish_local(");
+        let exit_role_guard = publisher
+            .find("if self.roles.relay || self.roles.exit")
+            .expect("current product withdraws local Relay/Exit advertisements");
+        let served_assignment = publisher
+            .find("self.served_local_advertisement = Some(")
+            .expect("client-only local advertisement assignment");
+        assert!(exit_role_guard < served_assignment);
     }
 
     async fn ingest_direct_snapshot_advertisement(
@@ -6513,6 +8288,103 @@ mod tests {
             advertisement_payload_hashes,
             now_ms,
         }
+    }
+
+    pub(super) async fn preselection_multi_exit_snapshot_fixture(
+        exits: usize,
+        other_relays: usize,
+        duplicate_relay_hint_clusters: Option<usize>,
+        advertised: PreselectionTestCapabilities,
+    ) -> RouteCandidateSnapshot {
+        assert!((2..=8).contains(&exits));
+        assert!((1..=32).contains(&other_relays));
+        assert!(
+            duplicate_relay_hint_clusters.is_none_or(|clusters| {
+                (1..=other_relays).contains(&clusters) && clusters <= 32
+            })
+        );
+        let mut fixture = Box::new(fixture(RolesConfig::default()));
+        let now_ms = unix_millis();
+        let relay_roles = RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        };
+        for offset in 0..exits {
+            let control = Identity::generate();
+            let control_nonce = 32_u8
+                .checked_add(u8::try_from(offset.saturating_mul(2)).expect("bounded exit offset"))
+                .expect("bounded control nonce");
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    &control,
+                    relay_roles,
+                    1,
+                    [control_nonce; 32],
+                    now_ms,
+                    advertised,
+                )
+                .await
+                .is_some()
+            );
+            let control_capability = fixture
+                .runtime
+                .direct_relays
+                .get(control.peer_id())
+                .expect("multi-exit control capability")
+                .clone();
+            let exit = Identity::generate();
+            assert!(
+                ingest_forwarded_snapshot_exit_with_capabilities(
+                    &mut fixture,
+                    &control_capability,
+                    &exit,
+                    RolesConfig {
+                        client: false,
+                        relay: false,
+                        exit: true,
+                    },
+                    1,
+                    [control_nonce + 1; 32],
+                    now_ms,
+                    advertised,
+                )
+                .await
+                .is_some()
+            );
+        }
+        for offset in 0..other_relays {
+            let relay = Identity::generate();
+            let cluster =
+                duplicate_relay_hint_clusters.map_or(offset, |clusters| offset % clusters);
+            let nonce = 96_u8
+                .checked_add(u8::try_from(cluster).expect("bounded relay cluster"))
+                .expect("bounded relay nonce");
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    &relay,
+                    relay_roles,
+                    1,
+                    [nonce; 32],
+                    now_ms,
+                    advertised,
+                )
+                .await
+                .is_some()
+            );
+        }
+        let snapshot = route_snapshot_at(
+            &mut fixture,
+            exits.saturating_mul(2).saturating_add(other_relays),
+            now_ms,
+        )
+        .await
+        .expect("multi-exit preselection snapshot");
+        assert_eq!(snapshot.forwarded_exits().len(), exits);
+        assert_eq!(snapshot.direct_relays().len(), exits + other_relays);
+        snapshot
     }
 
     fn assert_exact_persisted_snapshot_time(
@@ -8594,10 +10466,22 @@ mod tests {
         now_ms: u64,
     ) -> (DirectRelayCapability, Libp2pPeerId) {
         let control_identity = Identity::generate();
+        let valid_exit = Identity::generate();
+        let control =
+            install_valid_snapshot_route_for(fixture, &control_identity, &valid_exit, now_ms).await;
+        (control, valid_exit.peer_id().to_owned())
+    }
+
+    async fn install_valid_snapshot_route_for(
+        fixture: &mut RuntimeFixture,
+        control_identity: &Identity,
+        valid_exit: &Identity,
+        now_ms: u64,
+    ) -> DirectRelayCapability {
         assert!(
             ingest_direct_snapshot_advertisement(
                 fixture,
-                &control_identity,
+                control_identity,
                 RolesConfig {
                     client: false,
                     relay: true,
@@ -8616,13 +10500,786 @@ mod tests {
             .get(control_identity.peer_id())
             .expect("stored control capability")
             .clone();
-        let valid_exit = Identity::generate();
         assert!(
-            ingest_forwarded_snapshot_exit(fixture, &control, &valid_exit, 1, [161; 32], now_ms,)
+            ingest_forwarded_snapshot_exit(fixture, &control, valid_exit, 1, [161; 32], now_ms,)
                 .await
                 .is_some()
         );
-        (control, valid_exit.peer_id().to_owned())
+        control
+    }
+
+    struct ActiveClientPreselectionFixture {
+        fixture: RuntimeFixture,
+        control_service: DiscoveryService,
+        response: oneshot::Receiver<Result<PreparedPreselectionEvidence, ClientPreselectionError>>,
+        began_before: Instant,
+        began_after: Instant,
+    }
+
+    async fn active_client_preselection_fixture() -> ActiveClientPreselectionFixture {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        });
+        let now_ms = unix_millis();
+        let control_identity = Identity::generate();
+        let valid_exit = Identity::generate();
+        let _control =
+            install_valid_snapshot_route_for(&mut fixture, &control_identity, &valid_exit, now_ms)
+                .await;
+        let other_relay = Identity::generate();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &other_relay,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                1,
+                [162; 32],
+                now_ms,
+            )
+            .await
+            .is_some()
+        );
+
+        let mut control_service = DiscoveryService::new_with_protocol_roles(
+            control_identity.keypair().clone(),
+            DiscoveryProtocolRoles::new(false, true, false),
+        )
+        .expect("control discovery service");
+        connect_runtime_client_to_control(&mut fixture.runtime, &mut control_service).await;
+
+        let (reply, response) = oneshot::channel();
+        let began_before = Instant::now();
+        fixture
+            .runtime
+            .begin_client_preselection(
+                valid_client_preselection_parameters(),
+                reply,
+                &fixture.state,
+            )
+            .await;
+        let began_after = Instant::now();
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Active(_)
+        ));
+        assert!(
+            fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 1);
+
+        ActiveClientPreselectionFixture {
+            fixture,
+            control_service,
+            response,
+            began_before,
+            began_after,
+        }
+    }
+
+    async fn next_client_preselection_outbound_failure(
+        runtime: &mut DiscoveryRuntime,
+        control: &mut DiscoveryService,
+    ) -> DiscoveryEvent {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = runtime.service.next_event() => {
+                        if matches!(
+                            &event,
+                            DiscoveryEvent::Other(SwarmEvent::Behaviour(
+                                BehaviourEvent::PreselectionObservation(
+                                    request_response::Event::OutboundFailure { .. },
+                                ),
+                            ))
+                        ) {
+                            break event;
+                        }
+                    }
+                    _ = control.next_event() => {}
+                }
+            }
+        })
+        .await
+        .expect("preselection outbound failure timeout")
+    }
+
+    #[tokio::test]
+    async fn client_preselection_rejects_every_invalid_parameter_before_snapshot_or_gate() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        });
+
+        let mut unspecified_transport = valid_client_preselection_parameters();
+        unspecified_transport.transport = Transport::Unspecified;
+        let mut unspecified_family = valid_client_preselection_parameters();
+        unspecified_family.address_family = ObservationAddressFamily::Unspecified;
+        let mut zero_minimum_relays = valid_client_preselection_parameters();
+        zero_minimum_relays.minimum_other_relays = 0;
+        let mut inverted_relay_range = valid_client_preselection_parameters();
+        inverted_relay_range.minimum_other_relays = 2;
+        inverted_relay_range.maximum_other_relays = 1;
+        let mut excessive_relays = valid_client_preselection_parameters();
+        excessive_relays.maximum_other_relays = MAXIMUM_OTHER_RELAYS.saturating_add(1);
+        let mut zero_candidate_bound = valid_client_preselection_parameters();
+        zero_candidate_bound.requested_candidate_bound = 0;
+        let mut excessive_candidate_bound = valid_client_preselection_parameters();
+        excessive_candidate_bound.requested_candidate_bound =
+            MAXIMUM_SELECTION_CANDIDATES.saturating_add(1);
+        let mut zero_minimum_capacity = valid_client_preselection_parameters();
+        zero_minimum_capacity.minimum_capacity =
+            Bandwidth::new(0, 10).expect("bounded zero minimum capacity");
+        let mut ceiling_below_minimum = valid_client_preselection_parameters();
+        ceiling_below_minimum.conservative_capacity_ceiling =
+            Bandwidth::new(5, 5).expect("bounded low ceiling");
+        let mut local_below_ceiling = valid_client_preselection_parameters();
+        local_below_ceiling.local_profile_capacity =
+            Bandwidth::new(50, 50).expect("bounded low local capacity");
+
+        for (case, invalid) in [
+            ("unspecified transport", unspecified_transport),
+            ("unspecified family", unspecified_family),
+            ("zero minimum relay count", zero_minimum_relays),
+            ("inverted relay range", inverted_relay_range),
+            ("excessive relay bound", excessive_relays),
+            ("zero candidate bound", zero_candidate_bound),
+            ("excessive candidate bound", excessive_candidate_bound),
+            ("zero minimum capacity", zero_minimum_capacity),
+            ("ceiling below minimum capacity", ceiling_below_minimum),
+            ("local profile below ceiling", local_below_ceiling),
+        ] {
+            let (reply, response) = oneshot::channel();
+            fixture
+                .runtime
+                .begin_client_preselection(invalid, reply, &fixture.state)
+                .await;
+            assert!(
+                matches!(
+                    response.await.expect("typed rejection"),
+                    Err(ClientPreselectionError::InvalidParameters)
+                ),
+                "case: {case}"
+            );
+            assert!(
+                matches!(
+                    fixture.runtime.client_preselection,
+                    ClientPreselectionOwner::Available(_)
+                ),
+                "case: {case}"
+            );
+            assert_eq!(
+                fixture.runtime.route_snapshot_build_attempts.get(),
+                0,
+                "case: {case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connected_client_preselection_installs_active_slot_with_exact_owner_clocks() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            control_service: _control_service,
+            response,
+            began_before,
+            began_after,
+        } = Box::pin(active_client_preselection_fixture()).await;
+        let ClientPreselectionOwner::Active(active) = &fixture.runtime.client_preselection else {
+            panic!("connected dispatch must remain active");
+        };
+        let earliest_request_deadline = began_before
+            .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)
+            .expect("request clock");
+        let latest_request_deadline = began_after
+            .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)
+            .expect("request clock");
+        let earliest_attempt_deadline = began_before
+            .checked_add(CLIENT_PRESELECTION_TIMEOUT)
+            .expect("attempt clock");
+        let latest_attempt_deadline = began_after
+            .checked_add(CLIENT_PRESELECTION_TIMEOUT)
+            .expect("attempt clock");
+        assert!(active.request_deadline >= earliest_request_deadline);
+        assert!(active.request_deadline <= latest_request_deadline);
+        assert!(active.attempt_deadline >= earliest_attempt_deadline);
+        assert!(active.attempt_deadline <= latest_attempt_deadline);
+        assert!(active.request_deadline < active.attempt_deadline);
+
+        fixture
+            .runtime
+            .cancel_client_preselection(ClientPreselectionError::Closed);
+        assert!(matches!(
+            response.await.expect("terminal cancellation"),
+            Err(ClientPreselectionError::Closed)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_client_preselection_caller_drop_vacates_exact_slot_and_cools() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            control_service: _control_service,
+            response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        drop(response);
+
+        fixture.runtime.maintain_client_preselection();
+
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn either_active_client_preselection_deadline_vacates_exact_slot_and_times_out() {
+        for deadline in ["request", "attempt"] {
+            let ActiveClientPreselectionFixture {
+                mut fixture,
+                control_service: _control_service,
+                response,
+                ..
+            } = Box::pin(active_client_preselection_fixture()).await;
+            let ClientPreselectionOwner::Active(active) = &mut fixture.runtime.client_preselection
+            else {
+                panic!("connected dispatch must remain active");
+            };
+            if deadline == "request" {
+                active.request_deadline = Instant::now();
+            } else {
+                active.request_deadline = Instant::now()
+                    .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)
+                    .expect("future request deadline");
+                active.attempt_deadline = Instant::now();
+            }
+
+            fixture.runtime.maintain_client_preselection();
+
+            assert!(
+                matches!(
+                    response.await.expect("terminal deadline"),
+                    Err(ClientPreselectionError::Timeout)
+                ),
+                "deadline: {deadline}"
+            );
+            assert!(
+                !fixture
+                    .runtime
+                    .service
+                    .client_preselection_slot_active_for_test(),
+                "deadline: {deadline}"
+            );
+            assert!(
+                matches!(
+                    fixture.runtime.client_preselection,
+                    ClientPreselectionOwner::Cooling(_)
+                ),
+                "deadline: {deadline}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_revocation_cancels_active_client_preselection_and_vacates_slot() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            control_service: _control_service,
+            response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        assert!(fixture.state.read().await.policy_active(unix_millis()));
+        let (reply, applied) = oneshot::channel();
+
+        fixture
+            .runtime
+            .handle_command(
+                DiscoveryCommand::ApplyPolicy {
+                    policy: None,
+                    reply,
+                },
+                &fixture.state,
+            )
+            .await;
+
+        applied.await.expect("policy reply");
+        assert!(matches!(
+            response.await.expect("policy cancellation"),
+            Err(ClientPreselectionError::Invalidated)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+        assert!(!fixture.state.read().await.policy_active(unix_millis()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_active_client_preselection_with_closed_result() {
+        let ActiveClientPreselectionFixture {
+            fixture,
+            control_service: _control_service,
+            response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        let RuntimeFixture {
+            runtime,
+            state,
+            control: _control,
+            policy: _policy,
+            role_store: _role_store,
+            directory: _directory,
+        } = fixture;
+        let (shutdown, shutdown_signal) = watch::channel(false);
+        shutdown.send(true).expect("shutdown receiver");
+
+        Box::pin(timeout(
+            Duration::from_secs(2),
+            runtime.run(state, shutdown_signal),
+        ))
+        .await
+        .expect("runtime shutdown");
+
+        assert!(matches!(
+            response.await.expect("shutdown cancellation"),
+            Err(ClientPreselectionError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_outbound_failure_retains_active_slot_until_owner_timeout() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            mut control_service,
+            mut response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        let failure =
+            next_client_preselection_outbound_failure(&mut fixture.runtime, &mut control_service)
+                .await;
+
+        fixture
+            .runtime
+            .handle_sanitized_event(failure, &fixture.state)
+            .await;
+
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Active(_)
+        ));
+        assert!(
+            fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let ClientPreselectionOwner::Active(active) = &mut fixture.runtime.client_preselection
+        else {
+            panic!("raw failure must retain active owner");
+        };
+        active.request_deadline = Instant::now();
+        fixture.runtime.maintain_client_preselection();
+        assert!(matches!(
+            response.await.expect("owner timeout"),
+            Err(ClientPreselectionError::Timeout)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn foreign_service_cancel_retains_owner_until_originating_service_recovers_it() {
+        let ActiveClientPreselectionFixture {
+            mut fixture,
+            control_service: _control_service,
+            mut response,
+            ..
+        } = Box::pin(active_client_preselection_fixture()).await;
+        let foreign_identity = Identity::generate();
+        let foreign_service = DiscoveryService::new_with_protocol_roles(
+            foreign_identity.keypair().clone(),
+            DiscoveryProtocolRoles::new(true, false, false),
+        )
+        .expect("foreign client service");
+        let originating_service = std::mem::replace(&mut fixture.runtime.service, foreign_service);
+
+        fixture
+            .runtime
+            .cancel_client_preselection(ClientPreselectionError::Invalidated);
+
+        let ClientPreselectionOwner::Active(active) = &fixture.runtime.client_preselection else {
+            panic!("foreign service must retain affine owner");
+        };
+        assert_eq!(
+            active.terminal_error,
+            Some(ClientPreselectionError::Invalidated)
+        );
+        assert!(originating_service.client_preselection_slot_active_for_test());
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let foreign_service = std::mem::replace(&mut fixture.runtime.service, originating_service);
+        drop(foreign_service);
+        fixture.runtime.maintain_client_preselection();
+
+        assert!(matches!(
+            response.await.expect("retained terminal result"),
+            Err(ClientPreselectionError::Invalidated)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_client_preselection_caller_stops_before_snapshot_or_state_change() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        });
+        let (reply, response) = oneshot::channel();
+        drop(response);
+        fixture
+            .runtime
+            .begin_client_preselection(
+                valid_client_preselection_parameters(),
+                reply,
+                &fixture.state,
+            )
+            .await;
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
+        ));
+        assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_queued_client_preselection_with_closed_result() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        });
+        let (reply, response) = oneshot::channel();
+        fixture
+            .control
+            .sender
+            .send(DiscoveryCommand::BeginClientPreselection {
+                parameters: valid_client_preselection_parameters(),
+                reply,
+            })
+            .await
+            .expect("queue preselection command");
+        fixture.runtime.reject_queued_outbound_commands();
+        assert!(matches!(
+            response.await.expect("queued shutdown reply"),
+            Err(ClientPreselectionError::Closed)
+        ));
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn production_client_preselection_samples_before_request_derived_dispatch_and_cools() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        });
+        let now_ms = unix_millis();
+        let _ = install_valid_snapshot_route(&mut fixture, now_ms).await;
+        let other_relay = Identity::generate();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &other_relay,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                1,
+                [162; 32],
+                now_ms,
+            )
+            .await
+            .is_some()
+        );
+
+        let (reply, response) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_preselection(
+                valid_client_preselection_parameters(),
+                reply,
+                &fixture.state,
+            )
+            .await;
+        assert!(matches!(
+            response.await.expect("terminal dispatch result"),
+            Err(ClientPreselectionError::Transport)
+        ));
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+        assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 1);
+
+        let (busy_reply, busy_response) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_preselection(
+                valid_client_preselection_parameters(),
+                busy_reply,
+                &fixture.state,
+            )
+            .await;
+        assert!(matches!(
+            busy_response.await.expect("cooldown rejection"),
+            Err(ClientPreselectionError::Busy)
+        ));
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one source contract audits the complete private actor boundary"
+    )]
+    fn client_preselection_actor_surface_is_typed_private_affine_and_failure_opaque() {
+        let source = include_str!("discovery.rs");
+        let product = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("product/test boundary")
+            .0;
+        let parameters = braced_item(product, "pub(crate) struct ClientPreselectionParameters {");
+        for field in [
+            "transport: Transport,",
+            "address_family: ObservationAddressFamily,",
+            "minimum_capacity: Bandwidth,",
+            "local_profile_capacity: Bandwidth,",
+            "conservative_capacity_ceiling: Bandwidth,",
+            "minimum_other_relays: usize,",
+            "maximum_other_relays: usize,",
+            "requested_candidate_bound: usize,",
+        ] {
+            assert!(parameters.contains(field), "missing typed input {field}");
+        }
+        for forbidden in [
+            "peer",
+            "target",
+            "endpoint",
+            "exit",
+            "dispatch",
+            "request_id",
+            "authority",
+        ] {
+            assert!(
+                !parameters.contains(forbidden),
+                "authority input {forbidden}"
+            );
+        }
+        assert!(!parameters.contains("#[derive("));
+
+        let owner = braced_item(product, "enum ClientPreselectionOwner {");
+        for state in [
+            "Available(PreselectionAttemptGate),",
+            "Active(ActiveClientPreselection),",
+            "Cooling(CoolingPreselectionAttemptGate),",
+            "Closed,",
+            "Lost,",
+        ] {
+            assert!(owner.contains(state), "missing owner state {state}");
+        }
+        assert!(!product.contains("pub enum ClientPreselectionOwner"));
+        assert!(!product.contains("impl Clone for ClientPreselectionOwner"));
+        assert!(!product.contains("matches_request_id"));
+        assert!(!product.contains("preselection_dispatch_id"));
+        let active = braced_item(product, "struct ActiveClientPreselection {");
+        assert!(active.contains("request_deadline: Instant,"));
+        assert!(active.contains("attempt_deadline: Instant,"));
+        assert!(active.contains("terminal_error: Option<ClientPreselectionError>,"));
+
+        let begin = braced_item(product, "async fn begin_client_preselection(");
+        let snapshot = begin
+            .find("build_route_candidate_snapshot(")
+            .expect("actor snapshot");
+        let sampling = begin
+            .find("narrow_route_candidate_snapshot(snapshot, scope)")
+            .expect("actor sampler");
+        let gate = begin.find("gate.begin(").expect("affine gate begin");
+        let dispatch = begin
+            .find("pending.dispatch(&mut self.service)")
+            .expect("request-derived dispatch");
+        let request_deadline = begin
+            .find("let Some(request_deadline) = Instant::now()")
+            .expect("conservative request deadline");
+        assert!(
+            snapshot < sampling
+                && sampling < request_deadline
+                && request_deadline < gate
+                && gate < dispatch
+        );
+        assert!(begin.contains(
+            ".checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)\n            .map(|deadline| deadline.min(attempt_deadline))"
+        ));
+
+        let response = braced_item(product, "fn handle_client_preselection_response(");
+        let terminal = response
+            .find("if let Some(error) = active.terminal_error")
+            .expect("terminal Retained guard");
+        let bind = response
+            .find("dispatch.bind_response(&mut self.service, arrival)")
+            .expect("opaque bind");
+        let transition_clock = response
+            .find("let transition_started_at = Instant::now();")
+            .expect("pre-bind transition clock");
+        let exact_join = response
+            .find("completed.join_transport_proofs(transports)")
+            .expect("exact transport join");
+        let fresh = response
+            .find("prepare_preselection_evidence(fresh)")
+            .expect("private Fresh handoff");
+        assert!(terminal < transition_clock && transition_clock < bind);
+        assert!(bind < exact_join && exact_join < fresh);
+        assert!(response.contains(
+            "let Some(request_deadline) = transition_started_at\n                    .checked_add(PRESELECTION_OBSERVATION_REQUEST_TIMEOUT)"
+        ));
+        let bind_failure = response
+            .split_once("Err(failure) => {")
+            .expect("bind failure")
+            .1
+            .split_once("return Some(\"PRESELECTION_RESPONSE_REJECTED\");")
+            .expect("bind failure end")
+            .0;
+        assert!(
+            bind_failure.contains("ClientPreselectionError::Transport,\n                    None,")
+        );
+
+        let local_failure = braced_item(product, "fn install_local_client_preselection_failure(");
+        assert!(local_failure.contains("failure: PreselectionLocalRecovery,"));
+        assert!(!local_failure.contains("Retained"));
+        let retained = braced_item(
+            product,
+            "fn install_client_preselection_transition_failure(",
+        );
+        assert!(retained.contains("PreselectionOwnerTransitionFailure::Retained(dispatch)"));
+        assert!(retained.contains("ClientPreselectionOwner::Active(ActiveClientPreselection"));
+        assert!(retained.contains("terminal_error: retained_terminal_error,"));
+        assert!(!retained.contains("PreselectionOwnerTransitionFailure::Retained(_)"));
+        let cancel = braced_item(product, "fn cancel_active_client_preselection(");
+        assert!(cancel.contains("Some(error),"));
+        assert_eq!(
+            product
+                .matches("Some(ClientPreselectionError::Transport),")
+                .count(),
+            2,
+        );
+
+        let failure_arm = product
+            .split_once(
+                "BehaviourEvent::PreselectionObservation(\n                request_response::Event::OutboundFailure { .. },",
+            )
+            .expect("opaque outbound failure arm")
+            .1
+            .split_once("SwarmEvent::Behaviour(BehaviourEvent::ExitForward(event))")
+            .expect("outbound failure arm end")
+            .0;
+        assert!(!failure_arm.contains("request_id"));
+        assert!(!failure_arm.contains("cancel_client_preselection"));
+        let maintenance = braced_item(product, "fn maintain_client_preselection(");
+        assert!(maintenance.contains("active.request_deadline"));
+        assert!(maintenance.contains("active.attempt_deadline"));
+        assert!(maintenance.contains("active.reply.is_closed()"));
+        assert!(maintenance.contains("active.terminal_error.is_some()"));
+        assert!(maintenance.contains("cancel_active_client_preselection("));
+
+        let policy = product
+            .split_once("DiscoveryCommand::ApplyPolicy { policy, reply } => {")
+            .expect("policy arm")
+            .1
+            .split_once("DiscoveryCommand::RouteCandidateSnapshot")
+            .expect("policy arm end")
+            .0;
+        assert!(
+            policy
+                .find("cancel_client_preselection(")
+                .expect("policy owner cancellation")
+                < policy
+                    .find("state.write().await.set_policy(policy)")
+                    .expect("policy state mutation")
+        );
+        assert!(
+            product
+                .find("self.cancel_client_preselection(ClientPreselectionError::Closed);")
+                .expect("shutdown owner cancellation")
+                < product
+                    .find("self.fail_all_outbound_reservations(")
+                    .expect("shutdown reservation failure")
+        );
     }
 
     #[tokio::test]

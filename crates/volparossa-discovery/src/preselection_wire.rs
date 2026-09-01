@@ -1,12 +1,14 @@
-//! Bounded request-response wire types for the dormant A1c transaction boundary.
+//! Bounded request-response wire types for the A1c transaction boundary.
 //!
-//! A sibling module owns the single client-hop dispatch and connection-binding seam. The
-//! upstream hop remains callerless, and neither hop has a production handler or responder.
+//! Sibling modules own affine client-hop and relay-to-exit dispatch, connection binding, and
+//! role-gated response seams. Both inbound hops have one service-owned signed response poll seam,
+//! and the Relay poll owns the control-signed forwarding wrapper affinely. The client-side
+//! outbound attempt owner and Fresh-evidence join remain absent.
 //!
 //! Both codecs preserve exact canonical A0 bytes. They perform only state-free canonical,
 //! version, type, payload-local, and envelope-binding validation. Cryptographic verification,
 //! replay mutation, request correlation, signing, provenance binding, and evidence minting remain
-//! outside this precursor.
+//! outside these transport codecs.
 
 use std::{fmt, io, time::Duration};
 
@@ -1131,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_composition_keeps_codecs_private_and_delegates_one_affine_client_seam() {
+    fn discovery_composition_keeps_codecs_private_and_delegates_one_affine_transaction_module() {
         let source = include_str!("lib.rs");
         let production = source
             .split("\n#[cfg(test)]\nmod tests {")
@@ -1213,8 +1215,12 @@ mod tests {
         }
     }
 
+    fn assert_compact_method_once(production: &str, signature: &str) {
+        assert_eq!(production.matches(signature).count(), 1, "{signature}");
+    }
+
     #[test]
-    fn private_transaction_module_contains_only_the_affine_client_seam() {
+    fn private_transaction_module_contains_only_affine_outbound_transport_seams() {
         let transaction_source = include_str!("preselection_transaction.rs");
         let transaction_production = transaction_source
             .split("#[cfg(test)]")
@@ -1224,31 +1230,31 @@ mod tests {
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect();
-        assert_eq!(
-            transaction_compact
-                .matches("pubfndispatch_preselection_observation(")
-                .count(),
-            1
-        );
-        assert_eq!(
-            transaction_compact
-                .matches("pubfnbind_preselection_observation_response(")
-                .count(),
-            1
-        );
-        assert_eq!(
-            transaction_compact
-                .matches("pubfncancel_preselection_observation_dispatch(")
-                .count(),
-            1
-        );
+        for method in [
+            "pubfndispatch_preselection_observation(",
+            "pubfndispatch_preselection_observation_with_context<",
+            "pubfnbind_preselection_observation_response(",
+            "pubfnbind_preselection_observation_response_with_context<",
+            "pubfncancel_preselection_observation_dispatch(",
+            "pubfncancel_preselection_observation_transaction<",
+            "pubfndispatch_preselection_observation_upstream(",
+            "pubfndispatch_preselection_observation_upstream_with_context<",
+            "pubfnbind_preselection_observation_upstream_response(",
+            "pubfnbind_preselection_observation_upstream_response_with_context<",
+            "pubfncancel_preselection_observation_upstream_dispatch(",
+            "pubfncancel_preselection_observation_upstream_transaction<",
+        ] {
+            assert_compact_method_once(&transaction_compact, method);
+        }
+        assert!(!transaction_compact.contains("send_preselection_observation_response"));
+        assert!(!transaction_compact.contains("send_preselection_observation_upstream_response"));
+        assert!(!transaction_compact.contains("ResponseChannel"));
+        assert!(!transaction_compact.contains(".send_response("));
         for forbidden in [
-            "UpstreamPreselectionObservationRequest",
-            "UpstreamPreselectionObservationResponse",
-            "preselection_observation_upstream",
-            "send_response(",
             "respond_preselection",
             "handle_preselection",
+            "sign_control_message",
+            "ReplayCache",
             "FreshEvidence",
             "CandidateEvidence",
             "BoundPreselectionTranscriptBatch",

@@ -6,7 +6,7 @@ every future version are rejected without fallback. Historical schemas are retai
 archaeology and refusal tests; they are not registered or negotiated.
 
 The checked-in [control-v4 schema](../proto/volparossa/control/v4/control.proto) covers
-`SignedEnvelope` and all eighteen signed `ControlPayload` messages. The separate checked-in
+`SignedEnvelope` and all twenty-five signed `ControlPayload` messages. The separate checked-in
 [discovery-v4 schema](../proto/volparossa/discovery/v4/discovery.proto) mirrors the hand-written
 advertisement, exit-forwarding, and datapath-relay request-response wrappers. Descriptor and fuzz
 gates verify tag/enum parity; the two forwarding-hop Rust marker types remain distinct even though
@@ -95,6 +95,13 @@ The v4 discriminators are fixed:
 | 16 | `ExitConfirmationReceipt` | exit-signed positive acknowledgement of exact confirmation bytes |
 | 17 | `PreselectionObservationReceipt` | actor-signed response to one exact unsigned preselection challenge |
 | 18 | `ForwardedPreselectionAttestation` | control-signed public-prefix claim around one exact exit receipt |
+| 19 | `NativeProbePermitRequest` | endpoint-free request for one exact native candidate path |
+| 20 | `NativeProbePermit` | exit-signed endpoint-free permit for that exact path |
+| 21 | `NativeProbeExitReady` | Exit-to-data-Relay readiness containing only the Relay-Exit and Exit endpoints |
+| 22 | `NativeProbeRelayReady` | data-Relay-to-client readiness containing only the Relay-Client endpoint |
+| 23 | `NativeProbeStart` | client-to-data-Relay start containing only the Client endpoint |
+| 24 | `NativeProbeExitResult` | endpoint-free Exit result bound to the exact challenge and local lease |
+| 25 | `NativeProbeRelayResult` | endpoint-free data-Relay result wrapping the exact Exit result and local proofs |
 
 `NodeAdvertisement` contains roles, transport/family flags, bounded capacity counters, coarse
 network/operator hints, quality claims, policy version/hash, and lifetime. It contains no reusable
@@ -102,24 +109,26 @@ or route-specific WireGuard endpoint. Advertised capacity, control reachability,
 quality remain untrusted preselection metadata. They are not reservation capacity or datapath
 evidence and cannot by themselves create a production route candidate.
 
-### Dormant preselection-observation precursor
+### Preselection-observation control messages
 
-Tags 17 and 18 are protocol-only primitives for a future phase-A observation producer. A
+Tags 17 and 18 are partial phase-A control-transcript primitives. A
 `PreselectionObservationRequest` is unsigned, version 4, at most 4096 bytes, and live for at most
-five seconds. A future caller MUST CSPRNG-generate a fresh unique 32-byte challenge for every
-observation request, challenged subject (a direct relay or forwarded exit), and attempt, and MUST
-never reuse it across requests, subjects, or attempts. This module checks only the challenge's
-exact 32-byte, non-zero shape and has no producer, signer, uniqueness registry, handler, RPC, rate
-limiter, or network dispatcher. Dormant A1a is its only product-code static consumer, and that
-consumer has no production root, orchestrator, transport caller, or network path.
+five seconds. The production discovery attempt owner CSPRNG-generates a fresh unique 32-byte
+challenge for every observation request, challenged subject (a direct relay or forwarded exit), and attempt, and MUST
+never reuse it across requests, subjects, or attempts. The protocol module checks only the
+challenge's exact 32-byte, non-zero shape. Actor-owned A1a is the only product-code consumer that
+verifies a complete client-side transcript; the same owner joins it to the exact service-bound
+transport proof. Discovery separately owns the role-gated
+Relay/Exit responders and Relay forwarding wrapper described below; this message type itself
+provides no client request producer or challenge-uniqueness authority.
 
 A direct relay signs one `PreselectionObservationReceipt`. For a forwarded exit, the exit signs
 that same receipt and the exact prospective forwarding control named in the request signs a
 `ForwardedPreselectionAttestation` around the exact nested receipt bytes. The control intentionally
 echoes the exit-subject challenge while using its own envelope nonce and time window; there is no
 second control challenge. The wrapper carries only a control-attested public IPv4 /24 or IPv6 /48
-claim, never a host address, endpoint, or port. A future handler MUST derive that claim from the
-exact authenticated upstream connection. A valid control signature does not prove that a malicious
+claim, never a host address, endpoint, or port. The production Relay handler derives that claim
+from the exact authenticated upstream connection. A valid control signature does not prove that a malicious
 control relay reported the origin truthfully.
 
 A signed actor-receipt envelope is at most 4096 bytes. A forwarded wrapper is at most 8192 bytes
@@ -128,10 +137,10 @@ node ID, Peer ID, public key, advertisement sequence and expiry, advertisement p
 capability expiry; the request and both signed layers repeat the exact role, transport, address
 family, and policy version/hash/expiry scope.
 
-Every actor binding carries `advertisement_payload_hash`. A future producer MUST copy the exact
-32-byte `SignedEnvelope.payload_hash` from the same freshly cryptographically verified canonical
+Every actor binding carries `advertisement_payload_hash`. The client-side discovery owner copies
+the exact 32-byte `SignedEnvelope.payload_hash` from the same freshly cryptographically verified canonical
 `NodeAdvertisement`; A0 validates only its non-zero shape and exact transcript echo, not that
-advertisement provenance. The dormant agent-side A1a owner copies this value only from the exact
+advertisement provenance. The actor-owned A1a attempt copies this value only from the exact
 freshly revalidated stored signed advertisement used to construct its hidden subject set. A
 conforming direct Relay request/receipt binds
 `capability_expires_at_ms` to exactly the minimum of actor-advertisement and policy expiry. A
@@ -145,9 +154,10 @@ actor's canonical wire capability.
 Requests and actor envelopes use their own validity clocks. The request must satisfy
 `created_at_ms <= local_now_ms < expires_at_ms`; each signed envelope is independently checked by
 `TimePolicy` and has at most a 60-second signed lifetime. No ordering between control and exit
-timestamps is inferred across their clocks. A later producer must record local arrival wall time
-and monotonic RTT itself. Its aggregate validity ceiling must be the minimum of the local-arrival
-freshness ceiling, the future supervisor's unchanged absolute observation-attempt deadline, every
+timestamps is inferred across their clocks. The service-bound A1c transport proof records local
+arrival wall time and monotonic RTT, and the actor-owned join combines it only with its exact
+request transcript. The aggregate validity ceiling is the minimum of the local-arrival
+freshness ceiling, the supervisor's unchanged absolute observation-attempt deadline, every
 applicable signed receipt/attestation validity window, actor advertisement/capability expiries,
 and the policy expiry. Remote `observed_at_ms` is not local reachability, RTT, or freshness
 evidence.
@@ -178,15 +188,33 @@ outer control envelope and structural nested binding; it does not verify or repl
 nested exit signature. Likewise, a standalone verified Exit receipt is not a forwarded composite
 transcript. The opaque values have no `Clone`, `Debug`, Serde, getter, or decomposition surface.
 Neither is local origin, reachability, RTT, capacity, admission, reservation, route-session, or
-dispatch authority. The wire messages contain no capacity value; future phase A must independently
-supply its conservative local preselection ceiling. Dormant A1a accepts that value only as
-caller-supplied local input; a future production phase-A owner must derive it independently.
+dispatch authority. The wire messages contain no capacity value; actor-owned A1a independently
+accepts a conservative local preselection ceiling as typed caller input. A downstream route
+orchestrator must derive that ceiling independently; no such production caller exists yet.
 
-The agent now has a separate dormant A1a consumer around this protocol boundary. Its
+Before A1a, a separate discovery-private affine sampler can now narrow the exact actor-built
+candidate snapshot to one forwarded Exit, its exact control Relay, and one to eight other Relay
+prospects. It rechecks the complete advertisement/capability/policy/identity and forwarding shape,
+filters by requested role, transport, address family, advertised capacity and free slots, then uses
+an internal fallible CSPRNG with weighted 70/20/10 high, diverse-middle and exploration bands. Exit
+selection is randomized across all eligible forwarded pairs; it is never an implicit first sorted
+Exit. The result keeps the Exit forwarded and the control at direct index zero, so the sampler
+cannot create a normal client-to-Exit hop. Sampling failure returns the exact original snapshot
+affinely.
+
+The sampler applies strict operator-ID, ASN and requested-family advertised-prefix-hint diversity
+across the Exit, control and Relay slate. Those signed canonical public `/24` or `/48` hints are not
+authenticated network origins and do not satisfy A1c. The later exact-set transport join may mint
+only direct connection-derived or control-attested prefixes into private Fresh evidence. The
+existing FreshEvidence/selection hard filter must re-enforce actual origin diversity before route
+planning. The production discovery actor invokes this native-dataplane-agnostic sampler before its
+affine request dispatch; the sampler chooses no endpoint and grants no dispatch authority itself.
+
+The production discovery actor owns the A1a consumer around this protocol boundary. Its
 discovery-private `pub(super)` affine `PreselectionAttemptGate` validates one endpoint-free reduced
 snapshot and a caller-supplied non-zero conservative local bandwidth ceiling before entropy. It
-then uses `OsRng` internally to mint one non-zero 16-byte process-local batch ID and between two and nine
-unique non-zero 32-byte challenges, one per request and challenged direct relay or forwarded exit;
+then uses `OsRng` internally to mint one non-zero 16-byte process-local batch ID and between two
+and nine unique non-zero 32-byte challenges, one per request and challenged direct relay or forwarded exit;
 the control wrapper shares the exit challenge. A test-only fallible deterministic minter exists;
 no product API accepts an RNG or challenge. The attempt contains exactly one forwarded-exit
 request plus one to eight distinct prospective direct-relay requests. The forwarded response
@@ -211,11 +239,95 @@ the transcript back or permit reminting within that gate lineage. The final
 the endpoint-free subject/scope binding, opaque bound transcript tokens, process-local dispatch
 correlation, and attempt ceilings. It has no getter or decomposition surface and contains no local
 socket, connection ID, send/arrival event, prefix-derived direct origin, RTT, reachability,
-`FreshPeerEvidence`, route-session, reservation, or dispatch authority. There is still no
-production owner, request-response handler, transport caller, or network producer; A1a therefore
-does not alter production discovery behavior.
+`FreshPeerEvidence`, route-session, reservation, or dispatch authority. The client-side attempt
+owner is production code, but no downstream route orchestrator invokes its crate-private handle.
 
-Discovery now composes a dormant A1c wire shell without changing A0 or adding a protobuf wrapper.
+The completed A1a owner advances through one actor-owned affine A1c join. It accepts exactly one
+`BoundClientPreselectionTransport` in canonical request order for each retained transcript and
+purpose-consumes both opaque proof types only after rechecking the exact count, unique request
+hash, actor/role/forwarded-control shape, transport, native family, wall-clock attempt window and
+independent monotonic attempt window. Any mismatch consumes the unusable proof set and returns only
+the cooldown owner. A successful join retains the original snapshot and produces one bounded
+endpoint-free proof record per request; it adds no constructor, clone, serialization or reusable
+dispatch authority.
+
+The route-selection child is the sole production mint for those joined facts and constructs its
+existing private `FreshEvidenceBatch` directly. Direct Relay evidence uses the matching
+client-Relay prefix and round trip. Forwarded evidence uses the client's control-Relay prefix plus
+the exact control-signed upstream Exit prefix; its RTT is the complete
+client-control-Exit-control-client transaction, not a direct client-Exit measurement. The mint
+records one reachability sample, no measured p25, a configured non-authoritative capacity ceiling,
+zero proximity and egress-quality scores, and `network_address_usable = false`. Its
+`locally_blocked = false` means only that no local blocklist hit was supplied, not that policy was
+proved. The existing hard filter therefore rejects the batch until a separate native-path sampler
+adds dataplane evidence. The actor calls this join/mint and returns only opaque
+`PreparedPreselectionEvidence`. A crate-private, callerless native-preselection child can consume
+that value through its test seam while the five-second receipts are still live, but no production
+runtime invokes it. Neither the Prepared handoff nor the child grants admission, reservation,
+route, usability or datapath authority. The server-side responders and forwarding wrapper operate
+independently of this client value.
+
+### Native-preselection contract and server-side Permit provider
+
+Tags 19 through 25 define an endpoint-separated native-probe transcript and affine verification
+states. The private client owner consumes the exact Prepared handoff before its signed five-second
+receipt window closes, discards the control-plane reachability observations and mints a distinct
+attempt bounded to at most 30 seconds by policy and actor expiry. This does not extend or reinterpret
+the original receipt lifetime. One candidate set contains the control Relay plus one to eight other
+data Relays, for two to nine preselection candidates total; later route selection still admits at
+most eight paths.
+
+The Permit request and Permit are endpoint-free and bind the exact attempt, candidate set, path
+ordinal, data Relay, Exit, transport, native family, policy and expiry. Exit readiness is visible
+only to the selected data Relay and contains the Relay-Exit and Exit endpoints. Client-visible Relay
+readiness contains only the Relay-Client endpoint. Start exposes the Client endpoint only to that
+data Relay. Both result messages are endpoint-free. Consequently the client/control side never
+receives Relay-Exit or Exit-underlay endpoint bytes, and the Exit never receives the Client's helper
+endpoint or prepared-lease commitment.
+
+Every endpoint binding and lease proof uses `route_context_id == scope.probe_id`; the same route
+context spans the four helper-local leases. Relay-Client and Relay-Exit must have one Relay helper
+runtime, while Client, Relay and Exit runtimes are distinct. The data-Relay affine transition sees
+all four bindings and rejects every cross-role collision in helper runtime where nodes must differ,
+WireGuard public key, exact `(underlay IP, listen port)` socket tuple, or 32-byte prepared-lease
+commitment. It alone consumes verified Exit readiness plus both local prepared bindings to sign
+Relay readiness, then consumes the verified Start, verified Exit result, both Relay lease proofs and
+forwarding proof exactly once to sign the Relay result. Phase order is established by exact hashes
+and affine states, never by ordering wall clocks owned by different nodes; each signed message still
+enforces its own bounded lifetime, expiry ceiling and the normal clock-skew policy. Replay failures
+and cross-binding substitutions roll back only the newly admitted entries and fail closed.
+
+The client-side native attempt, ExitReady and ExitResult remain callerless contract/test
+foundations. The Exit now composes one production server-side Permit handler on the existing
+forwarded control protocol. That handler remains dormant in the current product: the local
+publisher intentionally serves no Exit advertisement or usable Exit capability yet, so a normal
+runtime cannot satisfy its exact-local-advertisement gate. An agent unit fixture injects a valid
+signed local Exit advertisement to prove the exact gate validators; a separate discovery transport
+integration proves connection-bound response handoff. No test claims the whole handler succeeds
+end to end. Once a truthful producer exists, the handler accepts
+only the exact signed native Permit request received from an authenticated control Relay, rechecks
+the current full Relay capability and exact locally served Exit advertisement, and consumes a
+purpose-specific token for that exact libp2p `ConnectionId` when handing the response back.
+Multiple or Circuit-Relay control connections are valid; this is authenticated control-channel
+provenance, not native-prefix or datapath evidence. The Exit API stores the response before handoff
+in a bounded no-live-eviction ledger together with its affine Permit owner. An exact retry by the
+same authenticated control actor returns the byte-identical signed Permit without signing or
+consuming replay again; request or actor substitution fails closed.
+
+Only Permit has that production-composed caller, and it cannot currently issue in a normal runtime.
+The module-private, non-Clone Exit readiness/result owner
+still uses raw test-seam data-Relay identities. Its typed projection from the `Copy`
+`ExitEndpointLease` proves neither helper-resource custody nor same-connection helper-runtime
+provenance or cleanup authority, and the private helper/datapath observation has no constructor.
+There is no production client Permit dispatcher, Ready/Result caller, helper lifecycle/cleanup
+owner, challenge delivery, live WireGuard probe, measured readiness/capacity, terminal
+helper-evidence producer, usability promotion or route admission. Permit, ExitReady and ExitResult
+each cap their own lifetime at the lower of the parent expiry and local production time plus 30
+seconds. Private phase owners retain the process-unique Exit boot incarnation and reject
+cross-restart consumption. In particular, Permit production cannot set
+`network_address_usable = true`; the existing hard filter continues to reject its output.
+
+Discovery composes A1c wire protocols without changing A0 or adding a protobuf wrapper.
 `/volparossa/preselection-observation/4` carries an exact canonical Relay or forwarded
 Exit request (at most 4096 bytes) from Client to Relay and returns either the exact Relay signed
 receipt (at most 4096 bytes) or exact control-signed forwarded Exit attestation (at most 8192
@@ -229,19 +341,115 @@ no retry.
 The opaque hop wrappers admit bytes only after state-free canonical, version, hop type/role,
 payload-local, and typed envelope-binding validation; codec writes repeat those checks. This is
 not cryptographic verification, replay acceptance, signature/origin authority, or usable evidence.
-Discovery has one dormant client-hop transport seam: it derives the peer and family from the exact
-request, admits one active dispatch, takes a connection-generation witness immediately before send,
-and binds only a typed matching response event under the fixed/request/attempt deadline minimum.
-The bind stamps arrival time internally and rechecks the exact service instance, request ID, peer,
-event-local `ConnectionId`, current unique connection generation and native prefix. The affine
-result exposes none of those fields. Explicit cancellation consumes the originating token. Dropping
-it, a non-response event, unavailable pre-correlation wall time, or a cross-service, wrong-ID or
-wrong-peer event keeps the only slot occupied fail closed. Exact correlation consumes the slot
-before later time or provenance checks.
-There is no runtime/agent caller, upstream sender, responder,
-signer, handler, forwarder, A0 verification/replay consumer, A1a exact-set join, or Fresh-evidence
-conversion. A later owner must consume the unchanged response bytes and opaque proof together
-before any observation can become usable.
+Discovery has independent client-hop and relay-to-exit transport seams. Each derives its
+target and family from the exact request, admits one active same-hop dispatch, takes a
+connection-generation witness immediately before send, and binds only a typed matching response
+arrival sealed by the originating service's private swarm pump under the fixed/request/caller
+deadline minimum. The upstream seam additionally requires the
+forwarding control identity to be local and never targets it instead of the exit. The private
+swarm pump stamps monotonic and wall arrival time while sealing the opaque arrival; binding then
+rechecks that both the dispatch and arrival belong to the exact service instance, and that the
+private request ID, peer, event-local `ConnectionId`, current unique connection generation and
+native prefix match. Context-bound entrypoints
+can carry a non-cloned attempt/snapshot or downstream-channel owner through only that exact bind or
+cancellation. A client transaction offered to a foreign service is returned unchanged for its
+originating service. Once the originating service recognizes the exact active client transaction,
+every sealed response is terminal: the slot is released before service-instance, peer, request-ID,
+time or provenance validation, and failure recovers the exact unchanged caller context without the
+consumed dispatch. Dropping an active token or an unavailable arrival clock still leaves the slot
+occupied. The upstream hop also retains its slot for a foreign service, peer or request ID; only
+exact upstream correlation consumes it before later time or provenance checks.
+
+Dispatches, transactions, arrivals and the unconsumed bound tokens expose no ID-equality oracle,
+constructor, generic ID/hash/time/prefix getter or decomposition. Their purpose-specific terminal
+consumers destroy the authority-bearing token and expose only an endpoint-free normalized public
+IPv4 `/24` or IPv6 `/48`, sealed local wall-observation time and monotonic round trip for the client
+transport; only a normalized prefix for the Relay-signed upstream wrapper; only the signed validity
+ceiling for a direct transcript; or the earlier joint signed ceiling and control-signed normalized
+prefix for a forwarded transcript. These projections contain no request, actor identity, signature,
+nonce, full endpoint, connection or reusable dispatch/evidence authority. The production
+discovery owner consumes them through the exact join, but native usability remains false and no
+route-readiness claim follows. A still-current inbound client-hop request is withheld unless it
+targets the local relay/control and its authenticated remote differs from both local peer and actor;
+requester-anonymous A0 has no client identity to bind. Upstream instead requires the authenticated
+relay to equal `forwarded_control` and the actor to equal the local exit. These predicates and the
+raw response channels remain behind a private pump. The ordinary public event pump closes inbound
+requests on both hops, drops stale/unowned responses, and replaces responses for the exact active
+dispatch with service-sealed opaque arrivals;
+the role-gated responder pump does the same while owning direct Relay and upstream Exit requests
+internally. No public pump yields a raw
+preselection request or response message, and no public API accepts a raw response event or
+response channel or sends either response type. Real independent client-hop and upstream
+request-response behaviours deliberately reproduce the same behaviour-local outbound ID and prove
+that their responses, even when sealed by a sibling service, cannot bind the originating dispatch.
+
+Discovery also exposes one production-compiled role-gated Relay/Exit response poll transaction. It
+takes each typed inbound request directly from the same service's swarm, so its behaviour-local request
+ID, response channel and `ConnectionId` cannot be transplanted across service instances. That exact
+`ConnectionId`, authenticated peer and requested native family rebind to a unique current private
+connection witness; it cryptographically re-verifies the exact currently served local Relay or
+Exit advertisement; requires nonzero ASN, matching local identity,
+advertised transport/family support and exact active policy; tombstones the exact request hash for
+120 seconds under fixed 1024-global/16-per-peer limits; and signs the bound receipt with a fresh
+fallibly generated CSPRNG nonce. It retains the affine connection proof through the exact libp2p
+response-channel handoff. For the upstream hop, the `forwarded_control` public key and Peer ID must
+also derive the exact authenticated Relay and the challenged actor must be the exact local Exit.
+Replay, stale authority, ambiguity, capacity or signing failures emit no response. Real two-swarm
+tests prove that each originating direct and upstream channel carries only its exact role-signed
+receipt. Companion transport regressions prove that neither public pump exposes an inbound channel
+and that a sibling service cannot answer a privately captured originating channel. Each receipt
+includes no prefix, endpoint, RTT, capacity, reachability, admission,
+reservation, route-session or evidence authority. The production discovery actor now polls this
+private seam only with an immutable Relay or Exit role, an exact active threshold-verified policy snapshot
+and the same actor-owned permanent identity. A policy command cancels the outstanding poll before
+the actor applies the replacement. Successful response production additionally requires an exact
+currently served role advertisement. Production intentionally advertises no usable Relay/Exit
+capability before dataplane readiness is proved, so this lifecycle caller remains fail closed and
+does not make the responder, a transport, or a route ready.
+
+For a forwarded Exit request, the same private poll is now the sole affine control-Relay owner. It
+retains the original canonical request, authenticated client peer, event-local `ConnectionId`,
+behaviour-local inbound request ID and response channel while dispatching the unchanged request over
+the separately authenticated upstream behaviour. Only the exact upstream peer/request ID and
+still-current unique connection generation may consume that owner. The returned Exit receipt is
+cryptographically verified and admitted into a fixed 1024-entry no-live-eviction replay cache,
+then rebound to the exact request hash, challenge, Exit actor, scope and Exit signing identity. A
+cross-binding failure rolls back only its newly inserted replay entry. The opaque upstream
+connection proof has one purpose-specific consuming projection into an endpoint-free public IPv4
+`/24` or IPv6 `/48`; there is no generic prefix/address getter.
+
+The Relay performs a read-only unique Exit-provenance preflight before shared replay admission.
+The subsequent tombstone is tentative until the synchronous no-failure send boundary: every
+pre-send dispatch failure consumes its exact non-cloneable token and rolls back only that new
+record, while a successful dispatch commits it.
+
+Before signing, the owner re-verifies the current Relay advertisement, permanent Identity and exact
+active policy. It caps the wrapper by the request, nested receipt, both actors' advertisement and
+capability expiries, and policy expiry, and uses a fresh fallible CSPRNG nonce. The canonical
+`ForwardedPreselectionAttestation` is sent only through the retained original client channel.
+Timeout, downstream cancellation, exact upstream failure, policy/Identity drift, replay,
+provenance, signature or channel failure drops the owner and clears its one upstream slot without a
+response. A hermetic three-swarm MemoryTransport test verifies both signatures and replay
+protection, checks live connected-peer state contains the Relay but not the Exit, and exercises
+wrong-peer, wrong-request, wrong-connection, upstream-failure, downstream-failure, policy-drift,
+deadline and responder-disable cleanup. Its `/24` derives from explicitly injected public endpoint
+lineage; it is not an external-network measurement. This is still control-plane transcript
+production only: it makes no Fresh, readiness, capacity, reservation, route or datapath claim.
+
+A production discovery owner now drives the snapshot, native-agnostic sampler, exact affine
+request/bind lineage, A1a/A1c join and opaque Prepared handoff. The private client child can consume
+that handoff only through a test seam. A separate module-private, non-Clone Exit owner can retain
+one Permit in a bounded idempotency ledger. Its sole production-composed caller binds the request
+and response channel to the exact authenticated control-Relay connection and current control/Exit
+advertisement and policy identities, but the current product has no local Exit-advertisement source
+that can satisfy the gate. ExitReady and ExitResult remain test-only; their
+data-Relay arguments still have no production connection-owned source. The typed
+`ExitEndpointLease` projection is not helper-resource custody or cleanup authority, and the result
+requires a private helper/datapath observation type with no constructor. Production client Permit
+dispatch, real same-helper custody/lifecycle and challenge providers, live dataplane evidence,
+measured readiness/capacity, usability promotion, route admission and reservation are still absent.
+The fixed alpha score remains
+**11/100 (11%)**.
 
 Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
 relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7

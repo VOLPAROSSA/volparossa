@@ -8,12 +8,16 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+internal-test-hooks = []
+
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
 libp2p.workspace = true
 percent-encoding.workspace = true
 prost.workspace = true
+rand_core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -8,6 +8,7 @@
 mod canonical;
 mod envelope;
 mod messages;
+mod native_preselection_probe;
 mod native_route;
 mod preselection_observation;
 mod reservation_requests;
@@ -26,17 +27,38 @@ pub use messages::{
     exit_confirmation_envelope_hash, finalized_reservation_bundle_hash,
     relay_reservation_request_sha256, verify_relay_reservation,
 };
+pub use native_preselection_probe::{
+    IssuedNativeProbeRelayReady, IssuedNativeProbeRelayResult, IssuedNativeProbeStart,
+    MAX_NATIVE_PROBE_CANDIDATES, MAX_NATIVE_PROBE_LIFETIME_MS, MIN_NATIVE_PROBE_CANDIDATES,
+    NativeProbeCandidateSet, NativeProbeEndpointBinding, NativeProbeExitReady,
+    NativeProbeExitResult, NativeProbeForwardingProof, NativeProbeLeaseProof, NativeProbePathScope,
+    NativeProbePermit, NativeProbePermitRequest, NativeProbeRelayLocalProofs,
+    NativeProbeRelayReady, NativeProbeRelayResult, NativeProbeStart, VerifiedNativeProbeExitReady,
+    VerifiedNativeProbeExitResult, VerifiedNativeProbePermit, VerifiedNativeProbeRelayReady,
+    VerifiedNativeProbeResult, VerifiedNativeProbeStartForRelay, native_probe_candidate_set_hash,
+    native_probe_challenge_hash, native_probe_exit_ready_hash, native_probe_exit_result_hash,
+    native_probe_permit_hash, native_probe_permit_request_hash,
+    native_probe_prepared_lease_commitment, native_probe_relay_ready_hash, native_probe_start_hash,
+    sign_native_probe_relay_ready, sign_native_probe_relay_ready_with,
+    sign_native_probe_relay_result, sign_native_probe_relay_result_with, sign_native_probe_start,
+    verify_native_probe_exit_ready, verify_native_probe_exit_result_for_relay,
+    verify_native_probe_permit, verify_native_probe_relay_ready, verify_native_probe_result,
+    verify_native_probe_start_for_relay,
+};
 pub use native_route::{
     NATIVE_ROUTE_AUTH_BEARER_LENGTH, NATIVE_ROUTE_AUTH_COMMITMENT_DOMAIN,
     native_route_auth_commitment,
 };
 pub use preselection_observation::{
     BoundDirectPreselectionTranscript, BoundForwardedPreselectionTranscript,
-    ForwardedPreselectionAttestation, MAX_FORWARDED_ATTESTATION_SIZE,
+    DirectPreselectionFreshnessProof, ForwardedPreselectionAttestation,
+    ForwardedPreselectionFreshnessProof, MAX_FORWARDED_ATTESTATION_SIZE,
     MAX_PRESELECTION_RECEIPT_SIZE, MAX_PRESELECTION_REQUEST_SIZE, ObservationAddressFamily,
     ObservationNetworkPrefix, PreselectionActorBinding, PreselectionObservationReceipt,
     PreselectionObservationRequest, PreselectionObservationRole, PreselectionObservationScope,
     VerifiedDirectPreselectionTranscript, VerifiedForwardedPreselectionTranscript,
+    consume_bound_direct_preselection_transcript_for_freshness,
+    consume_bound_forwarded_preselection_transcript_for_freshness,
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
     preselection_observation_receipt_hash, preselection_observation_request_hash,
     verify_direct_preselection_transcript, verify_forwarded_preselection_transcript,

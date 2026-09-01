@@ -1,0 +1,818 @@
+//! Private affine owner for endpoint-separated native-preselection attempts.
+//!
+//! This child consumes one exact A1 handoff while its five-second signed receipts are still
+//! live, then discards every control-plane reachability observation. It retains only immutable
+//! actor, policy, transport, family and configured-capacity commitments plus the opaque original
+//! snapshot. The newly minted authority is independently bounded to thirty seconds. Nothing in
+//! this module marks a network address usable or advances route selection.
+
+use std::{
+    collections::{HashSet, VecDeque},
+    str::FromStr,
+    time::Duration,
+};
+
+use ed25519_dalek::SigningKey;
+use libp2p::{PeerId as Libp2pPeerId, identity};
+use rand_core::{CryptoRng, OsRng, RngCore};
+use thiserror::Error;
+use tokio::time::Instant;
+use zeroize::Zeroizing;
+
+use volparossa_core::{Bandwidth, IpFamily, ServiceRole, Transport as SelectionTransport};
+use volparossa_protocol::{
+    IssuedNativeProbeStart, MAX_NATIVE_PROBE_CANDIDATES, MAX_NATIVE_PROBE_LIFETIME_MS,
+    MIN_NATIVE_PROBE_CANDIDATES, NativeProbeCandidateSet, NativeProbeEndpointBinding,
+    NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermitRequest,
+    PreselectionActorBinding, ProtocolError, ReplayCache, TimePolicy, VerifiedNativeProbePermit,
+    VerifiedNativeProbeRelayReady, VerifiedNativeProbeResult, native_probe_candidate_set_hash,
+    native_probe_challenge_hash, node_id_from_public_key, sign_control_message,
+    sign_native_probe_start, verify_native_probe_permit, verify_native_probe_relay_ready,
+    verify_native_probe_result,
+};
+
+use super::{
+    FreshEvidenceBatch, FreshPeerEvidence, PreparedPreselectionEvidence, RouteCandidateSnapshot,
+    SelectionBridgeError, evidence_batch_matches_snapshot, protocol_transport,
+};
+
+const ID_BYTES: usize = 16;
+const KEY_BYTES: usize = 32;
+const ENTROPY_ATTEMPTS: usize = 8;
+
+/// Failure to consume A1 evidence or advance one cryptographic native-probe phase.
+#[derive(Debug, Error)]
+pub(super) enum NativePreselectionError {
+    #[error("prepared A1 evidence is invalid or no longer fresh")]
+    InvalidPreparedEvidence,
+    #[error("native-preselection actor or exact candidate-set binding is invalid")]
+    InvalidCandidateSet,
+    #[error("native-preselection attempt deadline is invalid or expired")]
+    InvalidDeadline,
+    #[error("operating-system randomness is unavailable")]
+    EntropyUnavailable,
+    #[error("native-preselection protocol rejected the transition: {0}")]
+    Protocol(#[from] ProtocolError),
+}
+
+/// Affine owner of one exact snapshot and every not-yet-dispatched path authority.
+#[must_use = "native-preselection attempt ownership must remain affine"]
+pub(super) struct NativePreselectionAttemptOwner {
+    _snapshot: RouteCandidateSnapshot,
+    candidate_set: NativeProbeCandidateSet,
+    deadline: NativeAttemptDeadline,
+    pending: VecDeque<PendingNativeProbeAuthority>,
+}
+
+/// One not-yet-dispatched path authority minted only by the attempt owner.
+#[must_use = "pending native-probe authority must be consumed or dropped"]
+pub(super) struct PendingNativeProbeAuthority {
+    signed_request: Vec<u8>,
+    session_key: SigningKey,
+    challenge: Zeroizing<[u8; KEY_BYTES]>,
+    start_nonce: [u8; KEY_BYTES],
+    candidate: NativeCandidateTemplate,
+    deadline: NativeAttemptDeadline,
+}
+
+/// Exact signed request awaiting one endpoint-free Exit permit.
+#[must_use = "an issued permit request must be verified or dropped"]
+pub(super) struct AwaitingNativePermit {
+    signed_request: Vec<u8>,
+    session_key: SigningKey,
+    challenge: Zeroizing<[u8; KEY_BYTES]>,
+    start_nonce: [u8; KEY_BYTES],
+    candidate: NativeCandidateTemplate,
+    deadline: NativeAttemptDeadline,
+}
+
+/// Verified Exit permit awaiting client-visible readiness from the exact data Relay.
+#[must_use = "a verified native permit must remain bound to its exact Relay"]
+pub(super) struct AwaitingNativeRelayReady {
+    verified_permit: VerifiedNativeProbePermit,
+    relay_request: Vec<u8>,
+    relay_permit: Vec<u8>,
+    session_key: SigningKey,
+    challenge: Zeroizing<[u8; KEY_BYTES]>,
+    start_nonce: [u8; KEY_BYTES],
+    candidate: NativeCandidateTemplate,
+    deadline: NativeAttemptDeadline,
+}
+
+/// Relay readiness verified and waiting only for a local helper-prepared Client endpoint.
+#[must_use = "an armed native probe must be started once or dropped"]
+pub(super) struct ArmedNativeProbe {
+    relay_ready: VerifiedNativeProbeRelayReady,
+    session_key: SigningKey,
+    challenge: Zeroizing<[u8; KEY_BYTES]>,
+    start_nonce: [u8; KEY_BYTES],
+    candidate: NativeCandidateTemplate,
+    deadline: NativeAttemptDeadline,
+}
+
+/// Exact signed start and raw one-shot challenge awaiting local and remote helper results.
+#[must_use = "an in-flight native probe result must be verified or dropped"]
+pub(super) struct AwaitingNativeResult {
+    issued_start: IssuedNativeProbeStart,
+    _challenge: Zeroizing<[u8; KEY_BYTES]>,
+    candidate: NativeCandidateTemplate,
+    deadline: NativeAttemptDeadline,
+}
+
+/// Terminal exact cryptographic chain; deliberately not route-admission or usability evidence.
+#[must_use = "a bound native path proof grants no route until a later provider validates it"]
+pub(super) struct BoundNativePathProof {
+    _verified_result: VerifiedNativeProbeResult,
+    _candidate: NativeCandidateTemplate,
+}
+
+struct NativeCandidateProjection {
+    actor: PreselectionActorBinding,
+    role: ServiceRole,
+    transport: SelectionTransport,
+    address_family: IpFamily,
+    policy_version: u64,
+    policy_hash: [u8; KEY_BYTES],
+    policy_expires_at_ms: u64,
+    preselection_capacity_ceiling: Bandwidth,
+}
+
+struct NativeCandidateTemplate {
+    candidate_ordinal: u32,
+    data_relay: PreselectionActorBinding,
+    exit: PreselectionActorBinding,
+    preselection_capacity_ceiling: Bandwidth,
+}
+
+struct NativeAttemptInputs {
+    snapshot: RouteCandidateSnapshot,
+    candidate_set: NativeProbeCandidateSet,
+    relays: Vec<NativeCandidateProjection>,
+    exit: NativeCandidateProjection,
+}
+
+#[derive(Clone, Copy)]
+struct NativeAttemptDeadline {
+    created_at_ms: u64,
+    expires_at_ms: u64,
+    monotonic_expires_at: Instant,
+}
+
+impl NativeAttemptDeadline {
+    fn ensure_live(
+        self,
+        trusted_now_ms: u64,
+        trusted_now: Instant,
+    ) -> Result<(), NativePreselectionError> {
+        if trusted_now_ms < self.created_at_ms
+            || trusted_now_ms >= self.expires_at_ms
+            || trusted_now >= self.monotonic_expires_at
+        {
+            return Err(NativePreselectionError::InvalidDeadline);
+        }
+        Ok(())
+    }
+}
+
+/// Consume one opaque A1 handoff and mint a fresh, independently expiring sampler owner.
+pub(super) fn begin_native_preselection(
+    prepared: PreparedPreselectionEvidence,
+) -> Result<NativePreselectionAttemptOwner, NativePreselectionError> {
+    begin_native_preselection_at(prepared, crate::unix_millis(), Instant::now(), &mut OsRng)
+}
+
+fn begin_native_preselection_at<R>(
+    prepared: PreparedPreselectionEvidence,
+    trusted_now_ms: u64,
+    trusted_now: Instant,
+    rng: &mut R,
+) -> Result<NativePreselectionAttemptOwner, NativePreselectionError>
+where
+    R: RngCore + CryptoRng + ?Sized,
+{
+    let NativeAttemptInputs {
+        snapshot,
+        candidate_set,
+        relays,
+        exit,
+    } = consume_prepared_handoff(prepared, trusted_now_ms)?;
+    let deadline = native_attempt_deadline(&candidate_set, trusted_now_ms, trusted_now)?;
+    let pending = mint_path_authorities(&candidate_set, relays, &exit, deadline, rng)?;
+    Ok(NativePreselectionAttemptOwner {
+        _snapshot: snapshot,
+        candidate_set,
+        deadline,
+        pending,
+    })
+}
+
+fn consume_prepared_handoff(
+    prepared: PreparedPreselectionEvidence,
+    trusted_now_ms: u64,
+) -> Result<NativeAttemptInputs, NativePreselectionError> {
+    let PreparedPreselectionEvidence {
+        snapshot,
+        evidence_batch,
+    } = prepared;
+    evidence_batch
+        .validate_at(trusted_now_ms)
+        .map_err(invalid_prepared)?;
+    if snapshot.captured_at_ms() > trusted_now_ms
+        || !evidence_batch_matches_snapshot(&snapshot, &evidence_batch.entries)
+    {
+        return Err(NativePreselectionError::InvalidPreparedEvidence);
+    }
+    let FreshEvidenceBatch {
+        batch_id,
+        mut entries,
+    } = evidence_batch;
+    let exit_index = unique_role_index(&entries, ServiceRole::Exit)?;
+    let exit = entries.remove(exit_index);
+    let control_binding = exit
+        .forwarded_control
+        .as_ref()
+        .ok_or(NativePreselectionError::InvalidCandidateSet)?;
+    let control_index = unique_control_index(&entries, control_binding)?;
+    let control = entries.remove(control_index);
+    if !(MIN_NATIVE_PROBE_CANDIDATES..=MAX_NATIVE_PROBE_CANDIDATES).contains(&(entries.len() + 1))
+        || entries
+            .iter()
+            .any(|candidate| candidate.role != ServiceRole::Relay)
+    {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
+
+    let exit = project_candidate(exit)?;
+    let control = project_candidate(control)?;
+    let mut relays = Vec::with_capacity(entries.len() + 1);
+    relays.push(control);
+    for candidate in entries {
+        relays.push(project_candidate(candidate)?);
+    }
+    validate_shared_scope(&snapshot, &relays, &exit)?;
+
+    let policy = snapshot.policy();
+    let candidate_set = NativeProbeCandidateSet {
+        protocol_version: volparossa_protocol::PROTOCOL_VERSION,
+        preselection_batch_id: batch_id.0.to_vec(),
+        control: Some(relays[0].actor.clone()),
+        exit: Some(exit.actor.clone()),
+        data_relays: relays
+            .iter()
+            .map(|candidate| candidate.actor.clone())
+            .collect(),
+        transport: protocol_transport(relays[0].transport) as i32,
+        address_family: protocol_family(relays[0].address_family) as i32,
+        policy_version: policy.version(),
+        policy_hash: policy.hash().to_vec(),
+        policy_expires_at_ms: policy.expires_at_ms(),
+    };
+    candidate_set.validate()?;
+    Ok(NativeAttemptInputs {
+        snapshot,
+        candidate_set,
+        relays,
+        exit,
+    })
+}
+
+fn native_attempt_deadline(
+    candidate_set: &NativeProbeCandidateSet,
+    trusted_now_ms: u64,
+    trusted_now: Instant,
+) -> Result<NativeAttemptDeadline, NativePreselectionError> {
+    let actor_expiry = candidate_set
+        .data_relays
+        .iter()
+        .chain(candidate_set.exit.iter())
+        .map(actor_expiry)
+        .min()
+        .ok_or(NativePreselectionError::InvalidCandidateSet)?;
+    let expires_at_ms = trusted_now_ms
+        .checked_add(MAX_NATIVE_PROBE_LIFETIME_MS)
+        .ok_or(NativePreselectionError::InvalidDeadline)?
+        .min(candidate_set.policy_expires_at_ms)
+        .min(actor_expiry);
+    let lifetime_ms = expires_at_ms
+        .checked_sub(trusted_now_ms)
+        .filter(|lifetime| *lifetime != 0)
+        .ok_or(NativePreselectionError::InvalidDeadline)?;
+    let monotonic_expires_at = trusted_now
+        .checked_add(Duration::from_millis(lifetime_ms))
+        .ok_or(NativePreselectionError::InvalidDeadline)?;
+    Ok(NativeAttemptDeadline {
+        created_at_ms: trusted_now_ms,
+        expires_at_ms,
+        monotonic_expires_at,
+    })
+}
+
+fn mint_path_authorities<R>(
+    candidate_set: &NativeProbeCandidateSet,
+    relays: Vec<NativeCandidateProjection>,
+    exit: &NativeCandidateProjection,
+    deadline: NativeAttemptDeadline,
+    rng: &mut R,
+) -> Result<VecDeque<PendingNativeProbeAuthority>, NativePreselectionError>
+where
+    R: RngCore + CryptoRng + ?Sized,
+{
+    let candidate_set_hash = native_probe_candidate_set_hash(candidate_set)?;
+    let attempt_id = random_nonzero::<ID_BYTES, _>(rng)?;
+    let mut probe_ids = HashSet::with_capacity(relays.len());
+    let mut challenges = HashSet::with_capacity(relays.len());
+    let mut pending = VecDeque::with_capacity(relays.len());
+    for (index, relay) in relays.into_iter().enumerate() {
+        let candidate_ordinal =
+            u32::try_from(index + 1).map_err(|_| NativePreselectionError::InvalidCandidateSet)?;
+        let probe_id = unique_random::<ID_BYTES, _>(rng, &mut probe_ids)?;
+        let challenge = unique_random::<KEY_BYTES, _>(rng, &mut challenges)?;
+        let session_seed = Zeroizing::new(random_nonzero::<KEY_BYTES, _>(rng)?);
+        let session_key = SigningKey::from_bytes(&session_seed);
+        let session_public_key = session_key.verifying_key().to_bytes();
+        let request_nonce = random_nonzero::<KEY_BYTES, _>(rng)?;
+        let start_nonce = random_nonzero::<KEY_BYTES, _>(rng)?;
+        let scope = NativeProbePathScope {
+            attempt_id: attempt_id.to_vec(),
+            probe_id: probe_id.to_vec(),
+            candidate_set_hash: candidate_set_hash.to_vec(),
+            candidate_ordinal,
+            data_relay: Some(relay.actor.clone()),
+            control: candidate_set.control.clone(),
+            exit: candidate_set.exit.clone(),
+            client_session_id: node_id_from_public_key(&session_public_key).to_vec(),
+            client_session_public_key: session_public_key.to_vec(),
+            transport: candidate_set.transport,
+            address_family: candidate_set.address_family,
+            policy_version: candidate_set.policy_version,
+            policy_hash: candidate_set.policy_hash.clone(),
+            policy_expires_at_ms: candidate_set.policy_expires_at_ms,
+            challenge_hash: native_probe_challenge_hash(&challenge).to_vec(),
+            attempt_expires_at_ms: deadline.expires_at_ms,
+        };
+        let request = NativeProbePermitRequest {
+            scope: Some(scope),
+            created_at_ms: deadline.created_at_ms,
+            expires_at_ms: deadline.expires_at_ms,
+            nonce: request_nonce.to_vec(),
+        };
+        let signed_request = sign_control_message(
+            &request,
+            &session_key,
+            deadline.created_at_ms,
+            deadline.expires_at_ms,
+            request_nonce,
+            native_time_policy(),
+        )?;
+        pending.push_back(PendingNativeProbeAuthority {
+            signed_request,
+            session_key,
+            challenge: Zeroizing::new(challenge),
+            start_nonce,
+            candidate: NativeCandidateTemplate {
+                candidate_ordinal,
+                data_relay: relay.actor,
+                exit: exit.actor.clone(),
+                preselection_capacity_ceiling: relay
+                    .preselection_capacity_ceiling
+                    .component_min(exit.preselection_capacity_ceiling),
+            },
+            deadline,
+        });
+    }
+    Ok(pending)
+}
+
+#[cfg(test)]
+pub(super) fn begin_native_preselection_for_test(
+    prepared: PreparedPreselectionEvidence,
+    trusted_now_ms: u64,
+    trusted_now: Instant,
+) -> Result<NativePreselectionAttemptOwner, NativePreselectionError> {
+    begin_native_preselection_at(prepared, trusted_now_ms, trusted_now, &mut OsRng)
+}
+
+impl NativePreselectionAttemptOwner {
+    /// Remove and begin exactly one pending path, preserving all remaining ownership locally.
+    pub(super) fn begin_next(
+        &mut self,
+    ) -> Result<Option<AwaitingNativePermit>, NativePreselectionError> {
+        self.deadline
+            .ensure_live(crate::unix_millis(), Instant::now())?;
+        Ok(self
+            .pending
+            .pop_front()
+            .map(PendingNativeProbeAuthority::begin))
+    }
+
+    #[cfg(test)]
+    pub(super) fn candidate_set_for_test(&self) -> &NativeProbeCandidateSet {
+        &self.candidate_set
+    }
+
+    #[cfg(test)]
+    pub(super) fn deadline_for_test(&self) -> (u64, Instant) {
+        (
+            self.deadline.expires_at_ms,
+            self.deadline.monotonic_expires_at,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_for_test(&self) -> &VecDeque<PendingNativeProbeAuthority> {
+        &self.pending
+    }
+}
+
+impl PendingNativeProbeAuthority {
+    fn begin(self) -> AwaitingNativePermit {
+        AwaitingNativePermit {
+            signed_request: self.signed_request,
+            session_key: self.session_key,
+            challenge: self.challenge,
+            start_nonce: self.start_nonce,
+            candidate: self.candidate,
+            deadline: self.deadline,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn candidate_for_test(
+        &self,
+    ) -> (
+        u32,
+        &PreselectionActorBinding,
+        &PreselectionActorBinding,
+        Bandwidth,
+        &[u8],
+    ) {
+        (
+            self.candidate.candidate_ordinal,
+            &self.candidate.data_relay,
+            &self.candidate.exit,
+            self.candidate.preselection_capacity_ceiling,
+            &self.signed_request,
+        )
+    }
+}
+
+impl AwaitingNativePermit {
+    /// Borrow the endpoint-free request for dispatch through the exact control Relay.
+    pub(super) fn encoded_request(&self) -> &[u8] {
+        &self.signed_request
+    }
+
+    /// Consume the request authority after verifying one exact Exit-signed permit.
+    pub(super) fn accept_permit(
+        self,
+        signed_permit: Vec<u8>,
+        replay: &mut ReplayCache,
+    ) -> Result<AwaitingNativeRelayReady, NativePreselectionError> {
+        let now_ms = crate::unix_millis();
+        self.deadline.ensure_live(now_ms, Instant::now())?;
+        let relay_request = self.signed_request.clone();
+        let relay_permit = signed_permit.clone();
+        let verified_permit =
+            verify_native_probe_permit(self.signed_request, signed_permit, now_ms, replay)?;
+        Ok(AwaitingNativeRelayReady {
+            verified_permit,
+            relay_request,
+            relay_permit,
+            session_key: self.session_key,
+            challenge: self.challenge,
+            start_nonce: self.start_nonce,
+            candidate: self.candidate,
+            deadline: self.deadline,
+        })
+    }
+}
+
+impl AwaitingNativeRelayReady {
+    /// Borrow the endpoint-free request/permit pair for the exact data Relay.
+    pub(super) fn relay_authorization(&self) -> (&[u8], &[u8]) {
+        (&self.relay_request, &self.relay_permit)
+    }
+
+    /// Consume the permit after verifying readiness signed by the exact data Relay.
+    pub(super) fn accept_relay_ready(
+        self,
+        signed_relay_ready: Vec<u8>,
+        replay: &mut ReplayCache,
+    ) -> Result<ArmedNativeProbe, NativePreselectionError> {
+        let now_ms = crate::unix_millis();
+        self.deadline.ensure_live(now_ms, Instant::now())?;
+        let relay_ready = verify_native_probe_relay_ready(
+            self.verified_permit,
+            signed_relay_ready,
+            now_ms,
+            replay,
+        )?;
+        Ok(ArmedNativeProbe {
+            relay_ready,
+            session_key: self.session_key,
+            challenge: self.challenge,
+            start_nonce: self.start_nonce,
+            candidate: self.candidate,
+            deadline: self.deadline,
+        })
+    }
+}
+
+impl ArmedNativeProbe {
+    /// Consume readiness and bind the helper-prepared Client endpoint into one signed start.
+    pub(super) fn start(
+        self,
+        client_endpoint: NativeProbeEndpointBinding,
+    ) -> Result<AwaitingNativeResult, NativePreselectionError> {
+        let now_ms = crate::unix_millis();
+        self.deadline.ensure_live(now_ms, Instant::now())?;
+        let issued_start = sign_native_probe_start(
+            self.relay_ready,
+            client_endpoint,
+            &self.session_key,
+            now_ms,
+            self.start_nonce,
+        )?;
+        Ok(AwaitingNativeResult {
+            issued_start,
+            _challenge: self.challenge,
+            candidate: self.candidate,
+            deadline: self.deadline,
+        })
+    }
+}
+
+impl AwaitingNativeResult {
+    /// Borrow the signed start for delivery only to the exact data Relay.
+    pub(super) fn encoded_start(&self) -> &[u8] {
+        self.issued_start.encoded_start()
+    }
+
+    /// Consume the in-flight authority after exact local and signed remote proof verification.
+    pub(super) fn accept_result(
+        self,
+        client_lease: NativeProbeLeaseProof,
+        signed_relay_result: &[u8],
+        replay: &mut ReplayCache,
+    ) -> Result<BoundNativePathProof, NativePreselectionError> {
+        let now_ms = crate::unix_millis();
+        self.deadline.ensure_live(now_ms, Instant::now())?;
+        let verified_result = verify_native_probe_result(
+            self.issued_start,
+            client_lease,
+            signed_relay_result,
+            now_ms,
+            replay,
+        )?;
+        Ok(BoundNativePathProof {
+            _verified_result: verified_result,
+            _candidate: self.candidate,
+        })
+    }
+}
+
+fn invalid_prepared(_: SelectionBridgeError) -> NativePreselectionError {
+    NativePreselectionError::InvalidPreparedEvidence
+}
+
+fn unique_role_index(
+    entries: &[FreshPeerEvidence],
+    role: ServiceRole,
+) -> Result<usize, NativePreselectionError> {
+    let mut matching = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.role == role);
+    let (index, _) = matching
+        .next()
+        .ok_or(NativePreselectionError::InvalidCandidateSet)?;
+    if matching.next().is_some() {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
+    Ok(index)
+}
+
+fn unique_control_index(
+    relays: &[FreshPeerEvidence],
+    control: &super::ForwardedControlBinding,
+) -> Result<usize, NativePreselectionError> {
+    let mut matching = relays.iter().enumerate().filter(|(_, candidate)| {
+        candidate.role == ServiceRole::Relay
+            && candidate.node_id == control.node_id
+            && candidate.peer_id == control.peer_id
+            && candidate.capability_public_key == control.public_key
+            && candidate.advertisement_sequence == control.advertisement_sequence
+            && candidate.advertisement_expires_at_ms == control.advertisement_expires_at_ms
+            && candidate.advertisement_payload_hash == control.advertisement_payload_hash
+            && candidate.capability_expires_at_ms == control.capability_expires_at_ms
+    });
+    let (index, _) = matching
+        .next()
+        .ok_or(NativePreselectionError::InvalidCandidateSet)?;
+    if matching.next().is_some() {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
+    Ok(index)
+}
+
+fn project_candidate(
+    candidate: FreshPeerEvidence,
+) -> Result<NativeCandidateProjection, NativePreselectionError> {
+    let FreshPeerEvidence {
+        batch_id: _,
+        node_id,
+        peer_id,
+        capability_public_key,
+        advertisement_sequence,
+        advertisement_expires_at_ms,
+        advertisement_payload_hash,
+        capability_expires_at_ms,
+        role,
+        transport,
+        policy_version,
+        policy_hash,
+        policy_expires_at_ms,
+        address_family,
+        observed_at_ms: _,
+        valid_until_ms: _,
+        forwarded_control: _,
+        locally_measured_p25: _,
+        measurement_count: _,
+        preselection_capacity_ceiling,
+        uptime_score: _,
+        proximity_score: _,
+        recent_egress_quality: _,
+        rtt_ms: _,
+        reachable: _,
+        network_address_usable: _,
+        observed_network_prefix: _,
+        locally_blocked: _,
+    } = candidate;
+    let wire_node_id = node_id_from_public_key(&capability_public_key);
+    let parsed_peer = Libp2pPeerId::from_str(peer_id.as_str())
+        .map_err(|_| NativePreselectionError::InvalidCandidateSet)?;
+    let ed25519 = identity::ed25519::PublicKey::try_from_bytes(&capability_public_key)
+        .map_err(|_| NativePreselectionError::InvalidCandidateSet)?;
+    let derived_peer = identity::PublicKey::from(ed25519).to_peer_id();
+    if node_id.as_str() != hex::encode(wire_node_id) || parsed_peer != derived_peer {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
+    let mut payload_hash = Vec::with_capacity(KEY_BYTES);
+    advertisement_payload_hash.append_native_probe_commitment(&mut payload_hash);
+    let actor = PreselectionActorBinding {
+        node_id: wire_node_id.to_vec(),
+        peer_id: parsed_peer.to_bytes(),
+        public_key: capability_public_key.to_vec(),
+        advertisement_sequence,
+        advertisement_expires_at_ms,
+        advertisement_payload_hash: payload_hash,
+        capability_expires_at_ms,
+    };
+    Ok(NativeCandidateProjection {
+        actor,
+        role,
+        transport,
+        address_family: address_family.ok_or(NativePreselectionError::InvalidCandidateSet)?,
+        policy_version,
+        policy_hash: *policy_hash.as_bytes(),
+        policy_expires_at_ms,
+        preselection_capacity_ceiling,
+    })
+}
+
+fn validate_shared_scope(
+    snapshot: &RouteCandidateSnapshot,
+    relays: &[NativeCandidateProjection],
+    exit: &NativeCandidateProjection,
+) -> Result<(), NativePreselectionError> {
+    let first = relays
+        .first()
+        .ok_or(NativePreselectionError::InvalidCandidateSet)?;
+    let policy = snapshot.policy();
+    if first.role != ServiceRole::Relay
+        || exit.role != ServiceRole::Exit
+        || relays.iter().any(|candidate| {
+            candidate.role != ServiceRole::Relay
+                || candidate.transport != first.transport
+                || candidate.address_family != first.address_family
+                || candidate.policy_version != first.policy_version
+                || candidate.policy_hash != first.policy_hash
+                || candidate.policy_expires_at_ms != first.policy_expires_at_ms
+        })
+        || exit.transport != first.transport
+        || exit.address_family != first.address_family
+        || exit.policy_version != first.policy_version
+        || exit.policy_hash != first.policy_hash
+        || exit.policy_expires_at_ms != first.policy_expires_at_ms
+        || policy.version() != first.policy_version
+        || policy.hash() != first.policy_hash
+        || policy.expires_at_ms() != first.policy_expires_at_ms
+    {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
+    Ok(())
+}
+
+const fn protocol_family(family: IpFamily) -> volparossa_protocol::ObservationAddressFamily {
+    match family {
+        IpFamily::Ipv4 => volparossa_protocol::ObservationAddressFamily::Ipv4,
+        IpFamily::Ipv6 => volparossa_protocol::ObservationAddressFamily::Ipv6,
+    }
+}
+
+fn actor_expiry(actor: &PreselectionActorBinding) -> u64 {
+    actor
+        .advertisement_expires_at_ms
+        .min(actor.capability_expires_at_ms)
+}
+
+fn native_time_policy() -> TimePolicy {
+    TimePolicy {
+        maximum_lifetime_ms: MAX_NATIVE_PROBE_LIFETIME_MS,
+        maximum_clock_skew_ms: TimePolicy::default().maximum_clock_skew_ms,
+    }
+}
+
+fn random_nonzero<const LENGTH: usize, R>(
+    rng: &mut R,
+) -> Result<[u8; LENGTH], NativePreselectionError>
+where
+    R: RngCore + CryptoRng + ?Sized,
+{
+    for _ in 0..ENTROPY_ATTEMPTS {
+        let mut value = [0_u8; LENGTH];
+        rng.try_fill_bytes(&mut value)
+            .map_err(|_| NativePreselectionError::EntropyUnavailable)?;
+        if value.iter().any(|byte| *byte != 0) {
+            return Ok(value);
+        }
+    }
+    Err(NativePreselectionError::EntropyUnavailable)
+}
+
+fn unique_random<const LENGTH: usize, R>(
+    rng: &mut R,
+    seen: &mut HashSet<[u8; LENGTH]>,
+) -> Result<[u8; LENGTH], NativePreselectionError>
+where
+    R: RngCore + CryptoRng + ?Sized,
+{
+    for _ in 0..ENTROPY_ATTEMPTS {
+        let value = random_nonzero::<LENGTH, _>(rng)?;
+        if seen.insert(value) {
+            return Ok(value);
+        }
+    }
+    Err(NativePreselectionError::EntropyUnavailable)
+}
+
+#[cfg(test)]
+mod source_contract_tests {
+    #[test]
+    fn owner_is_affine_and_carries_no_a1_reachability_claim() {
+        let source = include_str!("native_preselection.rs");
+        let product = source
+            .rsplit_once("#[cfg(test)]\nmod source_contract_tests")
+            .expect("source-contract test boundary")
+            .0;
+        for declaration in [
+            "pub(super) struct NativePreselectionAttemptOwner {",
+            "pub(super) struct PendingNativeProbeAuthority {",
+            "pub(super) struct AwaitingNativePermit {",
+            "pub(super) struct AwaitingNativeRelayReady {",
+            "pub(super) struct ArmedNativeProbe {",
+            "pub(super) struct AwaitingNativeResult {",
+            "pub(super) struct BoundNativePathProof {",
+        ] {
+            let before = product
+                .split_once(declaration)
+                .expect("authority declaration")
+                .0;
+            let preceding = before.lines().rev().take(5).collect::<Vec<_>>().join("\n");
+            assert!(!preceding.contains("derive(Clone"));
+            assert!(!preceding.contains("derive(Copy"));
+        }
+        let owner = product
+            .split_once("pub(super) struct NativePreselectionAttemptOwner {")
+            .expect("owner")
+            .1
+            .split_once("}\n")
+            .expect("owner end")
+            .0;
+        for forbidden in [
+            "observed_at_ms",
+            "valid_until_ms",
+            "rtt_ms",
+            "reachable",
+            "network_address_usable",
+            "observed_network_prefix",
+        ] {
+            assert!(!owner.contains(forbidden), "stale owner field: {forbidden}");
+        }
+        assert!(!product.contains("network_address_usable: true"));
+        assert!(!product.contains("native_dataplane_challenge"));
+        assert!(!product.contains("control_endpoints"));
+        assert!(!product.contains("underlay_ip"));
+        assert!(!product.contains("WireguardEndpoint"));
+    }
+}

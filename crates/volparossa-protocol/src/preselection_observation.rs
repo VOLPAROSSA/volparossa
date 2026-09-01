@@ -217,8 +217,51 @@ pub struct BoundForwardedPreselectionTranscript {
     _transcript: VerifiedForwardedPreselectionTranscript,
 }
 
+/// Terminal direct-Relay transcript proof retained only for private freshness minting.
+///
+/// The projection is affine and intentionally exposes no request, identity, signature, nonce,
+/// remote observation time, prefix, or wire bytes. Its signed validity ceiling is the only fact
+/// a later local-observation owner may combine with its independently bound transport proof.
+#[must_use = "a direct preselection freshness proof must be consumed by its private owner"]
+pub struct DirectPreselectionFreshnessProof {
+    valid_until_ms: u64,
+}
+
+impl DirectPreselectionFreshnessProof {
+    /// Return the cryptographically verified Relay receipt validity ceiling.
+    #[must_use]
+    pub const fn valid_until_ms(&self) -> u64 {
+        self.valid_until_ms
+    }
+}
+
+/// Terminal forwarded-Exit transcript proof retained only for private freshness minting.
+///
+/// The projection is affine and retains only the joint signed validity ceiling and the normalized
+/// public /24 or /48 observed by the authenticated control Relay. It exposes no actor identity,
+/// request, signature, nonce, full endpoint, or wire bytes.
+#[must_use = "a forwarded preselection freshness proof must be consumed by its private owner"]
+pub struct ForwardedPreselectionFreshnessProof {
+    valid_until_ms: u64,
+    upstream_network_prefix: ObservedNetworkPrefix,
+}
+
+impl ForwardedPreselectionFreshnessProof {
+    /// Return the earlier validity ceiling of the control attestation and nested Exit receipt.
+    #[must_use]
+    pub const fn valid_until_ms(&self) -> u64 {
+        self.valid_until_ms
+    }
+
+    /// Return the endpoint-free public prefix cryptographically bound by the control Relay.
+    #[must_use]
+    pub const fn upstream_network_prefix(&self) -> ObservedNetworkPrefix {
+        self.upstream_network_prefix
+    }
+}
+
 impl PreselectionActorBinding {
-    fn validate(&self, field: &'static str) -> Result<(), ProtocolError> {
+    pub(crate) fn validate(&self, field: &'static str) -> Result<(), ProtocolError> {
         let node_id = fixed_array::<KEY_LENGTH>(&self.node_id, field)?;
         let public_key = fixed_array::<KEY_LENGTH>(&self.public_key, field)?;
         if node_id.iter().all(|byte| *byte == 0)
@@ -323,7 +366,7 @@ impl PreselectionObservationRequest {
 }
 
 impl ObservationNetworkPrefix {
-    fn validate(&self) -> Result<(), ProtocolError> {
+    pub(crate) fn validated_normalized(&self) -> Result<ObservedNetworkPrefix, ProtocolError> {
         let family = ObservationAddressFamily::try_from(self.address_family)
             .map_err(|_| ProtocolError::InvalidField("observation network prefix"))?;
         let prefix =
@@ -349,7 +392,11 @@ impl ObservationNetworkPrefix {
         if !prefix.is_public_routable() {
             return Err(ProtocolError::InvalidField("observation network prefix"));
         }
-        Ok(())
+        Ok(prefix)
+    }
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        self.validated_normalized().map(drop)
     }
 }
 
@@ -730,6 +777,98 @@ pub fn consume_forwarded_preselection_transcript(
     }
     Ok(BoundForwardedPreselectionTranscript {
         _transcript: transcript,
+    })
+}
+
+/// Purpose-consume one exact bound direct-Relay transcript for private freshness minting.
+///
+/// The returned affine projection carries only the signed receipt validity ceiling. In
+/// particular this terminal operation cannot recover the actor, request, signature, nonce,
+/// remote observation time, response bytes, or any dispatch capability.
+///
+/// # Errors
+///
+/// Returns a detail-free field error if the crate-private verified-token invariant is broken.
+pub fn consume_bound_direct_preselection_transcript_for_freshness(
+    transcript: BoundDirectPreselectionTranscript,
+) -> Result<DirectPreselectionFreshnessProof, ProtocolError> {
+    let BoundDirectPreselectionTranscript {
+        _transcript: verified,
+    } = transcript;
+    let VerifiedDirectPreselectionTranscript {
+        request,
+        _receipt: receipt,
+    } = verified;
+    let scope = required_scope(request.scope.as_ref())?;
+    if scope.role_value()? != PreselectionObservationRole::Relay
+        || request.forwarded_control.is_some()
+        || receipt.message().valid_until_ms == 0
+    {
+        return Err(ProtocolError::InvalidField(
+            "direct preselection freshness proof",
+        ));
+    }
+    Ok(DirectPreselectionFreshnessProof {
+        valid_until_ms: receipt.message().valid_until_ms,
+    })
+}
+
+/// Purpose-consume one exact bound forwarded-Exit transcript for private freshness minting.
+///
+/// The returned affine projection carries only the earlier signed validity ceiling and the
+/// endpoint-free public prefix in the authenticated control-Relay wrapper. It cannot recover any
+/// identity, request, signature, nonce, full endpoint, response bytes, or dispatch capability.
+///
+/// # Errors
+///
+/// Returns a detail-free field error if the crate-private verified-token invariant is broken.
+pub fn consume_bound_forwarded_preselection_transcript_for_freshness(
+    transcript: BoundForwardedPreselectionTranscript,
+) -> Result<ForwardedPreselectionFreshnessProof, ProtocolError> {
+    let BoundForwardedPreselectionTranscript {
+        _transcript: verified,
+    } = transcript;
+    let VerifiedForwardedPreselectionTranscript {
+        request,
+        _attestation: attestation,
+        _exit_receipt: exit_receipt,
+    } = verified;
+    let scope = required_scope(request.scope.as_ref())?;
+    let attestation_message = attestation.message();
+    let prefix = attestation_message
+        .upstream_network_prefix
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField(
+            "forwarded preselection freshness proof",
+        ))?
+        .validated_normalized()?;
+    let expected_family = ObservationAddressFamily::try_from(scope.address_family)
+        .map_err(|_| ProtocolError::InvalidField("forwarded preselection freshness proof"))?;
+    let family_matches = matches!(
+        (prefix.family(), expected_family),
+        (
+            volparossa_core::IpFamily::Ipv4,
+            ObservationAddressFamily::Ipv4
+        ) | (
+            volparossa_core::IpFamily::Ipv6,
+            ObservationAddressFamily::Ipv6
+        )
+    );
+    let valid_until_ms = attestation_message
+        .valid_until_ms
+        .min(exit_receipt.message().valid_until_ms);
+    if scope.role_value()? != PreselectionObservationRole::Exit
+        || request.forwarded_control.is_none()
+        || !family_matches
+        || valid_until_ms == 0
+    {
+        return Err(ProtocolError::InvalidField(
+            "forwarded preselection freshness proof",
+        ));
+    }
+    Ok(ForwardedPreselectionFreshnessProof {
+        valid_until_ms,
+        upstream_network_prefix: prefix,
     })
 }
 

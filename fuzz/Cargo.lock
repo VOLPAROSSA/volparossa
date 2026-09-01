@@ -3230,6 +3230,7 @@ dependencies = [
  "libp2p",
  "percent-encoding",
  "prost",
+ "rand_core 0.6.4",
  "serde",
  "thiserror 2.0.19",
  "tokio",

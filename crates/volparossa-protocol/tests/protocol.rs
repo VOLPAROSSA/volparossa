@@ -15,6 +15,8 @@ use volparossa_protocol::{
     PreselectionObservationRequest, PreselectionObservationRole, PreselectionObservationScope,
     ProtocolError, RelayAuthorization, RelayReservation, RelayReservationRequest, ReplayCache,
     SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, WireguardEndpoint,
+    consume_bound_direct_preselection_transcript_for_freshness,
+    consume_bound_forwarded_preselection_transcript_for_freshness,
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
     decode_canonical, encode_canonical, exit_confirmation_envelope_hash,
     finalized_reservation_bundle_hash, frame_control_message, generate_nonce,
@@ -88,11 +90,14 @@ fn preselection_schema_tags_and_callerless_surface_are_exact() {
         ControlMessageType::ForwardedPreselectionAttestation as i32,
         18
     );
+    assert_eq!(ControlMessageType::NativeProbePermitRequest as i32, 19);
+    assert_eq!(ControlMessageType::NativeProbeRelayResult as i32, 25);
 
     let schema = include_str!("../../../proto/volparossa/control/v4/control.proto");
     let messages = include_str!("../src/messages.rs");
     assert_preselection_message_type_tags(schema, messages);
     assert_preselection_schema_fields(schema);
+    assert_native_probe_schema_fields(schema);
     assert_preselection_product_surface();
 }
 
@@ -335,6 +340,25 @@ fn verified_direct_transcript_is_consumed_only_for_its_exact_canonical_request()
 }
 
 #[test]
+fn bound_direct_transcript_terminally_projects_only_its_signed_freshness_ceiling() {
+    let (request, signed_receipt) = direct_preselection_fixture();
+    let encoded_request = encode_preselection_request(&request);
+    let mut replay = ReplayCache::new(8).unwrap();
+    let verified = verify_direct_preselection_transcript(
+        &signed_receipt,
+        &encoded_request,
+        NOW + 1,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .unwrap();
+    let bound = consume_direct_preselection_transcript(verified, &encoded_request).unwrap();
+    let freshness = consume_bound_direct_preselection_transcript_for_freshness(bound).unwrap();
+    assert_eq!(freshness.valid_until_ms(), NOW + 40_000);
+    assert_eq!(replay.len(), 1);
+}
+
+#[test]
 fn verified_forwarded_transcript_is_consumed_only_for_its_exact_canonical_request() {
     let (request, _, signed_attestation, _, _) = forwarded_preselection_fixture();
     let encoded_request = encode_preselection_request(&request);
@@ -383,6 +407,29 @@ fn verified_forwarded_transcript_is_consumed_only_for_its_exact_canonical_reques
         Err(ProtocolError::Replay)
     ));
     assert_eq!(mismatch_cache.len(), 2);
+}
+
+#[test]
+fn bound_forwarded_transcript_projects_joint_ceiling_and_endpoint_free_prefix() {
+    let (request, _, signed_attestation, _, _) = forwarded_preselection_fixture();
+    let encoded_request = encode_preselection_request(&request);
+    let mut replay = ReplayCache::new(8).unwrap();
+    let verified = verify_forwarded_preselection_transcript(
+        &signed_attestation,
+        &encoded_request,
+        NOW + 1,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .unwrap();
+    let bound = consume_forwarded_preselection_transcript(verified, &encoded_request).unwrap();
+    let freshness = consume_bound_forwarded_preselection_transcript_for_freshness(bound).unwrap();
+    assert_eq!(freshness.valid_until_ms(), NOW + 40_000);
+    assert!(
+        freshness.upstream_network_prefix()
+            == volparossa_core::ObservedNetworkPrefix::ipv4_24([8, 8, 4])
+    );
+    assert_eq!(replay.len(), 2);
 }
 
 #[test]
@@ -1361,6 +1408,13 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "EXIT_CONFIRMATION_RECEIPT",
         "PRESELECTION_OBSERVATION_RECEIPT",
         "FORWARDED_PRESELECTION_ATTESTATION",
+        "NATIVE_PROBE_PERMIT_REQUEST",
+        "NATIVE_PROBE_PERMIT",
+        "NATIVE_PROBE_EXIT_READY",
+        "NATIVE_PROBE_RELAY_READY",
+        "NATIVE_PROBE_START",
+        "NATIVE_PROBE_EXIT_RESULT",
+        "NATIVE_PROBE_RELAY_RESULT",
     ];
     let rust_names = [
         "Unspecified",
@@ -1382,6 +1436,13 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "ExitConfirmationReceipt",
         "PreselectionObservationReceipt",
         "ForwardedPreselectionAttestation",
+        "NativeProbePermitRequest",
+        "NativeProbePermit",
+        "NativeProbeExitReady",
+        "NativeProbeRelayReady",
+        "NativeProbeStart",
+        "NativeProbeExitResult",
+        "NativeProbeRelayResult",
     ];
     assert_eq!(schema_enum.matches(';').count(), names.len());
     assert_eq!(
@@ -1443,6 +1504,199 @@ fn assert_preselection_schema_fields(schema: &str) {
     assert_preselection_actor_scope_schema(rust, schema);
     assert_preselection_request_receipt_schema(rust, schema);
     assert_preselection_prefix_attestation_schema(rust, schema);
+}
+
+fn assert_native_probe_schema_fields(schema: &str) {
+    let rust = include_str!("../src/native_preselection_probe.rs");
+    assert_native_probe_core_schema(rust, schema);
+    assert_native_probe_readiness_schema(rust, schema);
+    assert_native_probe_result_schema(rust, schema);
+}
+
+fn assert_native_probe_core_schema(rust: &str, schema: &str) {
+    let messages: &[(&str, &[(&str, usize)])] = &[
+        (
+            "NativeProbeCandidateSet",
+            &[
+                ("protocol_version", 1),
+                ("preselection_batch_id", 2),
+                ("control", 3),
+                ("exit", 4),
+                ("data_relays", 5),
+                ("transport", 6),
+                ("address_family", 7),
+                ("policy_version", 8),
+                ("policy_hash", 9),
+                ("policy_expires_at_ms", 10),
+            ],
+        ),
+        (
+            "NativeProbePathScope",
+            &[
+                ("attempt_id", 1),
+                ("probe_id", 2),
+                ("candidate_set_hash", 3),
+                ("candidate_ordinal", 4),
+                ("data_relay", 5),
+                ("control", 6),
+                ("exit", 7),
+                ("client_session_id", 8),
+                ("client_session_public_key", 9),
+                ("transport", 10),
+                ("address_family", 11),
+                ("policy_version", 12),
+                ("policy_hash", 13),
+                ("policy_expires_at_ms", 14),
+                ("challenge_hash", 15),
+                ("attempt_expires_at_ms", 16),
+            ],
+        ),
+        (
+            "NativeProbePermitRequest",
+            &[
+                ("scope", 1),
+                ("created_at_ms", 2),
+                ("expires_at_ms", 3),
+                ("nonce", 4),
+            ],
+        ),
+        (
+            "NativeProbePermit",
+            &[
+                ("request_hash", 1),
+                ("scope", 2),
+                ("issued_at_ms", 3),
+                ("expires_at_ms", 4),
+                ("nonce", 5),
+            ],
+        ),
+    ];
+    assert_native_probe_messages(rust, schema, messages);
+}
+
+fn assert_native_probe_readiness_schema(rust: &str, schema: &str) {
+    let messages: &[(&str, &[(&str, usize)])] = &[
+        (
+            "NativeProbeEndpointBinding",
+            &[
+                ("helper_runtime_id", 1),
+                ("route_context_id", 2),
+                ("endpoint", 3),
+                ("prepared_lease_commitment", 4),
+            ],
+        ),
+        (
+            "NativeProbeExitReady",
+            &[
+                ("permit_hash", 1),
+                ("scope", 2),
+                ("relay_exit_endpoint", 3),
+                ("exit_endpoint", 4),
+                ("ready_at_ms", 5),
+                ("expires_at_ms", 6),
+                ("nonce", 7),
+            ],
+        ),
+        (
+            "NativeProbeRelayReady",
+            &[
+                ("permit_hash", 1),
+                ("exit_ready_hash", 2),
+                ("scope", 3),
+                ("relay_client_endpoint", 4),
+                ("ready_at_ms", 5),
+                ("expires_at_ms", 6),
+                ("nonce", 7),
+            ],
+        ),
+        (
+            "NativeProbeStart",
+            &[
+                ("permit_hash", 1),
+                ("relay_ready_hash", 2),
+                ("scope", 3),
+                ("client_endpoint", 4),
+                ("started_at_ms", 5),
+                ("expires_at_ms", 6),
+                ("nonce", 7),
+            ],
+        ),
+    ];
+    assert_native_probe_messages(rust, schema, messages);
+}
+
+fn assert_native_probe_result_schema(rust: &str, schema: &str) {
+    let messages: &[(&str, &[(&str, usize)])] = &[
+        (
+            "NativeProbeLeaseProof",
+            &[
+                ("helper_runtime_id", 1),
+                ("route_context_id", 2),
+                ("prepared_lease_commitment", 3),
+                ("latest_handshake_unix", 4),
+                ("received_bytes_after_baseline", 5),
+                ("transmitted_bytes_after_baseline", 6),
+            ],
+        ),
+        (
+            "NativeProbeForwardingProof",
+            &[
+                ("client_to_exit_packets_after_baseline", 1),
+                ("client_to_exit_bytes_after_baseline", 2),
+                ("exit_to_client_packets_after_baseline", 3),
+                ("exit_to_client_bytes_after_baseline", 4),
+                ("terminal_drop_packets_after_baseline", 5),
+                ("terminal_drop_bytes_after_baseline", 6),
+            ],
+        ),
+        (
+            "NativeProbeExitResult",
+            &[
+                ("permit_hash", 1),
+                ("exit_ready_hash", 2),
+                ("scope", 3),
+                ("challenge_response", 4),
+                ("observed_network_prefix", 5),
+                ("exit_lease", 6),
+                ("measured_at_ms", 7),
+                ("expires_at_ms", 8),
+                ("nonce", 9),
+            ],
+        ),
+        (
+            "NativeProbeRelayResult",
+            &[
+                ("permit_hash", 1),
+                ("relay_ready_hash", 2),
+                ("start_hash", 3),
+                ("scope", 4),
+                ("challenge_hash", 5),
+                ("relay_client_lease", 6),
+                ("relay_exit_lease", 7),
+                ("forwarding", 8),
+                ("signed_exit_result", 9),
+                ("exit_result_hash", 10),
+                ("measured_at_ms", 11),
+                ("expires_at_ms", 12),
+                ("nonce", 13),
+            ],
+        ),
+    ];
+    assert_native_probe_messages(rust, schema, messages);
+}
+
+fn assert_native_probe_messages(rust: &str, schema: &str, messages: &[(&str, &[(&str, usize)])]) {
+    for (message, fields) in messages {
+        let rust_body = item_body(rust, &format!("pub struct {message} {{"));
+        let schema_body = item_body(schema, &format!("message {message} {{"));
+        assert_eq!(rust_body.matches("#[prost(").count(), fields.len());
+        assert_eq!(schema_body.matches(';').count(), fields.len());
+        for (field, tag) in *fields {
+            assert!(rust_body.contains(&format!("tag = \"{tag}\"")));
+            assert!(rust_body.contains(&format!("pub {field}:")));
+            assert!(schema_body.contains(&format!(" {field} = {tag};")));
+        }
+    }
 }
 
 fn assert_preselection_actor_scope_schema(rust: &str, schema: &str) {
@@ -1845,6 +2099,7 @@ fn assert_opaque_transcript_surface(product: &str) {
     assert_opaque_transcript_type_counts(product);
     let bodies = assert_opaque_transcript_field_shapes(product);
     assert_opaque_transcript_bodies_are_sanitized(&bodies);
+    assert_purpose_specific_freshness_projection(product);
     for forbidden in ["serde", "Serialize", "Deserialize"] {
         assert!(!product.contains(forbidden));
     }
@@ -1863,10 +2118,10 @@ fn assert_opaque_transcript_surface(product: &str) {
 
 fn assert_opaque_transcript_type_counts(product: &str) {
     for (name, count) in [
-        ("VerifiedDirectPreselectionTranscript", 5),
-        ("VerifiedForwardedPreselectionTranscript", 5),
-        ("BoundDirectPreselectionTranscript", 3),
-        ("BoundForwardedPreselectionTranscript", 3),
+        ("VerifiedDirectPreselectionTranscript", 6),
+        ("VerifiedForwardedPreselectionTranscript", 6),
+        ("BoundDirectPreselectionTranscript", 5),
+        ("BoundForwardedPreselectionTranscript", 5),
     ] {
         assert_eq!(product.matches(name).count(), count);
         assert_eq!(product.matches(&format!("pub struct {name} {{")).count(), 1);
@@ -1876,6 +2131,57 @@ fn assert_opaque_transcript_type_counts(product: &str) {
                 .lines()
                 .any(|line| { line.trim_start().starts_with("impl") && line.contains(name) })
         );
+    }
+}
+
+fn assert_purpose_specific_freshness_projection(product: &str) {
+    let direct = item_body(product, "pub struct DirectPreselectionFreshnessProof {");
+    assert_eq!(
+        direct
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>(),
+        ["valid_until_ms: u64,"]
+    );
+    let forwarded = item_body(product, "pub struct ForwardedPreselectionFreshnessProof {");
+    assert_eq!(
+        forwarded
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>(),
+        [
+            "valid_until_ms: u64,",
+            "upstream_network_prefix: ObservedNetworkPrefix,",
+        ]
+    );
+    for body in [direct, forwarded] {
+        for forbidden in [
+            "request",
+            "receipt",
+            "attestation",
+            "identity",
+            "signature",
+            "nonce",
+            "peer",
+            "endpoint",
+            "bytes",
+            "dispatch",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "freshness proof leaked {forbidden}"
+            );
+        }
+    }
+    for name in [
+        "DirectPreselectionFreshnessProof",
+        "ForwardedPreselectionFreshnessProof",
+    ] {
+        for trait_name in ["Clone", "Copy", "Debug", "Serialize", "Deserialize"] {
+            assert!(!product.contains(&format!("impl {trait_name} for {name}")));
+        }
     }
 }
 
@@ -2011,6 +2317,10 @@ fn assert_protocol_preselection_surface(direct_name: &str, forwarded_name: &str)
         "BoundForwardedPreselectionTranscript",
         "consume_direct_preselection_transcript",
         "consume_forwarded_preselection_transcript",
+        "DirectPreselectionFreshnessProof",
+        "ForwardedPreselectionFreshnessProof",
+        "consume_bound_direct_preselection_transcript_for_freshness",
+        "consume_bound_forwarded_preselection_transcript_for_freshness",
     ] {
         assert_eq!(protocol_exports.matches(symbol).count(), 1);
     }

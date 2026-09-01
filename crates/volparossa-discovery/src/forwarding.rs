@@ -50,6 +50,7 @@ pub enum ExitForwardOperation {
     ProbePermit = 3,
     FinalizeReservation = 4,
     ConfirmRelay = 5,
+    NativeProbePermit = 6,
 }
 
 /// Detail-free forwarding result.
@@ -172,7 +173,8 @@ impl ExitForwardRequest {
             ExitForwardOperation::CapacityHold
             | ExitForwardOperation::ProbePermit
             | ExitForwardOperation::FinalizeReservation
-            | ExitForwardOperation::ConfirmRelay => {
+            | ExitForwardOperation::ConfirmRelay
+            | ExitForwardOperation::NativeProbePermit => {
                 validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
                 if self.exit_node_id == self.control_relay_node_id {
                     return Err(ForwardingRpcError::InvalidFrame);
@@ -757,6 +759,9 @@ fn validate_granted_responses(
         ExitForwardOperation::ConfirmRelay => {
             validate_exact_types(responses, &[ControlMessageType::ExitConfirmationReceipt])
         }
+        ExitForwardOperation::NativeProbePermit => {
+            validate_exact_types(responses, &[ControlMessageType::NativeProbePermit])
+        }
         ExitForwardOperation::Unspecified => Err(ForwardingRpcError::InvalidOperation(0)),
     }
 }
@@ -829,6 +834,7 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
             Ok(ControlMessageType::ExitReservationFinalizeRequest)
         }
         ExitForwardOperation::ConfirmRelay => Ok(ControlMessageType::ExitReservationConfirmation),
+        ExitForwardOperation::NativeProbePermit => Ok(ControlMessageType::NativeProbePermitRequest),
         ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => {
             Err(ForwardingRpcError::InvalidOperation(operation as i32))
         }
@@ -1055,6 +1061,10 @@ mod tests {
                 ExitForwardOperation::ConfirmRelay,
                 ControlMessageType::ExitReservationConfirmation,
             ),
+            (
+                ExitForwardOperation::NativeProbePermit,
+                ControlMessageType::NativeProbePermitRequest,
+            ),
         ] {
             let request = ExitForwardRequest::new(
                 vec![1; REQUEST_ID_LENGTH],
@@ -1212,6 +1222,38 @@ mod tests {
             )],
         );
         assert!(receipt.is_ok());
+
+        let native_exit_peer = identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+            .to_bytes();
+        let native_permit = ExitForwardResponse::granted(
+            vec![1; REQUEST_ID_LENGTH],
+            ExitForwardOperation::NativeProbePermit,
+            vec![2; NODE_ID_LENGTH],
+            native_exit_peer.clone(),
+            vec![envelope(ControlMessageType::NativeProbePermit, Vec::new())],
+        );
+        assert!(native_permit.is_ok());
+        for responses in [
+            Vec::new(),
+            vec![
+                envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+                envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+            ],
+            vec![envelope(ControlMessageType::RelayProbePermit, Vec::new())],
+        ] {
+            assert!(matches!(
+                ExitForwardResponse::granted(
+                    vec![1; REQUEST_ID_LENGTH],
+                    ExitForwardOperation::NativeProbePermit,
+                    vec![2; NODE_ID_LENGTH],
+                    native_exit_peer.clone(),
+                    responses,
+                ),
+                Err(ForwardingRpcError::InvalidFrame)
+            ));
+        }
     }
 
     fn advertisement_request() -> ExitForwardRequest {

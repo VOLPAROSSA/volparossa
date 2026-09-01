@@ -7,6 +7,8 @@ mod advertisements;
 mod connection_provenance;
 mod forwarding;
 mod peerlink;
+mod preselection_forwarder;
+mod preselection_responder;
 mod preselection_transaction;
 mod preselection_wire;
 mod reservations;
@@ -39,6 +41,7 @@ pub use advertisements::{
     advertisement_envelope_matches_peer,
 };
 use advertisements::{AdvertisementCodec, advertisement_behaviour};
+pub use connection_provenance::BoundNativeProbeControlConnection;
 use connection_provenance::{ConnectionProvenanceBehaviour, ConnectionProvenanceEvent};
 pub use forwarding::{
     EXIT_FORWARD_PROTOCOL, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_PROTOCOL,
@@ -51,9 +54,22 @@ use forwarding::{
     exit_forward_upstream_behaviour,
 };
 pub use peerlink::{PeerLink, PeerLinkError};
-use preselection_transaction::PreselectionTransactionState;
+use preselection_forwarder::PreselectionForwarderState;
+use preselection_responder::PreselectionResponderState;
+pub use preselection_responder::{
+    DirectPreselectionResponderError, LocalPreselectionPolicy, UpstreamPreselectionResponderError,
+};
 pub use preselection_transaction::{
-    BoundClientPreselectionTransport, ClientPreselectionDispatch, PreselectionDispatchError,
+    BoundClientPreselectionTransport, BoundUpstreamPreselectionTransport,
+    ClientPreselectionBindFailure, ClientPreselectionCancelFailure, ClientPreselectionDispatch,
+    ClientPreselectionDispatchFailure, ClientPreselectionResponseArrival,
+    ClientPreselectionTransaction, ClientPreselectionTransportFreshnessProof,
+    PreselectionDispatchError, UpstreamPreselectionDispatch, UpstreamPreselectionResponseArrival,
+    UpstreamPreselectionTransaction, consume_bound_client_preselection_transport_for_freshness,
+};
+use preselection_transaction::{
+    PreselectionTransactionState, client_request_has_local_target_from_distinct_sender,
+    upstream_request_has_authenticated_target,
 };
 use preselection_wire::{
     ClientPreselectionObservationCodec, UpstreamPreselectionObservationCodec,
@@ -229,9 +245,9 @@ pub struct DiscoveryBehaviour {
     connection_limits: connection_limits::Behaviour,
     /// Private, passive lineage for exact authenticated connection observations.
     connection_provenance: ConnectionProvenanceBehaviour,
-    /// Client-hop A1c behaviour for the dormant affine owner seam.
+    /// Client-hop A1c behaviour; the client-side outbound attempt owner remains absent.
     preselection_observation: request_response::Behaviour<ClientPreselectionObservationCodec>,
-    /// Callerless control-relay-to-exit A1c wire precursor.
+    /// Affine control-relay-to-exit A1c transport behaviour.
     preselection_observation_upstream:
         request_response::Behaviour<UpstreamPreselectionObservationCodec>,
     /// Peer protocol/address metadata.
@@ -369,14 +385,14 @@ pub enum BehaviourEvent {
     RelayServer(relay::Event),
     /// Advertisement protocol event.
     Advertisements(request_response::Event<AdvertisementRequest, AdvertisementResponse>),
-    /// Client-to-control/direct-relay preselection event for the dormant affine owner seam.
+    /// Client-hop A1c event; the client-side outbound attempt owner remains absent.
     PreselectionObservation(
         request_response::Event<
             ClientPreselectionObservationRequest,
             ClientPreselectionObservationResponse,
         >,
     ),
-    /// Callerless control-relay-to-exit preselection wire event.
+    /// Affine control-relay-to-exit preselection transport event.
     PreselectionObservationUpstream(
         request_response::Event<
             UpstreamPreselectionObservationRequest,
@@ -391,6 +407,23 @@ pub enum BehaviourEvent {
     ),
     /// Direct client-to-datapath-relay event.
     DatapathRelay(request_response::Event<DatapathRelayRequest, DatapathRelayResponse>),
+}
+
+/// Sanitized public discovery event.
+///
+/// Preselection request messages remain entirely service-owned. Responses for the exact active
+/// dispatch are replaced at the private swarm boundary by opaque, instance-bound arrival values;
+/// stale or unowned responses are dropped. Raw request/response events are never returned by a
+/// public event pump. All unrelated swarm events, including typed outbound failures, remain
+/// available unchanged through [`Self::Other`].
+#[non_exhaustive]
+pub enum DiscoveryEvent {
+    /// Service-sealed response to an outbound client-to-relay observation request.
+    ClientPreselectionResponse(ClientPreselectionResponseArrival),
+    /// Service-sealed response to an outbound relay-to-exit observation request.
+    UpstreamPreselectionResponse(UpstreamPreselectionResponseArrival),
+    /// Any event other than a preselection request or response message.
+    Other(libp2p::swarm::SwarmEvent<BehaviourEvent>),
 }
 
 impl From<identify::Event> for BehaviourEvent {
@@ -686,6 +719,8 @@ pub struct DiscoveryService {
     advertisement_budgets: AdvertisementBudgets,
     address_admissions: AddressAdmissions,
     protocol_roles: DiscoveryProtocolRoles,
+    preselection_forwarder: PreselectionForwarderState,
+    preselection_responder: PreselectionResponderState,
     preselection_transaction: PreselectionTransactionState,
 }
 
@@ -748,6 +783,9 @@ impl DiscoveryService {
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
             address_admissions: AddressAdmissions::default(),
+            preselection_forwarder: PreselectionForwarderState::new()
+                .map_err(|error| DiscoveryError::Build(error.to_string()))?,
+            preselection_responder: PreselectionResponderState::new(),
             preselection_transaction: PreselectionTransactionState::new(),
         })
     }
@@ -1126,6 +1164,33 @@ impl DiscoveryService {
             .send_request(exit_peer, request))
     }
 
+    /// Bind one native-Permit request to the exact authenticated inbound control connection.
+    ///
+    /// This is control-plane provenance only. It deliberately permits multiple peer connections
+    /// and relayed libp2p connectivity and grants no native-address or datapath authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a self connection, or stale, closed, foreign,
+    /// or otherwise untracked connection lineage.
+    pub fn bind_native_probe_control_connection(
+        &self,
+        authenticated_control_relay: PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+    ) -> Result<BoundNativeProbeControlConnection, DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        if authenticated_control_relay == *self.local_peer_id() {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour()
+            .connection_provenance
+            .bind_native_probe_control(authenticated_control_relay, connection_id)
+            .ok_or(DiscoveryError::ProtocolPeer)
+    }
+
     /// Sends one canonical exit response to the authenticated control relay.
     ///
     /// # Errors
@@ -1152,6 +1217,44 @@ impl DiscoveryService {
             .send_response(channel, response)
             .map_err(|_| {
                 DiscoveryError::Swarm("exit-forward-upstream response channel closed".into())
+            })
+    }
+
+    /// Consume exact authenticated connection lineage while handing one native Permit response
+    /// back to the originating request-response channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-native-Permit response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_permit_response(
+        &mut self,
+        connection: BoundNativeProbeControlConnection,
+        authenticated_control_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbePermit
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_control(connection, authenticated_control_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| {
+                DiscoveryError::Swarm("native-probe Permit response channel closed".into())
             })
     }
 
@@ -1207,8 +1310,70 @@ impl DiscoveryService {
     }
 
     /// Advances the real libp2p swarm and performs safe automatic protocol plumbing.
+    ///
+    /// Inbound preselection request events are service-owned and dropped. Responses for the exact
+    /// active outbound dispatch are sealed into opaque arrivals whose private instance identity
+    /// and arrival clocks are captured here; stale or unowned responses are dropped. Thus neither
+    /// raw request nor raw response messages cross the `DiscoveryService` boundary. Call
+    /// [`Self::next_event_with_preselection_responders`] to enable the role-gated direct-Relay and
+    /// upstream-Exit responders.
+    pub async fn next_event(&mut self) -> DiscoveryEvent {
+        // The generic pump cannot complete a role/policy-bound Relay forward. Cancel its affine
+        // owner before consuming or sanitising any later upstream response.
+        self.cancel_preselection_forwarding();
+        loop {
+            let event = self.next_internal_event().await;
+            if let Some(event) = self.sanitize_public_event(event) {
+                return event;
+            }
+        }
+    }
+
+    fn sanitize_public_event(
+        &self,
+        event: libp2p::swarm::SwarmEvent<BehaviourEvent>,
+    ) -> Option<DiscoveryEvent> {
+        match event {
+            libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
+                request_response::Event::Message {
+                    peer,
+                    connection_id,
+                    message:
+                        request_response::Message::Response {
+                            request_id,
+                            response,
+                        },
+                },
+            )) => self
+                .seal_client_preselection_response(peer, connection_id, request_id, response)
+                .ok()
+                .map(DiscoveryEvent::ClientPreselectionResponse),
+            libp2p::swarm::SwarmEvent::Behaviour(
+                BehaviourEvent::PreselectionObservationUpstream(request_response::Event::Message {
+                    peer,
+                    connection_id,
+                    message:
+                        request_response::Message::Response {
+                            request_id,
+                            response,
+                        },
+                }),
+            ) => self
+                .seal_upstream_preselection_response(peer, connection_id, request_id, response)
+                .ok()
+                .map(DiscoveryEvent::UpstreamPreselectionResponse),
+            event if inbound_preselection_request(&event) => None,
+            event => Some(DiscoveryEvent::Other(event)),
+        }
+    }
+
+    /// Private event pump for service-owned protocol handlers and transport-only unit proofs.
+    ///
+    /// Unlike [`Self::next_event`], this may yield inbound preselection request channels and raw
+    /// outbound preselection responses. It must therefore never become a public API or be called
+    /// by application owners.
     #[allow(clippy::too_many_lines, reason = "single composed swarm event pump")]
-    pub async fn next_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
+    async fn next_internal_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
         loop {
             let event = self.swarm.select_next_some().await;
             match event {
@@ -1307,6 +1472,38 @@ impl DiscoveryService {
                         {
                             continue;
                         }
+                        libp2p::swarm::SwarmEvent::Behaviour(
+                            BehaviourEvent::PreselectionObservation(
+                                request_response::Event::Message {
+                                    peer,
+                                    message: request_response::Message::Request { request, .. },
+                                    ..
+                                },
+                            ),
+                        ) if !client_request_has_local_target_from_distinct_sender(
+                            request,
+                            peer,
+                            self.local_peer_id(),
+                        ) =>
+                        {
+                            continue;
+                        }
+                        libp2p::swarm::SwarmEvent::Behaviour(
+                            BehaviourEvent::PreselectionObservationUpstream(
+                                request_response::Event::Message {
+                                    peer,
+                                    message: request_response::Message::Request { request, .. },
+                                    ..
+                                },
+                            ),
+                        ) if !upstream_request_has_authenticated_target(
+                            request,
+                            peer,
+                            self.local_peer_id(),
+                        ) =>
+                        {
+                            continue;
+                        }
                         libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                             kad::Event::OutboundQueryProgressed { id, step, .. },
                         )) if step.last => {
@@ -1364,6 +1561,24 @@ impl DiscoveryService {
         }
     }
 }
+
+fn inbound_preselection_request(event: &libp2p::swarm::SwarmEvent<BehaviourEvent>) -> bool {
+    matches!(
+        event,
+        libp2p::swarm::SwarmEvent::Behaviour(
+            BehaviourEvent::PreselectionObservation(request_response::Event::Message {
+                message: request_response::Message::Request { .. },
+                ..
+            }) | BehaviourEvent::PreselectionObservationUpstream(
+                request_response::Event::Message {
+                    message: request_response::Message::Request { .. },
+                    ..
+                }
+            )
+        )
+    )
+}
+
 fn forward_request_targets_local_relay(request: &ExitForwardRequest, local_peer: &PeerId) -> bool {
     peer_id_from_wire(request.control_relay_peer_id()).is_ok_and(|peer| peer == *local_peer)
 }

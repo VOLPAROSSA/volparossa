@@ -60,6 +60,20 @@ pub enum ControlMessageType {
     PreselectionObservationReceipt = 17,
     /// Control-signed upstream-prefix attestation containing one exact exit receipt.
     ForwardedPreselectionAttestation = 18,
+    /// Ephemeral-client-signed, endpoint-free request for one native preselection probe.
+    NativeProbePermitRequest = 19,
+    /// Exit-signed, endpoint-free authorization for one exact native preselection probe.
+    NativeProbePermit = 20,
+    /// Exit-signed endpoint pair delivered only to the exact data Relay.
+    NativeProbeExitReady = 21,
+    /// Relay-signed client-facing readiness carrying only its client-side endpoint.
+    NativeProbeRelayReady = 22,
+    /// Ephemeral-client-signed start carrying its endpoint only to the exact data Relay.
+    NativeProbeStart = 23,
+    /// Exit-signed endpoint-free result for one native probe challenge.
+    NativeProbeExitResult = 24,
+    /// Relay-signed endpoint-free result containing the exact nested Exit result.
+    NativeProbeRelayResult = 25,
 }
 
 /// Data transport authorized by a reservation.
