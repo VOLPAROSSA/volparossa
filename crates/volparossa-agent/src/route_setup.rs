@@ -40,7 +40,7 @@ use tokio::{
     sync::{Mutex, oneshot, watch},
     time::{Instant, timeout},
 };
-use volparossa_config::{ClientAddressFamily, Config};
+use volparossa_config::{ClientAddressFamily, Config, TcpTransport};
 use volparossa_core::{
     Bandwidth, IpFamily, NodeId, ObservedNetworkPrefix, OperatorId, ServiceRole,
     Transport as SelectionTransport, UnixTime,
@@ -87,7 +87,9 @@ use volparossa_wireguard::overlay_addresses;
 use volparossa_wireguard::{HelperContextHandle, PublicWireGuardEndpoint};
 
 use crate::{
-    client_ingress::{PolicyAuthorizedUdpIngress, RouteAuthorizedUdpIngress},
+    client_ingress::{
+        PolicyAuthorizedTcpIngress, PolicyAuthorizedUdpIngress, RouteAuthorizedUdpIngress,
+    },
     discovery::{
         AdvertisementPayloadHash, ClientPreselectionError, ClientPreselectionParameters,
         DirectRelayCapability, DiscoveryControlHandle, ForwardedExitCapability,
@@ -229,6 +231,28 @@ pub(crate) enum ClientRouteConnectError {
 }
 
 impl ClientRouteControl {
+    /// Select and establish one normal relay-only MPTCP route for transparent TCP ingress.
+    ///
+    /// The transport-specific view prevents an enabled UDP profile from changing this TCP flow
+    /// into a different route type. It does not enable any direct-Exit or ordinary-TCP path.
+    pub(crate) async fn connect_tcp(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !config.tcp.enabled
+            || config.tcp.transport != TcpTransport::Mptcp
+            || config.tcp.allow_plain_tcp_fallback
+        {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        let mut tcp_profile = config.clone();
+        tcp_profile.udp.enabled = false;
+        tcp_profile.quic.enabled = false;
+        Box::pin(self.connect(&tcp_profile, discovery, helper)).await
+    }
+
     /// Starts exactly one config-bound preselection and retains its affine continuation.
     pub(crate) async fn connect(
         &self,
@@ -299,6 +323,22 @@ impl ClientRouteControl {
         {
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
+        self.activate_tcp_destination(
+            policy,
+            ClientTcpDestination::Hostname(hostname.to_owned()),
+            port,
+            now_ms,
+        )
+        .await
+    }
+
+    async fn activate_tcp_destination(
+        &self,
+        policy: &VerifiedManifest,
+        destination: ClientTcpDestination,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         let previous = {
             let mut state = self.state.lock().await;
             std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
@@ -330,7 +370,7 @@ impl ClientRouteControl {
                 return Err(ClientRouteConnectError::Busy);
             }
         };
-        let material = match client_open_tcp_material(&route, policy, hostname, port, now_ms) {
+        let material = match client_open_tcp_material(&route, policy, &destination, port, now_ms) {
             Ok(material) => material,
             Err(error) => {
                 let mut state = self.state.lock().await;
@@ -373,6 +413,74 @@ impl ClientRouteControl {
                 Err(ClientRouteConnectError::TransportRuntimeUnavailable)
             }
         }
+    }
+
+    /// Bind one accepted kernel-observed TCP stream, sign its exact raw-IP tuple, and proxy it
+    /// over the already selected genuine MPTCP/TLS route with fixed backpressure limits.
+    pub(crate) async fn run_tcp_ingress(
+        &self,
+        ingress: PolicyAuthorizedTcpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<(), ClientRouteConnectError> {
+        let (application, destination) = ingress
+            .into_route_parts(policy, now_ms)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        self.activate_tcp_destination(
+            policy,
+            ClientTcpDestination::Ip(destination.ip()),
+            destination.port(),
+            now_ms,
+        )
+        .await?;
+        self.proxy_tcp_application(application).await
+    }
+
+    async fn proxy_tcp_application(
+        &self,
+        application: tokio::net::TcpStream,
+    ) -> Result<(), ClientRouteConnectError> {
+        let previous = {
+            let mut state = self.state.lock().await;
+            std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
+        };
+        let established = match previous {
+            ClientRouteControlState::Established(established) => established,
+            other => {
+                let mut state = self.state.lock().await;
+                *state = other;
+                return Err(ClientRouteConnectError::Busy);
+            }
+        };
+        let EstablishedClientRoute {
+            transport,
+            route,
+            orchestrator,
+            helper,
+        } = *established;
+        let (flow, route) = match (transport, route) {
+            (ClientTransportState::TcpActive(flow), Some(route)) => (flow, route),
+            (transport, route) => {
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    transport,
+                    route,
+                    orchestrator,
+                    helper,
+                }));
+                return Err(ClientRouteConnectError::Busy);
+            }
+        };
+
+        let transfer = flow.proxy_application(&helper, application).await;
+        let route_cleanup = route.disconnect().await;
+        let orchestrator_cleanup = orchestrator.shutdown().await;
+        let mut state = self.state.lock().await;
+        *state = ClientRouteControlState::Idle;
+        if transfer.is_err() || route_cleanup.is_err() || orchestrator_cleanup.is_err() {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        Ok(())
     }
 
     /// Write one bounded payload chunk to the active protected TCP stream.
@@ -553,10 +661,15 @@ struct ClientOpenTcpMaterial {
     signed_open_tcp: Vec<u8>,
 }
 
+enum ClientTcpDestination {
+    Hostname(String),
+    Ip(IpAddr),
+}
+
 fn client_open_tcp_material(
     route: &ProductionRoute,
     policy: &VerifiedManifest,
-    hostname: &str,
+    destination: &ClientTcpDestination,
     port: u16,
     now_ms: u64,
 ) -> Result<ClientOpenTcpMaterial, ClientRouteConnectError> {
@@ -600,17 +713,25 @@ fn client_open_tcp_material(
         .as_ref()
         .and_then(PreparedContextOwner::protocol)
         .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
-    let signed_open_tcp = coordinator
-        .coordinator
-        .sign_open_tcp(
+    let signed_open_tcp = match destination {
+        ClientTcpDestination::Hostname(hostname) => coordinator.coordinator.sign_open_tcp(
             *verified_route.route_context_id(),
             *policy.policy_hash(),
             hostname,
             port,
             now_ms,
             expires_at_ms,
-        )
-        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        ),
+        ClientTcpDestination::Ip(address) => coordinator.coordinator.sign_open_tcp_ip(
+            *verified_route.route_context_id(),
+            *policy.policy_hash(),
+            *address,
+            port,
+            now_ms,
+            expires_at_ms,
+        ),
+    }
+    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
     Ok(ClientOpenTcpMaterial {
         route: verified_route,
         certificate_sha256,

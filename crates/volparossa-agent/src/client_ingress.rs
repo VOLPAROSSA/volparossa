@@ -2,20 +2,22 @@
 
 #![allow(
     dead_code,
-    reason = "the adjacent production UDP route actor consumes this complete ingress activation seam"
+    reason = "the production TCP and UDP route actors consume this complete ingress activation seam"
 )]
 
 use std::{
     io,
     net::{IpAddr, SocketAddr, SocketAddrV4},
+    os::fd::OwnedFd,
 };
 
 use rand_core::{OsRng, RngCore as _};
 use subtle::ConstantTimeEq as _;
 use thiserror::Error;
+use tokio::net::{TcpListener, TcpStream};
 use volparossa_linux_uapi::{
     IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
-    duplicate_descriptor_cloexec, receive_udp_with_original_destination,
+    duplicate_descriptor_cloexec, receive_udp_with_original_destination, tcp_original_destination,
 };
 use volparossa_policy::{PolicyError, TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{ReplayCache, TimePolicy};
@@ -39,6 +41,16 @@ const INGRESS_SETUP_TTL_SECONDS: u64 = 30;
 const INGRESS_HARD_TTL_SECONDS: u64 = 15 * 60;
 const INGRESS_UDP_IDLE_TIMEOUT_MS: u32 = 30_000;
 const INGRESS_UDP_FLOW_TTL_MS: u64 = 60_000;
+const INGRESS_TCP_FLOW_TTL_MS: u64 = 60_000;
+
+const IPV4_TRANSPARENT_TCP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
+    ClientIngressSocketKind::TransparentTcpListener,
+    ClientIngressSocketFamily::Ipv4,
+);
+const IPV6_TRANSPARENT_TCP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
+    ClientIngressSocketKind::TransparentTcpListener,
+    ClientIngressSocketFamily::Ipv6,
+);
 
 const IPV4_TRANSPARENT_UDP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
     ClientIngressSocketKind::TransparentUdp,
@@ -109,6 +121,34 @@ impl ClientIngressRuntime {
         Ok(Self { helper, active })
     }
 
+    /// Duplicate both helper-owned transparent TCP listeners into Tokio readiness owners.
+    ///
+    /// The active ingress capability retains the originals. Each duplicate preserves the
+    /// nonblocking file status and is close-on-exec; every accepted stream is independently
+    /// revalidated before its kernel-recorded original destination is exposed.
+    pub(crate) fn transparent_tcp_listeners(
+        &self,
+    ) -> Result<[ClientTcpIngressListener; 2], ClientIngressTcpError> {
+        Ok([
+            self.transparent_tcp_listener(IPV4_TRANSPARENT_TCP, KernelIngressSocketFamily::Ipv4)?,
+            self.transparent_tcp_listener(IPV6_TRANSPARENT_TCP, KernelIngressSocketFamily::Ipv6)?,
+        ])
+    }
+
+    fn transparent_tcp_listener(
+        &self,
+        identity: ClientIngressSocketIdentity,
+        family: KernelIngressSocketFamily,
+    ) -> Result<ClientTcpIngressListener, ClientIngressTcpError> {
+        let socket = self
+            .active
+            .socket(identity)
+            .ok_or(ClientIngressTcpError::DescriptorUnavailable)?;
+        let descriptor = duplicate_descriptor_cloexec(&socket.descriptor())
+            .map_err(ClientIngressTcpError::Duplicate)?;
+        ClientTcpIngressListener::from_descriptor(descriptor, family)
+    }
+
     /// Try to receive one IPv4 application datagram and bind its immutable destination to policy.
     ///
     /// The descriptor is nonblocking. `WouldBlock` is returned unchanged so an actor can wait for
@@ -145,9 +185,7 @@ impl ClientIngressRuntime {
         )
     }
 
-    pub(crate) fn duplicate_ipv4_udp_poll_descriptor(
-        &self,
-    ) -> Result<std::os::fd::OwnedFd, io::Error> {
+    pub(crate) fn duplicate_ipv4_udp_poll_descriptor(&self) -> Result<OwnedFd, io::Error> {
         let socket = self.active.socket(IPV4_TRANSPARENT_UDP).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "IPv4 UDP ingress unavailable")
         })?;
@@ -181,6 +219,127 @@ impl ClientIngressRuntime {
             .map(|_| ())
             .map_err(ClientIngressRuntimeError::Destroy)
     }
+}
+
+/// One readiness owner for an exact helper-created transparent TCP listener.
+pub(crate) struct ClientTcpIngressListener {
+    listener: TcpListener,
+    family: KernelIngressSocketFamily,
+}
+
+impl ClientTcpIngressListener {
+    fn from_descriptor(
+        descriptor: OwnedFd,
+        family: KernelIngressSocketFamily,
+    ) -> Result<Self, ClientIngressTcpError> {
+        let listener = std::net::TcpListener::from(descriptor);
+        listener
+            .set_nonblocking(true)
+            .map_err(ClientIngressTcpError::Duplicate)?;
+        Ok(Self {
+            listener: TcpListener::from_std(listener).map_err(ClientIngressTcpError::Duplicate)?,
+            family,
+        })
+    }
+
+    /// Accept one application stream and recover its immutable kernel original destination.
+    pub(crate) async fn accept(&self) -> Result<ObservedTcpIngress, ClientIngressTcpError> {
+        let (stream, _source) = self
+            .listener
+            .accept()
+            .await
+            .map_err(ClientIngressTcpError::Accept)?;
+        let destination = tcp_original_destination(&stream, self.family)
+            .map_err(ClientIngressTcpError::OriginalDestination)?;
+        Ok(ObservedTcpIngress {
+            stream,
+            destination,
+        })
+    }
+}
+
+/// One accepted transparent stream whose destination came only from kernel TPROXY evidence.
+#[must_use = "an observed TCP ingress stream must be policy-bound or dropped"]
+pub(crate) struct ObservedTcpIngress {
+    stream: TcpStream,
+    destination: SocketAddr,
+}
+
+impl ObservedTcpIngress {
+    /// Bind the exact observed raw-IP tuple to the currently active signed manifest.
+    pub(crate) fn authorize(
+        self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<PolicyAuthorizedTcpIngress, ClientIngressTcpError> {
+        let (policy_hash, expires_at_ms) =
+            authorize_tcp_destination(self.destination, policy, now_ms)?;
+        Ok(PolicyAuthorizedTcpIngress {
+            stream: self.stream,
+            destination: self.destination,
+            policy_hash,
+            expires_at_ms,
+        })
+    }
+}
+
+/// Affine application stream bound to one exact raw-IP policy authorization.
+#[must_use = "a policy-authorized TCP ingress stream must be route-bound or dropped"]
+pub(crate) struct PolicyAuthorizedTcpIngress {
+    stream: TcpStream,
+    destination: SocketAddr,
+    policy_hash: [u8; 32],
+    expires_at_ms: u64,
+}
+
+impl PolicyAuthorizedTcpIngress {
+    /// Recheck the immutable policy binding immediately before signing `OPEN_TCP`.
+    pub(crate) fn into_route_parts(
+        self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<(TcpStream, SocketAddr), ClientIngressTcpError> {
+        if now_ms >= self.expires_at_ms
+            || self.policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() != 1
+        {
+            return Err(ClientIngressTcpError::PolicyBinding);
+        }
+        policy
+            .authorize_ip(
+                now_ms,
+                self.destination.ip(),
+                TransportProtocol::Tcp,
+                self.destination.port(),
+            )
+            .map_err(ClientIngressTcpError::Policy)?;
+        Ok((self.stream, self.destination))
+    }
+}
+
+fn authorize_tcp_destination(
+    destination: SocketAddr,
+    policy: &VerifiedManifest,
+    now_ms: u64,
+) -> Result<([u8; 32], u64), ClientIngressTcpError> {
+    if destination.ip().is_unspecified() || destination.port() == 0 {
+        return Err(ClientIngressTcpError::DestinationBinding);
+    }
+    policy
+        .authorize_ip(
+            now_ms,
+            destination.ip(),
+            TransportProtocol::Tcp,
+            destination.port(),
+        )
+        .map_err(ClientIngressTcpError::Policy)?;
+    let expires_at_ms = now_ms
+        .checked_add(INGRESS_TCP_FLOW_TTL_MS)
+        .ok_or(ClientIngressTcpError::Clock)?
+        .min(policy.expires_at_ms());
+    if expires_at_ms <= now_ms {
+        return Err(ClientIngressTcpError::Clock);
+    }
+    Ok((*policy.policy_hash(), expires_at_ms))
 }
 
 /// One kernel-observed UDP datagram whose exact raw-IP tuple passed the active policy.
@@ -368,6 +527,26 @@ pub(crate) enum ClientIngressRuntimeError {
 }
 
 #[derive(Debug, Error)]
+pub(crate) enum ClientIngressTcpError {
+    #[error("transparent TCP ingress descriptor is unavailable")]
+    DescriptorUnavailable,
+    #[error("transparent TCP listener duplication failed")]
+    Duplicate(#[source] io::Error),
+    #[error("transparent TCP accept failed")]
+    Accept(#[source] io::Error),
+    #[error("transparent TCP original destination recovery failed")]
+    OriginalDestination(#[source] io::Error),
+    #[error("transparent TCP destination was denied by policy")]
+    Policy(#[source] PolicyError),
+    #[error("transparent TCP authorization lifetime is invalid")]
+    Clock,
+    #[error("transparent TCP policy binding changed before activation")]
+    PolicyBinding,
+    #[error("transparent TCP destination binding is invalid")]
+    DestinationBinding,
+}
+
+#[derive(Debug, Error)]
 pub(crate) enum ClientIngressUdpError {
     #[error("IPv4 transparent UDP ingress descriptor is unavailable")]
     DescriptorUnavailable,
@@ -407,7 +586,30 @@ mod tests {
     use volparossa_test_support::{SignedRouteFixture, verified_development_manifest};
     use volparossa_udp::VerifiedSingleRelayPath;
 
-    use super::PolicyAuthorizedUdpIngress;
+    use super::{PolicyAuthorizedUdpIngress, authorize_tcp_destination};
+
+    #[test]
+    fn transparent_tcp_destination_is_bound_to_exact_raw_ip_policy() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        let destination = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 443));
+        let permission =
+            ProtocolPort::new(TransportProtocol::Tcp, destination.port()).expect("TCP permission");
+        let rule = DestinationRule::exact_ip(destination.ip(), [permission]).expect("IP rule");
+        let policy = verified_development_manifest(NOW_MS, vec![rule]).expect("policy");
+
+        let (policy_hash, expires_at_ms) =
+            authorize_tcp_destination(destination, &policy, NOW_MS).expect("authorized TCP");
+        assert_eq!(policy_hash, *policy.policy_hash());
+        assert!(expires_at_ms > NOW_MS);
+        assert!(
+            authorize_tcp_destination(
+                SocketAddr::from((Ipv4Addr::new(93, 184, 216, 35), 443)),
+                &policy,
+                NOW_MS,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn ipv4_udp_ingress_becomes_one_exact_policy_and_route_bound_flow() {

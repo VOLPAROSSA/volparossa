@@ -559,6 +559,51 @@ impl ReservationCoordinator {
             timestamp_ms,
             expires_at_ms,
             nonce: nonce.to_vec(),
+            destination_ip: Vec::new(),
+        };
+        sign_control_message(
+            &message,
+            &self.session_key,
+            timestamp_ms,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(CoordinatorError::from)
+    }
+
+    /// Sign one policy-bound raw-IP TCP flow with this fresh route-attempt session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid port, scope, lifetime, or canonical signature frame.
+    pub fn sign_open_tcp_ip(
+        &self,
+        route_context_id: [u8; ID_BYTES],
+        policy_hash: [u8; KEY_BYTES],
+        destination_ip: IpAddr,
+        port: u16,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if timestamp_ms >= expires_at_ms {
+            return Err(CoordinatorError::Scope("TCP flow lifetime"));
+        }
+        let nonce = generate_nonce();
+        let message = OpenTcp {
+            route_context_id: route_context_id.to_vec(),
+            flow_id: random_nonzero_id().to_vec(),
+            client_ephemeral_id: self.client_session_id.to_vec(),
+            hostname: String::new(),
+            port: u32::from(port),
+            policy_hash: policy_hash.to_vec(),
+            timestamp_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+            destination_ip: match destination_ip {
+                IpAddr::V4(address) => address.octets().to_vec(),
+                IpAddr::V6(address) => address.octets().to_vec(),
+            },
         };
         sign_control_message(
             &message,
@@ -1969,7 +2014,7 @@ mod tests {
         ClientSessionCapability, ControlMessageType, ExitCapacityHold, ExitCapacityHoldRequest,
         ExitConfirmationReceipt, ExitReservation, ExitReservationFinalizeRequest,
         MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NATIVE_ROUTE_AUTH_BEARER_LENGTH,
-        NativeRouteIdentity, PROTOCOL_VERSION, ProbeAddressFamily, ProbeLegEvidence,
+        NativeRouteIdentity, OpenTcp, PROTOCOL_VERSION, ProbeAddressFamily, ProbeLegEvidence,
         RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
         ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
         exit_confirmation_envelope_hash, generate_nonce, native_route_auth_commitment,
@@ -1987,6 +2032,26 @@ mod tests {
     };
 
     const NOW: u64 = 1_700_000_000_000;
+
+    #[test]
+    fn raw_ip_open_tcp_is_signed_with_the_exact_destination_bytes() {
+        let coordinator = ReservationCoordinator::new(8).unwrap();
+        let destination = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let encoded = coordinator
+            .sign_open_tcp_ip([1; 16], [2; 32], destination, 443, NOW, NOW + 60_000)
+            .unwrap();
+        let mut replay = ReplayCache::new(2).unwrap();
+        let verified = verify_control_message::<OpenTcp>(
+            &encoded,
+            NOW + 1,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .unwrap();
+        assert!(verified.message().hostname.is_empty());
+        assert_eq!(verified.message().destination_ip, vec![93, 184, 216, 34]);
+        assert_eq!(verified.message().port, 443);
+    }
 
     #[test]
     fn coordinators_generate_distinct_route_attempt_sessions_and_hold_has_no_relays() {

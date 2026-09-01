@@ -7,14 +7,14 @@ use rustls::RootCertStore;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::time;
+use tokio::{net::TcpStream, time};
 use volparossa_exit::{
     ActiveTcpEgressRoute, ActiveTcpRoute, ExitNativeRouteAuthorization, ExitService,
     TcpEgressLimits,
 };
 use volparossa_tcp_proxy::{
     StreamTransferLimits, StreamTransferStats, Tls13MptcpClient, Tls13MptcpServer,
-    Tls13MptcpStream, VerifiedMptcpRoute, write_open_tcp,
+    Tls13MptcpStream, VerifiedMptcpRoute, proxy_bidirectional, write_open_tcp,
 };
 
 use crate::{
@@ -284,6 +284,34 @@ impl ActiveProductionMptcpClientFlow {
         drop(self.stream);
         self.endpoint_cleanup.shutdown(helper).await
     }
+
+    /// Proxy one accepted local application stream over the already authenticated MPTCP/TLS
+    /// connection with the same fixed buffer, byte and idle limits enforced at the Exit.
+    pub(crate) async fn proxy_application(
+        self,
+        helper: &HelperClient,
+        application: TcpStream,
+    ) -> Result<StreamTransferStats, ProductionMptcpClientError> {
+        let limits = StreamTransferLimits::new(
+            STREAM_BUFFER_BYTES,
+            MAXIMUM_DIRECTIONAL_BYTES,
+            MAXIMUM_DIRECTIONAL_BYTES,
+            STREAM_IDLE_TIMEOUT,
+        )
+        .map_err(|_| ProductionMptcpClientError::Stream)?;
+        let Self {
+            stream,
+            endpoint_cleanup,
+        } = self;
+        let transfer = proxy_bidirectional(application, stream, limits)
+            .await
+            .map_err(|_| ProductionMptcpClientError::Stream);
+        endpoint_cleanup
+            .shutdown(helper)
+            .await
+            .map_err(|_| ProductionMptcpClientError::Transport)?;
+        transfer
+    }
 }
 
 /// Wrap one helper-owned genuine MPTCP connection in pinned TLS 1.3 and write `OPEN_TCP`.
@@ -398,6 +426,8 @@ pub(crate) enum ProductionMptcpClientError {
     Tls,
     #[error("signed OPEN_TCP transmission failed")]
     OpenTcp,
+    #[error("bounded application stream proxy failed")]
+    Stream,
 }
 
 impl From<MptcpTransportError> for ProductionMptcpClientError {

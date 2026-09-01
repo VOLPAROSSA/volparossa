@@ -47,7 +47,7 @@ use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
 
-use client_ingress::{ClientIngressRuntime, ClientIngressUdpError};
+use client_ingress::{ClientIngressRuntime, ClientIngressTcpError, ClientIngressUdpError};
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
 use helper::HelperClient;
@@ -201,14 +201,16 @@ impl Agent {
             self.metrics.clone(),
             shutdown_tx.subscribe(),
         ));
-        let ingress_state = Arc::clone(&self.state);
-        let ingress_runtime = client_ingress.as_ref().map(Arc::clone);
-        let mut ingress_task = tokio::spawn(run_client_udp_ingress(
-            ingress_runtime,
-            ingress_state,
+        let (mut tcp_ingress_task, mut ingress_task) = spawn_client_ingress_tasks(
+            client_ingress.as_ref().map(Arc::clone),
+            Arc::clone(&self.state),
+            Arc::clone(&self.config),
+            self.discovery_control.clone(),
+            self.helper.clone(),
+            routes.clone(),
             routes,
-            shutdown_tx.subscribe(),
-        ));
+            &shutdown_tx,
+        );
 
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
@@ -225,6 +227,7 @@ impl Agent {
                 Ok(Ok(())) | Err(_) => Err(AgentError::Task),
             },
             _ = &mut ingress_task => Err(AgentError::Task),
+            _ = &mut tcp_ingress_task => Err(AgentError::Task),
         };
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
@@ -232,6 +235,7 @@ impl Agent {
         stop_task(&mut maintenance_task).await;
         stop_task(&mut metrics_task).await;
         stop_task(&mut ingress_task).await;
+        stop_task(&mut tcp_ingress_task).await;
         drop(socket_guard);
 
         if let Some(client_ingress) = client_ingress {
@@ -252,6 +256,143 @@ impl Agent {
                 .map_err(|_| AgentError::ShutdownCleanup)?;
         }
         run_result
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ingress actors share one exact production dependency set"
+)]
+fn spawn_client_ingress_tasks(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    tcp_routes: ClientRouteControl,
+    udp_routes: ClientRouteControl,
+    shutdown: &watch::Sender<bool>,
+) -> (JoinHandle<()>, JoinHandle<()>) {
+    let tcp = tokio::spawn(run_client_tcp_ingress(
+        runtime.clone(),
+        Arc::clone(&state),
+        config,
+        discovery,
+        helper,
+        tcp_routes,
+        shutdown.subscribe(),
+    ));
+    let udp = tokio::spawn(run_client_udp_ingress(
+        runtime,
+        state,
+        udp_routes,
+        shutdown.subscribe(),
+    ));
+    (tcp, udp)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "complete production TCP ingress dependencies"
+)]
+async fn run_client_tcp_ingress(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let Some(runtime) = runtime else {
+        wait_for_shutdown(&mut shutdown).await;
+        return;
+    };
+    let Ok([ipv4, ipv6]) = runtime.transparent_tcp_listeners() else {
+        state.write().await.log(
+            LogLevel::Error,
+            "INGRESS_TCP_LISTENER_FAILED",
+            unix_millis(),
+        );
+        return;
+    };
+
+    loop {
+        let observed = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            result = ipv4.accept() => result,
+            result = ipv6.accept() => result,
+        };
+        let observed = match observed {
+            Ok(observed) => observed,
+            Err(ClientIngressTcpError::OriginalDestination(_)) => {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_TCP_DESTINATION_REJECTED",
+                    unix_millis(),
+                );
+                continue;
+            }
+            Err(_) => {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "INGRESS_TCP_ACCEPT_FAILED", unix_millis());
+                tokio::time::sleep(INGRESS_POLICY_BACKOFF).await;
+                continue;
+            }
+        };
+        let now_ms = unix_millis();
+        let Some(policy) = state.read().await.active_policy(now_ms) else {
+            continue;
+        };
+        let ingress = match observed.authorize(&policy, now_ms) {
+            Ok(ingress) => ingress,
+            Err(ClientIngressTcpError::Policy(_)) => {
+                state.write().await.record_policy_rejection();
+                continue;
+            }
+            Err(_) => {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "INGRESS_TCP_FLOW_REJECTED", unix_millis());
+                continue;
+            }
+        };
+
+        if Box::pin(routes.connect_tcp(&config, &discovery, &helper))
+            .await
+            .is_err()
+        {
+            state.write().await.log(
+                LogLevel::Warn,
+                "INGRESS_TCP_ROUTE_UNAVAILABLE",
+                unix_millis(),
+            );
+            continue;
+        }
+        let activation_ms = unix_millis();
+        let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+            routes.disconnect().await;
+            continue;
+        };
+        if routes
+            .run_tcp_ingress(ingress, &active_policy, activation_ms)
+            .await
+            .is_err()
+        {
+            routes.disconnect().await;
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, "INGRESS_TCP_STREAM_FAILED", unix_millis());
+        }
     }
 }
 

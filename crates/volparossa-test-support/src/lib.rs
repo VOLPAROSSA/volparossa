@@ -650,6 +650,7 @@ impl SignedRouteFixture {
             timestamp_ms: now_ms,
             expires_at_ms,
             nonce: nonce.to_vec(),
+            destination_ip: Vec::new(),
         };
         sign_control_message(
             &payload,

@@ -31,7 +31,7 @@ pub use reservation_v4::{
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
 
@@ -2013,20 +2013,30 @@ where
 }
 
 async fn resolve_and_connect(
-    hostname: &str,
+    hostname: Option<&str>,
+    destination_ip: Option<IpAddr>,
     port: u16,
     dns_timeout: Duration,
     connect_timeout: Duration,
 ) -> Result<TcpStream, ExitError> {
-    let resolved = time::timeout(dns_timeout, lookup_host((hostname, port)))
-        .await
-        .map_err(|_| ExitError::EgressTimeout("DNS"))??;
-    let mut addresses = Vec::new();
-    for address in resolved.take(MAX_DNS_RESULTS) {
-        if permitted_egress(address.ip()) && !addresses.contains(&address) {
-            addresses.push(address);
+    let addresses = if let Some(destination_ip) = destination_ip {
+        if !permitted_egress(destination_ip) || hostname.is_some() {
+            return Err(ExitError::ResolutionFailed);
         }
-    }
+        vec![SocketAddr::new(destination_ip, port)]
+    } else {
+        let hostname = hostname.ok_or(ExitError::ResolutionFailed)?;
+        let resolved = time::timeout(dns_timeout, lookup_host((hostname, port)))
+            .await
+            .map_err(|_| ExitError::EgressTimeout("DNS"))??;
+        let mut addresses = Vec::new();
+        for address in resolved.take(MAX_DNS_RESULTS) {
+            if permitted_egress(address.ip()) && !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
+        addresses
+    };
     if addresses.is_empty() {
         return Err(ExitError::ResolutionFailed);
     }
@@ -2061,10 +2071,11 @@ where
     flow.ensure_active_at(now_ms)?;
     policy.ensure_active_at(now_ms)?;
 
-    let initial = if flow.port() == 443 {
+    let initial = if flow.port() == 443 && flow.destination_ip().is_none() {
+        let hostname = flow.hostname().ok_or(ExitError::ResolutionFailed)?;
         match time::timeout(
             limits.client_hello_timeout,
-            read_client_hello_prefix(&mut protected_client, flow.hostname()),
+            read_client_hello_prefix(&mut protected_client, hostname),
         )
         .await
         {
@@ -2088,6 +2099,7 @@ where
 
     let mut destination = resolve_and_connect(
         flow.hostname(),
+        flow.destination_ip(),
         flow.port(),
         limits.dns_timeout,
         limits.connect_timeout,
@@ -3843,7 +3855,7 @@ mod tests {
             .await
             .expect("authorized flow");
         writer.await.unwrap().unwrap();
-        assert_eq!(flow.hostname(), "allowed.example");
+        assert_eq!(flow.hostname(), Some("allowed.example"));
         assert_eq!(flow.port(), 80);
         service.release(&reservation_id).unwrap();
     }

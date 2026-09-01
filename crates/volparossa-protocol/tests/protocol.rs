@@ -2728,6 +2728,7 @@ fn open_tcp(signing_key: &SigningKey, nonce: [u8; 32]) -> OpenTcp {
         timestamp_ms: NOW,
         expires_at_ms: EXPIRY,
         nonce: nonce.to_vec(),
+        destination_ip: Vec::new(),
     }
 }
 
@@ -3174,6 +3175,50 @@ fn canonical_decode_rejects_unknown_and_duplicate_representations() {
     assert!(matches!(
         decode_canonical::<OpenTcp>(&encoded, MAX_CONTROL_PAYLOAD_SIZE),
         Err(ProtocolError::NonCanonical)
+    ));
+}
+
+#[test]
+fn open_tcp_accepts_exactly_one_canonical_dns_or_ip_destination() {
+    let signing_key = key(7);
+    let mut ip_message = open_tcp(&signing_key, [81; 32]);
+    ip_message.hostname.clear();
+    ip_message.destination_ip = vec![93, 184, 216, 34];
+    sign_control_message(
+        &ip_message,
+        &signing_key,
+        NOW,
+        EXPIRY,
+        [81; 32],
+        TimePolicy::default(),
+    )
+    .expect("raw-IP OPEN_TCP");
+
+    ip_message.hostname = "www.example.com".to_owned();
+    assert!(matches!(
+        sign_control_message(
+            &ip_message,
+            &signing_key,
+            NOW,
+            EXPIRY,
+            [81; 32],
+            TimePolicy::default(),
+        ),
+        Err(ProtocolError::InvalidField("open_tcp destination"))
+    ));
+
+    ip_message.hostname.clear();
+    ip_message.destination_ip.clear();
+    assert!(matches!(
+        sign_control_message(
+            &ip_message,
+            &signing_key,
+            NOW,
+            EXPIRY,
+            [81; 32],
+            TimePolicy::default(),
+        ),
+        Err(ProtocolError::InvalidField("open_tcp destination"))
     ));
 }
 #[test]

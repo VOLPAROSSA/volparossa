@@ -603,6 +603,8 @@ pub struct OpenTcp {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "9")]
     pub nonce: Vec<u8>,
+    #[prost(bytes = "vec", tag = "10")]
+    pub destination_ip: Vec<u8>,
 }
 
 /// Client-signed authorization pinning one UDP flow to one destination tuple.
@@ -1140,7 +1142,14 @@ impl ControlPayload for OpenTcp {
             &self.client_ephemeral_id,
             "open_tcp.client_ephemeral_id",
         )?;
-        validate_canonical_hostname(&self.hostname)?;
+        match (self.hostname.is_empty(), self.destination_ip.is_empty()) {
+            (false, true) => validate_canonical_hostname(&self.hostname)?,
+            (true, false) => {
+                parse_ip_bytes(&self.destination_ip)
+                    .ok_or(ProtocolError::InvalidField("open_tcp.destination_ip"))?;
+            }
+            _ => return Err(ProtocolError::InvalidField("open_tcp destination")),
+        }
         validate_port(self.port, "open_tcp.port")?;
         require_nonzero_length::<HASH_LENGTH>(&self.policy_hash, "open_tcp.policy_hash")?;
         require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "open_tcp.nonce")?;
