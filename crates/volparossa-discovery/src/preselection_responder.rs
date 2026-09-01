@@ -39,9 +39,9 @@ const MAX_REQUEST_TOMBSTONES_PER_PEER: usize = 16;
 /// protocol direction, a current authenticated connection, and an exact request binding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalPreselectionPolicy {
-    version: u64,
-    hash: [u8; 32],
-    expires_at_ms: u64,
+    pub(super) version: u64,
+    pub(super) hash: [u8; 32],
+    pub(super) expires_at_ms: u64,
 }
 
 impl LocalPreselectionPolicy {
@@ -134,7 +134,7 @@ pub enum UpstreamPreselectionResponderError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TombstoneError {
+pub(super) enum TombstoneError {
     Replay,
     ResourceLimit,
     Time,
@@ -143,6 +143,24 @@ enum TombstoneError {
 struct RequestTombstone {
     authenticated_peer: PeerId,
     expires_at: Instant,
+}
+
+/// Exact newly inserted replay record that has not crossed its no-failure send boundary yet.
+#[must_use = "a tentative request tombstone must be committed or rolled back"]
+pub(super) struct TentativeRequestTombstone {
+    request_hash: [u8; 32],
+    authenticated_peer: PeerId,
+    expires_at: Instant,
+}
+
+impl TentativeRequestTombstone {
+    pub(super) fn commit(self) {
+        let Self {
+            request_hash: _,
+            authenticated_peer: _,
+            expires_at: _,
+        } = self;
+    }
 }
 
 pub(super) struct PreselectionResponderState {
@@ -156,7 +174,7 @@ impl PreselectionResponderState {
         }
     }
 
-    fn reserve(
+    pub(super) fn reserve(
         &mut self,
         request_hash: [u8; 32],
         authenticated_peer: PeerId,
@@ -188,6 +206,42 @@ impl PreselectionResponderState {
         );
         Ok(())
     }
+
+    pub(super) fn reserve_tentative(
+        &mut self,
+        request_hash: [u8; 32],
+        authenticated_peer: PeerId,
+        now: Instant,
+    ) -> Result<TentativeRequestTombstone, TombstoneError> {
+        let expires_at = now
+            .checked_add(REQUEST_TOMBSTONE_LIFETIME)
+            .ok_or(TombstoneError::Time)?;
+        self.reserve(request_hash, authenticated_peer, now)?;
+        Ok(TentativeRequestTombstone {
+            request_hash,
+            authenticated_peer,
+            expires_at,
+        })
+    }
+
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "consuming the non-Clone tentative token prevents a second rollback attempt"
+    )]
+    pub(super) fn rollback_tentative(&mut self, reservation: TentativeRequestTombstone) -> bool {
+        let TentativeRequestTombstone {
+            request_hash,
+            authenticated_peer,
+            expires_at,
+        } = reservation;
+        let matches = self.requests.get(&request_hash).is_some_and(|entry| {
+            entry.authenticated_peer == authenticated_peer && entry.expires_at == expires_at
+        });
+        if matches {
+            self.requests.remove(&request_hash);
+        }
+        matches
+    }
 }
 
 struct PreparedDirectPreselectionResponse {
@@ -200,9 +254,9 @@ struct PreparedUpstreamPreselectionResponse {
     response: UpstreamPreselectionObservationResponse,
 }
 
-struct LocalPreselectionAuthority {
-    actor: PreselectionActorBinding,
-    advertisement: NodeAdvertisement,
+pub(super) struct LocalPreselectionAuthority {
+    pub(super) actor: PreselectionActorBinding,
+    pub(super) advertisement: NodeAdvertisement,
 }
 
 #[derive(Clone, Copy)]
@@ -224,8 +278,13 @@ impl DiscoveryService {
     /// to build this discovery service. The agent discovery actor calls this seam only while an
     /// immutable Relay or Exit role and a currently active threshold-verified policy snapshot are
     /// present. Each responder independently requires its exact current locally served role
-    /// advertisement before it can emit a response. The upstream response is only the Exit-signed
-    /// receipt: this boundary does not mint the Relay's prefix wrapper or any usable evidence.
+    /// advertisement before it can emit a response. An upstream Exit emits only its signed
+    /// receipt; on the Relay, the same private pump may verify that receipt and mint the bounded
+    /// forwarded control wrapper. Neither result is usable evidence, readiness, or datapath state.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one private event owner routes three exact preselection directions and cleanup events"
+    )]
     pub async fn next_event_with_preselection_responders<F>(
         &mut self,
         policy: LocalPreselectionPolicy,
@@ -236,7 +295,21 @@ impl DiscoveryService {
         F: FnMut(&[u8]) -> Option<[u8; 64]>,
     {
         loop {
-            match self.next_internal_event().await {
+            self.cancel_forwarded_preselection_if_context_changed(policy, signer_public_key);
+            self.cancel_forwarded_preselection_at_deadline(Instant::now());
+            let event = if let Some(deadline) = self.forwarded_preselection_pending_deadline() {
+                tokio::select! {
+                    event = self.next_internal_event() => Some(event),
+                    () = tokio::time::sleep_until(deadline) => None,
+                }
+            } else {
+                Some(self.next_internal_event().await)
+            };
+            let Some(event) = event else {
+                self.cancel_forwarded_preselection_at_deadline(Instant::now());
+                continue;
+            };
+            match event {
                 libp2p::swarm::SwarmEvent::Behaviour(
                     crate::BehaviourEvent::PreselectionObservation(
                         event @ request_response::Event::Message {
@@ -245,12 +318,26 @@ impl DiscoveryService {
                         },
                     ),
                 ) => {
-                    let _ = self.respond_direct_preselection_observation_event(
-                        event,
-                        policy,
-                        signer_public_key,
-                        |message| signer(message),
-                    );
+                    if matches!(
+                        &event,
+                        request_response::Event::Message {
+                            message: request_response::Message::Request { request, .. },
+                            ..
+                        } if crate::preselection_forwarder::client_request_is_forwarded_exit(request)
+                    ) {
+                        let _ = self.begin_forwarded_preselection_event(
+                            event,
+                            policy,
+                            signer_public_key,
+                        );
+                    } else {
+                        let _ = self.respond_direct_preselection_observation_event(
+                            event,
+                            policy,
+                            signer_public_key,
+                            |message| signer(message),
+                        );
+                    }
                 }
                 libp2p::swarm::SwarmEvent::Behaviour(
                     crate::BehaviourEvent::PreselectionObservationUpstream(
@@ -266,6 +353,59 @@ impl DiscoveryService {
                         signer_public_key,
                         |message| signer(message),
                     );
+                }
+                libp2p::swarm::SwarmEvent::Behaviour(
+                    crate::BehaviourEvent::PreselectionObservationUpstream(
+                        request_response::Event::Message {
+                            peer,
+                            connection_id,
+                            message:
+                                request_response::Message::Response {
+                                    request_id,
+                                    response,
+                                },
+                        },
+                    ),
+                ) if self.forwarded_preselection_owns_upstream_event(peer, request_id) => {
+                    let _ = self.handle_forwarded_preselection_upstream_response(
+                        peer,
+                        connection_id,
+                        request_id,
+                        response,
+                        |message| signer(message),
+                    );
+                }
+                libp2p::swarm::SwarmEvent::Behaviour(
+                    crate::BehaviourEvent::PreselectionObservationUpstream(
+                        event @ request_response::Event::OutboundFailure {
+                            peer, request_id, ..
+                        },
+                    ),
+                ) if self.forwarded_preselection_owns_upstream_event(peer, request_id) => {
+                    let _ = self.handle_forwarded_preselection_upstream_failure(peer, request_id);
+                    drop(event);
+                }
+                libp2p::swarm::SwarmEvent::Behaviour(
+                    crate::BehaviourEvent::PreselectionObservation(
+                        event @ request_response::Event::InboundFailure {
+                            peer,
+                            connection_id,
+                            request_id,
+                            ..
+                        },
+                    ),
+                ) if self.forwarded_preselection_owns_downstream_event(
+                    peer,
+                    connection_id,
+                    request_id,
+                ) =>
+                {
+                    let _ = self.handle_forwarded_preselection_downstream_failure(
+                        peer,
+                        connection_id,
+                        request_id,
+                    );
+                    drop(event);
                 }
                 event => {
                     if let Some(event) = self.sanitize_public_event(event) {
@@ -608,7 +748,7 @@ impl DiscoveryService {
         })
     }
 
-    fn local_relay_authority(
+    pub(super) fn local_relay_authority(
         &self,
         policy: LocalPreselectionPolicy,
         signer_public_key: [u8; 32],
@@ -783,7 +923,7 @@ fn system_unix_millis() -> Result<u64, DirectPreselectionResponderError> {
     u64::try_from(duration.as_millis()).map_err(|_| DirectPreselectionResponderError::Time)
 }
 
-fn mint_response_nonce() -> Option<[u8; 32]> {
+pub(super) fn mint_response_nonce() -> Option<[u8; 32]> {
     let mut nonce = [0; 32];
     OsRng.try_fill_bytes(&mut nonce).ok()?;
     if nonce == [0; 32] {
@@ -807,7 +947,8 @@ mod tests {
     use volparossa_protocol::{
         AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
         AdvertisementPolicy, AdvertisementQuality, AdvertisementRoles, ControlPayload,
-        MAX_CONTROL_PAYLOAD_SIZE, encode_canonical, verify_direct_preselection_transcript,
+        ForwardedPreselectionAttestation, MAX_CONTROL_PAYLOAD_SIZE, encode_canonical,
+        verify_direct_preselection_transcript, verify_forwarded_preselection_transcript,
     };
 
     use super::*;
@@ -1170,6 +1311,125 @@ mod tests {
         })
         .await
         .expect("memory connection timeout")
+    }
+
+    async fn connect_and_capture_both_lineages(
+        dialling: &mut DiscoveryService,
+        listening: &mut DiscoveryService,
+    ) -> (
+        (ConnectionId, ConnectedPoint),
+        (ConnectionId, ConnectedPoint),
+    ) {
+        listening
+            .listen_on("/memory/0".parse::<Multiaddr>().expect("memory address"))
+            .expect("memory listener");
+        let address = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let SwarmEvent::NewListenAddr { address, .. } = next_other(listening).await {
+                    break address;
+                }
+            }
+        })
+        .await
+        .expect("listener address timeout");
+        let listening_peer = *listening.local_peer_id();
+        let dialling_peer = *dialling.local_peer_id();
+        dialling
+            .dial_peerlink(&crate::PeerLink::new(listening_peer, address).expect("memory peerlink"))
+            .expect("memory dial");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut dialling_lineage = None;
+            let mut listening_lineage = None;
+            while dialling_lineage.is_none() || listening_lineage.is_none() {
+                tokio::select! {
+                    event = next_other(dialling) => {
+                        if let SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } = event
+                        {
+                            if peer_id == listening_peer {
+                                dialling_lineage = Some((connection_id, endpoint));
+                            }
+                        }
+                    }
+                    event = next_other(listening) => {
+                        if let SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } = event
+                        {
+                            if peer_id == dialling_peer {
+                                listening_lineage = Some((connection_id, endpoint));
+                            }
+                        }
+                    }
+                }
+            }
+            (
+                dialling_lineage.expect("dialling lineage"),
+                listening_lineage.expect("listening lineage"),
+            )
+        })
+        .await
+        .expect("memory connection timeout")
+    }
+
+    fn send_forwarded_control_request(
+        client: &mut DiscoveryService,
+        relay_peer: PeerId,
+        template: &PreselectionObservationRequest,
+        challenge: u8,
+    ) -> request_response::OutboundRequestId {
+        let mut request = template.clone();
+        let now_ms = system_unix_millis().expect("request wall time");
+        request.challenge = vec![challenge; 32];
+        request.created_at_ms = now_ms;
+        request.expires_at_ms = now_ms + 4_000;
+        let canonical = encode_canonical(&request, MAX_CONTROL_PAYLOAD_SIZE)
+            .expect("canonical forwarded request");
+        let wire = ClientPreselectionObservationRequest::from_canonical(canonical)
+            .expect("forwarded request wrapper");
+        client
+            .swarm
+            .behaviour_mut()
+            .preselection_observation
+            .send_request(&relay_peer, wire)
+    }
+
+    async fn drive_client_relay_until_forwarding_pending(
+        client: &mut DiscoveryService,
+        relay: &mut DiscoveryService,
+        policy: LocalPreselectionPolicy,
+        relay_public_key: [u8; 32],
+        relay_key: &identity::Keypair,
+    ) {
+        for _ in 0..32 {
+            if relay.forwarded_preselection_pending_deadline().is_some() {
+                return;
+            }
+            let mut signer = |message: &[u8]| sign_with_key(relay_key, message);
+            let _ = tokio::time::timeout(Duration::from_millis(50), async {
+                tokio::select! {
+                    _ = client.next_internal_event() => {}
+                    _ = relay.next_event_with_preselection_responders(
+                        policy,
+                        relay_public_key,
+                        &mut signer,
+                    ) => {}
+                }
+            })
+            .await;
+        }
+        assert!(
+            relay.forwarded_preselection_pending_deadline().is_some(),
+            "Relay must retain the exact forwarded owner before the bounded test deadline"
+        );
     }
 
     fn request(
@@ -2005,6 +2265,370 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one complete hermetic three-swarm affine control transaction plus failure cleanup"
+    )]
+    async fn affine_relay_owner_returns_one_verified_exit_wrapper_only_to_the_original_client() {
+        let client_key = identity::Keypair::generate_ed25519();
+        let relay_key = identity::Keypair::generate_ed25519();
+        let exit_key = identity::Keypair::generate_ed25519();
+        let relay_public_key = raw_public_key(&relay_key);
+        let exit_public_key = raw_public_key(&exit_key);
+        let mut client = DiscoveryService::new_with_protocol_roles(
+            client_key,
+            DiscoveryProtocolRoles::new(true, false, false),
+        )
+        .expect("client discovery");
+        let mut relay = DiscoveryService::new_with_protocol_roles(
+            relay_key.clone(),
+            DiscoveryProtocolRoles::new(false, true, false),
+        )
+        .expect("Relay discovery");
+        let mut exit = DiscoveryService::new_with_protocol_roles(
+            exit_key.clone(),
+            DiscoveryProtocolRoles::new(false, false, true),
+        )
+        .expect("Exit discovery");
+        let client_peer = *client.local_peer_id();
+        let relay_peer = *relay.local_peer_id();
+        let exit_peer = *exit.local_peer_id();
+        let now_ms = system_unix_millis().expect("current wall time");
+        let advertisement_expiry = now_ms + 30_000;
+        let policy_expiry = now_ms + 60_000;
+        let policy = LocalPreselectionPolicy::new(POLICY_VERSION, POLICY_HASH, policy_expiry)
+            .expect("current policy");
+
+        let mut relay_advertisement = relay_advertisement(&relay_key, relay_public_key);
+        relay_advertisement.measured_at_ms = now_ms;
+        relay_advertisement.expires_at_ms = advertisement_expiry;
+        let signed_relay_advertisement = sign_control_message_with(
+            &relay_advertisement,
+            relay_public_key,
+            now_ms,
+            advertisement_expiry,
+            [73; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&relay_key, message),
+        )
+        .expect("signed current Relay advertisement");
+        let relay_envelope: SignedEnvelope =
+            decode_canonical(&signed_relay_advertisement, MAX_CONTROL_MESSAGE_SIZE)
+                .expect("Relay advertisement envelope");
+        relay
+            .set_local_advertisement(signed_relay_advertisement)
+            .expect("serve Relay advertisement");
+        let control_actor = actor_for(
+            &relay_key,
+            relay_public_key,
+            relay_advertisement.sequence_number,
+            relay_envelope
+                .payload_hash
+                .as_slice()
+                .try_into()
+                .expect("Relay payload hash"),
+            advertisement_expiry,
+        );
+
+        let mut exit_advertisement = exit_advertisement(&exit_key, exit_public_key);
+        exit_advertisement.measured_at_ms = now_ms;
+        exit_advertisement.expires_at_ms = advertisement_expiry;
+        let signed_exit_advertisement = sign_control_message_with(
+            &exit_advertisement,
+            exit_public_key,
+            now_ms,
+            advertisement_expiry,
+            [74; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&exit_key, message),
+        )
+        .expect("signed current Exit advertisement");
+        let exit_envelope: SignedEnvelope =
+            decode_canonical(&signed_exit_advertisement, MAX_CONTROL_MESSAGE_SIZE)
+                .expect("Exit advertisement envelope");
+        exit.set_local_advertisement(signed_exit_advertisement)
+            .expect("serve Exit advertisement");
+        let exit_actor = actor_for(
+            &exit_key,
+            exit_public_key,
+            exit_advertisement.sequence_number,
+            exit_envelope
+                .payload_hash
+                .as_slice()
+                .try_into()
+                .expect("Exit payload hash"),
+            advertisement_expiry,
+        );
+
+        let _ = connect_and_capture_both_lineages(&mut client, &mut relay).await;
+        assert!(
+            client.swarm.is_connected(&relay_peer),
+            "the client must have its one authenticated Relay control connection"
+        );
+        assert!(
+            !client.swarm.is_connected(&exit_peer),
+            "the client must have no direct Exit connection"
+        );
+        let ((relay_exit_connection, relay_exit_old), (exit_relay_connection, exit_relay_old)) =
+            connect_and_capture_both_lineages(&mut relay, &mut exit).await;
+        let relay_exit_public = dialer("/ip4/8.8.8.8/tcp/443");
+        relay
+            .swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::AddressChange(AddressChange {
+                peer_id: exit_peer,
+                connection_id: relay_exit_connection,
+                old: &relay_exit_old,
+                new: &relay_exit_public,
+            }));
+        let exit_relay_public = listener("/ip4/1.1.1.8/tcp/443");
+        exit.swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::AddressChange(AddressChange {
+                peer_id: relay_peer,
+                connection_id: exit_relay_connection,
+                old: &exit_relay_old,
+                new: &exit_relay_public,
+            }));
+
+        let request_created_at = system_unix_millis().expect("request wall time");
+        let typed_request = PreselectionObservationRequest {
+            protocol_version: volparossa_protocol::PROTOCOL_VERSION,
+            challenge: vec![75; 32],
+            actor: Some(exit_actor.clone()),
+            scope: Some(PreselectionObservationScope {
+                role: PreselectionObservationRole::Exit as i32,
+                transport: Transport::UdpSinglePath as i32,
+                address_family: ObservationAddressFamily::Ipv4 as i32,
+                policy_version: POLICY_VERSION,
+                policy_hash: POLICY_HASH.to_vec(),
+                policy_expires_at_ms: policy_expiry,
+            }),
+            forwarded_control: Some(control_actor.clone()),
+            created_at_ms: request_created_at,
+            expires_at_ms: request_created_at + 4_000,
+        };
+        let canonical_request =
+            encode_canonical(&typed_request, MAX_CONTROL_PAYLOAD_SIZE).expect("canonical request");
+        let wire_request =
+            ClientPreselectionObservationRequest::from_canonical(canonical_request.clone())
+                .expect("client request");
+        let outbound = client
+            .swarm
+            .behaviour_mut()
+            .preselection_observation
+            .send_request(&relay_peer, wire_request);
+        let mut relay_signer = |message: &[u8]| sign_with_key(&relay_key, message);
+        let mut exit_signer = |message: &[u8]| sign_with_key(&exit_key, message);
+
+        let signed_attestation = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    event = client.next_internal_event() => {
+                        match event {
+                            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
+                                request_response::Event::Message {
+                                    peer,
+                                    message: request_response::Message::Response {
+                                        request_id,
+                                        response,
+                                    },
+                                    ..
+                                },
+                            )) if peer == relay_peer && request_id == outbound => {
+                                break response;
+                            }
+                            SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
+                                request_response::Event::OutboundFailure {
+                                    request_id,
+                                    error,
+                                    ..
+                                },
+                            )) if request_id == outbound => {
+                                panic!("three-swarm response transport failed: {error}");
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = relay.next_event_with_preselection_responders(
+                        policy,
+                        relay_public_key,
+                        &mut relay_signer,
+                    ) => {}
+                    _ = exit.next_event_with_preselection_responders(
+                        policy,
+                        exit_public_key,
+                        &mut exit_signer,
+                    ) => {}
+                }
+            }
+        })
+        .await
+        .expect("three-swarm forwarded response timeout");
+
+        let verification_time = system_unix_millis().expect("verification wall time");
+        let mut transcript_replay = ReplayCache::new(4).expect("transcript replay cache");
+        verify_forwarded_preselection_transcript(
+            signed_attestation.as_encoded(),
+            &canonical_request,
+            verification_time,
+            TimePolicy::default(),
+            &mut transcript_replay,
+        )
+        .expect("complete forwarded transcript");
+        assert!(
+            verify_forwarded_preselection_transcript(
+                signed_attestation.as_encoded(),
+                &canonical_request,
+                verification_time,
+                TimePolicy::default(),
+                &mut transcript_replay,
+            )
+            .is_err(),
+            "the outer and nested signatures remain replay-protected"
+        );
+        let envelope: SignedEnvelope =
+            decode_canonical(signed_attestation.as_encoded(), MAX_CONTROL_MESSAGE_SIZE)
+                .expect("forwarded envelope");
+        let attestation: ForwardedPreselectionAttestation =
+            decode_canonical(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE)
+                .expect("forwarded payload");
+        assert_eq!(attestation.control, Some(control_actor));
+        assert_eq!(attestation.exit, Some(exit_actor));
+        assert_eq!(
+            attestation
+                .upstream_network_prefix
+                .expect("Relay-observed Exit prefix")
+                .network_prefix,
+            [8, 8, 8]
+        );
+        assert_eq!(attestation.valid_until_ms, typed_request.expires_at_ms);
+        assert!(attestation.valid_until_ms <= advertisement_expiry);
+        assert_ne!(attestation.nonce, vec![0; 32]);
+        assert_eq!(envelope.expires_at_ms, attestation.valid_until_ms);
+        assert_eq!(envelope.sender_public_key, relay_public_key);
+        assert!(
+            relay.forwarded_preselection_pending_deadline().is_none(),
+            "successful handoff cleans the affine owner"
+        );
+        assert!(
+            !client.swarm.is_connected(&exit_peer),
+            "live connected-peer state still contains no direct client-to-Exit connection"
+        );
+        assert_ne!(client_peer, relay_peer);
+        assert_ne!(client_peer, exit_peer);
+
+        // A second request is deliberately left upstream-pending. Mismatched events cannot steal
+        // it, while the exact Exit failure consumes both the downstream owner and upstream slot.
+        let _ = send_forwarded_control_request(&mut client, relay_peer, &typed_request, 76);
+        drive_client_relay_until_forwarding_pending(
+            &mut client,
+            &mut relay,
+            policy,
+            relay_public_key,
+            &relay_key,
+        )
+        .await;
+        let first_pending_upstream = relay
+            .test_active_upstream_preselection_request_id()
+            .expect("active upstream request ID");
+        let (pending_client, _pending_connection, pending_request) = relay
+            .test_forwarded_downstream_identity()
+            .expect("retained downstream identity");
+        assert!(!relay.handle_forwarded_preselection_upstream_failure(
+            identity::Keypair::generate_ed25519().public().to_peer_id(),
+            first_pending_upstream,
+        ));
+        assert!(!relay.handle_forwarded_preselection_downstream_failure(
+            pending_client,
+            ConnectionId::new_unchecked(usize::MAX),
+            pending_request,
+        ));
+        assert!(relay.forwarded_preselection_pending_deadline().is_some());
+        assert!(
+            relay
+                .handle_forwarded_preselection_upstream_failure(exit_peer, first_pending_upstream,)
+        );
+        assert!(relay.forwarded_preselection_pending_deadline().is_none());
+
+        // A stale request ID cannot cancel a new owner; policy replacement does so atomically.
+        let _ = send_forwarded_control_request(&mut client, relay_peer, &typed_request, 77);
+        drive_client_relay_until_forwarding_pending(
+            &mut client,
+            &mut relay,
+            policy,
+            relay_public_key,
+            &relay_key,
+        )
+        .await;
+        let second_pending_upstream = relay
+            .test_active_upstream_preselection_request_id()
+            .expect("replacement upstream request ID");
+        assert_ne!(second_pending_upstream, first_pending_upstream);
+        assert!(
+            !relay
+                .handle_forwarded_preselection_upstream_failure(exit_peer, first_pending_upstream,)
+        );
+        relay.cancel_forwarded_preselection_if_context_changed(
+            LocalPreselectionPolicy::new(POLICY_VERSION + 1, [72; 32], policy_expiry)
+                .expect("replacement policy"),
+            relay_public_key,
+        );
+        assert!(relay.forwarded_preselection_pending_deadline().is_none());
+
+        // The exact original downstream failure also clears the affine owner.
+        let _ = send_forwarded_control_request(&mut client, relay_peer, &typed_request, 78);
+        drive_client_relay_until_forwarding_pending(
+            &mut client,
+            &mut relay,
+            policy,
+            relay_public_key,
+            &relay_key,
+        )
+        .await;
+        let (pending_client, pending_connection, pending_request) = relay
+            .test_forwarded_downstream_identity()
+            .expect("retained downstream identity");
+        assert!(relay.handle_forwarded_preselection_downstream_failure(
+            pending_client,
+            pending_connection,
+            pending_request,
+        ));
+        assert!(relay.forwarded_preselection_pending_deadline().is_none());
+
+        // Deadline and generic-pump lifecycle transitions are both bounded and idempotent.
+        let _ = send_forwarded_control_request(&mut client, relay_peer, &typed_request, 79);
+        drive_client_relay_until_forwarding_pending(
+            &mut client,
+            &mut relay,
+            policy,
+            relay_public_key,
+            &relay_key,
+        )
+        .await;
+        let deadline = relay
+            .forwarded_preselection_pending_deadline()
+            .expect("pending deadline");
+        relay.cancel_forwarded_preselection_at_deadline(deadline);
+        assert!(relay.forwarded_preselection_pending_deadline().is_none());
+
+        let _ = send_forwarded_control_request(&mut client, relay_peer, &typed_request, 80);
+        drive_client_relay_until_forwarding_pending(
+            &mut client,
+            &mut relay,
+            policy,
+            relay_public_key,
+            &relay_key,
+        )
+        .await;
+        let _ = tokio::time::timeout(Duration::from_millis(10), relay.next_event()).await;
+        assert!(relay.forwarded_preselection_pending_deadline().is_none());
+        relay.cancel_preselection_forwarding();
+    }
+
+    #[tokio::test]
     async fn replay_and_signing_failure_are_terminal_inside_the_tombstone_window() {
         let mut fixture = fixture().await;
         let first = request(fixture.actor.clone(), 22, ObservationAddressFamily::Ipv4);
@@ -2380,6 +3004,31 @@ mod tests {
     }
 
     #[test]
+    fn tentative_tombstone_rolls_back_only_its_exact_pre_send_record() {
+        let mut state = PreselectionResponderState::new();
+        let peer = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let now = Instant::now();
+        let hash = [202; 32];
+        let reservation = state
+            .reserve_tentative(hash, peer, now)
+            .expect("tentative reservation");
+        assert_eq!(state.requests.len(), 1);
+        assert!(state.rollback_tentative(reservation));
+        assert!(state.requests.is_empty());
+
+        let committed = state
+            .reserve_tentative(hash, peer, now)
+            .expect("same hash is admissible after exact pre-send rollback");
+        committed.commit();
+        assert_eq!(state.requests.len(), 1);
+        assert_eq!(
+            state.reserve(hash, peer, now),
+            Err(TombstoneError::Replay),
+            "a committed send boundary remains replay-tombstoned"
+        );
+    }
+
+    #[test]
     fn global_replay_tombstone_bound_fails_closed_without_live_eviction() {
         let mut state = PreselectionResponderState::new();
         let now = Instant::now();
@@ -2463,12 +3112,10 @@ mod tests {
         assert!(!production.contains("pub fn respond_direct_preselection_observation_event"));
         assert!(!production.contains("pub fn respond_upstream_preselection_observation_event"));
         assert!(!production.contains("pub fn prepare_upstream_preselection_response_at"));
-        assert_eq!(
-            production
-                .matches("match self.next_internal_event().await")
-                .count(),
-            1
-        );
+        assert_eq!(production.matches("self.next_internal_event()").count(), 2);
+        assert!(production.contains("tokio::time::sleep_until(deadline)"));
+        assert!(production.contains("begin_forwarded_preselection_event"));
+        assert!(production.contains("handle_forwarded_preselection_upstream_response"));
         assert!(production.contains("BehaviourEvent::PreselectionObservationUpstream"));
         assert!(production.contains("UpstreamPreselectionObservationResponse::from_canonical"));
         assert!(!production.contains("TODO"));

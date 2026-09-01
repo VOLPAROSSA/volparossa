@@ -1312,6 +1312,9 @@ impl DiscoveryRuntime {
                 let _ = reply.send(result);
             }
             DiscoveryCommand::ApplyPolicy { policy, reply } => {
+                // Policy replacement/revocation invalidates every retained Relay authority input.
+                // Cancel the affine forwarded owner before publishing the new actor state.
+                self.service.cancel_preselection_forwarding();
                 state.write().await.set_policy(policy);
                 self.synchronize_exit_policy(state).await;
                 self.publish_local(state).await;
@@ -4794,6 +4797,7 @@ async fn next_actor_discovery_event(
     responder_policy: Option<LocalPreselectionPolicy>,
 ) -> DiscoveryEvent {
     let Some(policy) = responder_policy else {
+        service.cancel_preselection_forwarding();
         return service.next_event().await;
     };
     let mut signer = |message: &[u8]| identity.sign(message).ok();
@@ -6171,9 +6175,39 @@ mod tests {
             1,
         );
         assert_eq!(actor_pump.matches("identity.sign(message).ok()").count(), 1);
+        assert_eq!(
+            actor_pump
+                .matches("cancel_preselection_forwarding()")
+                .count(),
+            1
+        );
+        assert!(
+            actor_pump
+                .find("cancel_preselection_forwarding()")
+                .expect("policy-off cancellation")
+                < actor_pump
+                    .find("service.next_event()")
+                    .expect("generic pump")
+        );
         assert!(!actor_pump.contains("request_exit_forward"));
         assert!(!actor_pump.contains("dispatch_preselection_observation"));
         assert!(!actor_pump.contains("Fresh"));
+
+        let handle_command = braced_item(source, "async fn handle_command(");
+        assert_eq!(
+            handle_command
+                .matches("self.service.cancel_preselection_forwarding()")
+                .count(),
+            1,
+        );
+        assert!(
+            handle_command
+                .find("self.service.cancel_preselection_forwarding()")
+                .expect("pre-policy cancellation")
+                < handle_command
+                    .find("state.write().await.set_policy(policy)")
+                    .expect("policy publication")
+        );
     }
 
     #[test]

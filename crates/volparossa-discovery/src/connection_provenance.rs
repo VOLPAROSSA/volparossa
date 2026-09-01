@@ -16,6 +16,7 @@ use libp2p::{
     },
 };
 use volparossa_core::{IpFamily, ObservedNetworkPrefix};
+use volparossa_protocol::{ObservationAddressFamily, ObservationNetworkPrefix};
 
 use crate::{MAX_ESTABLISHED_CONNECTIONS, MAX_ESTABLISHED_CONNECTIONS_PER_PEER};
 
@@ -113,6 +114,37 @@ pub(super) struct BoundConnectionObservation {
     connection_id: ConnectionId,
     generation: NonZeroU64,
     prefix: NativeNetworkPrefix,
+}
+
+impl BoundConnectionObservation {
+    /// Consume one exact upstream connection proof into only the prefix a control Relay may sign.
+    ///
+    /// This is deliberately not a generic prefix accessor: it consumes the complete affine proof,
+    /// emits only the endpoint-free protocol /24 or /48, and is used solely by the forwarded
+    /// preselection attestation owner.
+    pub(super) fn consume_into_forwarded_preselection_prefix(
+        self,
+    ) -> Option<ObservationNetworkPrefix> {
+        let Self {
+            peer_id: _,
+            connection_id: _,
+            generation: _,
+            prefix,
+        } = self;
+        if !prefix.is_consistent() || !prefix.normalized.is_public_routable() {
+            return None;
+        }
+        match prefix.bytes {
+            NativePrefixBytes::Ipv4(bytes) => Some(ObservationNetworkPrefix {
+                address_family: ObservationAddressFamily::Ipv4 as i32,
+                network_prefix: bytes.to_vec(),
+            }),
+            NativePrefixBytes::Ipv6(bytes) => Some(ObservationNetworkPrefix {
+                address_family: ObservationAddressFamily::Ipv6 as i32,
+                network_prefix: bytes.to_vec(),
+            }),
+        }
+    }
 }
 
 struct ConnectionRegistry {
@@ -658,6 +690,39 @@ mod tests {
             bound.prefix.bytes,
             NativePrefixBytes::Ipv4([1, 1, 1])
         ));
+    }
+
+    #[test]
+    fn purpose_specific_forwarded_projection_consumes_exact_native_ipv4_and_ipv6_prefixes() {
+        for (endpoint, family, expected_family, expected_prefix) in [
+            (
+                dialer("/ip4/8.8.8.8/tcp/443"),
+                IpFamily::Ipv4,
+                ObservationAddressFamily::Ipv4,
+                vec![8, 8, 8],
+            ),
+            (
+                dialer("/ip6/2606:4700:4700::1111/udp/443/quic-v1"),
+                IpFamily::Ipv6,
+                ObservationAddressFamily::Ipv6,
+                vec![0x26, 0x06, 0x47, 0x00, 0x47, 0x00],
+            ),
+        ] {
+            let peer = PeerId::random();
+            let mut behaviour = ConnectionProvenanceBehaviour::new();
+            established(&mut behaviour, peer, 1, &endpoint, 0);
+            let witness = behaviour
+                .unique_witness(peer, family)
+                .expect("unique native witness");
+            let bound = behaviour
+                .bind(witness, peer, ConnectionId::new_unchecked(1))
+                .expect("exact affine observation");
+            let projected = bound
+                .consume_into_forwarded_preselection_prefix()
+                .expect("public purpose-specific projection");
+            assert_eq!(projected.address_family, expected_family as i32);
+            assert_eq!(projected.network_prefix, expected_prefix);
+        }
     }
 
     #[test]

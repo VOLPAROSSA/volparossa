@@ -281,11 +281,41 @@ and the same actor-owned permanent identity. A policy command cancels the outsta
 the actor applies the replacement. Successful response production additionally requires an exact
 currently served role advertisement. Production intentionally advertises no usable Relay/Exit
 capability before dataplane readiness is proved, so this lifecycle caller remains fail closed and
-does not make the responder, a transport, or a route ready. The control Relay's affine signed
-prefix wrapper remains absent. A later outbound owner must consume the unchanged response bytes,
-retained caller context and opaque proofs together before any observation can become usable. There
-is no production A0 response-verification/replay consumer, A1a exact-set join or Fresh-evidence
-conversion. The fixed alpha score remains **11/100 (11%)**.
+does not make the responder, a transport, or a route ready.
+
+For a forwarded Exit request, the same private poll is now the sole affine control-Relay owner. It
+retains the original canonical request, authenticated client peer, event-local `ConnectionId`,
+behaviour-local inbound request ID and response channel while dispatching the unchanged request over
+the separately authenticated upstream behaviour. Only the exact upstream peer/request ID and
+still-current unique connection generation may consume that owner. The returned Exit receipt is
+cryptographically verified and admitted into a fixed 1024-entry no-live-eviction replay cache,
+then rebound to the exact request hash, challenge, Exit actor, scope and Exit signing identity. A
+cross-binding failure rolls back only its newly inserted replay entry. The opaque upstream
+connection proof has one purpose-specific consuming projection into an endpoint-free public IPv4
+`/24` or IPv6 `/48`; there is no generic prefix/address getter.
+
+The Relay performs a read-only unique Exit-provenance preflight before shared replay admission.
+The subsequent tombstone is tentative until the synchronous no-failure send boundary: every
+pre-send dispatch failure consumes its exact non-cloneable token and rolls back only that new
+record, while a successful dispatch commits it.
+
+Before signing, the owner re-verifies the current Relay advertisement, permanent Identity and exact
+active policy. It caps the wrapper by the request, nested receipt, both actors' advertisement and
+capability expiries, and policy expiry, and uses a fresh fallible CSPRNG nonce. The canonical
+`ForwardedPreselectionAttestation` is sent only through the retained original client channel.
+Timeout, downstream cancellation, exact upstream failure, policy/Identity drift, replay,
+provenance, signature or channel failure drops the owner and clears its one upstream slot without a
+response. A hermetic three-swarm MemoryTransport test verifies both signatures and replay
+protection, checks live connected-peer state contains the Relay but not the Exit, and exercises
+wrong-peer, wrong-request, wrong-connection, upstream-failure, downstream-failure, policy-drift,
+deadline and responder-disable cleanup. Its `/24` derives from explicitly injected public endpoint
+lineage; it is not an external-network measurement. This is still control-plane transcript
+production only: it makes no Fresh, readiness, capacity, reservation, route or datapath claim.
+
+A later client-side outbound owner must consume its exact `BoundClientPreselectionTransport` and
+the opaque `BoundForwardedPreselectionTranscript` together with the retained A1a set before any
+observation can become usable. There is still no production client attempt owner, A1a exact-set
+join or Fresh-evidence conversion. The fixed alpha score remains **11/100 (11%)**.
 
 Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
 relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7

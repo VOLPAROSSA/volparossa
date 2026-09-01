@@ -25,7 +25,9 @@ The current discovery crate composes:
   control-relay-to-exit hop; both behaviours have independent dormant one-at-a-time affine
   context/dispatch/bind/cancel seams; public event pumps expose no inbound response channel, the
   direct Relay and upstream Exit have one role-gated service-owned signer/responder pump, and the
-  outbound attempt owner plus control Relay's signed prefix wrapper remain absent;
+  same private pump now owns one affine forwarded client request through the exact upstream Exit
+  response and control Relay-signed prefix wrapper. The client-side outbound attempt owner remains
+  absent;
 - refusal-test constants, but no registered behaviour or fallback, for advertisement v1/v2/v3 and the
   retired direct reservation v2 identifiers; and
 - a process-local MemoryTransport used by hermetic swarm integration tests, not as a network or
@@ -326,12 +328,31 @@ exact signed receipt. Separate real transport regressions prove that the ordinar
 yields an inbound channel and a sibling service cannot answer a channel captured by the
 originating service's private test pump. A second real two-swarm proof sends an upstream request
 from an authenticated Relay and verifies the exact Exit-signed receipt on only its originating
-channel; the responder mints no control Relay prefix wrapper.
+channel. The Exit responder itself mints no control-Relay prefix wrapper.
 
-The responder emits no origin claim, RTT or capacity measurement and grants no Fresh evidence,
-reservation, route or admission authority. There is still no runtime/agent caller, upstream
-responder/forwarder or signer, A0 response-verifier/replay consumer, A1a exact-set join, or evidence
-mint. A future application owner must supply those remaining authenticated transaction semantics.
+For a forwarded Exit request, the same private production pump retains the original canonical
+request, authenticated client peer, event-local connection, inbound request ID and response channel
+as one affine owner. It first requires a read-only unique authenticated Exit-provenance preflight,
+then tentatively reserves shared replay capacity and synchronously dispatches the unchanged
+request. Every pre-send dispatch failure consumes an exact non-cloneable token to roll back only
+that newly inserted tombstone; successful send commits it. Only the
+exact upstream peer/request and still-current connection generation can return. The owner verifies
+and fixed-cache replay-admits the Exit signature and exact request binding, purpose-consumes the
+opaque upstream proof into only a public `/24` or `/48`, rechecks the current Relay
+advertisement/Identity/policy, applies every expiry ceiling, signs a fresh-nonce
+`ForwardedPreselectionAttestation`, and responds only on the retained client channel. Policy-off,
+policy/Identity drift, deadline, exact upstream/downstream failure and the generic event pump all
+cancel the owner and free its one upstream slot. Requests without unique Exit provenance fail
+before consuming a tombstone.
+
+A hermetic three-swarm MemoryTransport test verifies the nested signatures/replay and checks live
+connected-peer state includes the Relay but not the Exit. It also exercises wrong peer/request/
+connection and all lifecycle cleanup paths above. The test `/24` is derived from explicitly
+injected public endpoint lineage and is not external-network evidence. Neither receipt nor wrapper
+claims origin, RTT, capacity, Fresh evidence, reservation, route, admission, readiness, or datapath
+authority. The production agent supplies the policy and permanent signer, but there is still no
+client-side outbound attempt owner, A1a exact-set join, or Fresh-evidence mint. A future application
+owner must supply those remaining authenticated transaction semantics.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than

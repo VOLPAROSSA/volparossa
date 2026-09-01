@@ -1095,25 +1095,50 @@ single clean-build A01--A15 run; the score is not a release claim.
   application cancels that poll branch before the actor can observe the next event. The responder
   still requires an exact currently served role advertisement; because production deliberately
   publishes no usable Relay/Exit capability before dataplane readiness is proved, this lifecycle
-  integration emits no successful production response and makes no readiness claim yet. The
-  control Relay's affine signed prefix wrapper is still absent. There is still no
-  outbound production attempt owner, sampler, A0 response-verification/replay consumer, A1a
-  exact-set join, or conversion into fresh local evidence.
-  A future A1c boundary must consume and exact-set join these real request/connection proofs before
-  phase-A evidence. A first dormant private A1c precursor now passively tracks authenticated libp2p
-  establish/address-change/close lineage under the existing 384-global/four-per-peer ceilings.
+  integration emits no successful production response and makes no readiness claim yet.
+  For forwarded Exit requests, that private pump now retains the original downstream canonical
+  request, authenticated client peer, event-local connection, behaviour-local inbound request ID
+  and response channel as one affine owner while it dispatches the unchanged bytes upstream. Only
+  the exact Exit peer/request ID and still-current unique connection lineage can return. The owner
+  cryptographically verifies and fixed-cache replay-admits the Exit receipt, rebinds its exact
+  request hash/challenge/actor/scope/signing identity, and purpose-specifically consumes the opaque
+  upstream proof into only its public `/24` or `/48`. It then re-verifies the current Relay
+  advertisement, permanent Identity and active policy, signs a ceiling-minimum
+  `ForwardedPreselectionAttestation` with a fresh fallible CSPRNG nonce, and answers only through
+  the retained original client channel. Timeout, downstream cancellation, exact upstream failure,
+  authority drift, replay, provenance, signature or channel failure drops the owner and clears its
+  one upstream slot without response. The Exit replay cache has 1024 fixed entries and no live
+  eviction; exact cross-binding failure rolls back only its newly inserted entry. A hermetic
+  three-swarm MemoryTransport test verifies both signatures and replay protection, checks live
+  connected-peer state contains the Relay but not the Exit, and exercises wrong-peer,
+  wrong-request, wrong-connection, upstream/downstream failure, policy drift, deadline and
+  responder-disable cleanup. The observed public `/24` comes from explicitly injected test
+  endpoint lineage, not an external-network observation. Separate tests cover `/24` and `/48`
+  projection, identity substitution, cross-request replay rollback, and read-only provenance
+  preflight before shared replay capacity. A tentative non-cloneable tombstone token commits only
+  after the synchronous dispatch succeeds and otherwise rolls back only its exact new pre-send
+  record. This remains control-plane
+  transcript production only and claims no Freshness, readiness, capacity, reservation, route or
+  datapath.
+  There is still no outbound production client attempt owner, sampler, A1a exact-set join, or
+  conversion into fresh local evidence. A future client-side boundary must consume and exact-set
+  join its `BoundClientPreselectionTransport`, opaque `BoundForwardedPreselectionTranscript` and
+  retained A1a set before phase-A evidence. A first private A1c precursor passively tracks
+  authenticated libp2p establish/address-change/close lineage under the existing
+  384-global/four-per-peer ceilings.
   It counts unusable siblings for uniqueness, accepts prefixes only from exact direct public-IP
   TCP or QUIC-v1 remote shapes, retains only the opaque normalized token plus the same native three
   or six prefix bytes (no full IP/multiaddress), generation-invalidates every address change, and
   permanently poisons and clears on ambiguous lineage or overflow. Its affine
   witness/binding rechecks the exact Peer ID, `ConnectionId`, non-zero generation and native /24 or
   /48. It has no generic registry/address/prefix accessor; only the purpose-specific client and
-  upstream seams may consume its affine witness. There is still no A1a join or Fresh-evidence mint. The
-  fake-only 1-200-record evidence boundary and prospective planner remain separate;
-  no checkbox is closed. Production still publishes no usable relay/exit capability, route
+  upstream seams may consume its affine witness, and only the affine Relay wrapper may consume an
+  upstream binding into the signed endpoint-free prefix. There is still no A1a join or
+  Fresh-evidence mint. The fake-only 1-200-record evidence boundary and prospective planner remain
+  separate; no checkbox is closed. Production still publishes no usable relay/exit capability, route
   finalization still fails closed with `ProbeEvidenceUnavailable`, and no production evidence
   producer, production transaction caller/orchestration or disposable live-network proof for that
-  discovery/evidence pipeline exists. This direct-only dormant responder closes no checklist or
+  discovery/evidence pipeline exists. This control-plane responder/forwarder closes no checklist or
   scorecard row; the fixed alpha score remains **11/100 (11%)**.
 - [ ] Bootstrap from peerstore, mDNS, multiple independent built-ins, peerlinks, and signed bootstrap files works.
 - [ ] No bootstrap node or DHT record becomes a unique authority or central node catalogue.

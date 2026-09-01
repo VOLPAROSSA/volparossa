@@ -7,6 +7,7 @@ mod advertisements;
 mod connection_provenance;
 mod forwarding;
 mod peerlink;
+mod preselection_forwarder;
 mod preselection_responder;
 mod preselection_transaction;
 mod preselection_wire;
@@ -52,6 +53,7 @@ use forwarding::{
     exit_forward_upstream_behaviour,
 };
 pub use peerlink::{PeerLink, PeerLinkError};
+use preselection_forwarder::PreselectionForwarderState;
 use preselection_responder::PreselectionResponderState;
 pub use preselection_responder::{
     DirectPreselectionResponderError, LocalPreselectionPolicy, UpstreamPreselectionResponderError,
@@ -714,6 +716,7 @@ pub struct DiscoveryService {
     advertisement_budgets: AdvertisementBudgets,
     address_admissions: AddressAdmissions,
     protocol_roles: DiscoveryProtocolRoles,
+    preselection_forwarder: PreselectionForwarderState,
     preselection_responder: PreselectionResponderState,
     preselection_transaction: PreselectionTransactionState,
 }
@@ -777,6 +780,8 @@ impl DiscoveryService {
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
             address_admissions: AddressAdmissions::default(),
+            preselection_forwarder: PreselectionForwarderState::new()
+                .map_err(|error| DiscoveryError::Build(error.to_string()))?,
             preselection_responder: PreselectionResponderState::new(),
             preselection_transaction: PreselectionTransactionState::new(),
         })
@@ -1245,6 +1250,9 @@ impl DiscoveryService {
     /// [`Self::next_event_with_preselection_responders`] to enable the role-gated direct-Relay and
     /// upstream-Exit responders.
     pub async fn next_event(&mut self) -> DiscoveryEvent {
+        // The generic pump cannot complete a role/policy-bound Relay forward. Cancel its affine
+        // owner before consuming or sanitising any later upstream response.
+        self.cancel_preselection_forwarding();
         loop {
             let event = self.next_internal_event().await;
             if let Some(event) = self.sanitize_public_event(event) {
