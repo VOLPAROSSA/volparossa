@@ -691,6 +691,14 @@ between frames. Intent registration is runtime-global helper state, not a server
 that connection. Same-stream use is the HelperClient invariant that prevents a pathname/socket swap
 between registration and dispatch.
 
+A successful Prepare is retained by the agent as one affine runtime-bound lifecycle owner rather
+than returned as freely cloneable phase authority. On every new Unix stream used for Activate,
+Commit or exact retirement Destroy, the agent first sends `BindHelperRuntime(None)`, requires the
+same retained 32-byte runtime ID, and only then sends the canonical phase request on that stream.
+Runtime change sends no phase request. The bounded route supervisor retains this owner while a
+phase call settles and transfers it to its existing retirement/retry worker on failure, timeout or
+cancellation. This does not add Ready/Result, restart adoption or a usable route datapath.
+
 This pre-alpha protocol-v3 refinement is deployed lockstep with the packaged agent and helper. It
 does not provide a mixed-version rolling-upgrade path: an old agent omits required tag 6, a new agent
 sends a field an old helper cannot canonically accept, and formerly accepted permuted lease sets are

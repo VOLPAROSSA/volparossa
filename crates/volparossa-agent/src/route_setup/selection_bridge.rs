@@ -3520,9 +3520,9 @@ mod tests {
 
     use super::super::{
         ActivateLeaseBatch, ActivatedLeaseBatch, CleanupStatus, CommitLeaseBatch,
-        CommittedLeaseBatch, DestroyContext, DestroyedContext, ExitForwardRequest,
-        ExitForwardResponse, LocalPrepareFailure, PrepareLeaseBatch,
-        PrepareReconciliationAuthority, PreparedLeaseBatch, ReconciledExpiredPrepare,
+        CommittedLeaseBatch, DestroyedContext, ExitForwardRequest, ExitForwardResponse,
+        LocalPrepareFailure, PrepareLeaseBatch, PrepareReconciliationAuthority,
+        ReconciledExpiredPrepare, RuntimeBoundPreparedLeaseBatch,
     };
     use super::*;
 
@@ -5512,13 +5512,14 @@ mod tests {
         async fn prepare(
             &mut self,
             _request: &PrepareLeaseBatch,
-        ) -> Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
+        ) -> Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(LocalPrepareFailure::Definitive(NoopHandoffLocalError))
         }
 
         async fn activate(
             &mut self,
+            _owner: &mut RuntimeBoundPreparedLeaseBatch,
             _request: &ActivateLeaseBatch,
         ) -> Result<ActivatedLeaseBatch, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -5527,6 +5528,7 @@ mod tests {
 
         async fn commit(
             &mut self,
+            _owner: &mut RuntimeBoundPreparedLeaseBatch,
             _request: &CommitLeaseBatch,
         ) -> Result<CommittedLeaseBatch, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -5535,7 +5537,7 @@ mod tests {
 
         async fn destroy(
             &mut self,
-            _request: &DestroyContext,
+            _owner: &RuntimeBoundPreparedLeaseBatch,
         ) -> Result<DestroyedContext, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(NoopHandoffLocalError)

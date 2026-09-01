@@ -595,12 +595,14 @@ produced recorded evidence inside the required disposable Debian 13 transient se
 therefore leaves AV1-10 Open, keeps the fixed alpha score at 11/100 (11%), and closes no production,
 crash-cleanup, datapath or acceptance milestone.
 
-The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
-handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated
-public key, kernel-proven public UDP endpoint, and `DirectAssigned` evidence. Later operations may
-echo those handles and signed public peer tuples. A WireGuard private key, raw private-key bytes, or
-an endpoint secret must never cross into routing, agent, reservation, discovery, or any other
-unprivileged state.
+The unprivileged route owner retains a non-cloneable `RuntimeBoundPreparedLeaseBatch`: the exact
+helper runtime ID, canonical Prepare plan, opaque context handle and complete `PreparedLease` set.
+Every fresh-stream Activate, Commit and retirement Destroy first performs
+`BindHelperRuntime(None)` on that stream and compares the retained runtime ID before sending the
+mutating phase. Timeout and cancellation keep the same owner in the bounded route-retirement
+mechanism; they do not authorize a phase on a replacement helper process. This is lifecycle
+correlation only, not a live-datapath or crash-recovery claim. A WireGuard private key, raw
+private-key bytes, or endpoint secret must never cross into unprivileged state.
 
 The target worker transaction is intentionally stricter than the old worker:
 

@@ -45,7 +45,8 @@ The required order is:
    nested exit authorization and helper-bound endpoints.
 8. Send each exact relay grant to the exit through the control relay and require an exit-signed
    confirmation receipt bound to the exact confirmation bytes.
-9. Only after all receipts exist, call helper `Activate` and then `Commit`.
+9. Only after all receipts exist, call helper `Activate` and then `Commit`; each fresh phase stream
+   must first bind and verify the exact helper runtime retained by the affine Prepare owner.
 10. Transfer grants, receipts, helper handles, and cleanup authority to the established route until
     Destroy-first teardown completes.
 

@@ -21,6 +21,7 @@ use std::{
     fmt,
     future::Future,
     net::IpAddr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -28,7 +29,7 @@ use libp2p::PeerId as Libp2pPeerId;
 use rand_core::OsRng;
 use thiserror::Error;
 use tokio::{
-    sync::{oneshot, watch},
+    sync::{Mutex, oneshot, watch},
     time::{Instant, timeout},
 };
 use volparossa_core::{
@@ -48,11 +49,13 @@ use volparossa_reservation::{
     SignedProbePermitRequest, VerifiedExitCapacityHold, VerifiedFinalizedExitBundle,
     VerifiedProbePermit, VerifiedRelayGrant, VerifiedRelayProbe,
 };
+#[cfg(test)]
+use volparossa_routing::PreparedLeaseBatch;
 use volparossa_routing::{
     ActivateLeaseBatch, ActivatedLeaseBatch, CommitLeaseBatch, CommittedLeaseBatch, ContextRole,
-    DestroyContext, DestroyedContext, LeaseActivation, LeaseCommit, LeasePlan, MAX_HELPER_PATHS,
-    MAX_HELPER_RATE_MBPS, PrepareLeaseBatch, PreparedLeaseBatch, PublicUdpEndpoint,
-    ReconciledExpiredPrepare, WireguardRole,
+    DestroyedContext, LeaseActivation, LeaseCommit, LeasePlan, MAX_HELPER_PATHS,
+    MAX_HELPER_RATE_MBPS, PrepareLeaseBatch, PublicUdpEndpoint, ReconciledExpiredPrepare,
+    WireguardRole,
 };
 #[cfg(test)]
 use volparossa_selection::Candidate;
@@ -69,6 +72,7 @@ use crate::{
     endpoint_leases::{LocalEndpointLeaseBatch, bind_prepared_endpoint_leases},
     helper::{
         HelperClient, HelperClientError, PrepareLeaseBatchFailure, PrepareReconciliationAuthority,
+        RuntimeBoundPreparedLeaseBatch,
     },
 };
 use retirement::{PreparedContextOwner, RetirementOutcome, RetirementSink, RetirementSupervisor};
@@ -756,21 +760,26 @@ trait LocalRouteBackend: Clone + Send + Sync + 'static {
     fn prepare<'a>(
         &'a mut self,
         request: &'a PrepareLeaseBatch,
-    ) -> impl Future<Output = Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>>> + Send + 'a;
+    ) -> impl Future<
+        Output = Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>>,
+    > + Send
+    + 'a;
 
     fn activate<'a>(
         &'a mut self,
+        owner: &'a mut RuntimeBoundPreparedLeaseBatch,
         request: &'a ActivateLeaseBatch,
     ) -> impl Future<Output = Result<ActivatedLeaseBatch, Self::Error>> + Send + 'a;
 
     fn commit<'a>(
         &'a mut self,
+        owner: &'a mut RuntimeBoundPreparedLeaseBatch,
         request: &'a CommitLeaseBatch,
     ) -> impl Future<Output = Result<CommittedLeaseBatch, Self::Error>> + Send + 'a;
 
     fn destroy<'a>(
         &'a mut self,
-        request: &'a DestroyContext,
+        owner: &'a RuntimeBoundPreparedLeaseBatch,
     ) -> impl Future<Output = Result<DestroyedContext, Self::Error>> + Send + 'a;
 
     fn reconcile_expired_prepare(
@@ -785,7 +794,7 @@ impl LocalRouteBackend for HelperClient {
     async fn prepare(
         &mut self,
         request: &PrepareLeaseBatch,
-    ) -> Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
+    ) -> Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
         self.prepare_lease_batch(request.clone())
             .await
             .map_err(|failure| match failure {
@@ -800,20 +809,25 @@ impl LocalRouteBackend for HelperClient {
 
     async fn activate(
         &mut self,
+        owner: &mut RuntimeBoundPreparedLeaseBatch,
         request: &ActivateLeaseBatch,
     ) -> Result<ActivatedLeaseBatch, Self::Error> {
-        self.activate_lease_batch(request.clone()).await
+        self.activate_lease_batch(owner, request.clone()).await
     }
 
     async fn commit(
         &mut self,
+        owner: &mut RuntimeBoundPreparedLeaseBatch,
         request: &CommitLeaseBatch,
     ) -> Result<CommittedLeaseBatch, Self::Error> {
-        self.commit_lease_batch(request.clone()).await
+        self.commit_lease_batch(owner, request.clone()).await
     }
 
-    async fn destroy(&mut self, request: &DestroyContext) -> Result<DestroyedContext, Self::Error> {
-        self.destroy_context(request.clone()).await
+    async fn destroy(
+        &mut self,
+        owner: &RuntimeBoundPreparedLeaseBatch,
+    ) -> Result<DestroyedContext, Self::Error> {
+        self.destroy_context(owner).await
     }
 
     async fn reconcile_expired_prepare(
@@ -1693,9 +1707,12 @@ where
                     )
                 }
                 Ok(prepared) => {
-                    let Some(destroy) =
-                        destroy_authority(route_context_id, &prepared.context_handle)
-                    else {
+                    if prepared.prepare().route_context_id.as_slice() != route_context_id
+                        || HelperContextHandle::try_from(
+                            prepared.prepared().context_handle.as_slice(),
+                        )
+                        .is_err()
+                    {
                         retirement.fail_stop();
                         std::mem::forget((reservation, protocol));
                         let _ = sender.send(PrepareTicketSettlement::Failed(
@@ -1703,10 +1720,11 @@ where
                         ));
                         guard.disarm();
                         return;
-                    };
-                    let mut owner = reservation.bind(destroy, protocol, reservation_id);
-                    let endpoints = bind_prepared_endpoint_leases(&request, prepared)
-                        .map_err(|_| RouteSetupError::HelperCorrelation);
+                    }
+                    let endpoints =
+                        bind_prepared_endpoint_leases(&request, prepared.prepared().clone())
+                            .map_err(|_| RouteSetupError::HelperCorrelation);
+                    let mut owner = reservation.bind(prepared, protocol, reservation_id);
                     match endpoints {
                         Ok(endpoints) => {
                             if endpoints.client_leases().len() != request.leases.len()
@@ -1740,6 +1758,7 @@ where
 
     fn activate_ticket(
         &self,
+        runtime_owner: Arc<Mutex<RuntimeBoundPreparedLeaseBatch>>,
         request: ActivateLeaseBatch,
         setup_deadline: Instant,
     ) -> oneshot::Receiver<Result<ActivatedLeaseBatch, RouteSetupError>> {
@@ -1749,7 +1768,8 @@ where
         let helper_deadline = self.helper_deadline(setup_deadline);
         tokio::spawn(async move {
             let mut guard = HelperTicketGuard::new(retirement.clone());
-            let mut call = Box::pin(local.activate(&request));
+            let mut runtime_owner = runtime_owner.lock().await;
+            let mut call = Box::pin(local.activate(&mut runtime_owner, &request));
             let (result, mut deadline_violated) = tokio::select! {
                 biased;
                 () = tokio::time::sleep_until(helper_deadline) => {
@@ -1775,6 +1795,7 @@ where
 
     fn commit_ticket(
         &self,
+        runtime_owner: Arc<Mutex<RuntimeBoundPreparedLeaseBatch>>,
         request: CommitLeaseBatch,
         setup_deadline: Instant,
     ) -> oneshot::Receiver<Result<CommittedLeaseBatch, RouteSetupError>> {
@@ -1784,7 +1805,8 @@ where
         let helper_deadline = self.helper_deadline(setup_deadline);
         tokio::spawn(async move {
             let mut guard = HelperTicketGuard::new(retirement.clone());
-            let mut call = Box::pin(local.commit(&request));
+            let mut runtime_owner = runtime_owner.lock().await;
+            let mut call = Box::pin(local.commit(&mut runtime_owner, &request));
             let (result, mut deadline_violated) = tokio::select! {
                 biased;
                 () = tokio::time::sleep_until(helper_deadline) => {
@@ -1892,7 +1914,7 @@ where
     }
 
     #[cfg(test)]
-    fn retirement_state(&self) -> &std::sync::Arc<retirement::RetirementState> {
+    fn retirement_state(&self) -> &Arc<retirement::RetirementState> {
         self.retirement.state()
     }
 
@@ -2525,6 +2547,11 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
 
         self.ensure_live(clock, cancellation, deadline)?;
         self.phase = RouteSetupPhase::Activating;
+        let runtime_owner = self
+            .prepared
+            .as_ref()
+            .and_then(PreparedContextOwner::runtime_owner)
+            .ok_or(RouteSetupError::HelperCorrelation)?;
         let activation = activation_request::<P>(
             self.request.parameters.route_context_id,
             self.prepared
@@ -2534,7 +2561,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
             &grants,
         )?;
         let activated = await_helper_ticket(
-            context.activate_ticket(activation.clone(), deadline),
+            context.activate_ticket(runtime_owner, activation.clone(), deadline),
             deadline,
             cancellation,
             self.phase,
@@ -2545,8 +2572,13 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
 
         self.phase = RouteSetupPhase::Committing;
         let commit_request = commit_request(&activation);
+        let runtime_owner = self
+            .prepared
+            .as_ref()
+            .and_then(PreparedContextOwner::runtime_owner)
+            .ok_or(RouteSetupError::HelperCorrelation)?;
         let committed = await_helper_ticket(
-            context.commit_ticket(commit_request.clone(), deadline),
+            context.commit_ticket(runtime_owner, commit_request.clone(), deadline),
             deadline,
             cancellation,
             self.phase,
@@ -3054,15 +3086,6 @@ async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
     }
 }
 
-fn destroy_authority(route_context_id: [u8; ID_BYTES], handle: &[u8]) -> Option<DestroyContext> {
-    HelperContextHandle::try_from(handle)
-        .ok()
-        .map(|context_handle| DestroyContext {
-            route_context_id: route_context_id.to_vec(),
-            context_handle: context_handle.as_bytes().to_vec(),
-        })
-}
-
 fn activation_request<P: ClientReservationProtocol>(
     route_context_id: [u8; ID_BYTES],
     batch: &LocalEndpointLeaseBatch,
@@ -3395,7 +3418,7 @@ mod tests {
         async fn prepare(
             &mut self,
             request: &PrepareLeaseBatch,
-        ) -> Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
+        ) -> Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
             self.shared.record("local.prepare");
             let (block, delay_ms, ambiguous) = {
                 let mut state = self.shared.state.lock().expect("fake state");
@@ -3446,14 +3469,18 @@ mod tests {
                     }
                 })
                 .collect();
-            Ok(PreparedLeaseBatch {
-                context_handle: vec![99; HELPER_HANDLE_BYTES],
-                leases,
-            })
+            Ok(RuntimeBoundPreparedLeaseBatch::for_test(
+                request.clone(),
+                PreparedLeaseBatch {
+                    context_handle: vec![99; HELPER_HANDLE_BYTES],
+                    leases,
+                },
+            ))
         }
 
         async fn activate(
             &mut self,
+            owner: &mut RuntimeBoundPreparedLeaseBatch,
             request: &ActivateLeaseBatch,
         ) -> Result<ActivatedLeaseBatch, Self::Error> {
             encode_request(&HelperRequest {
@@ -3474,18 +3501,26 @@ mod tests {
             if block {
                 self.shared.activate_release.notified().await;
             }
-            Ok(ActivatedLeaseBatch {
+            owner
+                .begin_activation(request)
+                .map_err(|_| FakeLocalError::Definitive)?;
+            let response = ActivatedLeaseBatch {
                 context_handle: request.context_handle.clone(),
                 lease_handles: request
                     .leases
                     .iter()
                     .map(|lease| lease.lease_handle.clone())
                     .collect(),
-            })
+            };
+            owner
+                .finish_activation(&response)
+                .map_err(|_| FakeLocalError::Definitive)?;
+            Ok(response)
         }
 
         async fn commit(
             &mut self,
+            owner: &mut RuntimeBoundPreparedLeaseBatch,
             request: &CommitLeaseBatch,
         ) -> Result<CommittedLeaseBatch, Self::Error> {
             self.shared.record("local.commit");
@@ -3494,7 +3529,10 @@ mod tests {
             if block {
                 self.shared.commit_release.notified().await;
             }
-            Ok(CommittedLeaseBatch {
+            owner
+                .begin_commit(request)
+                .map_err(|_| FakeLocalError::Definitive)?;
+            let response = CommittedLeaseBatch {
                 context_handle: request.context_handle.clone(),
                 leases: request
                     .leases
@@ -3506,12 +3544,16 @@ mod tests {
                         transmitted_bytes: 10,
                     })
                     .collect(),
-            })
+            };
+            owner
+                .finish_commit(&response)
+                .map_err(|_| FakeLocalError::Definitive)?;
+            Ok(response)
         }
 
         async fn destroy(
             &mut self,
-            _request: &DestroyContext,
+            _owner: &RuntimeBoundPreparedLeaseBatch,
         ) -> Result<DestroyedContext, Self::Error> {
             self.shared.record("local.destroy");
             let block = self.shared.state.lock().expect("fake state").block_destroy;

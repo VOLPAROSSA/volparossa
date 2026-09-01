@@ -1342,6 +1342,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   and has no production caller. Its private phase-B split returns the original transaction on a
   measurement error, rejects cancellation/deadline expiry before retirement/Prepare, and builds one
   finalize frame only after Prepare while retaining the same session/IDs/deadline. The route-level
+  helper lifecycle now retains the exact Prepare plan/result and helper runtime in one non-cloneable
+  owner. Fresh Activate, Commit and retirement Destroy streams bind that runtime before mutation;
+  timeout/cancellation leave the owner in the existing bounded retirement/retry path. This closes
+  only same-process phase correlation, not restart adoption, Ready/Result or a usable datapath. The
+  route-level
   probe associated type is no longer Clone-bound, but public reservation `Verified*` values are not
   claimed to be affine and `VerifiedRelayProbe` remains cloneable for API compatibility. C2a/C2b
   admit only explicit ordered prospective IDs `1..N` (1-8 and at least the policy minimum), retain

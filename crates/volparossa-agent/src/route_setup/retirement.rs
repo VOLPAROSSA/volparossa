@@ -9,14 +9,15 @@ use std::{
     time::Duration,
 };
 
+use crate::{
+    endpoint_leases::LocalEndpointLeaseBatch,
+    helper::{PrepareReconciliationAuthority, RuntimeBoundPreparedLeaseBatch},
+};
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, MissedTickBehavior, interval, timeout},
 };
-use volparossa_routing::DestroyContext;
-
-use crate::{endpoint_leases::LocalEndpointLeaseBatch, helper::PrepareReconciliationAuthority};
 
 use super::{ClientReservationProtocol, LocalRouteBackend};
 
@@ -93,7 +94,7 @@ impl Drop for RetirementSlot {
 }
 
 enum CleanupTarget {
-    Exact(DestroyContext),
+    Exact(Arc<Mutex<RuntimeBoundPreparedLeaseBatch>>),
     AmbiguousPrepare {
         authority: PrepareReconciliationAuthority,
         not_before: Instant,
@@ -203,14 +204,14 @@ pub(super) struct RetirementReservation<P> {
 impl<P> RetirementReservation<P> {
     pub(super) fn bind(
         mut self,
-        destroy: DestroyContext,
+        prepared: RuntimeBoundPreparedLeaseBatch,
         protocol: P,
         reservation_id: [u8; 16],
     ) -> PreparedContextOwner<P> {
         PreparedContextOwner {
             sink: self.sink.clone(),
             job: Some(RetirementJob {
-                target: CleanupTarget::Exact(destroy),
+                target: CleanupTarget::Exact(Arc::new(Mutex::new(prepared))),
                 endpoints: None,
                 protocol,
                 reservation_id,
@@ -257,6 +258,14 @@ pub(super) struct PreparedContextOwner<P> {
 }
 
 impl<P> PreparedContextOwner<P> {
+    pub(super) fn runtime_owner(&self) -> Option<Arc<Mutex<RuntimeBoundPreparedLeaseBatch>>> {
+        let job = self.job.as_ref()?;
+        match &job.target {
+            CleanupTarget::Exact(owner) => Some(Arc::clone(owner)),
+            CleanupTarget::AmbiguousPrepare { .. } => None,
+        }
+    }
+
     pub(super) fn attach_endpoints(
         &mut self,
         endpoints: LocalEndpointLeaseBatch,
@@ -484,9 +493,10 @@ async fn process_job<P, L>(
         return;
     }
     let confirmed = match &job.target {
-        CleanupTarget::Exact(destroy) => {
+        CleanupTarget::Exact(owner) => {
+            let owner = owner.lock().await;
             matches!(
-                timeout(destroy_timeout, backend.destroy(destroy)).await,
+                timeout(destroy_timeout, backend.destroy(&owner)).await,
                 Ok(Ok(_))
             )
         }
