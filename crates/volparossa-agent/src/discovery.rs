@@ -62,9 +62,9 @@ use volparossa_discovery::{
     ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
     LocalPreselectionPolicy, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
     MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, NativeProbeReadyForwardRequest,
-    PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink, UpstreamExitForwardRequest,
-    UpstreamExitForwardResponse, advertisement_envelope_matches_peer, capability,
-    signed_envelope_matches_peer,
+    PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink, UdpSessionStartRequest,
+    UpstreamExitForwardRequest, UpstreamExitForwardResponse, advertisement_envelope_matches_peer,
+    capability, signed_envelope_matches_peer,
 };
 use volparossa_exit::{ExitService, ExitServiceConfig};
 use volparossa_identity::Identity;
@@ -76,23 +76,24 @@ use volparossa_peerstore::PeerStore;
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
-    ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
-    ExitReservationConfirmation, ExitReservationFinalizeRequest, IssuedNativeProbeRelayReady,
-    MAX_CONTROL_PAYLOAD_SIZE, MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding,
-    NativeProbeForwardingProof, NativeProbeLeaseProof, NativeProbePathScope,
-    NativeProbePermitRequest, NativeProbeRelayLocalProofs, NativeProbeStart,
-    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, ObservationNetworkPrefix,
-    PreselectionActorBinding, RelayAuthorization, RelayProbePermit, RelayProbePermitRequest,
+    ClientSessionCapability, ControlPayload, ExitCapacityHold, ExitCapacityHoldRequest,
+    ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
+    ExitReservationFinalizeRequest, IssuedNativeProbeRelayReady, MAX_CONTROL_PAYLOAD_SIZE,
+    MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding, NativeProbeForwardingProof,
+    NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermitRequest,
+    NativeProbeRelayLocalProofs, NativeProbeStart, NodeAdvertisement as WireAdvertisement,
+    ObservationAddressFamily, ObservationNetworkPrefix, PreselectionActorBinding,
+    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservation,
     RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
     VerifiedNativeProbePermit, VerifiedNativeProbeStartForRelay, decode_canonical,
-    encode_canonical, generate_nonce, native_probe_prepared_lease_commitment,
-    node_id_from_public_key, sign_native_probe_relay_ready_with,
-    sign_native_probe_relay_result_with, verify_control_message,
-    verify_native_probe_authorization_chain, verify_native_probe_exit_ready,
-    verify_native_probe_exit_result_for_relay, verify_native_probe_permit,
-    verify_native_probe_start_for_relay,
+    encode_canonical, exit_confirmation_envelope_hash, generate_nonce,
+    native_probe_prepared_lease_commitment, node_id_from_public_key,
+    sign_native_probe_relay_ready_with, sign_native_probe_relay_result_with,
+    verify_control_message, verify_native_probe_authorization_chain,
+    verify_native_probe_exit_ready, verify_native_probe_exit_result_for_relay,
+    verify_native_probe_permit, verify_native_probe_start_for_relay,
 };
-use volparossa_relay::{RelayService, RelayServiceConfig};
+use volparossa_relay::{AcceptedRelayReservation, RelayService, RelayServiceConfig};
 use volparossa_routing::{
     AcquireTransportSocket, ActivateLeaseBatch, CommitLeaseBatch, CommittedLeaseBatch, ContextRole,
     LeaseActivation, LeaseCommit, LeasePlan, NATIVE_PROBE_CLIENT_PORT, NATIVE_PROBE_DATAGRAM_BYTES,
@@ -100,6 +101,7 @@ use volparossa_routing::{
     TransportSocketKind, WireguardRole,
 };
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
+use volparossa_udp::VerifiedSingleRelayPath;
 use volparossa_wireguard::{ExitEndpointLease, RelayEndpointLease, overlay_addresses};
 
 use crate::{
@@ -648,6 +650,17 @@ struct PendingNativeProbeResult {
     endpoint: RelayEndpointLease,
     committed: CommittedLeaseBatch,
     helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+struct PreparedProductionRelayRoute {
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+    accepted: AcceptedRelayReservation,
+    #[allow(
+        dead_code,
+        reason = "consumed by the UdpSessionStart continuation once Exit native provenance lands"
+    )]
+    commit: CommitLeaseBatch,
+    expires_at_ms: u64,
 }
 
 #[derive(Clone)]
@@ -1355,6 +1368,7 @@ pub struct DiscoveryRuntime {
     prepared_native_authorization_helpers:
         HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
     active_native_relay_helpers: HashMap<[u8; FORWARD_ID_BYTES], ActiveNativeRelayProbe>,
+    prepared_production_relay_routes: HashMap<[u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute>,
     exit_native_ready_attempts: HashMap<[u8; FORWARD_ID_BYTES], ExitNativeReadyAttempt>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
     datapath_index: HashMap<DatapathKey, request_response::OutboundRequestId>,
@@ -1482,6 +1496,7 @@ impl DiscoveryRuntime {
             prepared_native_authorizations: HashMap::new(),
             prepared_native_authorization_helpers: HashMap::new(),
             active_native_relay_helpers: HashMap::new(),
+            prepared_production_relay_routes: HashMap::new(),
             exit_native_ready_attempts: HashMap::new(),
             pending_datapath: HashMap::new(),
             datapath_index: HashMap::new(),
@@ -1545,6 +1560,7 @@ impl DiscoveryRuntime {
                     self.synchronize_exit_policy(&state).await;
                     let now_ms = unix_millis();
                     self.destroy_expired_exit_native_attempts(now_ms).await;
+                    self.destroy_expired_production_relay_routes(now_ms).await;
                     let relay_purged = self
                         .relay_service
                         .as_mut()
@@ -1567,6 +1583,7 @@ impl DiscoveryRuntime {
                     self.synchronize_exit_policy(&state).await;
                     let now_ms = unix_millis();
                     self.destroy_expired_exit_native_attempts(now_ms).await;
+                    self.destroy_expired_production_relay_routes(now_ms).await;
                     let relay_purged = self
                         .relay_service
                         .as_mut()
@@ -1616,6 +1633,7 @@ impl DiscoveryRuntime {
             }
         }
         self.destroy_expired_exit_native_attempts(u64::MAX).await;
+        self.destroy_expired_production_relay_routes(u64::MAX).await;
         self.cancel_client_preselection(ClientPreselectionError::Closed);
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
         self.reject_queued_outbound_commands();
@@ -4141,6 +4159,16 @@ impl DiscoveryRuntime {
                 ..
             } => {
                 match request.validated_operation() {
+                    Ok(DatapathRelayOperation::ReservePath) => {
+                        self.begin_production_relay_reservation(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
                     Ok(DatapathRelayOperation::NativeProbeReady) => {
                         self.begin_native_probe_ready(
                             authenticated_client_peer,
@@ -4206,6 +4234,212 @@ impl DiscoveryRuntime {
             request_response::Event::InboundFailure { .. }
             | request_response::Event::ResponseSent { .. } => {}
         }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the signed standard grant and exact Relay helper owner are one transaction"
+    )]
+    async fn begin_production_relay_reservation(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::ReservePath,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(request, DatapathRelayOperation::ReservePath, now_ms)
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("PRODUCTION_RELAY_RESERVATION_SCOPE_REJECTED");
+        }
+        let Some((relay_request, authorization)) =
+            decoded_relay_reservation_request(request.client_signed_request())
+        else {
+            reject!("PRODUCTION_RELAY_RESERVATION_FRAME_REJECTED");
+        };
+        let Some(route_context_id) =
+            fixed_bytes::<FORWARD_ID_BYTES>(&authorization.route_context_id)
+        else {
+            reject!("PRODUCTION_RELAY_RESERVATION_FRAME_REJECTED");
+        };
+        if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
+            if existing.accepted.signed_client_relay_request() == request.client_signed_request()
+                && existing.accepted.expires_at_ms() > now_ms
+            {
+                if let Ok(response) = DatapathRelayResponse::granted(
+                    request.request_id().to_vec(),
+                    DatapathRelayOperation::ReservePath,
+                    self.local_node_id.to_vec(),
+                    local_peer.to_bytes(),
+                    existing.accepted.encoded().to_vec(),
+                ) {
+                    let _ = self.service.send_datapath_relay_response(channel, response);
+                }
+                return;
+            }
+            reject!("PRODUCTION_RELAY_RESERVATION_OWNER_CONFLICT");
+        }
+        let Some(prepare) = production_service_prepare_request(
+            route_context_id,
+            ContextRole::Relay,
+            authorization.path_id,
+            request.deadline_unix_ms(),
+            authorization.expires_at_ms,
+        ) else {
+            reject!("PRODUCTION_RELAY_RESERVATION_HELPER_SCOPE_REJECTED");
+        };
+        let Ok(mut helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
+            reject!("PRODUCTION_RELAY_RESERVATION_HELPER_PREPARE_UNAVAILABLE");
+        };
+        let Ok(endpoint) =
+            bind_prepared_relay_endpoint_lease(&prepare, helper_owner.prepared().clone())
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("PRODUCTION_RELAY_RESERVATION_HELPER_BIND_REJECTED");
+        };
+        let identity = &self.identity;
+        let accepted = self.relay_service.as_mut().and_then(|service| {
+            service
+                .accept_request_with(
+                    request.client_signed_request(),
+                    now_ms,
+                    self.local_public_key,
+                    move |path_id| (path_id == endpoint.path_id()).then_some(endpoint),
+                    |message| identity.sign(message).ok(),
+                )
+                .ok()
+        });
+        let Some(accepted) = accepted else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("PRODUCTION_RELAY_RESERVATION_SERVICE_REJECTED");
+        };
+        let Some(relay) = decoded_signed_payload::<RelayReservation>(accepted.encoded()) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_RESPONSE_REJECTED");
+        };
+        let Some(client_endpoint) = relay_request.client_wireguard_endpoint else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_CLIENT_ENDPOINT_REJECTED");
+        };
+        let Some(exit_endpoint) = relay.exit_wireguard_endpoint.clone() else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_EXIT_ENDPOINT_REJECTED");
+        };
+        let (Ok(maximum_up_mbps), Ok(maximum_down_mbps)) = (
+            u32::try_from(relay.maximum_up_mbps),
+            u32::try_from(relay.maximum_down_mbps),
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_RATE_REJECTED");
+        };
+        let activation = ActivateLeaseBatch {
+            route_context_id: route_context_id.to_vec(),
+            context_handle: endpoint.context_handle().as_bytes().to_vec(),
+            leases: vec![
+                LeaseActivation {
+                    lease_handle: endpoint.client_facing_handle().as_bytes().to_vec(),
+                    path_id: accepted.path_id(),
+                    role: WireguardRole::RelayClient as i32,
+                    peer_public_key: client_endpoint.public_key.clone(),
+                    peer_endpoint: Some(PublicUdpEndpoint {
+                        address: client_endpoint.underlay_ip.clone(),
+                        port: client_endpoint.listen_port,
+                    }),
+                    maximum_up_mbps,
+                    maximum_down_mbps,
+                    signed_relay_reservation: accepted.encoded().to_vec(),
+                    signed_client_relay_request: accepted.signed_client_relay_request().to_vec(),
+                },
+                LeaseActivation {
+                    lease_handle: endpoint.exit_facing_handle().as_bytes().to_vec(),
+                    path_id: accepted.path_id(),
+                    role: WireguardRole::RelayExit as i32,
+                    peer_public_key: exit_endpoint.public_key.clone(),
+                    peer_endpoint: Some(PublicUdpEndpoint {
+                        address: exit_endpoint.underlay_ip,
+                        port: exit_endpoint.listen_port,
+                    }),
+                    maximum_up_mbps,
+                    maximum_down_mbps,
+                    signed_relay_reservation: accepted.encoded().to_vec(),
+                    signed_client_relay_request: accepted.signed_client_relay_request().to_vec(),
+                },
+            ],
+        };
+        if self
+            .helper
+            .activate_lease_batch(&mut helper_owner, activation.clone())
+            .await
+            .is_err()
+        {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_HELPER_ACTIVATE_REJECTED");
+        }
+        let commit = commit_lease_batch(&activation);
+        let response = DatapathRelayResponse::granted(
+            request.request_id().to_vec(),
+            DatapathRelayOperation::ReservePath,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            accepted.encoded().to_vec(),
+        );
+        let Ok(response) = response else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_FRAME_REJECTED");
+        };
+        self.prepared_production_relay_routes.insert(
+            route_context_id,
+            PreparedProductionRelayRoute {
+                helper_owner,
+                expires_at_ms: accepted.expires_at_ms(),
+                accepted,
+                commit,
+            },
+        );
+        let _ = self.service.send_datapath_relay_response(channel, response);
+        log_relay_forward_admission(Some(state), "PRODUCTION_RELAY_RESERVATION_ACTIVATED");
     }
 
     #[allow(
@@ -5733,6 +5967,43 @@ impl DiscoveryRuntime {
             } else {
                 let previous = self.exit_native_ready_attempts.insert(attempt_id, attempt);
                 debug_assert!(previous.is_none(), "expired Exit attempt was removed above");
+            }
+        }
+        destroyed
+    }
+
+    async fn destroy_expired_production_relay_routes(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .prepared_production_relay_routes
+            .iter()
+            .filter_map(|(route_context_id, route)| {
+                (route.expires_at_ms <= now_ms).then_some(*route_context_id)
+            })
+            .collect::<Vec<_>>();
+        let mut destroyed = 0;
+        for route_context_id in expired {
+            let Some(route) = self
+                .prepared_production_relay_routes
+                .remove(&route_context_id)
+            else {
+                continue;
+            };
+            if self
+                .helper
+                .destroy_context(&route.helper_owner)
+                .await
+                .is_ok()
+            {
+                let _ = self
+                    .relay_service
+                    .as_mut()
+                    .and_then(|service| service.release(route.accepted.reservation_id()).ok());
+                destroyed += 1;
+            } else {
+                let previous = self
+                    .prepared_production_relay_routes
+                    .insert(route_context_id, route);
+                debug_assert!(previous.is_none(), "expired Relay route was removed above");
             }
         }
         destroyed
@@ -8461,6 +8732,17 @@ fn datapath_request_scope_matches(
         DatapathRelayOperation::NativeProbeStart | DatapathRelayOperation::NativeProbeAuthorize => {
             native_probe_start_scope_matches(request, operation, now_ms, &mut replay)
         }
+        DatapathRelayOperation::UdpSessionStart => {
+            verified_udp_session_start_scope(request.client_signed_request(), now_ms).is_some_and(
+                |scope| {
+                    request.exit_signed_authorization().is_empty()
+                        && request.request_id() == &scope.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= scope.expires_at_ms
+                        && request.relay_node_id() == scope.relay.relay_node_id
+                        && request.relay_peer_id() == scope.relay.relay_peer_id
+                },
+            )
+        }
         DatapathRelayOperation::Unspecified => false,
     }
 }
@@ -9018,6 +9300,80 @@ fn native_start_authorization_id(encoded_start: &[u8]) -> Option<[u8; FORWARD_ID
     )?))
 }
 
+fn decoded_signed_payload<M: ControlPayload>(encoded: &[u8]) -> Option<M> {
+    let envelope =
+        decode_canonical::<SignedEnvelope>(encoded, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE)
+            .ok()?;
+    let payload = decode_canonical::<M>(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).ok()?;
+    payload.validate().ok()?;
+    Some(payload)
+}
+
+fn decoded_relay_reservation_request(
+    encoded: &[u8],
+) -> Option<(RelayReservationRequest, RelayAuthorization)> {
+    let request = decoded_signed_payload::<RelayReservationRequest>(encoded)?;
+    let authorization = decoded_signed_payload::<RelayAuthorization>(&request.exit_authorization)?;
+    Some((request, authorization))
+}
+
+fn production_service_prepare_request(
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    role: ContextRole,
+    path_id: u32,
+    setup_expires_at_ms: u64,
+    hard_expires_at_ms: u64,
+) -> Option<PrepareLeaseBatch> {
+    if route_context_id.iter().all(|byte| *byte == 0)
+        || !(1..=8).contains(&path_id)
+        || setup_expires_at_ms > hard_expires_at_ms
+        || !matches!(role, ContextRole::Relay | ContextRole::Exit)
+    {
+        return None;
+    }
+    let setup_expires_at_unix = setup_expires_at_ms.checked_add(999)? / 1_000;
+    let hard_expires_at_unix = hard_expires_at_ms.checked_add(999)? / 1_000;
+    if setup_expires_at_unix <= unix_seconds() || hard_expires_at_unix < setup_expires_at_unix {
+        return None;
+    }
+    let lease_roles: &[WireguardRole] = match role {
+        ContextRole::Relay => &[WireguardRole::RelayClient, WireguardRole::RelayExit],
+        ContextRole::Exit => &[WireguardRole::Exit],
+        ContextRole::Unspecified | ContextRole::Client => return None,
+    };
+    Some(PrepareLeaseBatch {
+        route_context_id: route_context_id.to_vec(),
+        role: role as i32,
+        mptcp_accepted_addrs: 1,
+        mptcp_subflows: 1,
+        leases: lease_roles
+            .iter()
+            .map(|lease_role| LeasePlan {
+                path_id,
+                role: *lease_role as i32,
+            })
+            .collect(),
+        setup_expires_at_unix,
+        hard_expires_at_unix,
+    })
+}
+
+fn commit_lease_batch(activation: &ActivateLeaseBatch) -> CommitLeaseBatch {
+    CommitLeaseBatch {
+        route_context_id: activation.route_context_id.clone(),
+        context_handle: activation.context_handle.clone(),
+        leases: activation
+            .leases
+            .iter()
+            .map(|lease| LeaseCommit {
+                lease_handle: lease.lease_handle.clone(),
+                path_id: lease.path_id,
+                role: lease.role,
+            })
+            .collect(),
+    }
+}
+
 fn native_service_prepare_request(
     scope: &NativeProbePathScope,
     role: ContextRole,
@@ -9246,6 +9602,10 @@ fn native_probe_time_policy() -> TimePolicy {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive operation matrix keeps every signed forward scope explicit"
+)]
 fn forward_request_scope_matches(
     request: &ExitForwardRequest,
     operation: ExitForwardOperation,
@@ -9349,8 +9709,114 @@ fn forward_request_scope_matches(
         ExitForwardOperation::NativeProbeResult => {
             verified_native_probe_result_forward_scope(request, now_ms).is_some()
         }
+        ExitForwardOperation::UdpSessionStart => {
+            verified_udp_session_start_scope(request.canonical_request(), now_ms).is_some_and(
+                |scope| {
+                    request.forward_id() == &scope.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= scope.expires_at_ms
+                        && request.control_relay_node_id() == scope.relay.relay_node_id
+                        && request.control_relay_peer_id() == scope.relay.relay_peer_id
+                        && request.exit_node_id() == scope.exit.exit_node_id
+                        && request.exit_peer_id() == scope.exit.exit_peer_id
+                },
+            )
+        }
         ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
     }
+}
+
+struct VerifiedUdpSessionStartScope {
+    exit: ExitReservation,
+    relay: RelayReservation,
+    confirmation_nonce: [u8; 32],
+    expires_at_ms: u64,
+}
+
+fn verified_udp_session_start_scope(
+    encoded: &[u8],
+    now_ms: u64,
+) -> Option<VerifiedUdpSessionStartScope> {
+    let request = decode_canonical::<UdpSessionStartRequest>(
+        encoded,
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+    )
+    .ok()?;
+    request.validate().ok()?;
+    let mut path_replay = ReplayCache::new(4).ok()?;
+    let path = VerifiedSingleRelayPath::verify(
+        request.signed_exit_reservation(),
+        request.signed_relay_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut path_replay,
+    )
+    .ok()?;
+    let mut verification_replay = ReplayCache::new(4).ok()?;
+    let exit_verified = verify_control_message::<ExitReservation>(
+        request.signed_exit_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_replay,
+    )
+    .ok()?;
+    let exit_sender = *exit_verified.sender_id();
+    let exit = exit_verified.into_message();
+    let relay_verified = verify_control_message::<RelayReservation>(
+        request.signed_relay_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_replay,
+    )
+    .ok()?;
+    let relay_sender = *relay_verified.sender_id();
+    let relay = relay_verified.into_message();
+    let confirmation_verified = verify_control_message::<ExitReservationConfirmation>(
+        request.signed_confirmation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_replay,
+    )
+    .ok()?;
+    let confirmation_sender = *confirmation_verified.sender_id();
+    let confirmation_public_key = *confirmation_verified.sender_public_key();
+    let confirmation_nonce = *confirmation_verified.nonce();
+    let confirmation = confirmation_verified.into_message();
+    let receipt_verified = verify_control_message::<ExitConfirmationReceipt>(
+        request.signed_confirmation_receipt(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_replay,
+    )
+    .ok()?;
+    let receipt_sender = *receipt_verified.sender_id();
+    let receipt_expiry = receipt_verified.expires_at_ms();
+    let receipt = receipt_verified.into_message();
+    let confirmation_hash = exit_confirmation_envelope_hash(request.signed_confirmation()).ok()?;
+    if exit_sender != *path.exit_node_id()
+        || relay_sender != *path.relay_node_id()
+        || confirmation_sender != *path.client_ephemeral_id()
+        || confirmation_public_key.as_slice() != relay.client_session_public_key
+        || receipt_sender != *path.exit_node_id()
+        || receipt.confirmation_envelope_hash.as_slice() != confirmation_hash
+        || receipt.client_session_id != confirmation.client_session_id
+        || receipt.capability_id != confirmation.capability_id
+        || receipt.hold_id != confirmation.hold_id
+        || receipt.finalize_id != confirmation.finalize_id
+        || receipt.control_relay_node_id != confirmation.control_relay_node_id
+        || receipt.control_relay_peer_id != confirmation.control_relay_peer_id
+        || receipt.exit_node_id != confirmation.exit_node_id
+        || receipt.exit_peer_id != confirmation.exit_peer_id
+        || receipt.exit_boot_id != confirmation.exit_boot_id
+    {
+        return None;
+    }
+    let expires_at_ms = receipt_expiry.min(path.expires_at_ms());
+    Some(VerifiedUdpSessionStartScope {
+        exit,
+        relay,
+        confirmation_nonce,
+        expires_at_ms,
+    })
 }
 
 /// Test-only access to the production exit-forward scope validator.
