@@ -32,8 +32,10 @@ use volparossa_protocol::{
     ClientSessionCapability, ControlMessageType, ExitReservation, MAX_CONTROL_MESSAGE_SIZE,
     NativeProbeStart, ObservationAddressFamily, ProtocolError, RelayAuthorization,
     RelayReservation, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy,
-    VerifiedControlMessage, WireguardEndpoint, decode_canonical, native_probe_start_hash,
-    relay_reservation_request_sha256, verify_control_message, verify_relay_reservation,
+    VerifiedControlMessage, VerifiedNativeProbeAuthorizationChain, WireguardEndpoint,
+    decode_canonical, native_probe_prepared_lease_commitment, native_probe_start_hash,
+    relay_reservation_request_sha256, verify_control_message,
+    verify_native_probe_authorization_chain, verify_relay_reservation,
 };
 use volparossa_routing::{
     AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress,
@@ -113,6 +115,7 @@ const STAGE_ACTIVATE_INGRESS: u8 = 12;
 const STAGE_DESTROY_INGRESS: u8 = 13;
 const STAGE_ACQUIRE_INGRESS_REPLY: u8 = 14;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
+const NATIVE_PROBE_AUTHORIZED_RATE_MBPS: u64 = 1;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
@@ -2930,11 +2933,21 @@ fn validate_activate_batch_binding(
         return Err(BackendError::Invalid);
     }
     match context {
-        ContextRole::Client | ContextRole::Exit => {
+        ContextRole::Client => {
             if value.leases.iter().any(|activation| {
                 activation.maximum_up_mbps != 0
                     || activation.maximum_down_mbps != 0
                     || !activation.signed_client_relay_request.is_empty()
+            }) {
+                return Err(BackendError::Invalid);
+            }
+        }
+        ContextRole::Exit => {
+            let native_authority = !value.leases[0].signed_client_relay_request.is_empty();
+            if value.leases.iter().any(|activation| {
+                activation.maximum_up_mbps != 0
+                    || activation.maximum_down_mbps != 0
+                    || activation.signed_client_relay_request.is_empty() == native_authority
             }) {
                 return Err(BackendError::Invalid);
             }
@@ -3890,8 +3903,9 @@ struct VerifiedActivationAuthority {
 }
 
 struct VerifiedPathActivationAuthority {
-    relay: VerifiedControlMessage<RelayReservation>,
+    relay: Option<VerifiedControlMessage<RelayReservation>>,
     exit: VerifiedControlMessage<RelayAuthorization>,
+    native_exit: Option<VerifiedNativeProbeAuthorizationChain>,
 }
 
 enum VerifiedRelayClientRequest {
@@ -3969,7 +3983,7 @@ fn verify_activation_authority(
                 request,
                 capability,
                 exit_reservation,
-                &path.relay,
+                path.relay.as_ref().ok_or(BackendError::Invalid)?,
                 &path.exit,
             ) => {}
             VerifiedRelayClientRequest::NativeStart {
@@ -3981,7 +3995,7 @@ fn verify_activation_authority(
                 start,
                 signed_sha256,
                 start_hash,
-                &path.relay,
+                path.relay.as_ref().ok_or(BackendError::Invalid)?,
                 &path.exit,
             ) => {}
             _ => return Err(BackendError::Invalid),
@@ -3989,14 +4003,29 @@ fn verify_activation_authority(
         paths.push(path);
     } else {
         for (prepared, activation) in prepared.iter().zip(activations) {
-            paths.push(verify_path_activation_authority(
-                key,
-                prepared,
-                activation,
-                now_ms,
-                replay_cache,
-                replay_keys,
-            )?);
+            paths.push(
+                if context == ContextRole::Exit
+                    && !activation.signed_client_relay_request.is_empty()
+                {
+                    verify_native_exit_path_activation_authority(
+                        key,
+                        prepared,
+                        activation,
+                        now_ms,
+                        replay_cache,
+                        replay_keys,
+                    )?
+                } else {
+                    verify_path_activation_authority(
+                        key,
+                        prepared,
+                        activation,
+                        now_ms,
+                        replay_cache,
+                        replay_keys,
+                    )?
+                },
+            );
         }
     }
     Ok(VerifiedActivationAuthority {
@@ -4035,7 +4064,113 @@ fn verify_path_activation_authority(
     {
         return Err(BackendError::Invalid);
     }
-    Ok(VerifiedPathActivationAuthority { relay, exit })
+    Ok(VerifiedPathActivationAuthority {
+        relay: Some(relay),
+        exit,
+        native_exit: None,
+    })
+}
+
+fn verify_native_exit_path_activation_authority(
+    key: OpenLineageKey,
+    prepared: &PreparedWorkerLease,
+    activation: &volparossa_routing::LeaseActivation,
+    now_ms: u64,
+    replay_cache: &mut ReplayCache,
+    replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
+) -> Result<VerifiedPathActivationAuthority, BackendError> {
+    let native_exit =
+        verify_native_probe_authorization_chain(&activation.signed_client_relay_request, now_ms)
+            .map_err(|error| protocol_backend_error(&error))?;
+    let exit = verify_control_message::<RelayAuthorization>(
+        &activation.signed_relay_reservation,
+        now_ms,
+        TimePolicy::default(),
+        replay_cache,
+    )
+    .map_err(|error| protocol_backend_error(&error))?;
+    replay_keys.push((*exit.sender_id(), *exit.nonce()));
+    verify_native_exit_authorization_scope(key, prepared, activation, &native_exit, &exit)?;
+    Ok(VerifiedPathActivationAuthority {
+        relay: None,
+        exit,
+        native_exit: Some(native_exit),
+    })
+}
+
+fn verify_native_exit_authorization_scope(
+    key: OpenLineageKey,
+    prepared: &PreparedWorkerLease,
+    activation: &volparossa_routing::LeaseActivation,
+    chain: &VerifiedNativeProbeAuthorizationChain,
+    authorization: &VerifiedControlMessage<RelayAuthorization>,
+) -> Result<(), BackendError> {
+    let scope = chain.scope();
+    let data_relay = scope.data_relay.as_ref().ok_or(BackendError::Invalid)?;
+    let control = scope.control.as_ref().ok_or(BackendError::Invalid)?;
+    let exit = scope.exit.as_ref().ok_or(BackendError::Invalid)?;
+    let client_endpoint = chain
+        .client_endpoint()
+        .endpoint
+        .as_ref()
+        .ok_or(BackendError::Invalid)?;
+    let exit_binding = chain.exit_endpoint();
+    let exit_endpoint = exit_binding
+        .endpoint
+        .as_ref()
+        .ok_or(BackendError::Invalid)?;
+    let message = authorization.message();
+    let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
+    let start_hash = native_probe_start_hash(chain.encoded_start())
+        .map_err(|error| protocol_backend_error(&error))?;
+    let lease_handle: [u8; 32] = activation
+        .lease_handle
+        .as_slice()
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    let prepared_commitment = native_probe_prepared_lease_commitment(
+        &key.helper_runtime_id,
+        &key.context_id,
+        &lease_handle,
+        exit_endpoint,
+    )
+    .map_err(|error| protocol_backend_error(&error))?;
+
+    if authorization.sender_public_key().as_slice() != exit.public_key
+        || !signer_matches_peer_id(authorization.sender_public_key(), &exit.peer_id)
+        || authorization.expires_at_ms() < hard_expires_at_ms
+        || message.reservation_id != scope.probe_id
+        || message.route_context_id.as_slice() != key.context_id
+        || message.path_id != prepared.path_id
+        || message.path_id != scope.candidate_ordinal
+        || message.relay_node_id != data_relay.node_id
+        || message.relay_peer_id != data_relay.peer_id
+        || message.exit_node_id != exit.node_id
+        || message.exit_peer_id != exit.peer_id
+        || message.client_session_id != scope.client_session_id
+        || message.client_session_public_key != scope.client_session_public_key
+        || message.allowed_transports.as_slice() != [scope.transport]
+        || message.maximum_up_mbps != NATIVE_PROBE_AUTHORIZED_RATE_MBPS
+        || message.maximum_down_mbps != NATIVE_PROBE_AUTHORIZED_RATE_MBPS
+        || message.client_wireguard_public_key != client_endpoint.public_key
+        || message.exit_wireguard_endpoint.as_ref() != Some(exit_endpoint)
+        || message.policy_hash != scope.policy_hash
+        || message.created_at_ms != chain.started_at_ms()
+        || message.expires_at_ms != chain.expires_at_ms()
+        || message.capability_id != scope.attempt_id
+        || message.exit_boot_id != chain.exit_boot_id()
+        || message.hold_id != scope.probe_id
+        || message.finalize_id.as_slice() != &start_hash[..16]
+        || message.control_relay_node_id != control.node_id
+        || message.control_relay_peer_id != control.peer_id
+        || exit_binding.helper_runtime_id.as_slice() != key.helper_runtime_id
+        || exit_binding.route_context_id.as_slice() != key.context_id
+        || exit_binding.path_id != prepared.path_id
+        || exit_binding.prepared_lease_commitment.as_slice() != prepared_commitment
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(())
 }
 
 fn verify_relay_client_request(
@@ -4286,12 +4421,12 @@ fn verified_activation_endpoints(
                 .iter()
                 .zip(prepared)
                 .map(|(path, prepared)| {
-                    if path.relay.message().client_wireguard_public_key.as_slice()
-                        != prepared.public_key
+                    let relay = path.relay.as_ref().ok_or(BackendError::Invalid)?;
+                    if relay.message().client_wireguard_public_key.as_slice() != prepared.public_key
                     {
                         return Err(BackendError::Invalid);
                     }
-                    path.relay
+                    relay
                         .message()
                         .relay_client_wireguard_endpoint
                         .as_ref()
@@ -4309,11 +4444,19 @@ fn verified_activation_endpoints(
                 .iter()
                 .zip(prepared)
                 .map(|(path, prepared)| {
-                    let signed_local = path
-                        .exit
-                        .message()
-                        .exit_wireguard_endpoint
-                        .as_ref()
+                    let (signed_local, relay_exit) = if let Some(chain) = &path.native_exit {
+                        (
+                            chain.exit_endpoint().endpoint.as_ref(),
+                            chain.relay_exit_endpoint().endpoint.as_ref(),
+                        )
+                    } else {
+                        let relay = path.relay.as_ref().ok_or(BackendError::Invalid)?;
+                        (
+                            path.exit.message().exit_wireguard_endpoint.as_ref(),
+                            relay.message().relay_exit_wireguard_endpoint.as_ref(),
+                        )
+                    };
+                    let signed_local = signed_local
                         .and_then(verified_wireguard_endpoint)
                         .ok_or(BackendError::Invalid)?;
                     if (
@@ -4324,10 +4467,7 @@ fn verified_activation_endpoints(
                     {
                         return Err(BackendError::Invalid);
                     }
-                    path.relay
-                        .message()
-                        .relay_exit_wireguard_endpoint
-                        .as_ref()
+                    relay_exit
                         .and_then(verified_wireguard_endpoint)
                         .ok_or(BackendError::Invalid)
                 })
@@ -4340,6 +4480,10 @@ fn verified_activation_endpoints(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the complete Relay grant and two endpoint bindings remain one fail-closed check"
+)]
 fn verified_relay_activation_endpoints(
     authority: &VerifiedActivationAuthority,
     prepared: &[PreparedWorkerLease],
@@ -4359,7 +4503,8 @@ fn verified_relay_activation_endpoints(
     let [path] = authority.paths.as_slice() else {
         return Err(BackendError::Invalid);
     };
-    let relay = path.relay.message();
+    let relay_authority = path.relay.as_ref().ok_or(BackendError::Invalid)?;
+    let relay = relay_authority.message();
     let (request_sender, request_hash, client_peer) = match client_request {
         VerifiedRelayClientRequest::Reservation { request, .. } => (
             request.sender_public_key(),
@@ -4395,7 +4540,7 @@ fn verified_relay_activation_endpoints(
         .map_err(|_| BackendError::Invalid)?;
     if request_hash != signed_hash
         || request_sender.as_slice() != relay.client_session_public_key
-        || request_sender == path.relay.sender_public_key()
+        || request_sender == relay_authority.sender_public_key()
         || request_sender == path.exit.sender_public_key()
         || client_activation.maximum_up_mbps
             != u32::try_from(relay.maximum_up_mbps).map_err(|_| BackendError::Invalid)?
@@ -5254,9 +5399,13 @@ mod tests {
     use nix::unistd::{getegid, geteuid};
     use tempfile::tempdir;
     use volparossa_protocol::{
-        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeProbeEndpointBinding,
-        NativeProbePathScope, NativeProbeStart, PreselectionActorBinding, RelayAuthorization,
-        RelayReservation, SignedEnvelope, Transport, decode_canonical, generate_nonce,
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
+        MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE, NativeProbeAuthorizationChain,
+        NativeProbeEndpointBinding, NativeProbeExitReady, NativeProbePathScope, NativeProbePermit,
+        NativeProbePermitRequest, NativeProbeRelayReady, NativeProbeStart,
+        PreselectionActorBinding, RelayAuthorization, RelayReservation, SignedEnvelope, Transport,
+        decode_canonical, encode_canonical, generate_nonce, native_probe_exit_ready_hash,
+        native_probe_permit_hash, native_probe_permit_request_hash, native_probe_relay_ready_hash,
         node_id_from_public_key, sign_control_message,
     };
     use volparossa_test_support::SignedRouteFixture;
@@ -7576,6 +7725,273 @@ mod tests {
         (key, binding, value, activated)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture reproduces the production native Exit authorization chain exactly"
+    )]
+    fn live_native_exit_activate_fixture() -> (
+        OpenLineageKey,
+        ActivateLeaseBatch,
+        PreparedWorkerLease,
+        UnderlayCandidate,
+        SignedRouteFixture,
+    ) {
+        let (mut key, _, mut value, prepared, underlay, route) = live_exit_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now_unix = now_ms / 1_000;
+        key.setup_expires_at_unix = now_unix + 5;
+        key.hard_expires_at_unix = now_unix + 10;
+        let expires_at_ms = now_ms + 20_000;
+        let relay = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
+        let relay_client_endpoint = relay
+            .relay_client_wireguard_endpoint
+            .clone()
+            .expect("RelayClient endpoint");
+        let relay_exit_endpoint = relay
+            .relay_exit_wireguard_endpoint
+            .clone()
+            .expect("RelayExit endpoint");
+        let exit_endpoint = relay
+            .exit_wireguard_endpoint
+            .clone()
+            .expect("Exit endpoint");
+        let client_endpoint =
+            decode_relay_request(route.relay_request(0).expect("client relay request"))
+                .client_wireguard_endpoint
+                .expect("Client endpoint");
+        let data_relay = native_actor(
+            route.relay_key(0).expect("Relay key"),
+            route.relay_peer_id(0).expect("Relay peer ID"),
+            0x81,
+            expires_at_ms + 5_000,
+        );
+        let exit = native_actor(
+            route.exit_key(),
+            route.exit_peer_id(),
+            0x82,
+            expires_at_ms + 5_000,
+        );
+        let address_family = match exit_endpoint.underlay_ip.len() {
+            4 => ObservationAddressFamily::Ipv4,
+            16 => ObservationAddressFamily::Ipv6,
+            _ => panic!("fixture endpoint family"),
+        };
+        let scope = NativeProbePathScope {
+            attempt_id: key.context_id.to_vec(),
+            probe_id: vec![0x83; 16],
+            candidate_set_hash: vec![0x84; 32],
+            candidate_ordinal: prepared.path_id,
+            data_relay: Some(data_relay.clone()),
+            control: Some(data_relay.clone()),
+            exit: Some(exit.clone()),
+            client_session_id: route.client_session_id().to_vec(),
+            client_session_public_key: route.client_key().verifying_key().to_bytes().to_vec(),
+            transport: Transport::UdpSinglePath as i32,
+            address_family: address_family as i32,
+            policy_version: 1,
+            policy_hash: relay.policy_hash.clone(),
+            policy_expires_at_ms: expires_at_ms + 5_000,
+            challenge_hash: vec![0x85; 32],
+            attempt_expires_at_ms: expires_at_ms,
+            required_path_count: 1,
+        };
+        let client_binding = NativeProbeEndpointBinding {
+            helper_runtime_id: vec![0x86; 32],
+            route_context_id: key.context_id.to_vec(),
+            endpoint: Some(client_endpoint.clone()),
+            prepared_lease_commitment: vec![0x87; 32],
+            path_id: prepared.path_id,
+        };
+        let relay_client_binding = NativeProbeEndpointBinding {
+            helper_runtime_id: vec![0x88; 32],
+            route_context_id: key.context_id.to_vec(),
+            endpoint: Some(relay_client_endpoint),
+            prepared_lease_commitment: vec![0x89; 32],
+            path_id: prepared.path_id,
+        };
+        let relay_exit_binding = NativeProbeEndpointBinding {
+            helper_runtime_id: vec![0x88; 32],
+            route_context_id: key.context_id.to_vec(),
+            endpoint: Some(relay_exit_endpoint.clone()),
+            prepared_lease_commitment: vec![0x8a; 32],
+            path_id: prepared.path_id,
+        };
+        let lease_handle: [u8; 32] = value.leases[0]
+            .lease_handle
+            .as_slice()
+            .try_into()
+            .expect("Exit lease handle");
+        let exit_binding = NativeProbeEndpointBinding {
+            helper_runtime_id: key.helper_runtime_id.to_vec(),
+            route_context_id: key.context_id.to_vec(),
+            endpoint: Some(exit_endpoint.clone()),
+            prepared_lease_commitment: native_probe_prepared_lease_commitment(
+                &key.helper_runtime_id,
+                &key.context_id,
+                &lease_handle,
+                &exit_endpoint,
+            )
+            .expect("Exit lease commitment")
+            .to_vec(),
+            path_id: prepared.path_id,
+        };
+
+        let request_nonce = [0x8b; 32];
+        let request = NativeProbePermitRequest {
+            scope: Some(scope.clone()),
+            created_at_ms: now_ms,
+            expires_at_ms,
+            nonce: request_nonce.to_vec(),
+        };
+        let signed_request = sign_control_message(
+            &request,
+            route.client_key(),
+            now_ms,
+            expires_at_ms,
+            request_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Permit request");
+        let permit_nonce = [0x8c; 32];
+        let permit = NativeProbePermit {
+            request_hash: native_probe_permit_request_hash(&signed_request)
+                .expect("Permit request hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            issued_at_ms: now_ms + 1,
+            expires_at_ms,
+            nonce: permit_nonce.to_vec(),
+        };
+        let signed_permit = sign_control_message(
+            &permit,
+            route.exit_key(),
+            permit.issued_at_ms,
+            expires_at_ms,
+            permit_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Permit");
+        let exit_ready_nonce = [0x8d; 32];
+        let exit_boot_id = vec![0x8e; 16];
+        let exit_ready = NativeProbeExitReady {
+            permit_hash: native_probe_permit_hash(&signed_permit)
+                .expect("Permit hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            relay_exit_endpoint: Some(relay_exit_binding),
+            exit_endpoint: Some(exit_binding),
+            ready_at_ms: now_ms + 2,
+            expires_at_ms,
+            nonce: exit_ready_nonce.to_vec(),
+            exit_boot_id: exit_boot_id.clone(),
+        };
+        let signed_exit_ready = sign_control_message(
+            &exit_ready,
+            route.exit_key(),
+            exit_ready.ready_at_ms,
+            expires_at_ms,
+            exit_ready_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Exit Ready");
+        let relay_ready_nonce = [0x8f; 32];
+        let relay_ready = NativeProbeRelayReady {
+            permit_hash: exit_ready.permit_hash.clone(),
+            exit_ready_hash: native_probe_exit_ready_hash(&signed_exit_ready)
+                .expect("Exit Ready hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            relay_client_endpoint: Some(relay_client_binding),
+            ready_at_ms: now_ms + 3,
+            expires_at_ms,
+            nonce: relay_ready_nonce.to_vec(),
+        };
+        let signed_relay_ready = sign_control_message(
+            &relay_ready,
+            route.relay_key(0).expect("Relay key"),
+            relay_ready.ready_at_ms,
+            expires_at_ms,
+            relay_ready_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Relay Ready");
+        let start_nonce = [0x90; 32];
+        let start = NativeProbeStart {
+            permit_hash: exit_ready.permit_hash,
+            relay_ready_hash: native_probe_relay_ready_hash(&signed_relay_ready)
+                .expect("Relay Ready hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            client_endpoint: Some(client_binding),
+            started_at_ms: now_ms + 4,
+            expires_at_ms,
+            nonce: start_nonce.to_vec(),
+        };
+        let signed_start = sign_control_message(
+            &start,
+            route.client_key(),
+            start.started_at_ms,
+            expires_at_ms,
+            start_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Start");
+        let chain = NativeProbeAuthorizationChain {
+            signed_permit_request: signed_request,
+            signed_permit,
+            signed_exit_ready,
+            signed_relay_ready,
+            signed_start: signed_start.clone(),
+        };
+        let encoded_chain = encode_canonical(&chain, MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE)
+            .expect("canonical native authorization chain");
+        let start_hash = native_probe_start_hash(&signed_start).expect("Start hash");
+        let authorization_nonce = [0x91; 32];
+        let authorization = RelayAuthorization {
+            reservation_id: scope.probe_id.clone(),
+            route_context_id: scope.attempt_id.clone(),
+            path_id: scope.candidate_ordinal,
+            relay_node_id: data_relay.node_id.clone(),
+            exit_node_id: exit.node_id.clone(),
+            client_session_id: scope.client_session_id.clone(),
+            allowed_transports: vec![scope.transport],
+            maximum_up_mbps: NATIVE_PROBE_AUTHORIZED_RATE_MBPS,
+            maximum_down_mbps: NATIVE_PROBE_AUTHORIZED_RATE_MBPS,
+            client_wireguard_public_key: client_endpoint.public_key,
+            exit_wireguard_endpoint: Some(exit_endpoint),
+            policy_hash: scope.policy_hash.clone(),
+            created_at_ms: start.started_at_ms,
+            expires_at_ms,
+            nonce: authorization_nonce.to_vec(),
+            relay_peer_id: data_relay.peer_id.clone(),
+            capability_id: scope.attempt_id.clone(),
+            client_session_public_key: scope.client_session_public_key.clone(),
+            exit_boot_id,
+            hold_id: scope.probe_id,
+            finalize_id: start_hash[..16].to_vec(),
+            control_relay_node_id: data_relay.node_id,
+            control_relay_peer_id: data_relay.peer_id,
+            exit_peer_id: exit.peer_id,
+        };
+        let signed_authorization = sign_control_message(
+            &authorization,
+            route.exit_key(),
+            authorization.created_at_ms,
+            expires_at_ms,
+            authorization_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed direct Exit authorization");
+        value.leases[0].peer_public_key = relay_exit_endpoint.public_key;
+        value.leases[0].peer_endpoint = Some(PublicUdpEndpoint {
+            address: relay_exit_endpoint.underlay_ip,
+            port: relay_exit_endpoint.listen_port,
+        });
+        value.leases[0].signed_relay_reservation = signed_authorization;
+        value.leases[0].signed_client_relay_request = encoded_chain;
+        (key, value, prepared, underlay, route)
+    }
+
     fn live_relay_activate_fixture() -> (
         OpenLineageKey,
         BackendBinding,
@@ -8052,13 +8468,13 @@ mod tests {
             },
         )
         .expect("exit resource");
-        verified_internal_activate_plan(
+        verified_internal_activate_batch_plan(
             replay,
-            resource.resource(),
+            &[resource],
             key,
-            prepared,
+            &[prepared],
             underlay,
-            &value.leases[0],
+            &value.leases,
             now_ms,
         )
     }
@@ -9370,6 +9786,64 @@ mod tests {
             Err(BackendError::Invalid)
         );
         assert_eq!(lock_replay_cache(&replay).len(), 2);
+    }
+
+    #[test]
+    fn native_exit_accepts_direct_authorization_only_with_exact_phase_chain_and_lease_owner() {
+        let (key, value, prepared, underlay, route) = live_native_exit_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let envelope: SignedEnvelope = decode_canonical(
+            &value.leases[0].signed_relay_reservation,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("direct Exit authorization envelope");
+        assert_eq!(
+            ControlMessageType::try_from(envelope.message_type),
+            Ok(ControlMessageType::RelayAuthorization)
+        );
+        assert!(
+            verify_native_probe_authorization_chain(
+                &value.leases[0].signed_client_relay_request,
+                now_ms,
+            )
+            .is_ok()
+        );
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verify_exit_fixture_plan(&replay, key, prepared, underlay, &value, now_ms)
+            .expect("native Exit direct authorization plan");
+        assert_eq!(lock_replay_cache(&replay).len(), 1);
+        assert_eq!(plan.leases.len(), 1);
+        assert_eq!(
+            plan.leases[0].peer_public_key,
+            value.leases[0].peer_public_key
+        );
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrong_owner = value.clone();
+        wrong_owner.leases[0].lease_handle[0] ^= 1;
+        assert_eq!(
+            verify_exit_fixture_plan(&replay, key, prepared, underlay, &wrong_owner, now_ms,),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrapped_instead_of_direct = value;
+        wrapped_instead_of_direct.leases[0].signed_relay_reservation =
+            route.relay_reservations()[0].clone();
+        assert_eq!(
+            verify_exit_fixture_plan(
+                &replay,
+                key,
+                prepared,
+                underlay,
+                &wrapped_instead_of_direct,
+                now_ms,
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
     }
 
     #[tokio::test]

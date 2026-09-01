@@ -506,9 +506,10 @@ pub struct LeaseActivation {
     /// and enforces resource bounds but does not verify or grant authority from them.
     #[prost(bytes = "vec", tag = "8")]
     pub signed_relay_reservation: Vec<u8>,
-    /// Exact canonical client-session-signed `RelayReservationRequest` accepted by this relay.
+    /// Exact canonical client-session authority accepted for this activation.
     ///
-    /// Only `RelayClient` may carry these bounded opaque bytes. Cryptographic verification and
+    /// `RelayClient` carries its signed `RelayReservationRequest`; a native-probe `Exit` carries
+    /// the complete canonical `NativeProbeAuthorizationChain`. Cryptographic verification and
     /// request-to-reservation commitment checks remain the production backend's responsibility.
     #[prost(bytes = "vec", tag = "9")]
     pub signed_client_relay_request: Vec<u8>,
@@ -1285,9 +1286,17 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 if role == WireguardRole::RelayClient {
                     if lease.signed_client_relay_request.is_empty() {
                         return Err(HelperProtocolError::Invalid(
-                            "missing signed client relay request",
+                            "missing signed client activation authority",
                         ));
                     }
+                    signed_client_relay_request_bytes = signed_client_relay_request_bytes
+                        .checked_add(lease.signed_client_relay_request.len())
+                        .ok_or(HelperProtocolError::Invalid(
+                            "signed client relay request aggregate size",
+                        ))?;
+                } else if role == WireguardRole::Exit
+                    && !lease.signed_client_relay_request.is_empty()
+                {
                     signed_client_relay_request_bytes = signed_client_relay_request_bytes
                         .checked_add(lease.signed_client_relay_request.len())
                         .ok_or(HelperProtocolError::Invalid(
@@ -2984,7 +2993,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_client_relay_request_is_required_only_for_relay_client_and_binds_the_digest() {
+    fn signed_client_activation_authority_is_role_scoped_and_binds_the_digest() {
         let signed_request = vec![0xa5, 0x5a, 0x01, 0x00];
         let lease = relay_client_activation(1, signed_request.clone());
         let lease_wire = lease.encode_to_vec();
@@ -3013,15 +3022,16 @@ mod tests {
         assert!(matches!(
             validate_request(&missing),
             Err(HelperProtocolError::Invalid(
-                "missing signed client relay request"
+                "missing signed client activation authority"
             ))
         ));
 
-        for role in [
-            WireguardRole::Client,
-            WireguardRole::RelayExit,
-            WireguardRole::Exit,
-        ] {
+        let mut native_exit = activation_lease(1, vec![0xa5]);
+        native_exit.role = WireguardRole::Exit as i32;
+        native_exit.signed_client_relay_request = vec![0x5a];
+        assert!(validate_request(&activate(vec![native_exit])).is_ok());
+
+        for role in [WireguardRole::Client, WireguardRole::RelayExit] {
             let mut cross_role = activation_lease(1, vec![0xa5]);
             cross_role.role = role as i32;
             cross_role.maximum_up_mbps = u32::from(role == WireguardRole::RelayExit);

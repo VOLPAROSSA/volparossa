@@ -8839,6 +8839,7 @@ impl DiscoveryRuntime {
         let path_id = scope.candidate_ordinal;
         let relay_endpoint = verified_chain.relay_exit_endpoint().endpoint.as_ref()?;
         let accepted_encoded = accepted.encoded().to_vec();
+        let accepted_chain = accepted.authorization_chain().to_vec();
         let activation = {
             let attempt = self.exit_native_ready_attempts.get(&attempt_id)?;
             if !attempt.ready_paths.contains(&path_id) {
@@ -8860,7 +8861,7 @@ impl DiscoveryRuntime {
                 maximum_up_mbps: 0,
                 maximum_down_mbps: 0,
                 signed_relay_reservation: accepted_encoded.clone(),
-                signed_client_relay_request: Vec::new(),
+                signed_client_relay_request: accepted_chain,
             }
         };
         let activate_now = {
