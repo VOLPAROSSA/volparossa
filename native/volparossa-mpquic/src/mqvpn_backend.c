@@ -6,6 +6,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_backend_state.h"
+#include "mqvpn_exit_backend_state.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -41,6 +42,25 @@ typedef struct mqvpn_backend {
     bool connected;
     mqvpn_client_state_t state;
 } mqvpn_backend_t;
+
+typedef struct mqvpn_exit_path {
+    bool used;
+    int fd;
+    struct sockaddr_storage local;
+    socklen_t local_len;
+    struct sockaddr_storage peer;
+    socklen_t peer_len;
+} mqvpn_exit_path_t;
+
+typedef struct mqvpn_exit_backend {
+    mqvpn_server_t *server;
+    mqvpn_exit_path_t paths[VMP_MAX_PATHS];
+    uint64_t masque_context_id;
+    uint64_t netns_cookie;
+    bool have_netns_cookie;
+    bool started;
+    vmp_mqvpn_exit_backend_state_t lifecycle;
+} mqvpn_exit_backend_t;
 
 static void backend_zero(void *memory, size_t len)
 {
@@ -1040,6 +1060,389 @@ static void backend_destroy(void *session)
     free(backend);
 }
 
+static void copy_exit_tunnel_info(
+    const mqvpn_tunnel_info_t *info,
+    vmp_mqvpn_exit_raw_tunnel_info_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (info == NULL || info->struct_size != sizeof(*info)) return;
+    memcpy(out->assigned_ipv4, info->assigned_ip, 4U);
+    out->assigned_prefix_v4 = info->assigned_prefix;
+    memcpy(out->server_ipv4, info->server_ip, 4U);
+    out->server_prefix_v4 = info->server_prefix;
+    out->mtu = info->mtu;
+    memcpy(out->assigned_ipv6, info->assigned_ip6, 16U);
+    out->assigned_prefix_v6 = info->assigned_prefix6;
+    out->has_ipv6 = info->has_v6;
+}
+
+static void exit_tunnel_ready(const mqvpn_tunnel_info_t *info,
+                              void *user_context)
+{
+    mqvpn_exit_backend_t *backend = user_context;
+    vmp_mqvpn_exit_raw_tunnel_info_t evidence;
+    copy_exit_tunnel_info(info, &evidence);
+    if (backend == NULL ||
+        !vmp_mqvpn_exit_backend_observe_tunnel_ready(
+            &backend->lifecycle, &evidence)) {
+        if (backend != NULL) {
+            vmp_mqvpn_exit_backend_enter_terminal(
+                &backend->lifecycle, VMP_MQVPN_EXIT_TERMINAL_ENGINE);
+        }
+    }
+    backend_zero(&evidence, sizeof(evidence));
+}
+
+static void exit_client_connected(const mqvpn_tunnel_info_t *info,
+                                  uint32_t session_id,
+                                  void *user_context)
+{
+    mqvpn_exit_backend_t *backend = user_context;
+    vmp_mqvpn_exit_raw_tunnel_info_t evidence;
+    copy_exit_tunnel_info(info, &evidence);
+    if (backend == NULL ||
+        !vmp_mqvpn_exit_backend_observe_client_connected(
+            &backend->lifecycle, &evidence, session_id)) {
+        if (backend != NULL) {
+            vmp_mqvpn_exit_backend_enter_terminal(
+                &backend->lifecycle, VMP_MQVPN_EXIT_TERMINAL_ENGINE);
+        }
+    }
+    backend_zero(&evidence, sizeof(evidence));
+}
+
+static void exit_client_disconnected(uint32_t session_id,
+                                     mqvpn_error_t reason,
+                                     void *user_context)
+{
+    (void)reason;
+    mqvpn_exit_backend_t *backend = user_context;
+    if (backend != NULL) {
+        (void)vmp_mqvpn_exit_backend_observe_client_disconnected(
+            &backend->lifecycle, session_id);
+    }
+}
+
+static void exit_client_uplink(const uint8_t *packet, size_t packet_len,
+                               uint32_t session_id, void *user_context)
+{
+    mqvpn_exit_backend_t *backend = user_context;
+    if (backend != NULL) {
+        (void)vmp_mqvpn_exit_backend_enqueue_client_uplink(
+            &backend->lifecycle, session_id, packet, packet_len);
+    }
+}
+
+static void exit_server_packet(const uint8_t *packet, size_t packet_len,
+                               void *user_context)
+{
+    mqvpn_exit_backend_t *backend = user_context;
+    if (backend != NULL) {
+        (void)vmp_mqvpn_exit_backend_enqueue_server_icmp(
+            &backend->lifecycle, packet, packet_len);
+    }
+}
+
+static mqvpn_exit_path_t *exit_path_for_peer(
+    mqvpn_exit_backend_t *backend, const struct sockaddr *peer)
+{
+    if (backend == NULL || peer == NULL) return NULL;
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        mqvpn_exit_path_t *path = &backend->paths[index];
+        if (path->used &&
+            address_tuple_equal((const struct sockaddr *)&path->peer,
+                                peer)) {
+            return path;
+        }
+    }
+    return NULL;
+}
+
+static void exit_send_packet(mqvpn_path_handle_t path_handle,
+                             const uint8_t *packet, size_t packet_len,
+                             const struct sockaddr *peer,
+                             socklen_t peer_len, void *user_context)
+{
+    (void)path_handle;
+    mqvpn_exit_backend_t *backend = user_context;
+    mqvpn_exit_path_t *path = exit_path_for_peer(backend, peer);
+    if (path == NULL || peer_len != path->peer_len || packet == NULL ||
+        packet_len == 0U ||
+        sendto(path->fd, packet, packet_len, 0, peer, peer_len) !=
+            (ssize_t)packet_len) {
+        if (backend != NULL) {
+            vmp_mqvpn_exit_backend_enter_terminal(
+                &backend->lifecycle, VMP_MQVPN_EXIT_TERMINAL_ENGINE);
+        }
+    }
+}
+
+static vmp_transport_error_t exit_backend_create(
+    void *factory_context, const vmp_start_exit_session_t *start,
+    void **out_session)
+{
+    (void)factory_context;
+    if (start == NULL || out_session == NULL ||
+        start->transport_mode != VMP_TRANSPORT_MODE_MULTIPATH_QUIC ||
+        start->minimum_paths < 2U) {
+        return VMP_TRANSPORT_INVALID;
+    }
+    *out_session = NULL;
+    mqvpn_exit_backend_t *backend = calloc(1U, sizeof(*backend));
+    if (backend == NULL) return VMP_TRANSPORT_RESOURCE;
+    backend->masque_context_id = start->masque_context_id;
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        backend->paths[index].fd = -1;
+    }
+    vmp_mqvpn_exit_backend_state_init(&backend->lifecycle);
+
+    char listen_ip[INET6_ADDRSTRLEN];
+    char auth[VMP_MAX_AUTH_SECRET + 1U];
+    memset(listen_ip, 0, sizeof(listen_ip));
+    memset(auth, 0, sizeof(auth));
+    memcpy(auth, start->auth_secret.data, start->auth_secret.len);
+    mqvpn_config_t *config = mqvpn_config_new();
+    const bool configured =
+        config != NULL &&
+        inet_ntop(AF_INET6, start->listener_ip, listen_ip,
+                  sizeof(listen_ip)) != NULL &&
+        mqvpn_config_set_listen(config, listen_ip,
+                                (int)start->listener_port) == MQVPN_OK &&
+        mqvpn_config_set_subnet(config, "10.76.0.0/24") == MQVPN_OK &&
+        mqvpn_config_set_subnet6(config, "fd76:6f6c:7062::/112") ==
+            MQVPN_OK &&
+        mqvpn_config_set_tls_identity_pem(
+            config, start->tls_certificate_pem.data,
+            start->tls_certificate_pem.len,
+            start->tls_private_key_pem.data,
+            start->tls_private_key_pem.len) == MQVPN_OK &&
+        mqvpn_config_set_auth_key(config, auth) == MQVPN_OK &&
+        mqvpn_config_set_max_clients(config, 1) == MQVPN_OK &&
+        mqvpn_config_set_multipath(config, 1) == MQVPN_OK &&
+        mqvpn_config_set_scheduler(config, MQVPN_SCHED_WLB) == MQVPN_OK &&
+        mqvpn_config_set_cc(config, MQVPN_CC_BBR2) == MQVPN_OK &&
+        mqvpn_config_set_reinjection(config, MQVPN_REINJ_OFF) == MQVPN_OK &&
+        mqvpn_config_set_reorder_enabled(config, MQVPN_REORDER_OFF) ==
+            MQVPN_OK &&
+        mqvpn_config_set_hybrid_enabled(config, 0) == MQVPN_OK &&
+        mqvpn_config_set_tun_mtu(config, 1420) == MQVPN_OK;
+    mqvpn_server_callbacks_t callbacks = MQVPN_SERVER_CALLBACKS_INIT;
+    callbacks.tun_output = exit_server_packet;
+    callbacks.tunnel_config_ready = exit_tunnel_ready;
+    callbacks.send_packet = exit_send_packet;
+    callbacks.on_client_connected = exit_client_connected;
+    callbacks.on_client_disconnected = exit_client_disconnected;
+    callbacks.session_tun_output = exit_client_uplink;
+    if (configured) {
+        backend->server = mqvpn_server_new(config, &callbacks, backend);
+    }
+    if (config != NULL) mqvpn_config_free(config);
+    backend_zero(auth, sizeof(auth));
+    if (!configured || backend->server == NULL) {
+        backend_zero(backend, sizeof(*backend));
+        free(backend);
+        return VMP_TRANSPORT_ENGINE;
+    }
+    *out_session = backend;
+    return VMP_TRANSPORT_OK;
+}
+
+static vmp_transport_error_t exit_backend_add_listener(
+    void *session, const vmp_start_exit_session_t *request,
+    int listener_fd, int64_t *out_handle)
+{
+    mqvpn_exit_backend_t *backend = session;
+    if (backend == NULL || request == NULL || listener_fd < 0 ||
+        out_handle == NULL) {
+        if (listener_fd >= 0) (void)close(listener_fd);
+        return VMP_TRANSPORT_INVALID;
+    }
+    *out_handle = -1;
+    mqvpn_exit_path_t *path = NULL;
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        if (!backend->paths[index].used) {
+            path = &backend->paths[index];
+            break;
+        }
+    }
+    struct sockaddr_storage local;
+    struct sockaddr_storage peer;
+    socklen_t local_len = 0U;
+    socklen_t peer_len = 0U;
+    uint64_t cookie = 0U;
+    socklen_t cookie_len = (socklen_t)sizeof(cookie);
+    if (path == NULL ||
+        !make_address(request->listener_ip, 16U,
+                      request->listener_port, &local, &local_len) ||
+        !make_address(request->expected_client_ip, 16U,
+                      request->expected_client_port, &peer, &peer_len) ||
+        getsockopt(listener_fd, SOL_SOCKET, SO_NETNS_COOKIE, &cookie,
+                   &cookie_len) != 0 || cookie_len != sizeof(cookie) ||
+        cookie == 0U ||
+        (backend->have_netns_cookie && backend->netns_cookie != cookie)) {
+        (void)close(listener_fd);
+        return VMP_TRANSPORT_INVALID;
+    }
+    memset(path, 0, sizeof(*path));
+    path->used = true;
+    path->fd = listener_fd;
+    path->local = local;
+    path->local_len = local_len;
+    path->peer = peer;
+    path->peer_len = peer_len;
+    backend->netns_cookie = cookie;
+    backend->have_netns_cookie = true;
+    *out_handle = (int64_t)request->path_id;
+    return VMP_TRANSPORT_OK;
+}
+
+static vmp_transport_error_t exit_backend_start(void *session)
+{
+    mqvpn_exit_backend_t *backend = session;
+    if (backend == NULL || backend->server == NULL || backend->started) {
+        return VMP_TRANSPORT_INVALID;
+    }
+    const bool started = mqvpn_server_start(backend->server) == MQVPN_OK;
+    backend->started = started &&
+        vmp_mqvpn_exit_backend_finish_start(&backend->lifecycle, true);
+    return backend->started ? VMP_TRANSPORT_OK : VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t exit_backend_pump(void *session)
+{
+    mqvpn_exit_backend_t *backend = session;
+    if (backend == NULL || backend->server == NULL || !backend->started) {
+        return VMP_TRANSPORT_INVALID;
+    }
+    uint8_t packet[VMP_OUTER_PACKET_CAPACITY];
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        mqvpn_exit_path_t *path = &backend->paths[index];
+        if (!path->used) continue;
+        for (size_t read_index = 0U;
+             read_index < VMP_MAX_OUTER_READS_PER_PUMP; ++read_index) {
+            struct sockaddr_storage peer;
+            socklen_t peer_len = (socklen_t)sizeof(peer);
+            const ssize_t length = recvfrom(
+                path->fd, packet, sizeof(packet), 0,
+                (struct sockaddr *)&peer, &peer_len);
+            if (length < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                break;
+            }
+            if (length <= 0 || peer_len != path->peer_len ||
+                !address_tuple_equal((const struct sockaddr *)&peer,
+                                     (const struct sockaddr *)&path->peer) ||
+                mqvpn_server_on_path_socket_recv(
+                    backend->server, packet, (size_t)length,
+                    (const struct sockaddr *)&path->local,
+                    path->local_len, (const struct sockaddr *)&peer,
+                    peer_len) != MQVPN_OK) {
+                vmp_mqvpn_exit_backend_enter_terminal(
+                    &backend->lifecycle,
+                    VMP_MQVPN_EXIT_TERMINAL_ENGINE);
+                return VMP_TRANSPORT_ENGINE;
+            }
+        }
+    }
+    return mqvpn_server_tick(backend->server) == MQVPN_OK
+               ? VMP_TRANSPORT_OK
+               : VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t exit_backend_snapshot(
+    void *session, vmp_exit_transport_snapshot_t *out)
+{
+    mqvpn_exit_backend_t *backend = session;
+    if (backend == NULL || out == NULL) return VMP_TRANSPORT_INVALID;
+    memset(out, 0, sizeof(*out));
+    uint32_t session_id = 0U;
+    vmp_mqvpn_exit_assignment_t assignment;
+    memset(&assignment, 0, sizeof(assignment));
+    if (!vmp_mqvpn_exit_backend_snapshot(
+            &backend->lifecycle, &out->listening, &out->connected,
+            &session_id, &assignment)) {
+        backend_zero(&assignment, sizeof(assignment));
+        return VMP_TRANSPORT_ENGINE;
+    }
+    backend_zero(&assignment, sizeof(assignment));
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        if (backend->paths[index].used) ++out->retained_paths;
+    }
+    return VMP_TRANSPORT_OK;
+}
+
+static vmp_transport_error_t exit_backend_send_inner(
+    void *session, uint64_t masque_context_id, const uint8_t *packet,
+    size_t packet_len)
+{
+    mqvpn_exit_backend_t *backend = session;
+    if (backend == NULL || backend->server == NULL ||
+        masque_context_id != backend->masque_context_id) {
+        return VMP_TRANSPORT_INVALID;
+    }
+    bool listening = false;
+    bool connected = false;
+    uint32_t session_id = 0U;
+    vmp_mqvpn_exit_assignment_t assignment;
+    memset(&assignment, 0, sizeof(assignment));
+    if (!vmp_mqvpn_exit_backend_snapshot(
+            &backend->lifecycle, &listening, &connected, &session_id,
+            &assignment) || !listening || !connected ||
+        vmp_mqvpn_exit_backend_validate_downlink(
+            &backend->lifecycle, session_id, packet, packet_len) !=
+            VMP_MQVPN_EXIT_RESULT_NONE) {
+        backend_zero(&assignment, sizeof(assignment));
+        return VMP_TRANSPORT_ENGINE;
+    }
+    backend_zero(&assignment, sizeof(assignment));
+    const int result =
+        mqvpn_server_on_tun_packet(backend->server, packet, packet_len);
+    return result == MQVPN_OK
+               ? VMP_TRANSPORT_OK
+               : result == MQVPN_ERR_AGAIN ? VMP_TRANSPORT_RESOURCE
+                                           : VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t exit_backend_receive_inner(
+    void *session, uint64_t masque_context_id, uint8_t *out,
+    size_t out_capacity, size_t *out_len)
+{
+    mqvpn_exit_backend_t *backend = session;
+    if (backend == NULL || masque_context_id != backend->masque_context_id) {
+        return VMP_TRANSPORT_INVALID;
+    }
+    vmp_mqvpn_exit_packet_kind_t kind = VMP_MQVPN_EXIT_PACKET_NONE;
+    uint32_t session_id = 0U;
+    switch (vmp_mqvpn_exit_backend_dequeue(
+        &backend->lifecycle, out, out_capacity, out_len, &kind,
+        &session_id)) {
+    case VMP_MQVPN_EXIT_RESULT_NONE: return VMP_TRANSPORT_OK;
+    case VMP_MQVPN_EXIT_RESULT_EMPTY: return VMP_TRANSPORT_EMPTY;
+    case VMP_MQVPN_EXIT_RESULT_RESOURCE: return VMP_TRANSPORT_RESOURCE;
+    case VMP_MQVPN_EXIT_RESULT_OVERFLOW: return VMP_TRANSPORT_OVERFLOW;
+    case VMP_MQVPN_EXIT_RESULT_ENGINE:
+    case VMP_MQVPN_EXIT_RESULT_INVARIANT:
+    default: return VMP_TRANSPORT_ENGINE;
+    }
+}
+
+static void exit_backend_destroy(void *session)
+{
+    mqvpn_exit_backend_t *backend = session;
+    if (backend == NULL) return;
+    (void)vmp_mqvpn_exit_backend_begin_destroy(&backend->lifecycle);
+    if (backend->server != NULL) {
+        if (backend->started) (void)mqvpn_server_stop(backend->server);
+        mqvpn_server_destroy(backend->server);
+    }
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        if (backend->paths[index].fd >= 0) {
+            (void)close(backend->paths[index].fd);
+        }
+    }
+    backend_zero(backend, sizeof(*backend));
+    free(backend);
+}
+
 const vmp_transport_ops_t *vmp_mqvpn_transport_ops(void)
 {
     static const vmp_transport_ops_t operations = {
@@ -1051,6 +1454,14 @@ const vmp_transport_ops_t *vmp_mqvpn_transport_ops(void)
         .snapshot = backend_snapshot,
         .send_inner = backend_send_inner,
         .receive_inner = backend_receive_inner,
+        .exit_create = exit_backend_create,
+        .exit_destroy = exit_backend_destroy,
+        .exit_add_listener = exit_backend_add_listener,
+        .exit_start = exit_backend_start,
+        .exit_pump = exit_backend_pump,
+        .exit_snapshot = exit_backend_snapshot,
+        .exit_send_inner = exit_backend_send_inner,
+        .exit_receive_inner = exit_backend_receive_inner,
     };
     return &operations;
 }

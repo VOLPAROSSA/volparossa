@@ -187,6 +187,8 @@ verify_bundled_file wintun-readme "$source_root/third_party/wintun/README.md" \
 
 verify_patch mqvpn "$repo_root/patches/volparossa-mqvpn.patch" \
     91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887
+verify_patch mqvpn-exit "$repo_root/patches/volparossa-mqvpn-exit-paths.patch" \
+    da22508590dd066852344ac685cb1fc53dfdfaebaed16353ae53f8675f7e1427
 verify_patch xquic "$repo_root/patches/volparossa-xquic.patch" \
     acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b
 

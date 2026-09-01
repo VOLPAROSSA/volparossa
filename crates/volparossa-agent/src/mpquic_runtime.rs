@@ -14,6 +14,7 @@ use tokio::time::{Instant, sleep_until};
 use volparossa_quic::{
     AddPath, NativeClient, NativeClientError, NativeProcessRole, NativeResultCode, ReceiveDatagram,
     ReceivedDatagram, SendDatagram, StartSession, StopSession, TransportMode, TunnelAssignment,
+    VerifiedExitMpquicEndpoint,
 };
 use volparossa_reservation::{ClientNativeRouteAuthorization, VerifiedRelayGrant};
 use volparossa_routing::{TransportSocketAddress, TransportSocketKind, WireguardRole};
@@ -22,6 +23,7 @@ use volparossa_wireguard::overlay_addresses;
 use crate::helper::AcquiredTransportSocket;
 
 const MINIMUM_MULTIPATH_PATHS: usize = 2;
+const MINIMUM_MULTIPATH_PATHS_U32: u32 = 2;
 const MAXIMUM_MULTIPATH_PATHS: usize = 8;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAXIMUM_READY_WAIT: Duration = Duration::from_secs(10);
@@ -35,7 +37,9 @@ pub struct CommittedMpquicPath {
     add: AddPath,
     reservation_id: [u8; 16],
     relay_node_id: [u8; 32],
+    exit_native_instance_id: [u8; 32],
     expires_at_ms: u64,
+    listener_set_ready: bool,
 }
 
 impl CommittedMpquicPath {
@@ -45,14 +49,15 @@ impl CommittedMpquicPath {
     ///
     /// Returns an error when descriptor metadata, overlay addressing, or the Exit port does not
     /// match the verified path.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the affine endpoint authority is deliberately consumed by the committed path"
+    )]
     pub fn from_helper_handoff(
         acquired: AcquiredTransportSocket,
         grant: &VerifiedRelayGrant,
-        exit_mpquic_port: u16,
+        exit_endpoint: VerifiedExitMpquicEndpoint,
     ) -> Result<Self, ProductionMpquicError> {
-        if exit_mpquic_port == 0 {
-            return Err(ProductionMpquicError::Invalid("Exit MPQUIC port"));
-        }
         let (descriptor, metadata) = acquired.into_parts();
         if metadata.path_id != grant.path_id()
             || WireguardRole::try_from(metadata.role).ok() != Some(WireguardRole::Client)
@@ -71,12 +76,20 @@ impl CommittedMpquicPath {
             .map_err(|_| ProductionMpquicError::Invalid("MPQUIC path id"))?;
         let addresses = overlay_addresses(*grant.route_context_id(), path_id)
             .map_err(|_| ProductionMpquicError::Invalid("MPQUIC overlay"))?;
-        if local.ip() != IpAddr::V6(addresses.client) {
+        let reservation_hash: [u8; 32] = Sha256::digest(grant.signed_relay_reservation()).into();
+        if local.ip() != IpAddr::V6(addresses.client)
+            || exit_endpoint.route_context_id() != grant.route_context_id()
+            || exit_endpoint.path_id() != grant.path_id()
+            || exit_endpoint.listener_ip() != &addresses.exit.octets()
+            || exit_endpoint.expected_client_ip() != &addresses.client.octets()
+            || exit_endpoint.expected_client_port() != local.port()
+            || exit_endpoint.reservation_hash() != &reservation_hash
+            || exit_endpoint.minimum_paths() < MINIMUM_MULTIPATH_PATHS_U32
+        {
             return Err(ProductionMpquicError::Invalid(
-                "committed MPQUIC Client overlay",
+                "committed MPQUIC Client/Exit endpoint",
             ));
         }
-        let reservation_hash: [u8; 32] = Sha256::digest(grant.signed_relay_reservation()).into();
         Ok(Self {
             descriptor,
             add: AddPath {
@@ -84,13 +97,15 @@ impl CommittedMpquicPath {
                 path_id: grant.path_id(),
                 local_ip: addresses.client.octets().to_vec(),
                 remote_ip: addresses.exit.octets().to_vec(),
-                remote_port: u32::from(exit_mpquic_port),
+                remote_port: u32::from(exit_endpoint.listener_port()),
                 reservation_hash: reservation_hash.to_vec(),
                 local_port: u32::from(local.port()),
             },
             reservation_id: *grant.reservation_id(),
             relay_node_id: *grant.relay_node_id(),
+            exit_native_instance_id: *exit_endpoint.exit_native_instance_id(),
             expires_at_ms: grant.expires_at_ms(),
+            listener_set_ready: exit_endpoint.listener_set_ready(),
         })
     }
 
@@ -117,7 +132,9 @@ impl CommittedMpquicPath {
             },
             reservation_id,
             relay_node_id,
+            exit_native_instance_id: [8; 32],
             expires_at_ms: 1_700_000_060_000,
+            listener_set_ready: path_id == 2,
         }
     }
 }
@@ -284,10 +301,17 @@ fn validate_complete_path_set(
         .map_err(|_| ProductionMpquicError::Invalid("MPQUIC reservation"))?;
     let mut path_ids = BTreeSet::new();
     let mut relay_ids = BTreeSet::new();
+    let expected_exit_instance: [u8; 32] = start
+        .exit_native_instance_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProductionMpquicError::Invalid("Exit native instance"))?;
+    let mut listener_set_ready = false;
     for path in paths {
         if path.add.route_context_id.as_slice() != route_context
             || path.reservation_id != reservation_id
             || path.expires_at_ms <= now_ms
+            || path.exit_native_instance_id != expected_exit_instance
             || !path_ids.insert(path.add.path_id)
             || !relay_ids.insert(path.relay_node_id)
         {
@@ -295,8 +319,12 @@ fn validate_complete_path_set(
                 "distinct committed MPQUIC paths",
             ));
         }
+        listener_set_ready |= path.listener_set_ready;
     }
-    if path_ids.len() < MINIMUM_MULTIPATH_PATHS || path_ids.len() != paths.len() {
+    if path_ids.len() < MINIMUM_MULTIPATH_PATHS
+        || path_ids.len() != paths.len()
+        || !listener_set_ready
+    {
         return Err(ProductionMpquicError::Invalid(
             "distinct committed MPQUIC paths",
         ));

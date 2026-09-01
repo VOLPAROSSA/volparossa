@@ -15,13 +15,14 @@ the lock are rejected.
 
 `verify-upstream.sh` additionally compares the verbatim license and NOTICE
 copies, verifies the exact bundled Wintun `wintun.h`, `LICENSE`, and `README.md`
-hashes, and verifies both local patch hashes. `build-upstream.sh` then exports
+hashes, and verifies all local patch hashes. `build-upstream.sh` then exports
 each locked tree with `git archive` into the ignored native build staging
-directory. Only those exports receive the two reviewed patches:
+directory. Only those exports receive the reviewed patches:
 
 | Target | Patch | SHA-256 |
 |---|---|---|
 | mqvpn | `patches/volparossa-mqvpn.patch` | `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887` |
+| mqvpn | `patches/volparossa-mqvpn-exit-paths.patch` | `da22508590dd066852344ac685cb1fc53dfdfaebaed16353ae53f8675f7e1427` |
 | xquic | `patches/volparossa-xquic.patch` | `acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b` |
 
 The builder runs `git apply --check` before applying each patch and refuses a

@@ -61,6 +61,12 @@ typedef struct vmp_transport_path_snapshot {
     uint64_t acked_transport_bytes;
 } vmp_transport_path_snapshot_t;
 
+typedef struct vmp_exit_transport_snapshot {
+    size_t retained_paths;
+    bool listening;
+    bool connected;
+} vmp_exit_transport_snapshot_t;
+
 typedef struct vmp_transport_ops {
     vmp_transport_error_t (*create)(
         void *factory_context, const vmp_transport_create_params_t *params,
@@ -83,6 +89,24 @@ typedef struct vmp_transport_ops {
         void *session, uint64_t masque_context_id, const uint8_t *packet,
         size_t packet_len);
     vmp_transport_error_t (*receive_inner)(
+        void *session, uint64_t masque_context_id, uint8_t *out,
+        size_t out_capacity, size_t *out_len);
+    vmp_transport_error_t (*exit_create)(
+        void *factory_context, const vmp_start_exit_session_t *start,
+        void **out_session);
+    void (*exit_destroy)(void *session);
+    /* Consumes listener_fd on every return path. */
+    vmp_transport_error_t (*exit_add_listener)(
+        void *session, const vmp_start_exit_session_t *path,
+        int listener_fd, int64_t *out_handle);
+    vmp_transport_error_t (*exit_start)(void *session);
+    vmp_transport_error_t (*exit_pump)(void *session);
+    vmp_transport_error_t (*exit_snapshot)(
+        void *session, vmp_exit_transport_snapshot_t *out);
+    vmp_transport_error_t (*exit_send_inner)(
+        void *session, uint64_t masque_context_id, const uint8_t *packet,
+        size_t packet_len);
+    vmp_transport_error_t (*exit_receive_inner)(
         void *session, uint64_t masque_context_id, uint8_t *out,
         size_t out_capacity, size_t *out_len);
 } vmp_transport_ops_t;

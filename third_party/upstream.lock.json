@@ -139,6 +139,17 @@
         "bind each H3 connection to one lifetime-affine CONNECT-IP claim with idempotent request-close and connection-close session teardown",
         "exercise duplicate-stream bodies and owner-sensitive Datagram IDs, pre-H3 MaxClients refusal and reuse, and unsupported-ALPN cb_refuse capacity reuse through raw QUIC/H3 integration tests without hard-coding VOLPAROSSA's separate MaxClients=1 product policy"
       ]
+    },
+    {
+      "target": "mqvpn",
+      "applies_to_commit": "607c0df921e2c23bae8bea21cb3c6f2acb2db275",
+      "applies_after": "patches/volparossa-mqvpn.patch",
+      "file": "patches/volparossa-mqvpn-exit-paths.patch",
+      "sha256": "da22508590dd066852344ac685cb1fc53dfdfaebaed16353ae53f8675f7e1427",
+      "purpose": [
+        "feed exact per-path local tuples into the xquic server",
+        "route xquic server egress through caller-owned path descriptors"
+      ]
     }
   ],
   "audit_findings": {

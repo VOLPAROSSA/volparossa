@@ -12,8 +12,10 @@ source_stage="$build_root/source"
 native_build="$component_root/build/native-cmake"
 jobs=${VMP_BUILD_JOBS:-2}
 mqvpn_patch="$repo_root/patches/volparossa-mqvpn.patch"
+mqvpn_exit_patch="$repo_root/patches/volparossa-mqvpn-exit-paths.patch"
 xquic_patch="$repo_root/patches/volparossa-xquic.patch"
 mqvpn_patch_sha256=91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887
+mqvpn_exit_patch_sha256=da22508590dd066852344ac685cb1fc53dfdfaebaed16353ae53f8675f7e1427
 xquic_patch_sha256=acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b
 
 "$script_dir/verify-upstream.sh"
@@ -83,6 +85,8 @@ export_locked_tree "$boringssl_locked_source" "$boringssl_source" \
     "$boringssl_archive"
 apply_locked_patch xquic "$xquic_source" "$xquic_patch" "$xquic_patch_sha256"
 apply_locked_patch mqvpn "$mqvpn_source" "$mqvpn_patch" "$mqvpn_patch_sha256"
+apply_locked_patch mqvpn-exit "$mqvpn_source" "$mqvpn_exit_patch" \
+    "$mqvpn_exit_patch_sha256"
 cmake -E make_directory "$mqvpn_source/third_party"
 cmake -E remove_directory "$mqvpn_source/third_party/xquic"
 cmake -E remove_directory "$mqvpn_source/third_party/lwip"

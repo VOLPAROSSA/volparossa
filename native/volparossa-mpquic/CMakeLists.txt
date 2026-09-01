@@ -279,6 +279,7 @@ if(VMP_BUILD_DAEMON)
         volparossa_mpquic_request_binding
         volparossa_mpquic_daemon_socket
         volparossa_mpquic_mqvpn_backend_state
+        volparossa_mpquic_mqvpn_exit_backend_state
         volparossa_mpquic_tunnel_assignment
         "${VMP_MQVPN_LIBRARY}"
         "${VMP_LWIP_LIBRARY}"
