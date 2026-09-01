@@ -1001,9 +1001,9 @@ mod tests {
         for document in [discovery, status, protocol] {
             assert!(document.contains("module-private, non-Clone Exit"));
         }
-        assert!(discovery.contains("It remains dormant because the current local publisher"));
-        assert!(status.contains("The normal runtime cannot currently reach that success path"));
-        assert!(protocol.contains("handler remains dormant in the current product"));
+        assert!(discovery.contains("Relay and Exit runtimes now publish"));
+        assert!(status.contains("Relay and Exit runtimes now publish"));
+        assert!(protocol.contains("Relay and Exit runtimes now install"));
         assert!(status.contains(
             "| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |"
         ));

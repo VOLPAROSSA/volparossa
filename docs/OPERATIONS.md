@@ -114,12 +114,14 @@ manifest v2 or libp2p Circuit Relay v2, which remains control-plane connectivity
 
 The default client-only configuration may leave `network.operator_id: null`. Enabling relay or exit
 instead requires an explicit operator ID of 1..=128 ASCII letters, digits, `-`, `_`, `.`, or
-`:`; `unknown` is not synthesized. Unknown configuration fields remain rejected.
+`:` plus a non-zero `advertised_asn` and at least one canonical
+`advertised_ipv4_prefix` (`/24`) or `advertised_ipv6_prefix` (`/48`). Region and two-letter country
+claims are explicit untrusted diversity hints. Unknown configuration fields remain rejected.
 
-Relay and exit advertisement/provider publication currently stays fail closed even after the role
-is configured, because no helper-backed live service preparation/admission handle is connected yet.
-The agent never substitutes a static or placeholder WireGuard key, listen port, probe, or activation
-receipt.
+Relay and exit runtimes publish those short-lived signed service claims and provider indexes while
+capacity and policy remain active. Publication does not claim helper preparation, Fresh evidence or
+route usability. The agent never substitutes a static or placeholder WireGuard key, listen port,
+probe, or activation receipt.
 
 The intended client chooses a directly verified control relay before any exit. Direct
 `/volparossa/advertisement/4` retrieval may establish relay/control-relay provenance only. A

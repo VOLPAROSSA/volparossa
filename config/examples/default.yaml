@@ -8,6 +8,11 @@ network:
   bootstrap_peers: []
   candidate_pool_size: 200
   advertisement_ttl_seconds: 300
+  advertised_region: unknown
+  advertised_country_code: ZZ
+  advertised_asn: 0
+  advertised_ipv4_prefix: null
+  advertised_ipv6_prefix: null
 
 roles:
   client: true

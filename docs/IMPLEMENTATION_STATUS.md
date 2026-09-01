@@ -1181,9 +1181,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   served Exit advertisement, binds the inbound control Relay's exact libp2p connection, and
   consumes that token with the response channel. The bounded Exit ledger stores the affine owner
   before handoff and returns byte-identical output for an exact same-actor retry without re-signing.
-  The normal runtime cannot currently reach that success path because the local publisher
-  deliberately withdraws for an Exit role; only the test fixture injects the required signed Exit
-  advertisement. No usable Exit capability is published.
+  Relay and Exit runtimes now publish their exact signed local service advertisement and bounded
+  provider indexes from explicit operator capacity, origin-hint and active-policy configuration.
+  This opens the server's local-advertisement gate, but the self-declared capability remains
+  untrusted preselection input and no production client Permit dispatcher reaches it end to end.
   ExitReady and ExitResult remain test-only; their authenticated data-Relay values still lack a
   production connection-owned source. Its typed
   projection from the `Copy` `ExitEndpointLease` proves no helper-resource custody,
@@ -1203,9 +1204,10 @@ single clean-build A01--A15 run; the score is not a release claim.
 
 ## Advertisements, peerstore, and reputation
 
-- [ ] Signed advertisement schema contains the required bounded fields, but production currently
-  signs only client advertisements and withdraws provider state whenever relay or exit is enabled;
-  no usable service capability is published.
+- [ ] Signed advertisement schema contains the required bounded fields, and production Relay/Exit
+  runtimes now sign, serve and index short-lived role advertisements with current ledger capacity
+  plus explicit operator/ASN/prefix/policy claims. A live multi-node ingest proof and Fresh
+  datapath evidence are still absent, so these untrusted claims do not make a route usable.
 - [x] Advertisement TTL, monotonic sequence, signature, consistency, v4 protocol, active-policy,
   current-authority, and replay checks fail closed at one synchronous commit boundary.
 - [ ] SQLite has bounded schema/APIs for advertisements, endpoints, reachability, path measurements,
@@ -1227,8 +1229,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   deliberately sets dataplane address usability false, so the actor path remains at zero usable
   route candidates instead of substituting control-plane or stored evidence. A module-private,
   non-Clone Exit wire-phase owner can retain one Permit through the connection-bound,
-  production-composed server responder, but the normal runtime cannot pass its deliberately absent
-  local Exit-advertisement gate. Its `ExitEndpointLease` projection is not helper-resource custody
+  production-composed server responder. The local Exit-advertisement gate is now supplied by the
+  normal service publisher, but no production client Permit dispatcher reaches it. Its
+  `ExitEndpointLease` projection is not helper-resource custody
   or cleanup authority and its post-baseline challenge observation has no constructor.
 - [ ] A bounded 70/20/10 exploration primitive and a peer-only prospective relay selector are
   tested. The latter canonically handles at most 200 candidates, returns at most eight, and applies
@@ -1272,8 +1275,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   handoff. A private callerless native attempt owner consumes it in tests and retains affine
   endpoint-separated contracts. A module-private, non-Clone Exit wire-phase owner can retain one
   Permit from a connection-bound, production-composed server caller in a bounded idempotency ledger,
-  but the current local publisher serves no Exit advertisement, so normal runtime issuance remains
-  fail-closed. Its
+  and the current local publisher now serves the exact Exit advertisement, but normal runtime
+  issuance remains fail-closed because no production client Permit dispatcher consumes the affine
+  client attempt. Its
   typed `ExitEndpointLease` projection provides no helper-resource custody or cleanup authority.
   There is no production client Permit dispatcher, Ready/Result caller, same-helper prepared-lease
   provider, post-baseline

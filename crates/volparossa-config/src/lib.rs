@@ -1,6 +1,11 @@
 //! Strict, fail-closed configuration for all VOLPAROSSA processes.
 
-use std::{collections::HashSet, fmt, fs, path::Path};
+use std::{
+    collections::HashSet,
+    fmt, fs,
+    net::{Ipv4Addr, Ipv6Addr},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -175,6 +180,7 @@ impl Config {
             3_600,
         )?;
         validate_network_addresses(&self.network)?;
+        validate_advertisement_origin(self.roles, &self.network)?;
         validate_selection(&self.selection)?;
         validate_capacity(self.roles, &self.capacity)?;
         validate_routing(self.runtime_mode, &self.routing)?;
@@ -211,6 +217,16 @@ pub struct NetworkConfig {
     pub candidate_pool_size: usize,
     /// Maximum advertisement lifetime.
     pub advertisement_ttl_seconds: u64,
+    /// Self-declared coarse service region used only as an untrusted diversity hint.
+    pub advertised_region: String,
+    /// Self-declared ISO-like country code used only as an untrusted diversity hint.
+    pub advertised_country_code: String,
+    /// Self-declared non-zero origin ASN used only as an untrusted diversity hint.
+    pub advertised_asn: u32,
+    /// Canonical IPv4 /24 origin hint for service-role selection.
+    pub advertised_ipv4_prefix: Option<String>,
+    /// Canonical IPv6 /48 origin hint for service-role selection.
+    pub advertised_ipv6_prefix: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -223,6 +239,11 @@ impl Default for NetworkConfig {
             bootstrap_peers: Vec::new(),
             candidate_pool_size: 200,
             advertisement_ttl_seconds: 300,
+            advertised_region: "unknown".into(),
+            advertised_country_code: "ZZ".into(),
+            advertised_asn: 0,
+            advertised_ipv4_prefix: None,
+            advertised_ipv6_prefix: None,
         }
     }
 }
@@ -526,6 +547,87 @@ fn validate_network_addresses(network: &NetworkConfig) -> Result<(), ConfigError
         &network.bootstrap_peers,
         MAX_BOOTSTRAP_PEERS,
     )
+}
+
+fn validate_advertisement_origin(
+    roles: RolesConfig,
+    network: &NetworkConfig,
+) -> Result<(), ConfigError> {
+    if network.advertised_region.is_empty()
+        || network.advertised_region.len() > 32
+        || !network.advertised_region.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(validation(
+            "network.advertised_region",
+            "must be 1..=32 lowercase ASCII letters, digits, '-' or '_'",
+        ));
+    }
+    if network.advertised_country_code.len() != 2
+        || !network
+            .advertised_country_code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(validation(
+            "network.advertised_country_code",
+            "must contain exactly two uppercase ASCII letters",
+        ));
+    }
+    if let Some(prefix) = network.advertised_ipv4_prefix.as_deref() {
+        if !canonical_ipv4_prefix(prefix) {
+            return Err(validation(
+                "network.advertised_ipv4_prefix",
+                "must be a canonical IPv4 /24 network",
+            ));
+        }
+    }
+    if let Some(prefix) = network.advertised_ipv6_prefix.as_deref() {
+        if !canonical_ipv6_prefix(prefix) {
+            return Err(validation(
+                "network.advertised_ipv6_prefix",
+                "must be a canonical IPv6 /48 network",
+            ));
+        }
+    }
+    if roles.relay || roles.exit {
+        if network.advertised_asn == 0 {
+            return Err(validation(
+                "network.advertised_asn",
+                "an enabled relay or exit requires a non-zero origin ASN hint",
+            ));
+        }
+        if network.advertised_ipv4_prefix.is_none() && network.advertised_ipv6_prefix.is_none() {
+            return Err(validation(
+                "network.advertised_ipv4_prefix",
+                "an enabled relay or exit requires an IPv4 /24 or IPv6 /48 origin hint",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_ipv4_prefix(value: &str) -> bool {
+    let Some((address, prefix)) = value.rsplit_once('/') else {
+        return false;
+    };
+    let Ok(address) = address.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    prefix == "24" && address.octets()[3] == 0 && format!("{address}/24") == value
+}
+
+fn canonical_ipv6_prefix(value: &str) -> bool {
+    let Some((address, prefix)) = value.rsplit_once('/') else {
+        return false;
+    };
+    let Ok(address) = address.parse::<Ipv6Addr>() else {
+        return false;
+    };
+    prefix == "48"
+        && address.octets()[6..].iter().all(|byte| *byte == 0)
+        && format!("{address}/48") == value
 }
 
 fn validate_address_list(
@@ -874,7 +976,26 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.network.operator_id = Some("operator-a".to_owned());
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.12.34.0/24".to_owned());
         config.validate().expect("fully explicit exit is valid");
+    }
+
+    #[test]
+    fn service_origin_hints_are_explicit_and_canonical() {
+        let mut config = Config::default();
+        config.roles.relay = true;
+        config.network.operator_id = Some("operator-relay".to_owned());
+        config.capacity.maximum_relay_sessions = 4;
+        config.capacity.relay_upload_limit_mbps = 100;
+        config.capacity.relay_download_limit_mbps = 100;
+        assert!(config.validate().is_err());
+
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.12.34.1/24".to_owned());
+        assert!(config.validate().is_err());
+        config.network.advertised_ipv4_prefix = Some("44.12.34.0/24".to_owned());
+        config.validate().expect("canonical service origin hints");
     }
 
     #[test]

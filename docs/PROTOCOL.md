@@ -299,12 +299,12 @@ and cross-binding substitutions roll back only the newly admitted entries and fa
 
 The client-side native attempt, ExitReady and ExitResult remain callerless contract/test
 foundations. The Exit now composes one production server-side Permit handler on the existing
-forwarded control protocol. That handler remains dormant in the current product: the local
-publisher intentionally serves no Exit advertisement or usable Exit capability yet, so a normal
-runtime cannot satisfy its exact-local-advertisement gate. An agent unit fixture injects a valid
-signed local Exit advertisement to prove the exact gate validators; a separate discovery transport
-integration proves connection-bound response handoff. No test claims the whole handler succeeds
-end to end. Once a truthful producer exists, the handler accepts
+forwarded control protocol. Relay and Exit runtimes now install their exact signed local service
+advertisement and bounded provider indexes from explicit configuration and current capacity. This
+opens the handler's local-advertisement gate, but the advertisement remains an untrusted claim and
+not usable datapath evidence. A separate discovery transport integration proves connection-bound
+response handoff; no production client Permit dispatcher or test yet completes the whole handler
+exchange end to end. The handler accepts
 only the exact signed native Permit request received from an authenticated control Relay, rechecks
 the current full Relay capability and exact locally served Exit advertisement, and consumes a
 purpose-specific token for that exact libp2p `ConnectionId` when handing the response back.

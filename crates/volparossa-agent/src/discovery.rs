@@ -71,13 +71,13 @@ use volparossa_metrics::MetricsRegistry;
 use volparossa_peerstore::PeerStore;
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
-    AdvertisementCapabilities, ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest,
-    ExitReservation, ExitReservationConfirmation, ExitReservationFinalizeRequest,
-    MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbePathScope, NativeProbePermitRequest,
-    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, PreselectionActorBinding,
-    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservationRequest,
-    ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
-    node_id_from_public_key, verify_control_message,
+    AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
+    ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
+    ExitReservationConfirmation, ExitReservationFinalizeRequest, MAX_NATIVE_PROBE_LIFETIME_MS,
+    NativeProbePathScope, NativeProbePermitRequest, NodeAdvertisement as WireAdvertisement,
+    ObservationAddressFamily, PreselectionActorBinding, RelayAuthorization, RelayProbePermit,
+    RelayProbePermitRequest, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy,
+    Transport, decode_canonical, encode_canonical, node_id_from_public_key, verify_control_message,
 };
 use volparossa_relay::{RelayService, RelayServiceConfig};
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
@@ -3258,7 +3258,7 @@ impl DiscoveryRuntime {
 
     async fn publish_local(&mut self, state: &Arc<RwLock<AgentState>>) {
         let now_ms = unix_millis();
-        if self.roles.relay || self.roles.exit {
+        if !(self.roles.relay || self.roles.exit) {
             self.withdraw_local();
             return;
         }
@@ -3278,9 +3278,16 @@ impl DiscoveryRuntime {
             self.withdraw_local();
             return;
         }
+        let Some(capacity) = self.local_advertisement_capacity(roles, now_ms) else {
+            self.withdraw_local();
+            return;
+        };
         let input = LocalAdvertisementInput {
             roles,
             operator_id,
+            capabilities: self.local_advertisement_capabilities(),
+            capacity,
+            origin: self.local_advertisement_origin(),
             policy_version: policy.manifest_version,
             policy_hash,
             policy_expires_at_ms: policy.expires_at_ms,
@@ -3333,6 +3340,127 @@ impl DiscoveryRuntime {
             }
             self.active_provider_keys.insert(key);
         }
+    }
+
+    fn local_advertisement_capabilities(&self) -> AdvertisementCapabilities {
+        AdvertisementCapabilities {
+            tcp_mptcp: self.config.tcp.enabled,
+            udp_single_path: self.config.udp.enabled,
+            multipath_quic: self.config.quic.enabled,
+            ipv4: false,
+            ipv6: false,
+            udp_hole_punching: false,
+        }
+    }
+
+    fn local_advertisement_origin(&self) -> AdvertisementNetwork {
+        AdvertisementNetwork {
+            region: self.config.network.advertised_region.clone(),
+            country_code: self.config.network.advertised_country_code.clone(),
+            asn: self.config.network.advertised_asn,
+            ipv4_prefix_hint: self
+                .config
+                .network
+                .advertised_ipv4_prefix
+                .clone()
+                .unwrap_or_default(),
+            ipv6_prefix_hint: self
+                .config
+                .network
+                .advertised_ipv6_prefix
+                .clone()
+                .unwrap_or_default(),
+            operator_id: String::new(),
+        }
+    }
+
+    fn local_advertisement_capacity(
+        &mut self,
+        roles: RolesConfig,
+        now_ms: u64,
+    ) -> Option<AdvertisementCapacity> {
+        let relay_available = if roles.relay {
+            Some(self.relay_service.as_mut()?.available(now_ms)?)
+        } else {
+            None
+        };
+        let exit_available = if roles.exit {
+            Some(self.exit_service.as_mut()?.available(now_ms)?)
+        } else {
+            None
+        };
+        let estimated_free = match (relay_available, exit_available) {
+            (Some(relay), Some(exit)) => Bandwidth {
+                up_mbps: relay.bandwidth.up_mbps.min(exit.bandwidth.up_mbps),
+                down_mbps: relay.bandwidth.down_mbps.min(exit.bandwidth.down_mbps),
+            },
+            (Some(relay), None) => relay.bandwidth,
+            (None, Some(exit)) => exit.bandwidth,
+            (None, None) => return None,
+        };
+        let relay_reserved = relay_available.map_or(Bandwidth::default(), |available| Bandwidth {
+            up_mbps: self
+                .config
+                .capacity
+                .relay_upload_limit_mbps
+                .saturating_sub(available.bandwidth.up_mbps),
+            down_mbps: self
+                .config
+                .capacity
+                .relay_download_limit_mbps
+                .saturating_sub(available.bandwidth.down_mbps),
+        });
+        let exit_reserved = exit_available.map_or(Bandwidth::default(), |available| Bandwidth {
+            up_mbps: self
+                .config
+                .capacity
+                .exit_upload_limit_mbps
+                .saturating_sub(available.bandwidth.up_mbps),
+            down_mbps: self
+                .config
+                .capacity
+                .exit_download_limit_mbps
+                .saturating_sub(available.bandwidth.down_mbps),
+        });
+        Some(AdvertisementCapacity {
+            operator_relay_limit_up_mbps: u64::from(
+                self.config.capacity.relay_upload_limit_mbps * u32::from(roles.relay),
+            ),
+            operator_relay_limit_down_mbps: u64::from(
+                self.config.capacity.relay_download_limit_mbps * u32::from(roles.relay),
+            ),
+            operator_exit_limit_up_mbps: u64::from(
+                self.config.capacity.exit_upload_limit_mbps * u32::from(roles.exit),
+            ),
+            operator_exit_limit_down_mbps: u64::from(
+                self.config.capacity.exit_download_limit_mbps * u32::from(roles.exit),
+            ),
+            currently_reserved_up_mbps: u64::from(
+                relay_reserved.up_mbps.saturating_add(exit_reserved.up_mbps),
+            ),
+            currently_reserved_down_mbps: u64::from(
+                relay_reserved
+                    .down_mbps
+                    .saturating_add(exit_reserved.down_mbps),
+            ),
+            estimated_free_up_mbps: u64::from(estimated_free.up_mbps),
+            estimated_free_down_mbps: u64::from(estimated_free.down_mbps),
+            active_relay_sessions: relay_available.map_or(0, |available| {
+                self.config
+                    .capacity
+                    .maximum_relay_sessions
+                    .saturating_sub(available.free_slots)
+            }),
+            active_exit_sessions: exit_available.map_or(0, |available| {
+                self.config
+                    .capacity
+                    .maximum_exit_sessions
+                    .saturating_sub(available.free_slots)
+            }),
+            free_relay_slots: relay_available.map_or(0, |available| available.free_slots),
+            free_exit_slots: exit_available.map_or(0, |available| available.free_slots),
+            sample_window_seconds: 0,
+        })
     }
 
     fn withdraw_local(&mut self) {
@@ -6843,7 +6971,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet, HashSet},
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::fs::PermissionsExt,
         sync::{
             Arc,
             atomic::{AtomicU64, Ordering},
@@ -6892,6 +7020,10 @@ mod tests {
             ..Config::default()
         };
         config.network.operator_id = Some("operator-test".to_owned());
+        config.network.advertised_region = "test".to_owned();
+        config.network.advertised_country_code = "NL".to_owned();
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.160.1.0/24".to_owned());
         config.network.listen_addresses = vec![address.to_string()];
         config.network.advertisement_ttl_seconds = 30;
         config.capacity.relay_upload_limit_mbps = 100;
@@ -6933,6 +7065,53 @@ mod tests {
             policy,
             role_store,
             directory,
+        }
+    }
+
+    fn local_advertisement_input(
+        roles: RolesConfig,
+        operator_id: &str,
+        policy: &VerifiedManifest,
+        control_addresses: BTreeSet<String>,
+    ) -> LocalAdvertisementInput {
+        LocalAdvertisementInput {
+            roles,
+            operator_id: operator_id.to_owned(),
+            capabilities: AdvertisementCapabilities {
+                tcp_mptcp: true,
+                udp_single_path: true,
+                multipath_quic: true,
+                ipv4: false,
+                ipv6: false,
+                udp_hole_punching: false,
+            },
+            capacity: AdvertisementCapacity {
+                operator_relay_limit_up_mbps: u64::from(roles.relay) * 100,
+                operator_relay_limit_down_mbps: u64::from(roles.relay) * 100,
+                operator_exit_limit_up_mbps: u64::from(roles.exit) * 100,
+                operator_exit_limit_down_mbps: u64::from(roles.exit) * 100,
+                currently_reserved_up_mbps: 0,
+                currently_reserved_down_mbps: 0,
+                estimated_free_up_mbps: 100,
+                estimated_free_down_mbps: 100,
+                active_relay_sessions: 0,
+                active_exit_sessions: 0,
+                free_relay_slots: u32::from(roles.relay) * 4,
+                free_exit_slots: u32::from(roles.exit) * 4,
+                sample_window_seconds: 0,
+            },
+            origin: AdvertisementNetwork {
+                region: "test".to_owned(),
+                country_code: "NL".to_owned(),
+                asn: 64_512,
+                ipv4_prefix_hint: "44.160.1.0/24".to_owned(),
+                ipv6_prefix_hint: "2606:4700:100::/48".to_owned(),
+                operator_id: String::new(),
+            },
+            policy_version: policy.manifest_version(),
+            policy_hash: *policy.policy_hash(),
+            policy_expires_at_ms: policy.expires_at_ms(),
+            control_addresses,
         }
     }
 
@@ -7109,7 +7288,7 @@ mod tests {
         assert!(!publisher_impl.contains("-> Identity"));
 
         let role_validation = sign
-            .find("if !input.roles.client")
+            .find("if !(input.roles.relay || input.roles.exit)")
             .expect("role validation");
         let input_validation = sign
             .find("if input.control_addresses.is_empty()")
@@ -7141,7 +7320,7 @@ mod tests {
             "async fn publish_local(&mut self, state: &Arc<RwLock<AgentState>>) {",
         );
         let service_role_guard = publish
-            .find("if self.roles.relay || self.roles.exit")
+            .find("if !(self.roles.relay || self.roles.exit)")
             .expect("service-role guard");
         let operator_read = publish
             .find("let Some(operator_id)")
@@ -7175,14 +7354,16 @@ mod tests {
             .publisher
             .sign(
                 &fixture.runtime.identity,
-                &LocalAdvertisementInput {
-                    roles: RolesConfig::default(),
-                    operator_id: "operator-identity-coherence".to_owned(),
-                    policy_version: fixture.policy.manifest_version(),
-                    policy_hash: *fixture.policy.policy_hash(),
-                    policy_expires_at_ms: fixture.policy.expires_at_ms(),
-                    control_addresses: BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
-                },
+                &local_advertisement_input(
+                    RolesConfig {
+                        client: true,
+                        relay: true,
+                        exit: false,
+                    },
+                    "operator-identity-coherence",
+                    &fixture.policy,
+                    BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
+                ),
                 now_ms,
             )
             .expect("actor-signed advertisement");
@@ -7504,17 +7685,19 @@ mod tests {
             )),
             30,
         );
+        let seed_roles = if roles.relay || roles.exit {
+            roles
+        } else {
+            RolesConfig {
+                client: true,
+                relay: true,
+                exit: false,
+            }
+        };
         let seed = publisher
             .sign(
                 identity,
-                &LocalAdvertisementInput {
-                    roles: RolesConfig::default(),
-                    operator_id: "operator-proof".to_owned(),
-                    policy_version: policy.manifest_version(),
-                    policy_hash: *policy.policy_hash(),
-                    policy_expires_at_ms: policy.expires_at_ms(),
-                    control_addresses,
-                },
+                &local_advertisement_input(seed_roles, "operator-proof", policy, control_addresses),
                 now_ms,
             )
             .expect("seed advertisement");
@@ -7541,6 +7724,22 @@ mod tests {
         capabilities.ipv4 = advertised.families.ipv4;
         capabilities.ipv6 = advertised.families.ipv6;
         let capacity = wire.capacity.as_mut().expect("capacity");
+        let sample_window_seconds = capacity.sample_window_seconds;
+        *capacity = AdvertisementCapacity {
+            operator_relay_limit_up_mbps: 0,
+            operator_relay_limit_down_mbps: 0,
+            operator_exit_limit_up_mbps: 0,
+            operator_exit_limit_down_mbps: 0,
+            currently_reserved_up_mbps: 0,
+            currently_reserved_down_mbps: 0,
+            estimated_free_up_mbps: 0,
+            estimated_free_down_mbps: 0,
+            active_relay_sessions: 0,
+            active_exit_sessions: 0,
+            free_relay_slots: 0,
+            free_exit_slots: 0,
+            sample_window_seconds,
+        };
         if roles.relay {
             capacity.operator_relay_limit_up_mbps = 100;
             capacity.operator_relay_limit_down_mbps = 100;
@@ -8024,13 +8223,17 @@ mod tests {
         assert!(!sender.contains(".await"));
 
         let publisher = braced_item(production, "async fn publish_local(");
-        let exit_role_guard = publisher
-            .find("if self.roles.relay || self.roles.exit")
-            .expect("current product withdraws local Relay/Exit advertisements");
+        let service_role_guard = publisher
+            .find("if !(self.roles.relay || self.roles.exit)")
+            .expect("service advertisement role gate");
+        let capacity_snapshot = publisher
+            .find("self.local_advertisement_capacity(roles, now_ms)")
+            .expect("current local capacity snapshot");
         let served_assignment = publisher
             .find("self.served_local_advertisement = Some(")
-            .expect("client-only local advertisement assignment");
-        assert!(exit_role_guard < served_assignment);
+            .expect("service advertisement assignment");
+        assert!(service_role_guard < capacity_snapshot);
+        assert!(capacity_snapshot < served_assignment);
     }
 
     async fn ingest_direct_snapshot_advertisement(
@@ -8686,7 +8889,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_roles_remain_fail_closed_without_readiness_authority() {
+    async fn service_roles_publish_current_signed_advertisement_and_provider() {
         let roles = RolesConfig {
             client: true,
             relay: true,
@@ -8694,86 +8897,50 @@ mod tests {
         };
         let mut fixture = fixture(roles);
         let now_ms = unix_millis();
-        let expected_relay_snapshot = direct_capability(
-            &fixture.runtime.identity,
-            &fixture.policy,
-            1,
-            now_ms.saturating_add(60_000),
-        );
-        fixture.runtime.local_relay_snapshot = Some(expected_relay_snapshot.clone());
-        let signed = fixture
-            .runtime
-            .publisher
-            .sign(
-                &fixture.runtime.identity,
-                &LocalAdvertisementInput {
-                    roles: RolesConfig::default(),
-                    operator_id: "operator-service-role-guard".to_owned(),
-                    policy_version: fixture.policy.manifest_version(),
-                    policy_hash: *fixture.policy.policy_hash(),
-                    policy_expires_at_ms: fixture.policy.expires_at_ms(),
-                    control_addresses: BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
-                },
-                now_ms,
-            )
-            .expect("seed client advertisement");
-        fixture
-            .runtime
-            .service
-            .set_local_advertisement(signed.envelope.clone())
-            .expect("installed local advertisement");
-        fixture.runtime.served_local_advertisement = Some(signed.envelope);
-        fixture
-            .runtime
-            .service
-            .provide(capability::RELAY)
-            .expect("active relay provider query");
-        fixture
-            .runtime
-            .active_provider_keys
-            .insert(capability::RELAY.to_owned());
-        assert!(fixture.runtime.service.is_serving_local_advertisement());
-        assert!(fixture.runtime.served_local_advertisement.is_some());
-        assert_eq!(
-            fixture.runtime.active_provider_keys,
-            BTreeSet::from([capability::RELAY.to_owned()])
-        );
-
-        let sequence_path = fixture.directory.path().join("advertisement.sequence");
-        let sequence_before = fs::read(&sequence_path).expect("sequence before rejection");
-        let metadata_before =
-            fs::symlink_metadata(&sequence_path).expect("sequence metadata before rejection");
-
+        fixture.runtime.control_addresses =
+            BTreeSet::from(["/ip4/44.160.1.8/tcp/42100".to_owned()]);
         fixture.runtime.publish_local(&fixture.state).await;
 
-        let metadata_after =
-            fs::symlink_metadata(&sequence_path).expect("sequence metadata after rejection");
-        let sequence_after = fs::read(&sequence_path).expect("sequence after rejection");
-
-        assert!(!fixture.runtime.service.is_serving_local_advertisement());
-        assert!(fixture.runtime.served_local_advertisement.is_none());
-        assert!(fixture.runtime.active_provider_keys.is_empty());
-        assert_eq!(
-            fixture.runtime.local_relay_snapshot,
-            Some(expected_relay_snapshot)
+        let encoded = fixture
+            .runtime
+            .served_local_advertisement
+            .as_ref()
+            .expect("served service advertisement");
+        let mut replay = ReplayCache::new(1).expect("replay cache");
+        let verified = verify_control_message::<WireAdvertisement>(
+            encoded,
+            now_ms.saturating_add(1),
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("verified service advertisement");
+        let message = verified.message();
+        assert!(
+            message
+                .roles
+                .as_ref()
+                .is_some_and(|advertised| advertised.relay)
         );
-        assert_eq!(sequence_after, sequence_before);
-        assert_eq!(metadata_after.dev(), metadata_before.dev());
-        assert_eq!(metadata_after.ino(), metadata_before.ino());
-        assert_eq!(metadata_after.mode(), metadata_before.mode());
-        assert_eq!(metadata_after.nlink(), metadata_before.nlink());
-        assert_eq!(metadata_after.uid(), metadata_before.uid());
-        assert_eq!(metadata_after.gid(), metadata_before.gid());
-        assert_eq!(metadata_after.rdev(), metadata_before.rdev());
-        assert_eq!(metadata_after.size(), metadata_before.size());
-        assert_eq!(metadata_after.atime(), metadata_before.atime());
-        assert_eq!(metadata_after.atime_nsec(), metadata_before.atime_nsec());
-        assert_eq!(metadata_after.mtime(), metadata_before.mtime());
-        assert_eq!(metadata_after.mtime_nsec(), metadata_before.mtime_nsec());
-        assert_eq!(metadata_after.ctime(), metadata_before.ctime());
-        assert_eq!(metadata_after.ctime_nsec(), metadata_before.ctime_nsec());
-        assert_eq!(metadata_after.blksize(), metadata_before.blksize());
-        assert_eq!(metadata_after.blocks(), metadata_before.blocks());
+        assert!(message.capabilities.as_ref().is_some_and(|capabilities| {
+            capabilities.ipv4
+                && capabilities.tcp_mptcp
+                && capabilities.udp_single_path
+                && capabilities.multipath_quic
+        }));
+        assert_eq!(
+            message
+                .capacity
+                .as_ref()
+                .map(|capacity| capacity.free_relay_slots),
+            Some(4)
+        );
+        assert!(fixture.runtime.service.is_serving_local_advertisement());
+        assert!(
+            fixture
+                .runtime
+                .active_provider_keys
+                .contains(capability::RELAY)
+        );
     }
 
     #[tokio::test]
@@ -9748,14 +9915,16 @@ mod tests {
             .publisher
             .sign(
                 &fixture.runtime.identity,
-                &LocalAdvertisementInput {
-                    roles: RolesConfig::default(),
-                    operator_id: "operator-policy-barrier".to_owned(),
-                    policy_version: fixture.policy.manifest_version(),
-                    policy_hash: *fixture.policy.policy_hash(),
-                    policy_expires_at_ms: fixture.policy.expires_at_ms(),
-                    control_addresses: BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
-                },
+                &local_advertisement_input(
+                    RolesConfig {
+                        client: true,
+                        relay: true,
+                        exit: true,
+                    },
+                    "operator-policy-barrier",
+                    &fixture.policy,
+                    BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
+                ),
                 now_ms,
             )
             .expect("valid local signed advertisement");

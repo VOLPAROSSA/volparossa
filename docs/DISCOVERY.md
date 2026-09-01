@@ -405,12 +405,13 @@ Fresh-evidence mint. Its client-side native-preselection child still has no prod
 or route-orchestrator caller. The Exit-side actor composes one deliberately narrow production
 Permit responder: it binds the exact inbound control-Relay `ConnectionId`, current actor identities
 and policy before invoking the Exit signer, and consumes that connection token with the response
-channel without an intervening await. It remains dormant because the current local publisher
-deliberately withdraws for an Exit role and therefore cannot supply the required exact served Exit
-advertisement. An agent unit fixture injects that signed advertisement to test the exact validators;
-the separate discovery transport integration proves only connection-bound handoff. The normal
-runtime does not supply the advertisement. The responder provides no Ready, Result, helper or
-datapath work.
+channel without an intervening await. Relay and Exit runtimes now publish a short-lived signed
+service advertisement plus their bounded provider keys from explicit role, operator capacity,
+origin-hint and active-policy configuration. Those self-declared advertisements remain untrusted
+preselection input, not Fresh datapath evidence. The responder can therefore pass its exact local
+advertisement gate, but no production client Permit dispatcher yet drives the whole exchange. The
+separate discovery transport integration proves connection-bound handoff; no end-to-end route is
+claimed. The responder provides no Ready, Result, helper or datapath work.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than
