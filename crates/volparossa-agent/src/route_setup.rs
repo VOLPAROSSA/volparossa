@@ -209,40 +209,33 @@ where
     }
 }
 
-/// Establish every required native path, retaining each exact proof and helper context affinely.
+/// Collect every required Ready authority, then establish all paths in one helper context.
 async fn complete_required_client_native_paths(
-    ready: selection_bridge::ClientNativeRelayReady,
+    mut ready: selection_bridge::ClientNativeRelayReady,
     required_paths: usize,
     discovery: &DiscoveryControlHandle,
     helper: &HelperClient,
 ) -> Result<selection_bridge::CompletedClientNativeProbe, ClientRouteConnectError> {
-    let result = Box::pin(drive_required_native_paths(
-        ready,
-        required_paths,
-        |ready| complete_client_native_probe(ready, discovery, helper),
-        |completed| async move {
-            let preselection = completed
-                .dispatch_next_permit(discovery)
-                .await
-                .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
-            preselection
-                .dispatch_relay_ready(discovery)
-                .await
-                .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)
-        },
-        selection_bridge::CompletedClientNativeProbe::completed_path_count,
-    ))
-    .await;
+    while ready.ready_path_count() < required_paths {
+        let preselection = ready
+            .retain_and_dispatch_next_permit(discovery)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
+        ready = preselection
+            .dispatch_relay_ready(discovery)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
+    }
+    let result = complete_client_native_probe(ready, discovery, helper).await;
     if result.is_err() {
         // A later affine protocol join may have consumed its exact current helper owner. The
-        // existing agent-scoped token is the only authority that can close all earlier committed
-        // per-probe contexts as one fail-closed rollback.
+        // existing agent-scoped token is the only authority that can close the shared context.
         let _ = helper.cleanup_owned().await;
     }
     result
 }
 
-/// Drive one selected path through the exact helper runtime and both signed native RPCs.
+/// Drive the collected path set through one exact helper runtime and every signed native RPC.
 ///
 /// A helper-side context is destroyed immediately when the affine runtime owner is still
 /// available. Failures at consuming protocol joins fall back to the existing agent-scoped cleanup

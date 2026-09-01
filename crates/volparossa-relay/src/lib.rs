@@ -371,7 +371,8 @@ impl RelayService {
             .as_ref()
             .ok_or(RelayError::InvalidGrant("native Exit"))?;
         let reservation_id: [u8; ID_BYTES] = fixed(&scope.probe_id, "native probe ID")?;
-        let capability_id: [u8; ID_BYTES] = fixed(&scope.attempt_id, "native attempt ID")?;
+        let route_context_id: [u8; ID_BYTES] = fixed(&scope.attempt_id, "native attempt ID")?;
+        let path_id = scope.candidate_ordinal;
         let start_hash = native_probe_start_hash(start.encoded_start())?;
         let finalize_id: [u8; ID_BYTES] = start_hash[..ID_BYTES]
             .try_into()
@@ -406,8 +407,8 @@ impl RelayService {
             .as_ref()
             .ok_or(RelayError::InvalidGrant("native Exit endpoint"))?;
         if authorization.reservation_id != reservation_id
-            || authorization.route_context_id != reservation_id
-            || authorization.path_id != 1
+            || authorization.route_context_id != route_context_id
+            || authorization.path_id != path_id
             || authorization.relay_node_id != data_relay.node_id
             || authorization.exit_node_id != exit.node_id
             || authorization.client_session_id != scope.client_session_id
@@ -420,7 +421,7 @@ impl RelayService {
             || authorization.created_at_ms != start.started_at_ms()
             || authorization.expires_at_ms != start.expires_at_ms()
             || authorization.relay_peer_id != data_relay.peer_id
-            || authorization.capability_id != capability_id
+            || authorization.capability_id != route_context_id
             || authorization.client_session_public_key != scope.client_session_public_key
             || authorization.exit_boot_id != start.exit_boot_id()
             || authorization.hold_id != reservation_id
@@ -438,9 +439,9 @@ impl RelayService {
         {
             return Err(RelayError::ClientScopeMismatch);
         }
-        let endpoint = endpoint_provider(1).ok_or(RelayError::EndpointUnavailable)?;
-        if endpoint.route_context_id() != &reservation_id
-            || endpoint.path_id() != 1
+        let endpoint = endpoint_provider(path_id).ok_or(RelayError::EndpointUnavailable)?;
+        if endpoint.route_context_id() != &route_context_id
+            || endpoint.path_id() != path_id
             || endpoint.client_facing_endpoint() != expected_relay_client
             || endpoint.exit_facing_endpoint() != expected_relay_exit
         {
@@ -558,8 +559,8 @@ impl RelayService {
             exit_public_key,
             relay_public_key: local_public_key,
             reservation_id,
-            route_context_id: reservation_id,
-            path_id: 1,
+            route_context_id,
+            path_id,
             exit_node_id: fixed(&exit.node_id, "native Exit node ID")?,
             expires_at_ms: authorization.expires_at_ms,
         };

@@ -4470,8 +4470,8 @@ impl DiscoveryRuntime {
             || data_relay.node_id.as_slice() != self.local_node_id
             || data_relay.peer_id != local_peer.to_bytes()
             || data_relay.public_key.as_slice() != self.local_public_key
-            || endpoint.route_context_id().as_slice() != scope.probe_id
-            || endpoint.path_id() != 1
+            || endpoint.route_context_id().as_slice() != scope.attempt_id
+            || endpoint.path_id() != scope.candidate_ordinal
             || self.prepared_native_authorizations.len() >= MAX_CONCURRENT_DATAPATH_RELAY_STREAMS
             || self
                 .prepared_native_authorizations

@@ -31,6 +31,8 @@ pub const MIN_NATIVE_PROBE_CANDIDATES: usize = 2;
 /// This nine-candidate pool is not the admitted route's independent maximum of eight simultaneous
 /// paths.
 pub const MAX_NATIVE_PROBE_CANDIDATES: usize = 9;
+/// Maximum helper path identity admitted inside one shared native route context.
+pub const MAX_NATIVE_PROBE_PATHS: usize = 8;
 /// Hard wall-clock lifetime of one native-preselection attempt and every message within it.
 pub const MAX_NATIVE_PROBE_LIFETIME_MS: u64 = 30 * 1_000;
 const CANDIDATE_SET_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-candidate-set/v4\0";
@@ -143,9 +145,9 @@ pub struct NativeProbePermit {
 ///
 /// `prepared_lease_commitment` is a domain-separated digest containing the helper's secret,
 /// random 256-bit lease handle. It is not a deterministic or brute-forceable endpoint digest.
-/// All four endpoints of one path carry `route_context_id == scope.probe_id`; endpoints on
-/// different nodes have different helper runtimes, while the `RelayClient` and `RelayExit`
-/// endpoints share one Relay helper runtime.
+/// All endpoints in one attempt carry `route_context_id == scope.attempt_id`; the exact path is
+/// `scope.candidate_ordinal`. Endpoints on different nodes have different helper runtimes, while
+/// the `RelayClient` and `RelayExit` endpoints share one Relay helper runtime.
 #[allow(missing_docs)]
 #[derive(Clone, PartialEq, Message)]
 pub struct NativeProbeEndpointBinding {
@@ -763,7 +765,7 @@ impl NativeProbePathScope {
         require_nonzero::<ID_LENGTH>(&self.probe_id, "native scope probe_id")?;
         require_nonzero::<KEY_LENGTH>(&self.candidate_set_hash, "native scope set hash")?;
         require_nonzero::<KEY_LENGTH>(&self.challenge_hash, "native scope challenge hash")?;
-        if !(1..=u32::try_from(MAX_NATIVE_PROBE_CANDIDATES).unwrap_or(u32::MAX))
+        if !(1..=u32::try_from(MAX_NATIVE_PROBE_PATHS).unwrap_or(u32::MAX))
             .contains(&self.candidate_ordinal)
         {
             return Err(ProtocolError::InvalidField(
@@ -819,7 +821,7 @@ impl NativeProbeEndpointBinding {
             .as_ref()
             .ok_or(ProtocolError::InvalidField("native endpoint"))?;
         endpoint.validate("native endpoint")?;
-        if self.route_context_id != scope.probe_id
+        if self.route_context_id != scope.attempt_id
             || !endpoint_family_matches(endpoint, scope_family(scope)?)
         {
             return Err(ProtocolError::InvalidField("native endpoint scope"));
@@ -836,7 +838,7 @@ impl NativeProbeLeaseProof {
             &self.prepared_lease_commitment,
             "native prepared lease commitment",
         )?;
-        if self.route_context_id != scope.probe_id
+        if self.route_context_id != scope.attempt_id
             || self.latest_handshake_unix == 0
             || self.received_bytes_after_baseline == 0
             || self.transmitted_bytes_after_baseline == 0
@@ -2340,7 +2342,7 @@ mod tests {
     fn endpoint(port: u8, key: [u8; 32], address: [u8; 4]) -> NativeProbeEndpointBinding {
         NativeProbeEndpointBinding {
             helper_runtime_id: vec![helper_runtime_seed(port); 32],
-            route_context_id: vec![2; 16],
+            route_context_id: vec![1; 16],
             endpoint: Some(WireguardEndpoint {
                 public_key: key.to_vec(),
                 underlay_ip: address.to_vec(),
@@ -2353,7 +2355,7 @@ mod tests {
     fn lease(seed: u8) -> NativeProbeLeaseProof {
         NativeProbeLeaseProof {
             helper_runtime_id: vec![helper_runtime_seed(seed); 32],
-            route_context_id: vec![2; 16],
+            route_context_id: vec![1; 16],
             prepared_lease_commitment: vec![seed; 32],
             latest_handshake_unix: NOW / 1_000,
             received_bytes_after_baseline: 64,
@@ -2551,12 +2553,13 @@ mod tests {
         set.data_relays.push(ninth_alternative);
         assert!(set.validate().is_err(), "ten candidates must fail closed");
 
-        let mut ninth_ordinal = fixture.scope.clone();
-        ninth_ordinal.candidate_ordinal = 9;
-        ninth_ordinal.data_relay = Some(candidates[8].clone());
-        assert!(ninth_ordinal.validate().is_ok());
-        ninth_ordinal.candidate_ordinal = 10;
-        assert!(ninth_ordinal.validate().is_err());
+        let mut bounded_ordinal = fixture.scope.clone();
+        bounded_ordinal.candidate_ordinal = 8;
+        bounded_ordinal.data_relay = Some(candidates[7].clone());
+        assert!(bounded_ordinal.validate().is_ok());
+        bounded_ordinal.candidate_ordinal = 9;
+        bounded_ordinal.data_relay = Some(candidates[8].clone());
+        assert!(bounded_ordinal.validate().is_err());
     }
 
     #[test]
@@ -2644,7 +2647,7 @@ mod tests {
     }
 
     #[test]
-    fn every_endpoint_and_lease_binding_is_scoped_to_the_exact_probe_id() {
+    fn every_endpoint_and_lease_binding_is_scoped_to_the_shared_attempt_id() {
         let fixture = Fixture::new();
         for binding in [
             endpoint(21, [1; 32], [81, 1, 1, 1]),

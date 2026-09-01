@@ -697,6 +697,7 @@ impl ExitService {
             .as_slice()
             .try_into()
             .map_err(|_| ExitError::InvalidGrant("native attempt ID"))?;
+        let path_id = scope.candidate_ordinal;
         let start_hash = native_probe_start_hash(chain.encoded_start())?;
         let finalize_id: [u8; ID_BYTES] = start_hash[..ID_BYTES]
             .try_into()
@@ -717,8 +718,8 @@ impl ExitService {
         let transport = native_core_transport(scope.transport)?;
         let authorization = RelayAuthorization {
             reservation_id: reservation_id.to_vec(),
-            route_context_id: reservation_id.to_vec(),
-            path_id: 1,
+            route_context_id: capability_id.to_vec(),
+            path_id,
             relay_node_id: data_relay.node_id.to_vec(),
             exit_node_id: exit.node_id.to_vec(),
             client_session_id: scope.client_session_id.clone(),
@@ -743,14 +744,15 @@ impl ExitService {
         };
         let allocation = AuthorizedReservation {
             reservation_id: super::text_id::<ReservationId>(&reservation_id)?,
-            route_context_id: super::text_id::<RouteContextId>(&reservation_id)?,
+            route_context_id: super::text_id::<RouteContextId>(&capability_id)?,
             service_node_id: super::text_id::<NodeId>(&self.config.node_id)?,
             client_ephemeral_id: super::text_id::<ClientEphemeralId>(&scope.client_session_id)?,
             role: ServiceRole::Exit,
             allowed_transports: vec![transport],
             bandwidth: Bandwidth::new(NATIVE_PROBE_BANDWIDTH_MBPS, NATIVE_PROBE_BANDWIDTH_MBPS)
                 .map_err(|_| ExitError::InvalidGrant("native probe bandwidth"))?,
-            maximum_paths: 1,
+            maximum_paths: u8::try_from(volparossa_protocol::MAX_NATIVE_PROBE_PATHS)
+                .map_err(|_| ExitError::InvalidGrant("native path limit"))?,
             created_at: super::unix_seconds(authorization.created_at_ms),
             expires_at: super::unix_seconds(authorization.expires_at_ms),
         };
@@ -921,7 +923,7 @@ impl ExitService {
             return Err(ExitError::ExitBootMismatch);
         }
         if now_ms >= permit.expires_at_ms
-            || prepared_exit.binding.route_context_id != permit.scope.probe_id
+            || prepared_exit.binding.route_context_id != permit.scope.attempt_id
         {
             return Err(ExitError::InvalidGrant("native probe prepared Exit lease"));
         }
@@ -1334,7 +1336,7 @@ mod tests {
             let relay_node_id = self.relay_node_id();
             let relay_peer_id = self.relay_peer_id();
             let relay_exit = relay_exit_binding(&self.scope);
-            let prepared_exit = prepared_exit_lease(PROBE_ID);
+            let prepared_exit = prepared_exit_lease([1; ID_BYTES]);
             let public_key = self.exit_public_key();
             let exit_key = &self.exit_key;
             self.service
@@ -1423,7 +1425,7 @@ mod tests {
             route_context_id,
             HelperContextHandle::from_bytes([0xe3; NODE_ID_BYTES]).expect("context handle"),
             HelperLeaseHandle::from_bytes([0xe4; NODE_ID_BYTES]).expect("lease handle"),
-            1,
+            2,
             EndpointRole::Exit,
             endpoint,
         )
@@ -1475,11 +1477,11 @@ mod tests {
 
     fn relay_endpoint_lease() -> RelayEndpointLease {
         RelayEndpointLease::new(
-            PROBE_ID,
+            [1; ID_BYTES],
             HelperContextHandle::from_bytes([0xd0; NODE_ID_BYTES]).expect("Relay context"),
             HelperLeaseHandle::from_bytes([0xd4; NODE_ID_BYTES]).expect("RelayClient lease"),
             HelperLeaseHandle::from_bytes([0xd3; NODE_ID_BYTES]).expect("RelayExit lease"),
-            1,
+            2,
             EndpointRole::RelayClient,
             EndpointRole::RelayExit,
             PublicWireGuardEndpoint::new(
@@ -1518,7 +1520,7 @@ mod tests {
         endpoint: WireguardEndpoint,
     ) -> NativeProbeEndpointBinding {
         let route_context_id: [u8; ID_BYTES] =
-            scope.probe_id.as_slice().try_into().expect("probe ID");
+            scope.attempt_id.as_slice().try_into().expect("attempt ID");
         let commitment = native_probe_prepared_lease_commitment(
             &runtime,
             &route_context_id,
@@ -1587,7 +1589,7 @@ mod tests {
                 &relay_node_id,
                 &relay_peer_id,
                 relay_exit,
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -1696,7 +1698,7 @@ mod tests {
                 &relay_node_id,
                 &relay_peer_id,
                 relay_exit.clone(),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 exit_public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -1825,8 +1827,11 @@ mod tests {
             &mut client_grant_replay,
         )
         .expect("nested standard reservation");
-        assert_eq!(relay_grant.message().route_context_id, PROBE_ID);
-        assert_eq!(relay_grant.message().path_id, 1);
+        assert_eq!(relay_grant.message().route_context_id, [1; ID_BYTES]);
+        assert_eq!(
+            relay_grant.message().path_id,
+            fixture.scope.candidate_ordinal
+        );
         assert_eq!(
             relay_grant.message().exit_authorization,
             exit_authorization.encoded()
@@ -2120,7 +2125,7 @@ mod tests {
                 &relay_node_id,
                 &relay_peer_id,
                 relay_exit_binding(&fixture.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 ready_now,
                 exit_public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -2188,7 +2193,7 @@ mod tests {
                 &relay_node_id,
                 &relay_peer_id,
                 relay_exit_binding(&permit_fixture.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -2231,7 +2236,7 @@ mod tests {
                 &ready_fixture.relay_node_id(),
                 &ready_fixture.relay_peer_id(),
                 relay_exit_binding(&ready_fixture.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 ready_fixture.exit_public_key(),
                 |_message| None,
@@ -2372,7 +2377,7 @@ mod tests {
                 &[0xf2; NODE_ID_BYTES],
                 &wrong_relay.relay_peer_id(),
                 relay_exit_binding(&wrong_relay.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -2390,7 +2395,7 @@ mod tests {
                 &wrong_relay_peer.relay_node_id(),
                 &[0xf3; 38],
                 relay_exit_binding(&wrong_relay_peer.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 wrong_relay_peer.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -2426,7 +2431,7 @@ mod tests {
                 &expired.relay_node_id(),
                 &expired.relay_peer_id(),
                 relay_exit_binding(&expired.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 ATTEMPT_EXPIRY_MS,
                 expired.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -2438,7 +2443,7 @@ mod tests {
 
         let mut collision = Fixture::new();
         let permit = collision.issue_permit();
-        let local = prepared_exit_lease(PROBE_ID);
+        let local = prepared_exit_lease([1; ID_BYTES]);
         let local_endpoint = local.binding.endpoint.clone().expect("local endpoint");
         let colliding_relay = relay_binding_with_endpoint(
             &collision.scope,

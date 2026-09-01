@@ -2085,13 +2085,11 @@ fn validate_activate_batch_binding(
     }
     match context {
         ContextRole::Client | ContextRole::Exit => {
-            let [activation] = value.leases.as_slice() else {
-                return Err(BackendError::Invalid);
-            };
-            if activation.maximum_up_mbps != 0
-                || activation.maximum_down_mbps != 0
-                || !activation.signed_client_relay_request.is_empty()
-            {
+            if value.leases.iter().any(|activation| {
+                activation.maximum_up_mbps != 0
+                    || activation.maximum_down_mbps != 0
+                    || !activation.signed_client_relay_request.is_empty()
+            }) {
                 return Err(BackendError::Invalid);
             }
         }
@@ -2719,6 +2717,11 @@ fn validate_functional_lease_batch_shape(
                     functional_lease_role(context as i32, lease.role).is_none()
                         || !(1..=8).contains(&lease.path_id)
                 })
+                || leases.iter().enumerate().any(|(index, lease)| {
+                    leases[index + 1..]
+                        .iter()
+                        .any(|other| other.path_id == lease.path_id)
+                })
             {
                 return Err(BackendError::Invalid);
             }
@@ -2824,7 +2827,7 @@ fn internal_prepare_batch_plan(
     key: OpenLineageKey,
     leases: &[RoutingLeasePlan],
 ) -> Result<PrepareLeases, BackendError> {
-    if resources.len() != leases.len() || !(1..=2).contains(&leases.len()) {
+    if resources.len() != leases.len() || leases.is_empty() || leases.len() > 8 {
         return Err(BackendError::Invalid);
     }
     let leases = resources
@@ -2896,7 +2899,8 @@ fn verified_internal_activate_batch_plan(
 ) -> Result<ActivateLeases, BackendError> {
     if resources.len() != prepared.len()
         || prepared.len() != activations.len()
-        || !(1..=2).contains(&prepared.len())
+        || prepared.is_empty()
+        || prepared.len() > 8
     {
         return Err(BackendError::Invalid);
     }
@@ -2953,6 +2957,10 @@ fn verified_internal_activate_batch_plan(
 struct VerifiedActivationAuthority {
     context: ContextRole,
     client_request: Option<VerifiedRelayClientRequest>,
+    paths: Vec<VerifiedPathActivationAuthority>,
+}
+
+struct VerifiedPathActivationAuthority {
     relay: VerifiedControlMessage<RelayReservation>,
     exit: VerifiedControlMessage<RelayAuthorization>,
 }
@@ -3001,37 +3009,28 @@ fn verify_activation_authority(
     } else {
         None
     };
-    let (relay, exit) = verify_relay_reservation(
-        &activations[0].signed_relay_reservation,
-        now_ms,
-        TimePolicy::default(),
-        replay_cache,
-    )
-    .map_err(|error| {
-        rollback_replay_entries(replay_cache, replay_keys);
-        protocol_backend_error(&error)
-    })?;
-    replay_keys.push((*relay.sender_id(), *relay.nonce()));
-    replay_keys.push((*exit.sender_id(), *exit.nonce()));
-
-    let relay_message = relay.message();
-    let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
-    if activations.iter().skip(1).any(|activation| {
-        activation.signed_relay_reservation != activations[0].signed_relay_reservation
-    }) || relay_message.route_context_id.as_slice() != key.context_id
-        || relay_message.path_id != prepared[0].path_id
-        || prepared
-            .iter()
-            .any(|lease| lease.path_id != relay_message.path_id)
-        || relay.expires_at_ms() < hard_expires_at_ms
-        || exit.expires_at_ms() < hard_expires_at_ms
-        || !signer_matches_peer_id(relay.sender_public_key(), &relay_message.relay_peer_id)
-        || !signer_matches_peer_id(exit.sender_public_key(), &exit.message().exit_peer_id)
-        || relay.sender_public_key() == exit.sender_public_key()
-    {
-        return Err(BackendError::Invalid);
-    }
+    let mut paths = Vec::with_capacity(if context == ContextRole::Relay {
+        1
+    } else {
+        prepared.len()
+    });
     if context == ContextRole::Relay {
+        if activations.iter().skip(1).any(|activation| {
+            activation.signed_relay_reservation != activations[0].signed_relay_reservation
+        }) || prepared
+            .iter()
+            .any(|lease| lease.path_id != prepared[0].path_id)
+        {
+            return Err(BackendError::Invalid);
+        }
+        let path = verify_path_activation_authority(
+            key,
+            &prepared[0],
+            &activations[0],
+            now_ms,
+            replay_cache,
+            replay_keys,
+        )?;
         match client_request.as_ref().ok_or(BackendError::Invalid)? {
             VerifiedRelayClientRequest::Reservation {
                 request,
@@ -3041,8 +3040,8 @@ fn verify_activation_authority(
                 request,
                 capability,
                 exit_reservation,
-                &relay,
-                &exit,
+                &path.relay,
+                &path.exit,
             ) => {}
             VerifiedRelayClientRequest::NativeStart {
                 start,
@@ -3053,18 +3052,61 @@ fn verify_activation_authority(
                 start,
                 signed_sha256,
                 start_hash,
-                &relay,
-                &exit,
+                &path.relay,
+                &path.exit,
             ) => {}
             _ => return Err(BackendError::Invalid),
+        }
+        paths.push(path);
+    } else {
+        for (prepared, activation) in prepared.iter().zip(activations) {
+            paths.push(verify_path_activation_authority(
+                key,
+                prepared,
+                activation,
+                now_ms,
+                replay_cache,
+                replay_keys,
+            )?);
         }
     }
     Ok(VerifiedActivationAuthority {
         context,
         client_request,
-        relay,
-        exit,
+        paths,
     })
+}
+
+fn verify_path_activation_authority(
+    key: OpenLineageKey,
+    prepared: &PreparedWorkerLease,
+    activation: &volparossa_routing::LeaseActivation,
+    now_ms: u64,
+    replay_cache: &mut ReplayCache,
+    replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
+) -> Result<VerifiedPathActivationAuthority, BackendError> {
+    let (relay, exit) = verify_relay_reservation(
+        &activation.signed_relay_reservation,
+        now_ms,
+        TimePolicy::default(),
+        replay_cache,
+    )
+    .map_err(|error| protocol_backend_error(&error))?;
+    replay_keys.push((*relay.sender_id(), *relay.nonce()));
+    replay_keys.push((*exit.sender_id(), *exit.nonce()));
+    let relay_message = relay.message();
+    let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
+    if relay_message.route_context_id.as_slice() != key.context_id
+        || relay_message.path_id != prepared.path_id
+        || relay.expires_at_ms() < hard_expires_at_ms
+        || exit.expires_at_ms() < hard_expires_at_ms
+        || !signer_matches_peer_id(relay.sender_public_key(), &relay_message.relay_peer_id)
+        || !signer_matches_peer_id(exit.sender_public_key(), &exit.message().exit_peer_id)
+        || relay.sender_public_key() == exit.sender_public_key()
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(VerifiedPathActivationAuthority { relay, exit })
 }
 
 fn verify_relay_client_request(
@@ -3184,9 +3226,9 @@ fn verified_native_start_scope(
         && start.sender_public_key().as_slice() == relay_message.client_session_public_key
         && start.sender_public_key() != relay.sender_public_key()
         && start.sender_public_key() != authorization.sender_public_key()
-        && scope.probe_id.as_slice() == key.context_id
+        && scope.attempt_id.as_slice() == key.context_id
         && scope.probe_id == relay_message.reservation_id
-        && scope.probe_id == relay_message.route_context_id
+        && scope.attempt_id == relay_message.route_context_id
         && scope.attempt_id == relay_message.capability_id
         && scope.client_session_id == relay_message.client_session_id
         && scope.client_session_public_key == relay_message.client_session_public_key
@@ -3198,7 +3240,7 @@ fn verified_native_start_scope(
         && exit.node_id == relay_message.exit_node_id
         && exit.peer_id == relay_message.exit_peer_id
         && exit.public_key.as_slice() == authorization.sender_public_key()
-        && relay_message.path_id == 1
+        && relay_message.path_id == scope.candidate_ordinal
         && relay_message.allowed_transports.as_slice() == [scope.transport]
         && relay_message.policy_hash == scope.policy_hash
         && relay_message.created_at_ms == start_message.started_at_ms
@@ -3307,54 +3349,60 @@ fn verified_activation_endpoints(
 ) -> Result<Vec<VerifiedWireguardEndpoint>, BackendError> {
     match authority.context {
         ContextRole::Client => {
-            let [prepared] = prepared else {
-                return Err(BackendError::Invalid);
-            };
-            if authority
-                .relay
-                .message()
-                .client_wireguard_public_key
-                .as_slice()
-                != prepared.public_key
-            {
+            if authority.paths.len() != prepared.len() {
                 return Err(BackendError::Invalid);
             }
             authority
-                .relay
-                .message()
-                .relay_client_wireguard_endpoint
-                .as_ref()
-                .and_then(verified_wireguard_endpoint)
-                .map(|endpoint| vec![endpoint])
-                .ok_or(BackendError::Invalid)
+                .paths
+                .iter()
+                .zip(prepared)
+                .map(|(path, prepared)| {
+                    if path.relay.message().client_wireguard_public_key.as_slice()
+                        != prepared.public_key
+                    {
+                        return Err(BackendError::Invalid);
+                    }
+                    path.relay
+                        .message()
+                        .relay_client_wireguard_endpoint
+                        .as_ref()
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)
+                })
+                .collect()
         }
         ContextRole::Exit => {
-            let [prepared] = prepared else {
-                return Err(BackendError::Invalid);
-            };
-            let signed_local = authority
-                .exit
-                .message()
-                .exit_wireguard_endpoint
-                .as_ref()
-                .and_then(verified_wireguard_endpoint)
-                .ok_or(BackendError::Invalid)?;
-            if (
-                signed_local.public_key,
-                signed_local.address,
-                signed_local.port,
-            ) != (prepared.public_key, underlay.address, prepared.listen_port)
-            {
+            if authority.paths.len() != prepared.len() {
                 return Err(BackendError::Invalid);
             }
             authority
-                .relay
-                .message()
-                .relay_exit_wireguard_endpoint
-                .as_ref()
-                .and_then(verified_wireguard_endpoint)
-                .map(|endpoint| vec![endpoint])
-                .ok_or(BackendError::Invalid)
+                .paths
+                .iter()
+                .zip(prepared)
+                .map(|(path, prepared)| {
+                    let signed_local = path
+                        .exit
+                        .message()
+                        .exit_wireguard_endpoint
+                        .as_ref()
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)?;
+                    if (
+                        signed_local.public_key,
+                        signed_local.address,
+                        signed_local.port,
+                    ) != (prepared.public_key, underlay.address, prepared.listen_port)
+                    {
+                        return Err(BackendError::Invalid);
+                    }
+                    path.relay
+                        .message()
+                        .relay_exit_wireguard_endpoint
+                        .as_ref()
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)
+                })
+                .collect()
         }
         ContextRole::Relay => {
             verified_relay_activation_endpoints(authority, prepared, underlay, activations)
@@ -3379,7 +3427,10 @@ fn verified_relay_activation_endpoints(
         .client_request
         .as_ref()
         .ok_or(BackendError::Invalid)?;
-    let relay = authority.relay.message();
+    let [path] = authority.paths.as_slice() else {
+        return Err(BackendError::Invalid);
+    };
+    let relay = path.relay.message();
     let (request_sender, request_hash, client_peer) = match client_request {
         VerifiedRelayClientRequest::Reservation { request, .. } => (
             request.sender_public_key(),
@@ -3415,8 +3466,8 @@ fn verified_relay_activation_endpoints(
         .map_err(|_| BackendError::Invalid)?;
     if request_hash != signed_hash
         || request_sender.as_slice() != relay.client_session_public_key
-        || request_sender == authority.relay.sender_public_key()
-        || request_sender == authority.exit.sender_public_key()
+        || request_sender == path.relay.sender_public_key()
+        || request_sender == path.exit.sender_public_key()
         || client_activation.maximum_up_mbps
             != u32::try_from(relay.maximum_up_mbps).map_err(|_| BackendError::Invalid)?
         || client_activation.maximum_down_mbps
@@ -3455,7 +3506,7 @@ fn verified_relay_activation_endpoints(
     ) {
         return Err(BackendError::Invalid);
     }
-    let exit_peer = authority
+    let exit_peer = path
         .exit
         .message()
         .exit_wireguard_endpoint
@@ -3820,7 +3871,7 @@ fn matches_prepared_batch(
     else {
         return None;
     };
-    if prepared.leases.len() != leases.len() || !(1..=2).contains(&leases.len()) {
+    if prepared.leases.len() != leases.len() || leases.is_empty() || leases.len() > 8 {
         return None;
     }
     let mut output = Vec::with_capacity(leases.len());
@@ -3864,7 +3915,7 @@ fn matches_activated_batch(
     else {
         return None;
     };
-    if activated.leases.len() != prepared.len() || !(1..=2).contains(&prepared.len()) {
+    if activated.leases.len() != prepared.len() || prepared.is_empty() || prepared.len() > 8 {
         return None;
     }
     activated
@@ -3916,7 +3967,7 @@ fn matches_probed_batch(
     else {
         return None;
     };
-    if probed.leases.len() != activated.len() || !(1..=2).contains(&activated.len()) {
+    if probed.leases.len() != activated.len() || activated.is_empty() || activated.len() > 8 {
         return None;
     }
     probed
@@ -4489,6 +4540,49 @@ mod tests {
         )
     }
 
+    fn add_committed_transport_path(
+        backend: &FunctionalAlphaLeaseBackend,
+        key: OpenLineageKey,
+        role: WireguardRole,
+        path_id: u32,
+    ) -> Ipv6Addr {
+        let lease = RoutingLeasePlan {
+            path_id,
+            role: role as i32,
+        };
+        let wireguard = process_owned_resource(key, &lease).expect("additional live owner");
+        let overlay = wireguard.resource().local_address();
+        let mut prepare = internal_prepare_plan(wireguard.resource(), key, &lease);
+        let prepared = PreparedWorkerLease {
+            path_id,
+            role: role as i32,
+            public_key: [0x72_u8.wrapping_add(u8::try_from(path_id).unwrap_or(0)); 32],
+            listen_port: 31_337_u16.saturating_add(u16::try_from(path_id).unwrap_or(0)),
+        };
+        let activated = ActivatedWorkerLease {
+            prepared,
+            peer_public_key: [0x73_u8.wrapping_add(u8::try_from(path_id).unwrap_or(0)); 32],
+            baseline: KernelCounters {
+                path_id,
+                role: role as i32,
+                latest_handshake_unix: 1,
+                received_bytes: 2,
+                transmitted_bytes: 3,
+            },
+        };
+        let mut state = lock_state(&backend.state);
+        let entry = state.as_mut().expect("committed entry");
+        entry.wireguard.push(wireguard);
+        entry
+            .prepare
+            .leases
+            .push(prepare.leases.pop().expect("additional prepare lease"));
+        entry.prepared.push(prepared);
+        entry.activated.push(activated);
+        entry.birth_may_exist.push(true);
+        overlay
+    }
+
     fn bound_freebind_udp(address: Ipv6Addr) -> (OwnedFd, u16) {
         let socket = socket2::Socket::new(
             socket2::Domain::IPV6,
@@ -4889,6 +4983,53 @@ mod tests {
             );
             state.as_mut().expect("committed entry").phase = OpenLeasePhase::Committed;
         }
+        drop(peer);
+        retire_transport_fixture(&backend, key).await;
+    }
+
+    #[tokio::test]
+    async fn committed_multipath_transport_acquire_selects_the_exact_requested_path() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = live_key([0x83; 16], now);
+        let (backend, peer, _alive, first_overlay) =
+            committed_transport_backend(key, WireguardRole::Client);
+        let second_overlay = add_committed_transport_path(&backend, key, WireguardRole::Client, 2);
+        let binding = acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+        let mut value = acquire_value(key, WireguardRole::Client, second_overlay, 41_002);
+        value.path_id = 2;
+        let (_, internal) =
+            validate_acquire_transport_binding(binding, &value).expect("path two Acquire binding");
+        {
+            let state = lock_state(&backend.state);
+            validate_committed_acquire_entry(
+                state.as_ref().expect("multipath committed entry"),
+                &value,
+                &internal,
+            )
+            .expect("path two belongs to the shared committed context");
+        }
+
+        let wrong_path = AcquireTransportSocket {
+            path_id: 1,
+            ..value.clone()
+        };
+        let (_, wrong_internal) = validate_acquire_transport_binding(binding, &wrong_path)
+            .expect("well-formed but mismatched path binding");
+        {
+            let state = lock_state(&backend.state);
+            assert_eq!(
+                validate_committed_acquire_entry(
+                    state.as_ref().expect("multipath committed entry"),
+                    &wrong_path,
+                    &wrong_internal,
+                ),
+                Err(BackendError::Invalid)
+            );
+        }
+        assert_ne!(first_overlay, second_overlay);
         drop(peer);
         retire_transport_fixture(&backend, key).await;
     }
@@ -6455,7 +6596,7 @@ mod tests {
         let expires_at_ms = now_ms + 20_000;
         let relay = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
         let request = decode_relay_request(&value.leases[0].signed_client_relay_request);
-        let attempt_id = [0x71; 16];
+        let probe_id = [0x71; 16];
         let data_relay = native_actor(
             route.relay_key(0).expect("Relay key"),
             route.relay_peer_id(0).expect("Relay peer ID"),
@@ -6469,8 +6610,8 @@ mod tests {
             expires_at_ms + 5_000,
         );
         let scope = NativeProbePathScope {
-            attempt_id: attempt_id.to_vec(),
-            probe_id: key.context_id.to_vec(),
+            attempt_id: key.context_id.to_vec(),
+            probe_id: probe_id.to_vec(),
             candidate_set_hash: vec![0x74; 32],
             candidate_ordinal: 1,
             data_relay: Some(data_relay.clone()),
@@ -6515,7 +6656,7 @@ mod tests {
         let start_hash = native_probe_start_hash(&signed_start).expect("native Start hash");
         let policy_hash = relay.policy_hash;
         let grant = resign_consistent_grant(&route, |relay, authorization| {
-            relay.reservation_id = key.context_id.to_vec();
+            relay.reservation_id = probe_id.to_vec();
             relay.route_context_id = key.context_id.to_vec();
             relay.path_id = 1;
             relay.client_session_id = route.client_session_id().to_vec();
@@ -6523,14 +6664,14 @@ mod tests {
             relay.policy_hash.clone_from(&policy_hash);
             relay.created_at_ms = now_ms;
             relay.expires_at_ms = expires_at_ms;
-            relay.capability_id = attempt_id.to_vec();
-            relay.hold_id = key.context_id.to_vec();
+            relay.capability_id = key.context_id.to_vec();
+            relay.hold_id = probe_id.to_vec();
             relay.finalize_id = start_hash[..16].to_vec();
             relay.control_relay_node_id = route.relay_node_id(0).expect("Relay node ID").to_vec();
             relay.control_relay_peer_id = route.relay_peer_id(0).expect("Relay peer ID").to_vec();
             relay.signed_client_relay_request_sha256 = signed_sha256.to_vec();
 
-            authorization.reservation_id = key.context_id.to_vec();
+            authorization.reservation_id = probe_id.to_vec();
             authorization.route_context_id = key.context_id.to_vec();
             authorization.path_id = 1;
             authorization.client_session_id = route.client_session_id().to_vec();
@@ -6538,8 +6679,8 @@ mod tests {
             authorization.policy_hash.clone_from(&policy_hash);
             authorization.created_at_ms = now_ms;
             authorization.expires_at_ms = expires_at_ms;
-            authorization.capability_id = attempt_id.to_vec();
-            authorization.hold_id = key.context_id.to_vec();
+            authorization.capability_id = key.context_id.to_vec();
+            authorization.hold_id = probe_id.to_vec();
             authorization.finalize_id = start_hash[..16].to_vec();
             authorization.control_relay_node_id =
                 route.relay_node_id(0).expect("Relay node ID").to_vec();
@@ -7120,6 +7261,83 @@ mod tests {
     }
 
     #[test]
+    fn client_activate_accepts_two_unique_grants_in_one_exact_route_context() {
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now = now_ms / 1_000;
+        let route =
+            SignedRouteFixture::new_with_path_ids(&[1, 2], 2, 8, &[Transport::TcpMptcp], now_ms)
+                .expect("two-path signed route");
+        let key = live_key(*route.route_context_id(), now);
+        let mut prepared = Vec::new();
+        let mut activations = Vec::new();
+        let mut resources = Vec::new();
+        for (index, signed) in route.relay_reservations().iter().enumerate() {
+            let relay = decode_relay_reservation(signed);
+            let path_id = relay.path_id;
+            let remote = relay
+                .relay_client_wireguard_endpoint
+                .as_ref()
+                .expect("RelayClient endpoint");
+            prepared.push(PreparedWorkerLease {
+                path_id,
+                role: WireguardRole::Client as i32,
+                public_key: relay
+                    .client_wireguard_public_key
+                    .as_slice()
+                    .try_into()
+                    .expect("Client key"),
+                listen_port: 51_820 + u16::try_from(index).expect("path index"),
+            });
+            activations.push(volparossa_routing::LeaseActivation {
+                lease_handle: vec![
+                    0x90 + u8::try_from(index).expect("path index");
+                    HELPER_HANDLE_BYTES
+                ],
+                path_id,
+                role: WireguardRole::Client as i32,
+                peer_public_key: remote.public_key.clone(),
+                peer_endpoint: Some(PublicUdpEndpoint {
+                    address: remote.underlay_ip.clone(),
+                    port: remote.listen_port,
+                }),
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                signed_relay_reservation: signed.clone(),
+                signed_client_relay_request: Vec::new(),
+            });
+            resources.push(
+                process_owned_resource(
+                    key,
+                    &RoutingLeasePlan {
+                        path_id,
+                        role: WireguardRole::Client as i32,
+                    },
+                )
+                .expect("Client resource"),
+            );
+        }
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verified_internal_activate_batch_plan(
+            &replay,
+            &resources,
+            key,
+            &prepared,
+            fixture_underlay(),
+            &activations,
+            now_ms,
+        )
+        .expect("shared two-path Client activation");
+        assert_eq!(
+            plan.leases
+                .iter()
+                .map(|lease| lease.path_id)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 4);
+    }
+
+    #[test]
     #[allow(
         clippy::too_many_lines,
         reason = "one substitution matrix proves the complete native activation scope and replay rollback"
@@ -7131,13 +7349,13 @@ mod tests {
             },
             |start| {
                 let scope = start.scope.as_mut().expect("scope");
-                scope.probe_id[0] ^= 1;
+                scope.attempt_id[0] ^= 1;
                 start
                     .client_endpoint
                     .as_mut()
                     .expect("Client binding")
                     .route_context_id
-                    .clone_from(&scope.probe_id);
+                    .clone_from(&scope.attempt_id);
             },
             |start| {
                 let key = SigningKey::from_bytes(&[0x81; 32]);

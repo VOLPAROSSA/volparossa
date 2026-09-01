@@ -26,13 +26,13 @@ use volparossa_discovery::{
 };
 use volparossa_protocol::{
     IssuedNativeProbeStart, MAX_NATIVE_PROBE_CANDIDATES, MAX_NATIVE_PROBE_LIFETIME_MS,
-    MIN_NATIVE_PROBE_CANDIDATES, NativeProbeCandidateSet, NativeProbeEndpointBinding,
-    NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermitRequest,
-    PreselectionActorBinding, ProtocolError, ReplayCache, TimePolicy, VerifiedNativeProbePermit,
-    VerifiedNativeProbeRelayReady, VerifiedNativeProbeResult, native_probe_candidate_set_hash,
-    native_probe_challenge_hash, node_id_from_public_key, sign_control_message,
-    sign_native_probe_start, verify_native_probe_permit, verify_native_probe_relay_ready,
-    verify_native_probe_result,
+    MAX_NATIVE_PROBE_PATHS, MIN_NATIVE_PROBE_CANDIDATES, NativeProbeCandidateSet,
+    NativeProbeEndpointBinding, NativeProbeLeaseProof, NativeProbePathScope,
+    NativeProbePermitRequest, PreselectionActorBinding, ProtocolError, ReplayCache, TimePolicy,
+    VerifiedNativeProbePermit, VerifiedNativeProbeRelayReady, VerifiedNativeProbeResult,
+    native_probe_candidate_set_hash, native_probe_challenge_hash, node_id_from_public_key,
+    sign_control_message, sign_native_probe_start, verify_native_probe_permit,
+    verify_native_probe_relay_ready, verify_native_probe_result,
 };
 
 use super::{
@@ -388,7 +388,7 @@ where
     let mut probe_ids = HashSet::with_capacity(relays.len());
     let mut challenges = HashSet::with_capacity(relays.len());
     let mut pending = VecDeque::with_capacity(relays.len());
-    for (index, relay) in relays.into_iter().enumerate() {
+    for (index, relay) in relays.into_iter().take(MAX_NATIVE_PROBE_PATHS).enumerate() {
         let candidate_ordinal =
             u32::try_from(index + 1).map_err(|_| NativePreselectionError::InvalidCandidateSet)?;
         let probe_id = unique_random::<ID_BYTES, _>(rng, &mut probe_ids)?;
@@ -802,16 +802,18 @@ impl ArmedNativeProbe {
     /// Exact helper route context and remote `RelayClient` binding for local preparation.
     pub(super) fn helper_scope(
         &self,
-    ) -> Result<([u8; ID_BYTES], &NativeProbeEndpointBinding, u64), NativePreselectionError> {
+    ) -> Result<([u8; ID_BYTES], u32, &NativeProbeEndpointBinding, u64), NativePreselectionError>
+    {
         let route_context_id = self
             .relay_ready
             .scope()
-            .probe_id
+            .attempt_id
             .as_slice()
             .try_into()
             .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
         Ok((
             route_context_id,
+            self.relay_ready.scope().candidate_ordinal,
             self.relay_ready.relay_client_endpoint(),
             self.relay_ready.expires_at_ms(),
         ))
@@ -1290,7 +1292,7 @@ mod dispatch_tests {
             scope,
         } = ready_fixture();
         let now_ms = crate::unix_millis();
-        let relay_endpoint = endpoint_binding(&scope.probe_id, 11, [8, 8, 8, 8], 41_001);
+        let relay_endpoint = endpoint_binding(&scope.attempt_id, 11, [8, 8, 8, 8], 41_001);
         let ready = NativeProbeRelayReady {
             permit_hash: native_probe_permit_hash(&awaiting.relay_permit)
                 .expect("Permit hash")
@@ -1326,10 +1328,12 @@ mod dispatch_tests {
             .expect("Ready dispatch")
             .accept_response_for_test(&response, &mut replay_cache)
             .expect("verified Ready");
-        let (route_context, observed_relay, _) = armed.helper_scope().expect("helper scope");
-        assert_eq!(route_context.as_slice(), scope.probe_id);
+        let (route_context, path_id, observed_relay, _) =
+            armed.helper_scope().expect("helper scope");
+        assert_eq!(route_context.as_slice(), scope.attempt_id);
+        assert_eq!(path_id, scope.candidate_ordinal);
         assert_eq!(observed_relay, &relay_endpoint);
-        let client_endpoint = endpoint_binding(&scope.probe_id, 31, [1, 1, 1, 1], 42_001);
+        let client_endpoint = endpoint_binding(&scope.attempt_id, 31, [1, 1, 1, 1], 42_001);
         let start = armed.start(client_endpoint).expect("signed Start");
         let dispatch = start.into_relay_start_dispatch().expect("Start dispatch");
         let (relay_peer, request) = dispatch.request_for_test();
@@ -1361,7 +1365,7 @@ mod dispatch_tests {
             exit_ready_hash: vec![7; KEY_BYTES],
             scope: Some(scope.clone()),
             relay_client_endpoint: Some(endpoint_binding(
-                &scope.probe_id,
+                &scope.attempt_id,
                 11,
                 [8, 8, 8, 8],
                 41_001,
@@ -1585,9 +1589,9 @@ mod dispatch_tests {
             listen_port: 44_001,
         };
         let authorization = RelayAuthorization {
-            reservation_id: vec![31; ID_BYTES],
-            route_context_id: scope.probe_id.clone(),
-            path_id: 1,
+            reservation_id: scope.probe_id.clone(),
+            route_context_id: scope.attempt_id.clone(),
+            path_id: scope.candidate_ordinal,
             relay_node_id: relay.node_id.clone(),
             exit_node_id: exit.node_id.clone(),
             client_session_id: scope.client_session_id.clone(),
@@ -1601,10 +1605,10 @@ mod dispatch_tests {
             expires_at_ms: scope.attempt_expires_at_ms,
             nonce: vec![41; KEY_BYTES],
             relay_peer_id: relay.peer_id.clone(),
-            capability_id: vec![42; ID_BYTES],
+            capability_id: scope.attempt_id.clone(),
             client_session_public_key: scope.client_session_public_key.clone(),
             exit_boot_id: vec![43; ID_BYTES],
-            hold_id: vec![44; ID_BYTES],
+            hold_id: scope.probe_id.clone(),
             finalize_id: vec![45; ID_BYTES],
             control_relay_node_id: control.node_id.clone(),
             control_relay_peer_id: control.peer_id.clone(),
