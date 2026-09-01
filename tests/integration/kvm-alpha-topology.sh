@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Run the five-node development-alpha topology with one real production helper per agent.
+# Run the six-node development-alpha topology with one real production helper per agent.
 # This script is intentionally restricted to a disposable Debian 13 KVM guest.
 # shellcheck disable=SC2317
 set -eu
@@ -30,14 +30,14 @@ print_plan() {
     printf '%s\n' \
         'VOLPAROSSA production-helper alpha topology plan:' \
         '  require one disposable Debian 13 amd64 KVM guest with systemd v257 as PID 1;' \
-        '  create Client, Relay 1, Relay 2, Exit and destination network namespaces;' \
+        '  create Client, control Relay 0, data Relays 1/2, Exit and destination namespaces;' \
         '  give each product node one disposable public underlay and fail-closed default;' \
         '  create only Client-Relay, Relay-Exit and Exit-destination underlay links;' \
-        '  launch four distinct transient production-helper service instances;' \
+        '  launch five distinct transient production-helper service instances;' \
         '  launch real pinned mqvpn/xquic processes for the Client and Exit;' \
         '  bind each helper and agent privately to its node-owned /run/volparossa;' \
         '  prove GetUnitByPID, MainPID, cgroup, network namespace and FD-store binding;' \
-        '  launch four real agents and exact-policy TCP/UDP echo applications;' \
+        '  launch five real agents and exact-policy TCP/UDP echo applications;' \
         '  prove transparent TCP over Relay-only MPTCP/TLS and signed OPEN_TCP;' \
         '  constrain each Relay path and prove aggregate MPTCP download throughput;' \
         '  remove one data-carrying Relay during a second uninterrupted download;' \
@@ -172,6 +172,7 @@ case $RUN_ID in ''|*[!0-9a-f]*) exit 69 ;; esac
 [ "${#RUN_ID}" -eq 32 ] || exit 69
 PREFIX=va-$(printf '%.8s' "$RUN_ID")
 CLIENT=$PREFIX-c
+R0=$PREFIX-r0
 R1=$PREFIX-r1
 R2=$PREFIX-r2
 EXIT_NODE=$PREFIX-x
@@ -223,12 +224,12 @@ FINALIZED=no
 copy_artifacts() {
     for artifact in \
         connect-client.out connect-client.err \
-        logs-client.txt logs-relay1.txt logs-relay2.txt logs-exit.txt \
-        status-client.txt status-relay1.txt status-relay2.txt status-exit.txt \
-        roles-client.txt roles-relay1.txt roles-relay2.txt roles-exit.txt \
-        helper-client.log helper-relay1.log helper-relay2.log helper-exit.log \
+        logs-client.txt logs-relay0.txt logs-relay1.txt logs-relay2.txt logs-exit.txt \
+        status-client.txt status-relay0.txt status-relay1.txt status-relay2.txt status-exit.txt \
+        roles-client.txt roles-relay0.txt roles-relay1.txt roles-relay2.txt roles-exit.txt \
+        helper-client.log helper-relay0.log helper-relay1.log helper-relay2.log helper-exit.log \
         mpquic-client.log mpquic-exit.log mpquic-units.json \
-        agent-client.log agent-relay1.log agent-relay2.log agent-exit.log \
+        agent-client.log agent-relay0.log agent-relay1.log agent-relay2.log agent-exit.log \
         destination.log destination-tcp-evidence.json destination-udp-evidence.json \
         helper-units.json a02-client.json a02-client.err a02-client-fallback-route.txt \
         a02-client-capture.json a02-client-capture.log a02-client-capture.err \
@@ -345,7 +346,8 @@ write_report() {
           source_revision:$commit,run_id:$run_id,last_phase:$phase,
           topology:{ready:$topology,direct_client_exit_adjacency:false,
             client_exit_route_absent:$client_exit_route_absent,
-            roles:["client","relay1","relay2","exit","destination"]},
+            exit_control_relay:"relay0",data_relays:["relay1","relay2"],
+            roles:["client","relay0","relay1","relay2","exit","destination"]},
           production_helpers:{ready:$helpers,instances:$helper_records},
           native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records},
           agents_ready:$agents,destination_ready:$destination,
@@ -399,7 +401,7 @@ cleanup() {
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_unit in $MPQUIC_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_unit in $HELPER_UNITS; do retire_unit "$cleanup_unit" || true; done
-    for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$CLIENT"; do
+    for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$CLIENT"; do
         ip netns del "$cleanup_ns" 2>/dev/null || true
     done
 
@@ -462,7 +464,7 @@ binary_directory=$WORK/bin
 mpquic_binary=$WORK/bin/volparossa-mpquic
 
 PHASE=network-topology
-for namespace in "$CLIENT" "$R1" "$R2" "$EXIT_NODE" "$DEST"; do
+for namespace in "$CLIENT" "$R0" "$R1" "$R2" "$EXIT_NODE" "$DEST"; do
     [ -z "$(ip netns list | awk -v name="$namespace" '$1 == name { print $1 }')" ] \
         || fail NAMESPACE_COLLISION
     ip netns add "$namespace"
@@ -498,26 +500,33 @@ add_public_underlay() {
     ip -n "$underlay_ns" route add default dev underlay scope global
 }
 
+link_nodes "$CLIENT" cr0 10.241.10.1/30 "$R0" r0c 10.241.10.2/30
 link_nodes "$CLIENT" cr1 10.241.11.1/30 "$R1" r1c 10.241.11.2/30
 link_nodes "$CLIENT" cr2 10.241.12.1/30 "$R2" r2c 10.241.12.2/30
+link_nodes "$R0" r0x 10.241.20.1/30 "$EXIT_NODE" xr0 10.241.20.2/30
 link_nodes "$R1" r1x 10.241.21.1/30 "$EXIT_NODE" xr1 10.241.21.2/30
 link_nodes "$R2" r2x 10.241.22.1/30 "$EXIT_NODE" xr2 10.241.22.2/30
 link_nodes "$EXIT_NODE" xd 10.241.31.1/30 "$DEST" dx 10.241.31.2/30
 ip -n "$EXIT_NODE" address add 47.163.4.1/30 dev xd
 ip -n "$DEST" address add 47.163.4.2/30 dev dx
 add_public_underlay "$CLIENT" 43.159.1.1
+add_public_underlay "$R0" 42.158.0.1
 add_public_underlay "$R1" 44.160.1.1
 add_public_underlay "$R2" 45.161.2.1
 add_public_underlay "$EXIT_NODE" 46.162.3.1
+ip -n "$CLIENT" route add 42.158.0.1/32 via 10.241.10.2 dev cr0 src 43.159.1.1
 ip -n "$CLIENT" route add 44.160.1.1/32 via 10.241.11.2 dev cr1 src 43.159.1.1
 ip -n "$CLIENT" route add 45.161.2.1/32 via 10.241.12.2 dev cr2 src 43.159.1.1
+ip -n "$R0" route add 43.159.1.1/32 via 10.241.10.1 dev r0c src 42.158.0.1
+ip -n "$R0" route add 46.162.3.1/32 via 10.241.20.2 dev r0x src 42.158.0.1
 ip -n "$R1" route add 43.159.1.1/32 via 10.241.11.1 dev r1c src 44.160.1.1
 ip -n "$R1" route add 46.162.3.1/32 via 10.241.21.2 dev r1x src 44.160.1.1
 ip -n "$R2" route add 43.159.1.1/32 via 10.241.12.1 dev r2c src 45.161.2.1
 ip -n "$R2" route add 46.162.3.1/32 via 10.241.22.2 dev r2x src 45.161.2.1
+ip -n "$EXIT_NODE" route add 42.158.0.1/32 via 10.241.20.1 dev xr0 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 44.160.1.1/32 via 10.241.21.1 dev xr1 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 45.161.2.1/32 via 10.241.22.1 dev xr2 src 46.162.3.1
-for forbidden in 10.241.21.2 10.241.22.2 10.241.31.1 10.241.31.2 46.162.3.1 \
+for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.31.1 10.241.31.2 46.162.3.1 \
     47.163.4.1; do
     ip -n "$CLIENT" route add unreachable "$forbidden/32"
     if ip -n "$CLIENT" route get "$forbidden" >/dev/null 2>&1; then
@@ -528,7 +537,7 @@ CLIENT_EXIT_ROUTE_ABSENT=true
 TOPOLOGY_READY=true
 
 PHASE=configuration
-for node in client relay1 relay2 exit; do
+for node in client relay0 relay1 relay2 exit; do
     install -d -o root -g "$AGENT_GID" -m 0750 "$WORK/runtime-$node"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0750 \
         "$WORK/runtime-$node/control"
@@ -544,12 +553,20 @@ for node in client relay1 relay2 exit; do
         >"$WORK/init-$node.log"
 done
 CLIENT_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-client.log")
+R0_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-relay0.log")
 R1_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-relay1.log")
 R2_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-relay2.log")
 EXIT_PEER=$(sed -n 's/^peer ID: //p' "$WORK/init-exit.log")
-for peer in "$CLIENT_PEER" "$R1_PEER" "$R2_PEER" "$EXIT_PEER"; do
+for peer in "$CLIENT_PEER" "$R0_PEER" "$R1_PEER" "$R2_PEER" "$EXIT_PEER"; do
     [ -n "$peer" ] || fail IDENTITY_INITIALISATION_FAILED
 done
+if [ "$CLIENT_PEER" = "$R0_PEER" ] || [ "$CLIENT_PEER" = "$R1_PEER" ] \
+    || [ "$CLIENT_PEER" = "$R2_PEER" ] || [ "$CLIENT_PEER" = "$EXIT_PEER" ] \
+    || [ "$R0_PEER" = "$R1_PEER" ] || [ "$R0_PEER" = "$R2_PEER" ] \
+    || [ "$R0_PEER" = "$EXIT_PEER" ] || [ "$R1_PEER" = "$R2_PEER" ] \
+    || [ "$R1_PEER" = "$EXIT_PEER" ] || [ "$R2_PEER" = "$EXIT_PEER" ]; then
+    fail IDENTITY_INITIALISATION_FAILED
+fi
 
 "$binary_directory/examples/acceptance-policy-fixture" "$WORK"
 chown "$AGENT_UID:$AGENT_GID" "$WORK/development-policy.manifest" \
@@ -557,12 +574,13 @@ chown "$AGENT_UID:$AGENT_GID" "$WORK/development-policy.manifest" \
 
 write_config() {
     node=$1; operator=$2; relay_role=$3; exit_role=$4; listen_ip=$5
-    bootstrap_one=$6; bootstrap_two=$7
+    bootstrap_one=$6; bootstrap_two=$7; bootstrap_three=$8
     client_role=false; relay_capacity=0; exit_capacity=0; advertised_asn=0; advertised_prefix=null
     [ "$node" != client ] || client_role=true
     [ "$relay_role" = false ] || relay_capacity=32
     [ "$exit_role" = false ] || exit_capacity=32
     case $node in
+        relay0) advertised_asn=64511; advertised_prefix=42.158.0.0/24 ;;
         relay1) advertised_asn=64512; advertised_prefix=44.160.1.0/24 ;;
         relay2) advertised_asn=64513; advertised_prefix=45.161.2.0/24 ;;
         exit) advertised_asn=64514; advertised_prefix=46.162.3.0/24 ;;
@@ -582,6 +600,8 @@ write_config() {
             || printf '    - %s\n' "$bootstrap_one"
         [ "$bootstrap_two" = none ] \
             || printf '    - %s\n' "$bootstrap_two"
+        [ "$bootstrap_three" = none ] \
+            || printf '    - %s\n' "$bootstrap_three"
         printf 'roles:\n  client: %s\n  relay: %s\n  exit: %s\n' \
             "$client_role" "$relay_role" "$exit_role"
         printf 'capacity:\n  relay_upload_limit_mbps: %s\n' "$relay_capacity"
@@ -601,13 +621,14 @@ write_config() {
 }
 
 write_config client null false false 43.159.1.1 \
+    "/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER" \
     "/ip4/44.160.1.1/udp/41000/quic-v1/p2p/$R1_PEER" \
     "/ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER"
-write_config relay1 acceptance-relay-one true false 44.160.1.1 none none
-write_config relay2 acceptance-relay-two true false 45.161.2.1 none none
+write_config relay0 acceptance-relay-zero true false 42.158.0.1 none none none
+write_config relay1 acceptance-relay-one true false 44.160.1.1 none none none
+write_config relay2 acceptance-relay-two true false 45.161.2.1 none none none
 write_config exit acceptance-exit false true 46.162.3.1 \
-    "/ip4/44.160.1.1/udp/41000/quic-v1/p2p/$R1_PEER" \
-    "/ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER"
+    "/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER" none none
 
 PHASE=helper-launch
 CAPABILITIES='CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'
@@ -681,6 +702,7 @@ launch_helper() {
 }
 
 launch_helper client "$CLIENT"
+launch_helper relay0 "$R0"
 launch_helper relay1 "$R1"
 launch_helper relay2 "$R2"
 launch_helper exit "$EXIT_NODE"
@@ -744,6 +766,7 @@ verify_helper() {
 }
 
 verify_helper client "$CLIENT"
+verify_helper relay0 "$R0"
 verify_helper relay1 "$R1"
 verify_helper relay2 "$R2"
 verify_helper exit "$EXIT_NODE"
@@ -919,6 +942,7 @@ launch_agent() {
 }
 
 launch_agent client "$CLIENT"
+launch_agent relay0 "$R0"
 launch_agent relay1 "$R1"
 launch_agent relay2 "$R2"
 launch_agent exit "$EXIT_NODE"
@@ -1016,6 +1040,7 @@ while running and time.monotonic() < deadline:
             is_wireguard_data = wireguard_message_type == 4 and udp_length > 40
             if role == "client":
                 if source == "43.159.1.1" and destination in {
+                    "10.241.20.2",
                     "10.241.21.2",
                     "10.241.22.2",
                     "10.241.31.1",
@@ -1154,6 +1179,7 @@ while running and time.monotonic() < deadline:
             is_wireguard_data = wireguard_message_type == 4 and udp_length > 40
             if role == "client":
                 if source == "43.159.1.1" and destination in {
+                    "10.241.20.2",
                     "10.241.21.2",
                     "10.241.22.2",
                     "10.241.31.1",
@@ -1465,7 +1491,7 @@ PHASE=agent-readiness
 attempt=0
 while [ "$attempt" -lt 300 ]; do
     agents_running=yes
-    for node in client relay1 relay2 exit; do
+    for node in client relay0 relay1 relay2 exit; do
         agent_unit=volparossa-alpha-agent@$node.service
         [ "$(systemctl show --property=ActiveState --value "$agent_unit" 2>/dev/null || true)" = active ] \
             || agents_running=no
@@ -1480,7 +1506,7 @@ done
 AGENTS_READY=true
 DESTINATION_READY=true
 
-for node in client relay1 relay2 exit; do
+for node in client relay0 relay1 relay2 exit; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
         >"$WORK/status-$node.txt"
@@ -1489,9 +1515,11 @@ for node in client relay1 relay2 exit; do
         >"$WORK/roles-$node.txt"
 done
 grep -Fx 'client: true' "$WORK/roles-client.txt" >/dev/null || fail CLIENT_ROLE_INVALID
+grep -Fx 'client: false' "$WORK/roles-relay0.txt" >/dev/null || fail RELAY0_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay1.txt" >/dev/null || fail RELAY1_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay2.txt" >/dev/null || fail RELAY2_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-exit.txt" >/dev/null || fail EXIT_CLIENT_ROLE_INVALID
+grep -Fx 'relay: true' "$WORK/roles-relay0.txt" >/dev/null || fail RELAY0_ROLE_INVALID
 grep -Fx 'relay: true' "$WORK/roles-relay1.txt" >/dev/null || fail RELAY1_ROLE_INVALID
 grep -Fx 'relay: true' "$WORK/roles-relay2.txt" >/dev/null || fail RELAY2_ROLE_INVALID
 grep -Fx 'exit: true' "$WORK/roles-exit.txt" >/dev/null || fail EXIT_ROLE_INVALID
@@ -1500,7 +1528,7 @@ PHASE=discovery
 attempt=0
 while [ "$attempt" -lt 300 ]; do
     control_ready=yes
-    for node in client relay1 relay2 exit; do
+    for node in client relay0 relay1 relay2 exit; do
         if ! "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-$node/control/agent.sock" status \
             >"$WORK/status-$node.txt"; then
@@ -1508,7 +1536,13 @@ while [ "$attempt" -lt 300 ]; do
             continue
         fi
         active_peers=$(awk '/^active peers: / { print $3 }' "$WORK/status-$node.txt")
-        [ -n "$active_peers" ] && [ "$active_peers" -ge 2 ] || control_ready=no
+        case $node in
+            client) required_active_peers=3 ;;
+            relay0) required_active_peers=2 ;;
+            relay1|relay2|exit) required_active_peers=1 ;;
+        esac
+        [ -n "$active_peers" ] \
+            && [ "$active_peers" -ge "$required_active_peers" ] || control_ready=no
     done
     [ "$control_ready" = yes ] && break
     sleep 0.1
@@ -1517,7 +1551,7 @@ done
 [ "$control_ready" = yes ] || fail DISCOVERY_NOT_READY
 
 capture_product_logs() {
-    for log_node in client relay1 relay2 exit; do
+    for log_node in client relay0 relay1 relay2 exit; do
         "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-$log_node/control/agent.sock" logs --limit 400 \
             >"$WORK/logs-$log_node.txt" || true
@@ -1666,7 +1700,7 @@ A02_FALLBACK_ROUTE=$(ip -n "$CLIENT" -o route get "$A02_DESTINATION_IP" | sed -n
 printf '%s\n' "$A02_FALLBACK_ROUTE" >"$WORK/a02-client-fallback-route.txt"
 printf '%s\n' "$A02_FALLBACK_ROUTE" | grep -Eq '(^| )dev underlay( |$)' \
     || fail A02_FALLBACK_ROUTE_INVALID
-if printf '%s\n' "$A02_FALLBACK_ROUTE" | grep -Eq '(^| )dev (cr1|cr2)( |$)'; then
+if printf '%s\n' "$A02_FALLBACK_ROUTE" | grep -Eq '(^| )dev (cr0|cr1|cr2)( |$)'; then
     fail DIRECT_CLIENT_EXIT_REACHABLE
 fi
 
@@ -2219,7 +2253,7 @@ A05_FALLBACK_ROUTE=$(ip -n "$CLIENT" -o route get 10.241.31.2 | sed -n '1p')
 printf '%s\n' "$A05_FALLBACK_ROUTE" >"$WORK/a05-client-fallback-route.txt"
 printf '%s\n' "$A05_FALLBACK_ROUTE" | grep -Eq '(^| )dev underlay( |$)' \
     || fail A05_FALLBACK_ROUTE_INVALID
-if printf '%s\n' "$A05_FALLBACK_ROUTE" | grep -Eq '(^| )dev (cr1|cr2)( |$)'; then
+if printf '%s\n' "$A05_FALLBACK_ROUTE" | grep -Eq '(^| )dev (cr0|cr1|cr2)( |$)'; then
     fail DIRECT_CLIENT_EXIT_REACHABLE
 fi
 

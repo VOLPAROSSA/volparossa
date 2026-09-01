@@ -38,9 +38,14 @@ grep -F 'scp_to "$mpquic_path" /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
 grep -F -- '--mpquic /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
 
 [ "$(grep -Fc 'launch_helper client "$CLIENT"' "$GUEST")" -eq 1 ]
+[ "$(grep -Fc 'launch_helper relay0 "$R0"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay1 "$R1"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay2 "$R2"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper exit "$EXIT_NODE"' "$GUEST")" -eq 1 ]
+[ "$(grep -Fc 'launch_agent relay0 "$R0"' "$GUEST")" -eq 1 ]
+grep -F 'verify_helper relay0 "$R0"' "$GUEST" >/dev/null
+grep -F 'for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$CLIENT"' \
+    "$GUEST" >/dev/null
 grep -F 'helper_unit=volparossa-alpha-helper@$node.service' "$GUEST" >/dev/null
 grep -F 'agent_unit=volparossa-alpha-agent@$node.service' "$GUEST" >/dev/null
 grep -F -- '--property="NetworkNamespacePath=/run/netns/$namespace"' "$GUEST" >/dev/null
@@ -52,16 +57,30 @@ grep -F -- '--property="BindPaths=$WORK/runtime-$node:/run/volparossa"' "$GUEST"
 grep -F 'VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock' "$GUEST" >/dev/null
 grep -F 'launch_mpquic client "$CLIENT" client' "$GUEST" >/dev/null
 grep -F 'launch_mpquic exit "$EXIT_NODE" exit' "$GUEST" >/dev/null
-if grep -Eq 'launch_mpquic relay[12]' "$GUEST"; then exit 1; fi
+if grep -Eq 'launch_mpquic relay[012]' "$GUEST"; then exit 1; fi
 grep -F -- '--socket /run/volparossa/native/mpquic.sock' "$GUEST" >/dev/null
 grep -F 'native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records}' \
     "$GUEST" >/dev/null
 grep -F 'DIRECT_CLIENT_EXIT_REACHABLE' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" link add underlay type dummy' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" route add default dev underlay scope global' "$GUEST" >/dev/null
-[ "$(grep -Fc 'add_public_underlay ' "$GUEST")" -eq 4 ]
+[ "$(grep -Fc 'add_public_underlay ' "$GUEST")" -eq 5 ]
 grep -F 'ip -n "$CLIENT" route add unreachable "$forbidden/32"' "$GUEST" >/dev/null
-grep -F '10.241.31.1 10.241.31.2 46.162.3.1' "$GUEST" >/dev/null
+grep -F '10.241.20.2 10.241.21.2 10.241.22.2 10.241.31.1' "$GUEST" >/dev/null
+grep -F 'link_nodes "$CLIENT" cr0 10.241.10.1/30 "$R0" r0c 10.241.10.2/30' \
+    "$GUEST" >/dev/null
+grep -F 'link_nodes "$R0" r0x 10.241.20.1/30 "$EXIT_NODE" xr0 10.241.20.2/30' \
+    "$GUEST" >/dev/null
+grep -F 'write_config relay0 acceptance-relay-zero true false 42.158.0.1 none none none' \
+    "$GUEST" >/dev/null
+grep -F 'relay0) advertised_asn=64511; advertised_prefix=42.158.0.0/24' \
+    "$GUEST" >/dev/null
+grep -F '/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER' "$GUEST" >/dev/null
+grep -F 'write_config exit acceptance-exit false true 46.162.3.1' "$GUEST" >/dev/null
+grep -F 'exit_control_relay:"relay0",data_relays:["relay1","relay2"]' \
+    "$GUEST" >/dev/null
+grep -F 'relay0) required_active_peers=2' "$GUEST" >/dev/null
+grep -F 'relay1|relay2|exit) required_active_peers=1' "$GUEST" >/dev/null
 if grep -E 'ip -n "\$CLIENT" route add (unicast )?46\.162\.3\.1' "$GUEST"; then exit 1; fi
 if grep -F 'link_nodes "$CLIENT"' "$GUEST" | grep -F '"$EXIT_NODE"'; then
     exit 1
@@ -72,6 +91,14 @@ grep -F 'ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID"' "$GUEST" >/dev/n
 grep -F 'application.sendto(payload, destination)' "$GUEST" >/dev/null
 grep -F 'response, source = application.recvfrom(2048)' "$GUEST" >/dev/null
 grep -F 'direct_client_exit_packets' "$GUEST" >/dev/null
+if grep -F 'relay0_wireguard_data_datagrams' "$GUEST"; then exit 1; fi
+if grep -E 'interface == "(cr0|xr0)"' "$GUEST"; then exit 1; fi
+grep -F '"$DOWNLOAD_MARKER" cr1 cr2 underlay' "$GUEST" >/dev/null
+grep -F '"$DOWNLOAD_MARKER" xr1 xr2 xd' "$GUEST" >/dev/null
+grep -F 'client "$WORK/a05-client-capture.json" "$WORK/a05-client-capture.ready"' \
+    "$GUEST" >/dev/null
+grep -F 'exit "$WORK/a05-exit-capture.json" "$WORK/a05-exit-capture.ready"' \
+    "$GUEST" >/dev/null
 grep -F 'selected_relay:$selected' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A05",success:$success' "$GUEST" >/dev/null
 grep -F 'a05_udp_echo:{requested:$a05_requested,succeeded:$a05_succeeded' "$GUEST" \
