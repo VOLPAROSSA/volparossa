@@ -82,12 +82,12 @@ use volparossa_protocol::{
     MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding, NativeProbeForwardingProof,
     NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermitRequest,
     NativeProbeRelayLocalProofs, NativeProbeStart, NodeAdvertisement as WireAdvertisement,
-    ObservationAddressFamily, ObservationNetworkPrefix, PreselectionActorBinding,
-    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservation,
-    RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
+    ObservationAddressFamily, ObservationNetworkPrefix, PreselectionActorBinding, ProbeLegEvidence,
+    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
+    RelayReservation, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
     VerifiedNativeProbePermit, VerifiedNativeProbeStartForRelay, decode_canonical,
     encode_canonical, exit_confirmation_envelope_hash, generate_nonce,
-    native_probe_prepared_lease_commitment, node_id_from_public_key,
+    native_probe_prepared_lease_commitment, node_id_from_public_key, sign_control_message_with,
     sign_native_probe_relay_ready_with, sign_native_probe_relay_result_with,
     verify_control_message, verify_native_probe_authorization_chain,
     verify_native_probe_exit_ready, verify_native_probe_exit_result_for_relay,
@@ -134,6 +134,7 @@ const MAX_LEDGER_ENTRIES: usize = 256;
 const MAX_LEDGER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LEDGER_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
 const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
+const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
 const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
 const PROVIDER_OBSERVATION_TTL_MS: u64 = 120_000;
 const CLIENT_PRESELECTION_TIMEOUT: Duration = Duration::from_secs(TUNNEL_SETUP_TIMEOUT_SECONDS);
@@ -641,6 +642,20 @@ struct ActiveNativeRelayProbe {
     authenticated_client_peer: Libp2pPeerId,
     endpoint: RelayEndpointLease,
     helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+/// One fresh, helper-observed native probe that may authorize exactly one standard probe result.
+///
+/// The standard reservation protocol deliberately carries no native endpoints. Retaining this
+/// affine ticket lets its `ExecuteProbe` phase reuse the immediately preceding real
+/// Client-to-Relay-to-Exit observation instead of fabricating a second probe or accepting an
+/// unsigned metric. The ticket is consumed when the Relay signs that result.
+struct RecentNativeRelayEvidence {
+    authenticated_client_peer: Libp2pPeerId,
+    scope: NativeProbePathScope,
+    client_relay: ProbeLegEvidence,
+    relay_exit: ProbeLegEvidence,
+    expires_at_ms: u64,
 }
 
 struct PendingNativeProbeResult {
@@ -1368,6 +1383,7 @@ pub struct DiscoveryRuntime {
     prepared_native_authorization_helpers:
         HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
     active_native_relay_helpers: HashMap<[u8; FORWARD_ID_BYTES], ActiveNativeRelayProbe>,
+    recent_native_relay_evidence: Vec<RecentNativeRelayEvidence>,
     prepared_production_relay_routes: HashMap<[u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute>,
     exit_native_ready_attempts: HashMap<[u8; FORWARD_ID_BYTES], ExitNativeReadyAttempt>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
@@ -1496,6 +1512,7 @@ impl DiscoveryRuntime {
             prepared_native_authorizations: HashMap::new(),
             prepared_native_authorization_helpers: HashMap::new(),
             active_native_relay_helpers: HashMap::new(),
+            recent_native_relay_evidence: Vec::new(),
             prepared_production_relay_routes: HashMap::new(),
             exit_native_ready_attempts: HashMap::new(),
             pending_datapath: HashMap::new(),
@@ -2997,6 +3014,8 @@ impl DiscoveryRuntime {
             .retain(|_, entry| entry.expires_at_ms > now_ms);
         self.retry_datapath
             .retain(|_, entry| entry.expires_at_ms > now_ms);
+        self.recent_native_relay_evidence
+            .retain(|evidence| evidence.expires_at_ms > now_ms);
         let expired_direct_relays = self
             .direct_relays
             .iter()
@@ -4159,6 +4178,16 @@ impl DiscoveryRuntime {
                 ..
             } => {
                 match request.validated_operation() {
+                    Ok(DatapathRelayOperation::ExecuteProbe) => {
+                        self.answer_production_execute_probe(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
                     Ok(DatapathRelayOperation::ReservePath) => {
                         self.begin_production_relay_reservation(
                             authenticated_client_peer,
@@ -4234,6 +4263,156 @@ impl DiscoveryRuntime {
             request_response::Event::InboundFailure { .. }
             | request_response::Event::ResponseSent { .. } => {}
         }
+    }
+
+    /// Translate one immediately preceding helper-proven native path observation into the
+    /// standard reservation protocol's Relay-signed probe result.
+    ///
+    /// This does not trust metrics supplied by the client and does not claim a second network
+    /// measurement. The affine ticket was created only after the native Relay helper committed,
+    /// the Exit returned its signed observation, and the Relay proved bidirectional forwarding.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exact native-evidence consumption and signed response are fail-atomic"
+    )]
+    async fn answer_production_execute_probe(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::ExecuteProbe,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::ExecuteProbe,
+                now_ms,
+            )
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("PRODUCTION_RELAY_PROBE_SCOPE_REJECTED");
+        }
+        let Ok(mut replay) = ReplayCache::new(1) else {
+            reject!("PRODUCTION_RELAY_PROBE_FRAME_REJECTED");
+        };
+        let Ok(verified_permit) = verify_control_message::<RelayProbePermit>(
+            request.exit_signed_authorization(),
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        ) else {
+            reject!("PRODUCTION_RELAY_PROBE_FRAME_REJECTED");
+        };
+        let permit = verified_permit.into_message();
+        self.recent_native_relay_evidence
+            .retain(|evidence| evidence.expires_at_ms > now_ms);
+        let Some(index) = self
+            .recent_native_relay_evidence
+            .iter()
+            .rposition(|evidence| {
+                let Some(data_relay) = evidence.scope.data_relay.as_ref() else {
+                    return false;
+                };
+                let Some(control) = evidence.scope.control.as_ref() else {
+                    return false;
+                };
+                let Some(exit) = evidence.scope.exit.as_ref() else {
+                    return false;
+                };
+                evidence.authenticated_client_peer == authenticated_client_peer
+                    && data_relay.node_id == permit.relay_node_id
+                    && data_relay.peer_id == permit.relay_peer_id
+                    && control.node_id == permit.control_relay_node_id
+                    && control.peer_id == permit.control_relay_peer_id
+                    && exit.node_id == permit.exit_node_id
+                    && exit.peer_id == permit.exit_peer_id
+                    && evidence.scope.policy_hash == permit.policy_hash
+                    && evidence.scope.transport == permit.transport
+                    && evidence.scope.address_family == permit.address_family
+                    && evidence.expires_at_ms <= evidence.scope.attempt_expires_at_ms
+            })
+        else {
+            reject!("PRODUCTION_RELAY_PROBE_NATIVE_EVIDENCE_UNAVAILABLE");
+        };
+        let evidence = self.recent_native_relay_evidence.remove(index);
+        let measured_at_ms = evidence.client_relay.measured_at_ms;
+        let expires_at_ms = permit
+            .expires_at_ms
+            .min(evidence.expires_at_ms)
+            .min(measured_at_ms.saturating_add(30_000));
+        if expires_at_ms <= now_ms {
+            reject!("PRODUCTION_RELAY_PROBE_NATIVE_EVIDENCE_EXPIRED");
+        }
+        let nonce = generate_nonce();
+        let result = RelayProbeResult {
+            probe_id: permit.probe_id.clone(),
+            relay_probe_permit: request.exit_signed_authorization().to_vec(),
+            relay_node_id: permit.relay_node_id.clone(),
+            relay_peer_id: permit.relay_peer_id.clone(),
+            exit_node_id: permit.exit_node_id.clone(),
+            exit_peer_id: permit.exit_peer_id.clone(),
+            exit_boot_id: permit.exit_boot_id.clone(),
+            hold_id: permit.hold_id.clone(),
+            capability_id: permit.capability_id.clone(),
+            reservation_id: permit.reservation_id.clone(),
+            route_context_id: permit.route_context_id.clone(),
+            client_session_id: permit.client_session_id.clone(),
+            policy_hash: permit.policy_hash.clone(),
+            transport: permit.transport,
+            address_family: permit.address_family,
+            client_relay: Some(evidence.client_relay),
+            relay_exit: Some(evidence.relay_exit),
+            measured_at_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        let identity = &self.identity;
+        let Ok(signed_result) = sign_control_message_with(
+            &result,
+            self.local_public_key,
+            result.measured_at_ms,
+            result.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+            |message| identity.sign(message).ok(),
+        ) else {
+            reject!("PRODUCTION_RELAY_PROBE_SIGNING_FAILED");
+        };
+        let Ok(response) = DatapathRelayResponse::granted(
+            request.request_id().to_vec(),
+            DatapathRelayOperation::ExecuteProbe,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            signed_result,
+        ) else {
+            reject!("PRODUCTION_RELAY_PROBE_RESPONSE_FAILED");
+        };
+        if self
+            .service
+            .send_datapath_relay_response(channel, response)
+            .is_err()
+        {
+            log_relay_forward_admission(Some(state), "PRODUCTION_RELAY_PROBE_DELIVERY_FAILED");
+            return;
+        }
+        log_reservation_event(state, "PRODUCTION_RELAY_PROBE_COMPLETED").await;
     }
 
     #[allow(
@@ -5629,6 +5808,8 @@ impl DiscoveryRuntime {
                 self.destroy_helper_owner(native.helper_owner);
                 return OutboundEventOutcome::InvalidResponse;
             };
+            let native_scope = native.start.scope().clone();
+            let native_started_at_ms = native.start.started_at_ms();
             let Ok(exit_result) = verify_native_probe_exit_result_for_relay(
                 native.start,
                 signed_exit_result,
@@ -5703,6 +5884,33 @@ impl DiscoveryRuntime {
                     terminal_drop_bytes_after_baseline: 0,
                 },
             };
+            let evidence_measured_at_ms = unix_millis();
+            let evidence_window_started_at_ms = native_started_at_ms
+                .min(evidence_measured_at_ms.saturating_sub(1))
+                .max(evidence_measured_at_ms.saturating_sub(10_000));
+            let recent_evidence = native_probe_leg_evidence(
+                relay_client.transmitted_bytes,
+                relay_client.received_bytes,
+                evidence_window_started_at_ms,
+                evidence_measured_at_ms,
+            )
+            .zip(native_probe_leg_evidence(
+                relay_exit.transmitted_bytes,
+                relay_exit.received_bytes,
+                evidence_window_started_at_ms,
+                evidence_measured_at_ms,
+            ))
+            .and_then(|(client_relay, relay_exit)| {
+                (native_scope.attempt_expires_at_ms > evidence_measured_at_ms).then_some(
+                    RecentNativeRelayEvidence {
+                        authenticated_client_peer: pending.key.authenticated_client_peer,
+                        expires_at_ms: native_scope.attempt_expires_at_ms,
+                        scope: native_scope,
+                        client_relay,
+                        relay_exit,
+                    },
+                )
+            });
             let Ok(_destroyed) = self.helper.destroy_context(&native.helper_owner).await else {
                 return OutboundEventOutcome::Failed;
             };
@@ -5732,6 +5940,14 @@ impl DiscoveryRuntime {
                 .is_err()
             {
                 return OutboundEventOutcome::Failed;
+            }
+            if let Some(evidence) = recent_evidence {
+                self.recent_native_relay_evidence
+                    .retain(|entry| entry.expires_at_ms > evidence_measured_at_ms);
+                if self.recent_native_relay_evidence.len() >= MAX_RECENT_NATIVE_EVIDENCE {
+                    self.recent_native_relay_evidence.remove(0);
+                }
+                self.recent_native_relay_evidence.push(evidence);
             }
             log_reservation_event(state, "NATIVE_PROBE_RESULT_COMPLETED").await;
             return OutboundEventOutcome::Completed;
@@ -8743,6 +8959,35 @@ fn ledger_reservation_bytes(canonical_request_bytes: usize) -> Option<usize> {
     canonical_request_bytes
         .checked_add(usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?)
         .filter(|reserved| *reserved <= MAX_LEDGER_BYTES_PER_PEER)
+}
+
+fn native_probe_leg_evidence(
+    transmitted_bytes: u64,
+    received_bytes: u64,
+    window_started_at_ms: u64,
+    window_ended_at_ms: u64,
+) -> Option<ProbeLegEvidence> {
+    let duration_ms = window_ended_at_ms.checked_sub(window_started_at_ms)?;
+    if duration_ms == 0 || transmitted_bytes == 0 || received_bytes == 0 {
+        return None;
+    }
+    let measured_mbps = |bytes: u64| {
+        bytes
+            .saturating_mul(8)
+            .checked_div(duration_ms.saturating_mul(1_000).max(1))
+            .unwrap_or(0)
+            .clamp(1, 1_000_000)
+    };
+    Some(ProbeLegEvidence {
+        up_capacity_mbps: measured_mbps(transmitted_bytes),
+        down_capacity_mbps: measured_mbps(received_bytes),
+        rtt_micros: duration_ms.saturating_mul(1_000).clamp(1, 60_000_000),
+        transmitted_bytes,
+        received_bytes,
+        window_started_at_ms,
+        window_ended_at_ms,
+        measured_at_ms: window_ended_at_ms,
+    })
 }
 
 fn deadline_is_bounded(deadline_unix_ms: u64, now_ms: u64) -> bool {
