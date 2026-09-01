@@ -1612,6 +1612,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end regression binds both browser flows and the reverse packet"
+    )]
     fn browser_quic_reuses_multipath_flow_with_tunnel_source_and_exact_reverse_packet() {
         const NOW_MS: u64 = 1_900_000_000_000;
         const HOSTNAME: &str = "destination.volparossa.test";

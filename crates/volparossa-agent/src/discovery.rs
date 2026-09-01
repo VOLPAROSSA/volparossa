@@ -2527,7 +2527,7 @@ impl DiscoveryRuntime {
             terminal_error,
         } = active;
         match dispatch.consume_outbound_failure(&mut self.service, peer, request_id) {
-            Ok(gate) => {
+            Ok(gate) | Err(PreselectionOwnerTransitionFailure::Cooling(gate)) => {
                 self.client_preselection = ClientPreselectionOwner::Cooling(gate);
                 let _ = reply.send(Err(ClientPreselectionError::Transport));
                 true
@@ -2543,11 +2543,6 @@ impl DiscoveryRuntime {
                         terminal_error,
                     });
                 false
-            }
-            Err(PreselectionOwnerTransitionFailure::Cooling(gate)) => {
-                self.client_preselection = ClientPreselectionOwner::Cooling(gate);
-                let _ = reply.send(Err(ClientPreselectionError::Transport));
-                true
             }
             Err(PreselectionOwnerTransitionFailure::Closed) => {
                 self.client_preselection = ClientPreselectionOwner::Closed;
@@ -19300,6 +19295,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end regression retains the complete refreshed control lineage"
+    )]
     async fn production_client_preselection_accepts_same_lineage_control_refresh() {
         let mut fixture = fixture(RolesConfig {
             client: true,
