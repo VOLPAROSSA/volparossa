@@ -2262,7 +2262,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     ///
     /// The later request supplies only a tuple to check. The route, endpoint role and overlay
     /// address remain derived from the already committed worker-owned `WireGuard` resource.
-    fn committed_quic_udp_lease(
+    fn committed_transport_lease(
         &self,
         operation: &AcquireTransportSocket,
     ) -> Result<CommittedSocketLease, InternalWorkerResult> {
@@ -2298,9 +2298,24 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             routing_endpoint_role(operation.role).ok_or(InternalWorkerResult::Invalid)?;
         let wall_deadline_is_live = current_unix_seconds()
             .is_some_and(|now| now < ownership.resource.hard_expires_at_unix());
+        let transport_shape_is_valid = matches!(
+            (role, kind, operation.expected_remote.as_ref()),
+            (
+                InternalEndpointRole::Client,
+                InternalTransportSocketKind::MptcpConnected,
+                Some(_)
+            ) | (
+                InternalEndpointRole::Client | InternalEndpointRole::Exit,
+                InternalTransportSocketKind::QuicUdpUnconnected,
+                None
+            ) | (
+                InternalEndpointRole::Exit,
+                InternalTransportSocketKind::MptcpListener,
+                None
+            )
+        );
         if role != expected_role
-            || kind != InternalTransportSocketKind::QuicUdpUnconnected
-            || operation.expected_remote.is_some()
+            || !transport_shape_is_valid
             || self.bound_path_id.is_some_and(|bound| bound != path_id)
             || ownership.resource.key() != (path_id, expected_routing_role)
             || proof.local_overlay_address != IpAddr::V6(ownership.resource.local_address())
@@ -3099,7 +3114,7 @@ fn acquire_transport_child_context(
     }) else {
         return Ok((InternalWorkerResult::NotFound, None, None));
     };
-    let lease = match context.committed_quic_udp_lease(acquire) {
+    let lease = match context.committed_transport_lease(acquire) {
         Ok(lease) => lease,
         Err(result) => return Ok((result, None, None)),
     };
@@ -3126,7 +3141,7 @@ fn acquire_transport_child_context(
                 role: acquire.role,
                 descriptor_kind: acquire.descriptor_kind,
                 local: acquire.expected_local.clone(),
-                remote: None,
+                remote: acquire.expected_remote.clone(),
             },
         )),
         Some(descriptor),
@@ -13332,7 +13347,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_client_and_exit_project_only_their_exact_quic_udp_lease() {
+    fn committed_client_and_exit_project_only_their_exact_transport_lease() {
         for (context_seed, context_role, endpoint_role) in [
             (
                 0x91,
@@ -13345,7 +13360,35 @@ mod tests {
             let (context, exact, overlay) =
                 committed_quic_udp_worker_fixture(context_seed, context_role, endpoint_role);
             assert_eq!(
-                context.committed_quic_udp_lease(&exact),
+                context.committed_transport_lease(&exact),
+                Ok(CommittedSocketLease {
+                    route_context_id,
+                    path_id: 1,
+                    role: endpoint_role,
+                    overlay_address: IpAddr::V6(overlay),
+                })
+            );
+            let mptcp = match endpoint_role {
+                InternalEndpointRole::Client => AcquireTransportSocket {
+                    descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
+                    expected_remote: Some(InternalSocketAddress {
+                        address: {
+                            let mut remote = overlay.octets();
+                            remote[14] ^= 1;
+                            remote.to_vec()
+                        },
+                        port: 42_092,
+                    }),
+                    ..exact.clone()
+                },
+                InternalEndpointRole::Exit => AcquireTransportSocket {
+                    descriptor_kind: InternalTransportSocketKind::MptcpListener as i32,
+                    ..exact.clone()
+                },
+                _ => unreachable!("fixture endpoint role"),
+            };
+            assert_eq!(
+                context.committed_transport_lease(&mptcp),
                 Ok(CommittedSocketLease {
                     route_context_id,
                     path_id: 1,
@@ -13362,17 +13405,28 @@ mod tests {
                     role: InternalEndpointRole::RelayClient as i32,
                     ..exact.clone()
                 },
-                AcquireTransportSocket {
+            ] {
+                assert_eq!(
+                    context.committed_transport_lease(&changed),
+                    Err(InternalWorkerResult::Invalid)
+                );
+            }
+            let wrong_mptcp_kind = match endpoint_role {
+                InternalEndpointRole::Client => AcquireTransportSocket {
+                    descriptor_kind: InternalTransportSocketKind::MptcpListener as i32,
+                    ..exact.clone()
+                },
+                InternalEndpointRole::Exit => AcquireTransportSocket {
                     descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
                     expected_remote: exact.expected_local.clone(),
                     ..exact.clone()
                 },
-            ] {
-                assert_eq!(
-                    context.committed_quic_udp_lease(&changed),
-                    Err(InternalWorkerResult::Invalid)
-                );
-            }
+                _ => unreachable!("fixture endpoint role"),
+            };
+            assert_eq!(
+                context.committed_transport_lease(&wrong_mptcp_kind),
+                Err(InternalWorkerResult::Invalid)
+            );
         }
     }
 
@@ -13387,7 +13441,7 @@ mod tests {
             .map(|offset| acquire_start + offset)
             .expect("production child Acquire end");
         let acquire = &source[acquire_start..acquire_end];
-        assert!(acquire.contains("context.committed_quic_udp_lease(acquire)"));
+        assert!(acquire.contains("context.committed_transport_lease(acquire)"));
         assert!(acquire.contains("create_transport_socket(lease, acquire)"));
         assert!(acquire.contains("Some(descriptor)"));
 

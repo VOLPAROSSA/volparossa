@@ -1,8 +1,9 @@
 //! Phase-3a private worker transport channel and closed socket factories.
 //!
-//! The production helper selects its credentialed channel and unconnected QUIC UDP factory only
-//! for a committed Client or Exit lease inside the owned route namespace. MPTCP factories, Relay
-//! transport handoff, a route-manager caller and every usable datapath remain disconnected.
+//! The production helper selects its credentialed channel and exact transport factory only for a
+//! committed Client or Exit lease inside the owned route namespace. Client connected-MPTCP, Exit
+//! MPTCP-listener and unconnected QUIC UDP descriptors are supported. Relay transport handoff, a
+//! route-manager caller and every usable datapath remain disconnected.
 
 use std::{
     io::{self, IoSlice, IoSliceMut},
@@ -1379,6 +1380,8 @@ mod tests {
 
     const ADOPTED_SOCKET_NAMESPACE_CHILD_ENV: &str =
         "VOLPAROSSA_ADOPTED_SOCKET_NAMESPACE_TEST_CHILD";
+    const MPTCP_TRANSPORT_NAMESPACE_CHILD_ENV: &str =
+        "VOLPAROSSA_MPTCP_TRANSPORT_NAMESPACE_TEST_CHILD";
 
     fn address(octets: [u8; 4], port: u32) -> InternalSocketAddress {
         InternalSocketAddress {
@@ -2586,6 +2589,111 @@ mod tests {
         assert!(
             output.status.success(),
             "isolated adopted-socket proof failed\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn committed_client_and_exit_create_genuine_mptcp_fds_in_disposable_netns() {
+        if env::var_os(MPTCP_TRANSPORT_NAMESPACE_CHILD_ENV).is_some() {
+            for arguments in [
+                ["link", "set", "lo", "up"].as_slice(),
+                ["address", "add", "10.242.0.1/32", "dev", "lo"].as_slice(),
+                ["address", "add", "10.242.0.2/32", "dev", "lo"].as_slice(),
+            ] {
+                let status = Command::new("ip")
+                    .args(arguments)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .expect("run ip inside disposable network namespace");
+                assert!(status.success(), "ip {arguments:?} failed");
+            }
+
+            let context_id = [0x4d; 16];
+            let path_id = 7;
+            let exit_address = SocketAddr::from((Ipv4Addr::new(10, 242, 0, 1), 39_123));
+            let client_address = SocketAddr::from((Ipv4Addr::new(10, 242, 0, 2), 39_124));
+
+            let mut exit_request =
+                acquire_request_for_local(InternalTransportSocketKind::MptcpListener, exit_address);
+            let exit_operation = acquire_operation_mut(&mut exit_request);
+            exit_operation.route_context_id = context_id.to_vec();
+            exit_operation.path_id = path_id;
+            exit_operation.role = InternalEndpointRole::Exit as i32;
+            let exit_descriptor = create_transport_socket(
+                CommittedSocketLease {
+                    route_context_id: context_id,
+                    path_id,
+                    role: InternalEndpointRole::Exit,
+                    overlay_address: exit_address.ip(),
+                },
+                exit_operation,
+            )
+            .expect("create exact committed Exit MPTCP listener");
+            let exit_socket = Socket::from(exit_descriptor);
+            validate_mptcp_listener(&exit_socket, exit_address)
+                .expect("returned Exit descriptor is a genuine MPTCP listener");
+
+            let mut client_request = acquire_request_for_local(
+                InternalTransportSocketKind::MptcpConnected,
+                client_address,
+            );
+            let client_operation = acquire_operation_mut(&mut client_request);
+            client_operation.route_context_id = context_id.to_vec();
+            client_operation.path_id = path_id;
+            client_operation.role = InternalEndpointRole::Client as i32;
+            client_operation.expected_remote = Some(internal_address(exit_address));
+            let client_descriptor = create_transport_socket(
+                CommittedSocketLease {
+                    route_context_id: context_id,
+                    path_id,
+                    role: InternalEndpointRole::Client,
+                    overlay_address: client_address.ip(),
+                },
+                client_operation,
+            )
+            .expect("connect exact committed Client MPTCP socket");
+            let client_socket = Socket::from(client_descriptor);
+            validate_connected_mptcp(&client_socket, client_address, exit_address)
+                .expect("returned Client descriptor negotiated genuine MPTCP");
+            assert!(
+                mptcp_info(&client_socket)
+                    .expect("read MPTCP_INFO from returned Client descriptor")
+                    .is_negotiated(),
+                "ordinary TCP fallback must never satisfy the committed MPTCP acquisition"
+            );
+            return;
+        }
+
+        let executable = env::current_exe().expect("current helper test executable");
+        let output = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net"])
+            .arg(executable)
+            .arg("--exact")
+            .arg(
+                "worker_transport::tests::committed_client_and_exit_create_genuine_mptcp_fds_in_disposable_netns",
+            )
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(MPTCP_TRANSPORT_NAMESPACE_CHILD_ENV, "1")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn disposable MPTCP transport namespace test");
+        if unprivileged_user_namespace_policy_denied(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ) {
+            eprintln!("skipped live MPTCP transport proof: user namespaces denied by policy");
+            return;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "disposable MPTCP transport proof failed\nstdout: {stdout}\nstderr: {stderr}"
         );
     }
 

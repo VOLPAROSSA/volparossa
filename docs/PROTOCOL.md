@@ -628,7 +628,7 @@ rejected before dispatch.
 | `DestroyContext` | idempotently remove one context and all contained state; Relay first restores policy-drop and proves the active fence absent |
 | `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
 | `RemoveMptcpEndpoint` | remove one exact owned MPTCP endpoint; currently returns `Unavailable` in production |
-| `AcquireTransportSocket` | tag 27: bind one committed context/path/role to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts only unconnected QUIC UDP for an exact committed Client/Exit singleton, while MPTCP and Relay remain unavailable |
+| `AcquireTransportSocket` | tag 27: bind one committed context/path/role to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts unconnected QUIC UDP for an exact committed Client/Exit singleton, genuine connected MPTCP only for Client, and a genuine MPTCP listener only for Exit, while Relay remains unavailable |
 | `ReconcileExpiredPrepare` | tag 28: after setup expiry, re-evaluate one exact same-runtime ambiguous Prepare lineage and succeed only after its exact generation is proven absent |
 | `CleanupOwned` | remove only resources matching a random 32-byte process-start ownership token |
 | `PrepareClientIngress` | tag 31: request a pre-route client runtime with exactly four closed socket kinds crossed with IPv4/IPv6; production returns `Unavailable` before state or network work |

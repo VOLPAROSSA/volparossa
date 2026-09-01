@@ -12,9 +12,10 @@
 //! crash/restart recovery. Production Prepare now completes the durable journal plus systemd
 //! descriptor-store handoff before child/kernel mutation, and same-runtime clean teardown settles
 //! that exact custody. An exact committed Client or Exit singleton can additionally hand off one
-//! bound, explicitly unconnected QUIC UDP descriptor. MPTCP, Relay transport handoff and all route
-//! manager/datapath callers remain unavailable. Inherited-custody recovery after a helper restart
-//! remains fail-closed.
+//! bound transport descriptor: unconnected QUIC UDP for either role, connected genuine MPTCP for
+//! Client, or a genuine MPTCP listener for Exit. Relay transport handoff and all route-manager
+//! datapath callers remain unavailable. Inherited-custody recovery after a helper restart remains
+//! fail-closed.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -2013,13 +2014,47 @@ fn validate_acquire_transport_binding(
     let role = functional_lease_role_for_wireguard(value.role).ok_or(BackendError::Invalid)?;
     let descriptor_kind =
         TransportSocketKind::try_from(value.descriptor_kind).map_err(|_| BackendError::Invalid)?;
-    if descriptor_kind != TransportSocketKind::QuicUdpUnconnected
-        || !matches!(role.context, ContextRole::Client | ContextRole::Exit)
-    {
+    let allowed = matches!(
+        (role.context, descriptor_kind),
+        (
+            ContextRole::Client | ContextRole::Exit,
+            TransportSocketKind::QuicUdpUnconnected
+        ) | (ContextRole::Client, TransportSocketKind::MptcpConnected)
+            | (ContextRole::Exit, TransportSocketKind::MptcpListener)
+    );
+    if !allowed {
         return Err(BackendError::Unavailable);
     }
-    let (local_address, local_port) =
-        parse_quic_overlay_socket_address(value.expected_local.as_ref())?;
+    let (local_address, local_port) = parse_overlay_socket_address(value.expected_local.as_ref())?;
+    let (internal_kind, expected_remote) = match descriptor_kind {
+        TransportSocketKind::QuicUdpUnconnected => {
+            if value.expected_remote.is_some() {
+                return Err(BackendError::Invalid);
+            }
+            (InternalTransportSocketKind::QuicUdpUnconnected, None)
+        }
+        TransportSocketKind::MptcpConnected => {
+            let (remote_address, remote_port) =
+                parse_overlay_socket_address(value.expected_remote.as_ref())?;
+            if remote_address == local_address && remote_port == local_port {
+                return Err(BackendError::Invalid);
+            }
+            (
+                InternalTransportSocketKind::MptcpConnected,
+                Some(InternalSocketAddress {
+                    address: remote_address.octets().to_vec(),
+                    port: u32::from(remote_port),
+                }),
+            )
+        }
+        TransportSocketKind::MptcpListener => {
+            if value.expected_remote.is_some() {
+                return Err(BackendError::Invalid);
+            }
+            (InternalTransportSocketKind::MptcpListener, None)
+        }
+        TransportSocketKind::Unspecified => return Err(BackendError::Invalid),
+    };
     // `operation_generation` is the engine's exact current Committed-context generation. The
     // lineage's `backend_generation` deliberately remains the stable Prepare generation across
     // Activate and Probe/Commit. The engine owns exact current-generation checks before dispatch
@@ -2048,7 +2083,6 @@ fn validate_acquire_transport_binding(
         || value.context_handle.len() != HELPER_HANDLE_BYTES
         || value.context_handle.iter().all(|byte| *byte == 0)
         || !(1..=8).contains(&value.path_id)
-        || value.expected_remote.is_some()
     {
         return Err(BackendError::Invalid);
     }
@@ -2061,12 +2095,12 @@ fn validate_acquire_transport_binding(
             route_context_id: context_id.to_vec(),
             path_id: value.path_id,
             role: role.internal_endpoint as i32,
-            descriptor_kind: InternalTransportSocketKind::QuicUdpUnconnected as i32,
+            descriptor_kind: internal_kind as i32,
             expected_local: Some(InternalSocketAddress {
                 address: local_address.octets().to_vec(),
                 port: u32::from(local_port),
             }),
-            expected_remote: None,
+            expected_remote,
         },
     ))
 }
@@ -2079,7 +2113,7 @@ pub(super) fn validate_acquire_transport_binding_for_engine_test(
     validate_acquire_transport_binding(binding, value).map(|_| ())
 }
 
-fn parse_quic_overlay_socket_address(
+fn parse_overlay_socket_address(
     value: Option<&TransportSocketAddress>,
 ) -> Result<(Ipv6Addr, u16), BackendError> {
     let value = value.ok_or(BackendError::Invalid)?;
@@ -2094,6 +2128,32 @@ fn parse_quic_overlay_socket_address(
         return Err(BackendError::Invalid);
     }
     Ok((address, port))
+}
+
+const fn public_transport_kind_to_internal(
+    kind: TransportSocketKind,
+) -> Option<InternalTransportSocketKind> {
+    match kind {
+        TransportSocketKind::MptcpConnected => Some(InternalTransportSocketKind::MptcpConnected),
+        TransportSocketKind::MptcpListener => Some(InternalTransportSocketKind::MptcpListener),
+        TransportSocketKind::QuicUdpUnconnected => {
+            Some(InternalTransportSocketKind::QuicUdpUnconnected)
+        }
+        TransportSocketKind::Unspecified => None,
+    }
+}
+
+fn transport_remote_matches(
+    public: Option<&TransportSocketAddress>,
+    internal: Option<&InternalSocketAddress>,
+) -> bool {
+    match (public, internal) {
+        (None, None) => true,
+        (Some(public), Some(internal)) => {
+            public.address == internal.address && public.port == internal.port
+        }
+        (None | Some(_), None | Some(_)) => false,
+    }
 }
 
 fn ensure_hard_is_live(key: OpenLineageKey) -> Result<(), BackendError> {
@@ -2152,8 +2212,14 @@ fn validate_committed_acquire_entry(
         || internal.route_context_id.as_slice() != entry.key.context_id
         || internal.path_id != value.path_id
         || internal.role != role.internal_endpoint as i32
-        || internal.descriptor_kind != InternalTransportSocketKind::QuicUdpUnconnected as i32
-        || internal.expected_remote.is_some()
+        || InternalTransportSocketKind::try_from(internal.descriptor_kind).ok()
+            != TransportSocketKind::try_from(value.descriptor_kind)
+                .ok()
+                .and_then(public_transport_kind_to_internal)
+        || !transport_remote_matches(
+            value.expected_remote.as_ref(),
+            internal.expected_remote.as_ref(),
+        )
         || !exact_internal_local
         || wireguard.resource().key() != (u8::try_from(value.path_id).unwrap_or(0), value.role)
         || wireguard.resource().hard_expires_at_unix() != entry.key.hard_expires_at_unix
@@ -2193,7 +2259,7 @@ fn classify_acquire_transport_execution(
                     && ready.role == request.role
                     && ready.descriptor_kind == request.descriptor_kind
                     && ready.local == request.expected_local
-                    && ready.remote.is_none()
+                    && ready.remote == request.expected_remote
         );
         return match (exact, execution.descriptor.take()) {
             (true, Some(descriptor)) => AcquireTransportExecution::Ready(descriptor),
@@ -4023,7 +4089,7 @@ mod tests {
                     role: acquire.role,
                     descriptor_kind: acquire.descriptor_kind,
                     local: acquire.expected_local.clone(),
-                    remote: None,
+                    remote: acquire.expected_remote.clone(),
                 },
             )),
         )
@@ -4294,7 +4360,7 @@ mod tests {
             );
         }
 
-        let unsupported_mptcp = AcquireTransportSocket {
+        let supported_mptcp = AcquireTransportSocket {
             descriptor_kind: TransportSocketKind::MptcpConnected as i32,
             expected_remote: Some(TransportSocketAddress {
                 address: {
@@ -4307,8 +4373,18 @@ mod tests {
             ..value.clone()
         };
         assert_eq!(
-            validate_acquire_transport_binding(binding, &unsupported_mptcp),
-            Err(BackendError::Unavailable)
+            validate_acquire_transport_binding(binding, &supported_mptcp).and_then(
+                |(_, internal)| {
+                    let state = lock_state(&backend.state);
+                    validate_committed_acquire_entry(
+                        state.as_ref().expect("committed entry"),
+                        &supported_mptcp,
+                        &internal,
+                    )
+                    .map(|_| ())
+                }
+            ),
+            Ok(())
         );
         let unsupported_relay = AcquireTransportSocket {
             role: WireguardRole::RelayClient as i32,
