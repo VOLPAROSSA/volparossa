@@ -1440,6 +1440,12 @@ impl ActiveUdpPath {
     pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
         &self.reservation_id
     }
+
+    /// Consume the activated service grant into the exact verified transport path.
+    #[must_use]
+    pub fn into_verified_path(self) -> VerifiedSingleRelayPath {
+        self.path
+    }
 }
 
 /// A policy-approved UDP flow still bound to its sole verified relay path.
@@ -1543,6 +1549,7 @@ impl fmt::Debug for ExitReservationState {
 pub struct ConfirmedExitPath {
     reservation_id: [u8; ID_BYTES],
     path_id: u32,
+    relay_exit_endpoint: PublicWireGuardEndpoint,
     relay_exit_public_key: WireGuardPublicKey,
     exit_public_key: WireGuardPublicKey,
 }
@@ -1558,6 +1565,12 @@ impl ConfirmedExitPath {
     #[must_use]
     pub const fn path_id(&self) -> u32 {
         self.path_id
+    }
+
+    /// Confirmed public Relay endpoint for the relay-to-Exit link.
+    #[must_use]
+    pub const fn relay_exit_endpoint(&self) -> PublicWireGuardEndpoint {
+        self.relay_exit_endpoint
     }
 
     /// Relay public key on the relay-to-exit link.

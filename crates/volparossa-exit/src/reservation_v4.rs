@@ -118,6 +118,7 @@ impl fmt::Debug for AcceptedRelayProbePermit {
 #[derive(Clone)]
 pub struct AcceptedExitConfirmation {
     signed_receipt: Vec<u8>,
+    signed_relay_reservation: Vec<u8>,
     confirmed_path: ConfirmedExitPath,
     expires_at_ms: u64,
 }
@@ -127,6 +128,12 @@ impl AcceptedExitConfirmation {
     #[must_use]
     pub fn signed_receipt(&self) -> &[u8] {
         &self.signed_receipt
+    }
+
+    /// Canonical Relay reservation whose endpoint was accepted by this confirmation.
+    #[must_use]
+    pub fn signed_relay_reservation(&self) -> &[u8] {
+        &self.signed_relay_reservation
     }
 
     /// Typed stored relay-to-exit endpoint binding.
@@ -1656,6 +1663,7 @@ impl ExitService {
             let confirmed_path = ConfirmedExitPath {
                 reservation_id,
                 path_id: path.path_id,
+                relay_exit_endpoint,
                 relay_exit_public_key: relay_exit_endpoint.public_key(),
                 exit_public_key: path.exit_endpoint.public_endpoint().public_key(),
             };
@@ -1680,6 +1688,7 @@ impl ExitService {
             live_path.relay_reservation_hash = Some(relay_reservation_hash);
             Ok(AcceptedExitConfirmation {
                 signed_receipt,
+                signed_relay_reservation: confirmation.relay_reservation.clone(),
                 confirmed_path,
                 expires_at_ms: confirmation.expires_at_ms,
             })
