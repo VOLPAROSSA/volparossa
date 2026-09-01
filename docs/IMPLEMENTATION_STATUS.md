@@ -1048,13 +1048,24 @@ single clean-build A01--A15 run; the score is not a release claim.
   which stamps monotonic and wall arrival time before returning it. Upstream dispatch requires
   the forwarding control to be local and targets only the exit. Context-bound variants retain a
   non-cloned caller owner—suitable for the original candidate-snapshot attempt or downstream
-  request/channel—until that exact bind or cancellation. Binding requires both affine values to
-  originate from the exact service and rechecks the private request ID, peer, event-local
-  connection, half-open deadline, uniqueness, generation and native prefix; dispatches,
-  transactions, arrivals and bound results expose no equality oracle, constructor, field or
-  decomposition. Drop, an unavailable arrival clock, or a service/ID/peer mismatch leaves that
-  hop's slot occupied fail closed. Exact correlation consumes it before later time or provenance
-  checks. The
+  request/channel. A client transaction presented to a foreign service is retained unchanged for
+  its originating service. Once that service recognizes the exact active client transaction, any
+  sealed response is terminal: the slot is released before service-instance, peer, request-ID,
+  half-open deadline or provenance validation, and failure recovers the exact unchanged caller context
+  without reusable dispatch authority. Dropping an active token or an unavailable arrival clock
+  still leaves its slot occupied. The upstream hop also retains its slot for a foreign service,
+  peer or request ID; exact upstream correlation consumes it before later time or provenance
+  checks. Binding rechecks the event-local connection, uniqueness, generation and native prefix.
+  Dispatches, transactions, arrivals and unconsumed bound tokens expose no equality oracle,
+  constructor, generic field/getter or decomposition. Purpose-specific terminal consumption
+  destroys their authority and yields only an endpoint-free normalized public IPv4 `/24` or IPv6
+  `/48`, sealed local wall-observation time and monotonic round trip for client transport; only the
+  normalized prefix for the Relay-signed upstream wrapper; only signed validity for a direct
+  transcript; or the earlier joint signed validity and control-signed normalized prefix for a
+  forwarded transcript. No projection contains a request, identity, signature, nonce, full
+  endpoint, connection, dispatch capability or other reusable authority. No production outbound
+  client attempt actor/owner, sampler or exact-set `FreshEvidenceBatch` join consumes these values,
+  and they make no Fresh-evidence or route-readiness claim. The
   swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to

@@ -243,11 +243,25 @@ rechecks that both the dispatch and arrival belong to the exact service instance
 private request ID, peer, event-local `ConnectionId`, current unique connection generation and
 native prefix match. Context-bound entrypoints
 can carry a non-cloned attempt/snapshot or downstream-channel owner through only that exact bind or
-cancellation. Dispatches, transactions, arrivals and bound results expose no ID-equality oracle,
-constructor, ID/hash/time/prefix field or decomposition. Dropping a token, an unavailable arrival
-clock, or a cross-service, wrong-ID or wrong-peer arrival keeps that hop's slot occupied fail
-closed; exact correlation consumes it before
-later time or provenance checks. A still-current inbound client-hop request is withheld unless it
+cancellation. A client transaction offered to a foreign service is returned unchanged for its
+originating service. Once the originating service recognizes the exact active client transaction,
+every sealed response is terminal: the slot is released before service-instance, peer, request-ID,
+time or provenance validation, and failure recovers the exact unchanged caller context without the
+consumed dispatch. Dropping an active token or an unavailable arrival clock still leaves the slot
+occupied. The upstream hop also retains its slot for a foreign service, peer or request ID; only
+exact upstream correlation consumes it before later time or provenance checks.
+
+Dispatches, transactions, arrivals and the unconsumed bound tokens expose no ID-equality oracle,
+constructor, generic ID/hash/time/prefix getter or decomposition. Their purpose-specific terminal
+consumers destroy the authority-bearing token and expose only an endpoint-free normalized public
+IPv4 `/24` or IPv6 `/48`, sealed local wall-observation time and monotonic round trip for the client
+transport; only a normalized prefix for the Relay-signed upstream wrapper; only the signed validity
+ceiling for a direct transcript; or the earlier joint signed ceiling and control-signed normalized
+prefix for a forwarded transcript. These projections contain no request, actor identity, signature,
+nonce, full endpoint, connection or reusable dispatch/evidence authority. There is still no
+production outbound client attempt actor/owner, sampler or exact-set join into a
+`FreshEvidenceBatch`, and no route-readiness claim follows. A still-current inbound client-hop
+request is withheld unless it
 targets the local relay/control and its authenticated remote differs from both local peer and actor;
 requester-anonymous A0 has no client identity to bind. Upstream instead requires the authenticated
 relay to equal `forwarded_control` and the actor to equal the local exit. These predicates and the

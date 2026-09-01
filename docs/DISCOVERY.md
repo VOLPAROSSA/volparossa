@@ -291,18 +291,32 @@ generation-bound witness immediately before its synchronous libp2p send, binds o
 same-hop response arrival minted by the same service instance, and applies the minimum of its fixed timeout, unchanged A0 expiry, and
 caller deadline. Context-bound variants retain an arbitrary non-cloned caller owner—intended for
 the original candidate-snapshot attempt on the client and the original downstream channel/request
-owner at a control relay—and return it only after that exact bind or cancellation. This prevents a
-later owner from accidentally pairing a sibling response and snapshot without exposing the
-context during flight.
+owner at a control relay. A client transaction presented to a foreign service is retained
+unchanged so its originating service can still bind or cancel it. Once that originating service
+recognizes its exact active client transaction, every sealed response is terminal: it releases the
+slot before checking the arrival's service instance, peer, request ID, time or connection
+provenance, and a failed bind returns the exact unchanged caller context without reusable dispatch
+authority. The upstream context is still returned only by its exact bind or cancellation. This
+prevents a later owner from accidentally pairing a sibling response and snapshot without exposing
+the context during flight.
 
-Dropping a dispatch or arrival, an unavailable arrival clock, or a cross-service, wrong-ID or
-wrong-peer arrival leaves that hop's slot occupied fail closed. After
-exact correlation the slot is consumed even when the subsequent time or connection-provenance
-check fails. The private pump stamps local monotonic and wall time at observation; binding rechecks
-that both affine values belong to the exact service instance plus the private request ID,
-authenticated peer, event-local `ConnectionId`, deadline, uniqueness,
-generation and native prefix. Both resulting proofs are completely opaque: they expose no prefix,
-address, ID, hash, time, getter, equality oracle, clone or decomposition surface. The swarm pump drops a
+Merely dropping an active dispatch, transaction or arrival, or failing to obtain an arrival clock,
+leaves its slot occupied fail closed. On the upstream hop a foreign service, wrong peer or wrong ID
+also leaves the slot occupied; exact upstream correlation consumes it before subsequent time or
+connection-provenance checks. The private pump stamps local monotonic and wall time at observation;
+binding rechecks the exact service instance, private request ID, authenticated peer, event-local
+`ConnectionId`, deadline, uniqueness, generation and native prefix. The bound authority tokens
+themselves expose no address, peer, connection, ID/hash/time getter, equality oracle, clone or
+decomposition. Purpose-specific terminal consumers destroy those tokens and expose only the facts
+needed by a future private freshness owner: the client transport yields an endpoint-free normalized
+public IPv4 `/24` or IPv6 `/48`, its sealed local wall-observation time and monotonic round trip; the
+upstream connection may yield only the normalized prefix for the Relay-signed wrapper; and verified
+direct or forwarded transcripts yield only their signed validity ceiling, or the earlier joint
+signed ceiling plus the control-signed normalized prefix. None exposes a request, identity,
+signature, nonce, full endpoint, connection, dispatch capability or other reusable authority. No
+production outbound client attempt actor/owner or sampler yet exact-set joins these projections and
+the retained A1a set into a `FreshEvidenceBatch`, so they establish neither Fresh evidence nor route
+readiness. The swarm pump drops a
 still-current client-hop request unless it targets the local relay/control and its authenticated
 remote sender differs from both that local peer and the challenged actor. A0 deliberately contains
 no client identity, so this is not a claim that the sender is request-bound. Upstream, the pump
