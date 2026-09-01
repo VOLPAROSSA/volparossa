@@ -5955,28 +5955,6 @@ impl DiscoveryRuntime {
         let Some(authorized_control) = self.local_relay_snapshot.clone() else {
             reject!("MPQUIC_SESSION_RELAY_AUTHORITY_UNAVAILABLE");
         };
-        let authorized_exit = self
-            .forwarded_exits
-            .get(&ForwardedExitKey {
-                control_relay_peer: local_peer,
-                exit_peer,
-            })
-            .filter(|capability| {
-                forwarded_exit_capability_matches(
-                    capability,
-                    &authorized_control,
-                    self.local_node_id,
-                    local_peer,
-                    self.local_public_key,
-                    exit_node_id,
-                    exit_peer,
-                    request.deadline_unix_ms(),
-                )
-            })
-            .cloned();
-        let Some(authorized_exit) = authorized_exit else {
-            reject!("MPQUIC_SESSION_RELAY_EXIT_AUTHORITY_UNAVAILABLE");
-        };
         let Ok(upstream) = ExitForwardRequest::new(
             datapath_request_id.to_vec(),
             self.local_node_id.to_vec(),
@@ -6040,7 +6018,7 @@ impl DiscoveryRuntime {
                 operation: ExitForwardOperation::MpquicSessionStart,
                 expected_exit_node_id: Some(exit_node_id),
                 authorized_control,
-                authorized_exit: Some(authorized_exit),
+                authorized_exit: None,
                 canonical_request,
                 operation_expires_at_ms: request.deadline_unix_ms(),
                 attempt_deadline,
@@ -7729,6 +7707,7 @@ impl DiscoveryRuntime {
                     | ExitForwardOperation::NativeProbeReady
                     | ExitForwardOperation::NativeProbeAuthorize
                     | ExitForwardOperation::NativeProbeResult
+                    | ExitForwardOperation::MpquicSessionStart
             ),
         }
     }
@@ -8289,19 +8268,21 @@ impl DiscoveryRuntime {
         let now_ms = unix_millis();
         let valid_exit_target = operation == ExitForwardOperation::FetchExitAdvertisement
             || fixed_bytes::<32>(request.exit_node_id()) == Some(self.local_node_id);
-        let valid_control_relay = operation == ExitForwardOperation::FetchExitAdvertisement
-            || self
-                .direct_relays
-                .get(&authenticated_control_relay)
-                .is_some_and(|capability| {
-                    direct_relay_capability_matches(
-                        capability,
-                        control_relay_node_id,
-                        authenticated_control_relay,
-                        control_relay_public_key,
-                        request.deadline_unix_ms(),
-                    )
-                });
+        let valid_control_relay = matches!(
+            operation,
+            ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::MpquicSessionStart
+        ) || self
+            .direct_relays
+            .get(&authenticated_control_relay)
+            .is_some_and(|capability| {
+                direct_relay_capability_matches(
+                    capability,
+                    control_relay_node_id,
+                    authenticated_control_relay,
+                    control_relay_public_key,
+                    request.deadline_unix_ms(),
+                )
+            });
         if request.validate().is_err()
             || !forward_request_scope_matches(&request, operation, now_ms)
             || !self.roles.exit
@@ -15755,6 +15736,56 @@ mod tests {
             actor,
             &fixture.scope,
         ));
+    }
+
+    #[test]
+    fn production_mpquic_start_uses_prepared_route_proofs_without_advertisement_cache() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+
+        let relay_start = braced_item(production, "async fn begin_mpquic_session_start(");
+        for proof in [
+            "prepared_production_relay_routes",
+            "dispatch.signed_relay_reservation",
+            "route.accepted.reservation_id()",
+            "route.accepted.exit_node_id()",
+            "authorized_exit: None",
+        ] {
+            assert!(relay_start.contains(proof), "missing Relay proof {proof}");
+        }
+        assert!(!relay_start.contains("self.forwarded_exits"));
+
+        let relay_authority = braced_item(production, "fn relay_authority_is_current(");
+        let cache_independent = relay_authority
+            .find("None => matches!(")
+            .expect("cache-independent operations");
+        assert!(
+            relay_authority[cache_independent..]
+                .contains("ExitForwardOperation::MpquicSessionStart")
+        );
+
+        let exit_forward = braced_item(production, "async fn answer_exit_forward_upstream(");
+        let cache_bypass = exit_forward
+            .find("| ExitForwardOperation::MpquicSessionStart")
+            .expect("MPQUIC Start cache bypass");
+        let advertisement_cache = exit_forward
+            .find(".direct_relays")
+            .expect("ordinary forwarded operation advertisement cache");
+        assert!(cache_bypass < advertisement_cache);
+
+        let exit_start = braced_item(production, "async fn begin_production_mpquic_exit_session(");
+        for proof in [
+            "path.relay.relay_peer_id == authenticated_control_relay.to_bytes()",
+            "forward_id == path.confirmation_nonce[..FORWARD_ID_BYTES]",
+            "prepared_production_exit_routes",
+            "route.bundle.signed_exit_reservation() == start.signed_exit_reservation()",
+            "route.pending_activations.len() == selected_path_ids.len()",
+        ] {
+            assert!(exit_start.contains(proof), "missing Exit proof {proof}");
+        }
     }
 
     #[test]
