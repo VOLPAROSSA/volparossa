@@ -4896,6 +4896,18 @@ helper_holds_no_worker_custody() {
     [ "$hook_custody_count" -ge 1 ]
 }
 
+wait_for_helper_no_worker_custody() {
+    [ "$#" -eq 1 ] || return 1
+    hook_custody_parent_pid=$1
+    number_is_safe "$hook_custody_parent_pid" || return 1
+    hook_custody_wait_attempt=0
+    while ! helper_holds_no_worker_custody "$hook_custody_parent_pid"; do
+        hook_custody_wait_attempt=$((hook_custody_wait_attempt + 1))
+        [ "$hook_custody_wait_attempt" -lt 100 ] || return 1
+        sleep 0.05
+    done
+}
+
 worker_process_fd_is_retired() {
     [ "$#" -eq 1 ] || return 1
     hook_worker_process_fd=$1
@@ -5503,7 +5515,7 @@ run_functional_client_lease_probe() {
     [ ! -e /proc/self/fd/7 ] && [ ! -L /proc/self/fd/7 ] || return 1
     unit_fdstore_prior_custody_is_absent \
         "$hook_functional_unit" "$hook_functional_custody_name" || return 1
-    helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
+    wait_for_helper_no_worker_custody "$hook_functional_main_pid" || return 1
 
     printf '%s' "$functional_release_byte" >&6 || return 1
     hook_functional_exit_ready_output=$(printf '%s\n%s\n%s' \
@@ -5757,7 +5769,7 @@ run_functional_client_lease_probe() {
     unit_fdstore_prior_custody_is_absent \
         "$hook_functional_unit" "$hook_functional_exit_custody_name" || return 1
     advance_start_failure_stage functional-exit-cleanup-parent-custody || return 1
-    helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
+    wait_for_helper_no_worker_custody "$hook_functional_main_pid" || return 1
 
     printf '%s' "$functional_release_byte" >&6 || return 1
     hook_functional_relay_pair_ready_output=$(printf '%s\n%s\n%s\n%s\n%s' \
@@ -6115,7 +6127,7 @@ run_functional_client_lease_probe() {
     worker_process_fd_is_retired 8 || return 1
     [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
         "$hook_functional_pair_process_identity" ] || return 1
-    helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
+    wait_for_helper_no_worker_custody "$hook_functional_main_pid" || return 1
     hook_functional_journal_proof=$("$probe" prove-settled-journal \
         "$hook_functional_main_pid" "$hook_functional_agent_gid" \
         2>/dev/null) || return 1

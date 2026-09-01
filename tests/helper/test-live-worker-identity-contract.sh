@@ -7515,7 +7515,9 @@ for required_hook_contract in \
     'functional_probe_output_is_exact "$hook_functional_stdout"' \
     'helper_has_no_children "$hook_functional_main_pid"' \
     'worker_process_fd_is_retired 8' \
-    'helper_holds_no_worker_custody "$hook_functional_main_pid"' \
+    'helper_holds_no_worker_custody() {' \
+    'wait_for_helper_no_worker_custody() {' \
+    'wait_for_helper_no_worker_custody "$hook_functional_main_pid"' \
     'worker_wireguard_is_absent 7 "$hook_functional_peer_address"' \
     'command exec 8>&-' \
     'command exec 7>&-' \
@@ -8249,6 +8251,73 @@ if ! awk '
     printf '%s\n' 'production IPC probes or hook-owned records are not in exact order' >&2
     exit 1
 fi
+
+no_custody_wait_contract=$temporary_directory/no-custody-wait-contract.sh
+sed -n '/^wait_for_helper_no_worker_custody() {$/,/^}$/p' \
+    "$ipc_hook" >"$no_custody_wait_contract"
+# These are literal hook-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+no_custody_wait_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'helper_holds_no_worker_custody' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'hook_custody_wait_attempt=0' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc \
+            'hook_custody_wait_attempt=$((hook_custody_wait_attempt + 1))' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Ec \
+            '^[[:space:]]*\[ "\$hook_custody_wait_attempt" -lt 100 \] \|\| return 1$' \
+            "$1")" -eq 1 ] \
+        && [ "$(grep -Fc 'sleep 0.05' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '|| true' "$1")" -eq 0 ]
+}
+no_custody_wait_source_is_exact "$no_custody_wait_contract" || {
+    printf '%s\n' 'worker-custody retirement wait is not exact and bounded' >&2
+    exit 1
+}
+sh -n "$no_custody_wait_contract"
+# shellcheck disable=SC1090,SC2317
+exercise_no_custody_wait_contract() (
+    . "$no_custody_wait_contract"
+    number_is_safe() { [ "$#" -eq 1 ] && [ "$1" = 4242 ]; }
+    sleep() { [ "$#" -eq 1 ] && [ "$1" = 0.05 ]; }
+    custody_observations=0
+    helper_holds_no_worker_custody() {
+        custody_observations=$((custody_observations + 1))
+        [ "$custody_observations" -eq 3 ]
+    }
+    wait_for_helper_no_worker_custody 4242
+    [ "$custody_observations" -eq 3 ]
+    custody_observations=0
+    helper_holds_no_worker_custody() {
+        custody_observations=$((custody_observations + 1))
+        return 1
+    }
+    if wait_for_helper_no_worker_custody 4242; then
+        exit 1
+    fi
+    [ "$custody_observations" -eq 100 ]
+)
+exercise_no_custody_wait_contract || {
+    printf '%s\n' 'worker-custody retirement wait does not converge or fail closed' >&2
+    exit 1
+}
+no_custody_wait_bound_mutant=$temporary_directory/no-custody-wait-bound-mutant.sh
+sed 's/-lt 100/-lt 1000/' \
+    "$no_custody_wait_contract" >"$no_custody_wait_bound_mutant"
+no_custody_wait_predicate_mutant=$temporary_directory/no-custody-wait-predicate-mutant.sh
+sed 's/helper_holds_no_worker_custody/true/' \
+    "$no_custody_wait_contract" >"$no_custody_wait_predicate_mutant"
+for no_custody_wait_mutant in \
+    "$no_custody_wait_bound_mutant" "$no_custody_wait_predicate_mutant"
+do
+    sh -n "$no_custody_wait_mutant"
+    if no_custody_wait_source_is_exact "$no_custody_wait_mutant"; then
+        printf 'worker-custody retirement wait accepted mutant: %s\n' \
+            "${no_custody_wait_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
 if ! awk '
     /^run_functional_client_lease_probe\(\) \{$/ { in_functional = 1; next }
     /^restart_record_line\(\) \{$/ { in_functional = 0 }
@@ -8465,7 +8534,12 @@ if ! awk '
         if (retired_count == 3) exit_retired = NR
         if (retired_count == 4) pair_retired = NR
     }
-    in_functional && /helper_holds_no_worker_custody/ { custody_absent = NR }
+    in_functional && /wait_for_helper_no_worker_custody/ {
+        custody_wait_count++
+        if (custody_wait_count == 1) client_custody_absent = NR
+        if (custody_wait_count == 2) exit_custody_absent = NR
+        if (custody_wait_count == 3) pair_custody_absent = NR
+    }
     in_functional && /worker_wireguard_is_absent/ {
         wireguard_absent_count++
         if (wireguard_absent_count == 1) exact_client_wireguard_absent = NR
@@ -8485,6 +8559,7 @@ if ! awk '
         valid = valid && release_count == 5 && retired_count == 4
         valid = valid && wireguard_absent_count == 5
         valid = valid && process_release_count == 3 && namespace_release_count == 3
+        valid = valid && custody_wait_count == 3
         valid = valid && pristine_before < underlay && underlay < fifo
         valid = valid && fifo < fifo_open && fifo_open < probe && probe < client_ready
         valid = valid && client_ready < client_child
@@ -8507,7 +8582,8 @@ if ! awk '
         valid = valid && client_settled_wait < client_cleanup_stage
         valid = valid && client_cleanup_stage < client_retired
         valid = valid && client_retired < client_wireguard_absent
-        valid = valid && client_wireguard_absent < client_settlement_release
+        valid = valid && client_wireguard_absent < client_custody_absent
+        valid = valid && client_custody_absent < client_settlement_release
         valid = valid && client_settlement_release < exit_ready_wait
         valid = valid && exit_ready_wait < exit_ready_stage
         valid = valid && exit_ready_stage < exit_worker_stage
@@ -8535,7 +8611,8 @@ if ! awk '
         valid = valid && exit_cleanup_process_close_stage < exit_cleanup_namespace_close_stage
         valid = valid && exit_cleanup_namespace_close_stage < exit_cleanup_fdstore_stage
         valid = valid && exit_cleanup_fdstore_stage < exit_cleanup_parent_stage
-        valid = valid && exit_cleanup_parent_stage < exit_settlement_release
+        valid = valid && exit_cleanup_parent_stage < exit_custody_absent
+        valid = valid && exit_custody_absent < exit_settlement_release
         valid = valid && exit_settlement_release < pair_ready_wait
         valid = valid && pair_ready_wait < pair_ready_stage
         valid = valid && pair_ready_stage < pair_worker_stage
@@ -8556,8 +8633,8 @@ if ! awk '
         valid = valid && pair_release < release_close && release_close < waited
         valid = valid && waited < final_output && final_output < cleanup_stage
         valid = valid && cleanup_stage < no_children && no_children < pair_retired
-        valid = valid && pair_retired < custody_absent
-        valid = valid && custody_absent < pair_client_wireguard_absent
+        valid = valid && pair_retired < pair_custody_absent
+        valid = valid && pair_custody_absent < pair_client_wireguard_absent
         valid = valid && pair_client_wireguard_absent < pair_exit_wireguard_absent
         valid = valid && pair_exit_wireguard_absent < underlay_remove
         valid = valid && underlay_remove < pristine_after
