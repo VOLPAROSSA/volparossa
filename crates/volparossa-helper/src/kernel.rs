@@ -38,6 +38,7 @@ sockopt_impl!(
 );
 
 const NLMSG_HEADER_LEN: usize = 16;
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const NLMSG_ERROR_CODE_LEN: usize = 4;
 const GENL_HEADER_LEN: usize = 4;
 const ATTRIBUTE_HEADER_LEN: usize = 4;
@@ -943,6 +944,7 @@ impl NamespaceKernel {
     }
 
     /// Remove the exact fwmark rule and local route while attempting both cleanup steps.
+    #[allow(clippy::needless_pass_by_value)] // Consuming the token records affine teardown.
     pub(crate) fn remove_client_ingress_ipv4_routing(
         &mut self,
         routing: ClientIngressIpv4Routing,
@@ -2043,11 +2045,10 @@ pub(crate) fn client_ingress_interface_names(
     if client_runtime_id.iter().all(|byte| *byte == 0) {
         return Err(KernelError::Invalid);
     }
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut suffix = String::with_capacity(8);
     for byte in &client_runtime_id[..4] {
-        suffix.push(char::from(HEX[usize::from(byte >> 4)]));
-        suffix.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        suffix.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        suffix.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
     }
     let parent = format!("vpih{suffix}");
     let worker = format!("vpiw{suffix}");

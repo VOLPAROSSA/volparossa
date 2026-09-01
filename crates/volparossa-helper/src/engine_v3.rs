@@ -3108,6 +3108,7 @@ impl HelperEngine {
         ))
     }
 
+    #[allow(clippy::too_many_lines)] // One affine prepare transaction with exact rollback.
     async fn prepare_client_ingress_async(
         &self,
         request: &HelperRequest,
@@ -3302,6 +3303,7 @@ impl HelperEngine {
         ))
     }
 
+    #[allow(clippy::too_many_lines)] // Descriptor adoption and replay handling form one audit unit.
     async fn acquire_client_ingress_async(
         &self,
         request: &HelperRequest,
@@ -3490,6 +3492,7 @@ impl HelperEngine {
         ))
     }
 
+    #[allow(clippy::too_many_lines)] // Activation, ambiguity handling, and rollback stay adjacent.
     async fn activate_client_ingress_async(
         &self,
         request: &HelperRequest,
@@ -3557,9 +3560,7 @@ impl HelperEngine {
             }
             BackendCall::TimedOut(task) => {
                 self.send_ambiguous(request, sender).await;
-                if let Ok(completion) = task.await {
-                    drop(completion);
-                }
+                let _ = task.await;
                 self.destroy_ingress_backend_quiet(binding.client_runtime_id, binding.generation)
                     .await;
                 self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
@@ -3764,9 +3765,9 @@ impl HelperEngine {
         value: &AcquireTransportSocket,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
-        let descriptor_kind = match RoutingTransportSocketKind::try_from(value.descriptor_kind) {
-            Ok(kind) => kind,
-            Err(_) => return Some(execution(invalid_response(request), None)),
+        let Ok(descriptor_kind) = RoutingTransportSocketKind::try_from(value.descriptor_kind)
+        else {
+            return Some(execution(invalid_response(request), None));
         };
         let (required_context_phase, backend_phase) =
             if descriptor_kind == RoutingTransportSocketKind::NativeProbeUdpConnected {

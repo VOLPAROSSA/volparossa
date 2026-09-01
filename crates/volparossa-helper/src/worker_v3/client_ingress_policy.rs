@@ -25,6 +25,7 @@ const MAX_ACK_DATAGRAMS: usize = 8;
 const MAX_ACK_FRAMES: usize = 16;
 const NLMSG_HEADER_LEN: usize = 16;
 const ATTRIBUTE_HEADER_LEN: usize = 4;
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 const NLM_F_REQUEST: u16 = 0x0001;
 const NLM_F_ACK: u16 = 0x0004;
@@ -143,6 +144,7 @@ pub(super) fn install(
     Ok(ActiveClientIngressPolicy { table_name })
 }
 
+#[allow(clippy::needless_pass_by_value)] // Consuming the policy token records affine teardown.
 pub(super) fn remove(
     active: ActiveClientIngressPolicy,
     deadline: HardDeadline,
@@ -181,12 +183,11 @@ fn table_name(runtime: [u8; 16]) -> Result<Vec<u8>, ClientIngressPolicyError> {
     if runtime.iter().all(|byte| *byte == 0) {
         return Err(ClientIngressPolicyError::Malformed);
     }
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut name = Vec::with_capacity(TABLE_PREFIX.len() + runtime.len() * 2);
     name.extend_from_slice(TABLE_PREFIX);
     for byte in runtime {
-        name.push(HEX[usize::from(byte >> 4)]);
-        name.push(HEX[usize::from(byte & 0x0f)]);
+        name.push(HEX_DIGITS[usize::from(byte >> 4)]);
+        name.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
     }
     Ok(name)
 }

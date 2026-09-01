@@ -1818,6 +1818,11 @@ impl FunctionalAlphaLeaseBackend {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        clippy::manual_let_else,
+        clippy::single_match_else
+    )] // Admission and every exact rollback path are intentionally one transaction.
     async fn prepare_ingress_one(
         &self,
         binding: IngressBackendBinding,
@@ -2239,6 +2244,7 @@ impl FunctionalAlphaLeaseBackend {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Exact worker, link, and journal cleanup is one transaction.
     async fn cleanup_ingress_exact(
         &self,
         client_runtime_id: [u8; 16],
@@ -2849,6 +2855,7 @@ fn validate_probe_batch_binding(
     ))
 }
 
+#[allow(clippy::too_many_lines)] // The complete typed socket allowlist is deliberately co-located.
 fn validate_acquire_transport_binding(
     binding: BackendBinding,
     value: &AcquireTransportSocket,
@@ -4887,10 +4894,10 @@ fn exact_ingress_entry(
         .ok_or(BackendError::Invalid)
 }
 
-fn exact_ingress_entry_mut<'a>(
-    entry: &'a mut Option<OpenIngressEntry>,
+fn exact_ingress_entry_mut(
+    entry: &mut Option<OpenIngressEntry>,
     binding: IngressBackendBinding,
-) -> Result<&'a mut OpenIngressEntry, BackendError> {
+) -> Result<&mut OpenIngressEntry, BackendError> {
     entry
         .as_mut()
         .filter(|entry| {

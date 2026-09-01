@@ -2004,27 +2004,23 @@ impl WorkerClientIngress {
             .kernel
             .install_client_ingress_ipv4_routing(deadline)
             .map_err(|_| InternalWorkerResult::Kernel)?;
-        let policy = match client_ingress_policy::install(
+        let Ok(policy) = client_ingress_policy::install(
             self.client_runtime_id,
             self.ingress_ifindex,
             ports,
             deadline,
-        ) {
-            Ok(policy) => policy,
-            Err(_) => {
-                let policy_absent =
-                    client_ingress_policy::cleanup_runtime(self.client_runtime_id, deadline)
-                        .is_ok();
-                let routing_absent = self
-                    .kernel
-                    .remove_client_ingress_ipv4_routing(routing, deadline)
-                    .is_ok();
-                return Err(if policy_absent && routing_absent {
-                    InternalWorkerResult::Kernel
-                } else {
-                    InternalWorkerResult::CleanupIncomplete
-                });
-            }
+        ) else {
+            let policy_absent =
+                client_ingress_policy::cleanup_runtime(self.client_runtime_id, deadline).is_ok();
+            let routing_absent = self
+                .kernel
+                .remove_client_ingress_ipv4_routing(routing, deadline)
+                .is_ok();
+            return Err(if policy_absent && routing_absent {
+                InternalWorkerResult::Kernel
+            } else {
+                InternalWorkerResult::CleanupIncomplete
+            });
         };
         self.routing = Some(routing);
         self.policy = Some(policy);
@@ -2592,7 +2588,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         };
         let kind = InternalTransportSocketKind::try_from(operation.descriptor_kind)
             .map_err(|_| InternalWorkerResult::Invalid)?;
-        let ownerships = match (kind, self.lease.as_ref()) {
+        let (
             (
                 InternalTransportSocketKind::NativeProbeUdpConnected,
                 Some(WorkerLeaseLifecycle::Activated(ownerships)),
@@ -2602,14 +2598,14 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 | InternalTransportSocketKind::MptcpListener
                 | InternalTransportSocketKind::QuicUdpUnconnected,
                 Some(WorkerLeaseLifecycle::Committed(ownerships)),
-            ) => ownerships,
-            _ => {
-                return Err(if self.lease.is_some() {
-                    InternalWorkerResult::Conflict
-                } else {
-                    InternalWorkerResult::NotFound
-                });
-            }
+            ),
+        ) = ((kind, self.lease.as_ref()),)
+        else {
+            return Err(if self.lease.is_some() {
+                InternalWorkerResult::Conflict
+            } else {
+                InternalWorkerResult::NotFound
+            });
         };
         let path_id = u8::try_from(operation.path_id)
             .ok()
@@ -3679,7 +3675,7 @@ fn remove_mptcp_child_context(
 
 fn initialise_client_ingress_child(
     ingress: &mut Option<WorkerClientIngress>,
-    route_context: &Option<WorkerContext<NamespaceKernel>>,
+    route_context: Option<&WorkerContext<NamespaceKernel>>,
     network_bootstrap: &mut Option<WorkerNetworkBootstrap>,
     request: &InitialiseClientIngress,
     bound_context: ContextId,
@@ -3818,6 +3814,7 @@ fn destroy_client_ingress_child(
     ))
 }
 
+#[allow(clippy::too_many_lines)] // The child request loop is the single authenticated state boundary.
 fn child_loop(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
@@ -3897,7 +3894,7 @@ fn child_loop(
             internal_worker_request::Operation::InitialiseClientIngress(operation) => {
                 let (result, outcome, exit) = initialise_client_ingress_child(
                     &mut ingress,
-                    &context,
+                    context.as_ref(),
                     &mut network_bootstrap,
                     operation,
                     bound_context,
@@ -7536,27 +7533,21 @@ fn transition(
     use internal_worker_request::Operation;
 
     match (phase, request.operation.as_ref()) {
-        (StablePhase::Starting, Some(Operation::Initialise(_))) => {
-            Ok((StablePhase::Initialised, false))
-        }
-        (StablePhase::Starting, Some(Operation::InitialiseClientIngress(_))) => {
-            Ok((StablePhase::Initialised, false))
-        }
-        (StablePhase::Initialised, Some(Operation::PrepareLeases(_))) => {
+        (
+            StablePhase::Starting,
+            Some(Operation::Initialise(_) | Operation::InitialiseClientIngress(_)),
+        ) => Ok((StablePhase::Initialised, false)),
+        (
+            StablePhase::Initialised,
+            Some(Operation::PrepareLeases(_) | Operation::PrepareClientIngress(_)),
+        )
+        | (StablePhase::Prepared, Some(Operation::AcquireClientIngressSocket(_))) => {
             Ok((StablePhase::Prepared, false))
         }
-        (StablePhase::Initialised, Some(Operation::PrepareClientIngress(_))) => {
-            Ok((StablePhase::Prepared, false))
-        }
-        (StablePhase::Prepared, Some(Operation::AcquireClientIngressSocket(_))) => {
-            Ok((StablePhase::Prepared, false))
-        }
-        (StablePhase::Prepared, Some(Operation::ActivateClientIngress(_))) => {
-            Ok((StablePhase::Activated, false))
-        }
-        (StablePhase::Prepared, Some(Operation::ActivateLeases(_))) => {
-            Ok((StablePhase::Activated, false))
-        }
+        (
+            StablePhase::Prepared,
+            Some(Operation::ActivateClientIngress(_) | Operation::ActivateLeases(_)),
+        ) => Ok((StablePhase::Activated, false)),
         (StablePhase::Activated, Some(Operation::ProbeCommitLeases(_))) => {
             Ok((StablePhase::Committed, false))
         }
@@ -7576,8 +7567,9 @@ fn transition(
         {
             Ok((StablePhase::Committed, false))
         }
-        (_, Some(Operation::DestroyContext(_))) => Ok((phase, true)),
-        (_, Some(Operation::DestroyClientIngress(_))) => Ok((phase, true)),
+        (_, Some(Operation::DestroyContext(_) | Operation::DestroyClientIngress(_))) => {
+            Ok((phase, true))
+        }
         _ => Err(WorkerV3Error::Conflict),
     }
 }
@@ -8442,11 +8434,6 @@ impl WorkerSupervisor {
                         descriptor,
                     )?);
                 }
-                Some(internal_worker_request::Operation::AcquireTransportSocket(_)) => {
-                    if pinned_network_namespace.is_none() || execution.descriptor.is_some() {
-                        return Err(WorkerV3Error::Invalid);
-                    }
-                }
                 Some(internal_worker_request::Operation::AcquireClientIngressSocket(acquire))
                     if execution.response.result == InternalWorkerResult::Ok as i32 =>
                 {
@@ -8460,7 +8447,10 @@ impl WorkerSupervisor {
                         descriptor,
                     )?);
                 }
-                Some(internal_worker_request::Operation::AcquireClientIngressSocket(_)) => {
+                Some(
+                    internal_worker_request::Operation::AcquireTransportSocket(_)
+                    | internal_worker_request::Operation::AcquireClientIngressSocket(_),
+                ) => {
                     if pinned_network_namespace.is_none() || execution.descriptor.is_some() {
                         return Err(WorkerV3Error::Invalid);
                     }

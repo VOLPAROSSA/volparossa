@@ -2886,6 +2886,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One disposable namespace owns setup, exchange, and cleanup.
     fn activated_probe_sockets_exchange_exact_challenge_in_disposable_netns() {
         if env::var_os(NATIVE_PROBE_NAMESPACE_CHILD_ENV).is_some() {
             for arguments in [
