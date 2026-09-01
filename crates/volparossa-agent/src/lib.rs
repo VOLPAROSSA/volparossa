@@ -312,7 +312,8 @@ fn spawn_client_ingress_tasks(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "complete production TCP ingress dependencies"
+    clippy::too_many_lines,
+    reason = "one production ingress actor keeps accept, policy, route, and outcome ownership linear"
 )]
 async fn run_client_tcp_ingress(
     runtime: Option<Arc<ClientIngressRuntime>>,
