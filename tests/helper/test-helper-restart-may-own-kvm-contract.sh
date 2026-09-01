@@ -1446,6 +1446,45 @@ if ! awk '
     exit 1
 fi
 
+may_own_start_hook_contract=$tmp/may-own-start-hook-contract.sh
+sed -n '/^may_own_start_hook() {$/,/^}$/p' \
+    "$hook" >"$may_own_start_hook_contract"
+sh -n "$may_own_start_hook_contract"
+may_own_launcher_mode_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    awk '
+        /if \[ ! -e "\$may_own_first_boundary_record" \]/ {
+            first = NR; first_count++
+        }
+        /^        restart_exact_present_mode=yes$/ {
+            launcher = NR; launcher_count++
+        }
+        /^        may_own_relay_mode=yes$/ { relay = NR; relay_count++ }
+        /^        start_hook "\$1" "\$2" "\$3" "\$4" "\$5" "\$6"$/ {
+            start = NR; start_count++
+        }
+        END {
+            valid = first_count == 1 && launcher_count == 1
+            valid = valid && relay_count == 1 && start_count == 1
+            valid = valid && first < launcher && launcher < relay && relay < start
+            if (!valid) exit 1
+        }
+    ' "$1"
+}
+may_own_launcher_mode_contract_is_exact "$may_own_start_hook_contract" \
+    || {
+        printf '%s\n' 'MayOwn first launch is not bound to the restart launcher' >&2
+        exit 1
+    }
+may_own_launcher_mode_mutant=$tmp/may-own-launcher-mode-mutant.sh
+sed '/^        restart_exact_present_mode=yes$/d' \
+    "$may_own_start_hook_contract" >"$may_own_launcher_mode_mutant"
+sh -n "$may_own_launcher_mode_mutant"
+if may_own_launcher_mode_contract_is_exact "$may_own_launcher_mode_mutant"; then
+    printf '%s\n' 'MayOwn launcher-mode contract accepted a missing binding' >&2
+    exit 1
+fi
+
 observer_preexec_contract=$tmp/observer-preexec-contract
 sed -n '/^[[:space:]]*pre-exec-one|pre-exec-two|pre-exec-three)/,/^[[:space:]]*;;$/p' \
     "$observer" >"$observer_preexec_contract"

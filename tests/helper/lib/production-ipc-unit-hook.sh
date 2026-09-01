@@ -6734,6 +6734,7 @@ may_own_start_hook() {
         || fail 'MayOwn driver invocation is unavailable'
     if [ ! -e "$may_own_first_boundary_record" ] \
         && [ ! -L "$may_own_first_boundary_record" ]; then
+        restart_exact_present_mode=yes
         may_own_relay_mode=yes
         start_hook "$1" "$2" "$3" "$4" "$5" "$6"
         fail 'MayOwn first invocation crossed the forced-crash boundary'
