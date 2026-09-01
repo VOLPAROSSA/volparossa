@@ -386,8 +386,14 @@ async fn run_client_tcp_ingress(
         if routes
             .run_tcp_ingress(ingress, &active_policy, activation_ms)
             .await
-            .is_err()
+            .is_ok()
         {
+            state.write().await.log(
+                LogLevel::Info,
+                "INGRESS_TCP_STREAM_COMPLETED",
+                unix_millis(),
+            );
+        } else {
             routes.disconnect().await;
             state
                 .write()

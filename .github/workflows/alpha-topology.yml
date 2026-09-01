@@ -124,7 +124,9 @@ jobs:
               "last phase: \(.last_phase)",
               "helpers ready: \(.production_helpers.ready)",
               "agents ready: \(.agents_ready)",
+              "A02 transparent TCP succeeded: \(.a02_transparent_tcp.succeeded)",
               "Connect succeeded: \(.client_connect.succeeded)",
+              "A05 UDP echo succeeded: \(.a05_udp_echo.succeeded)",
               "observed blocker: \(.client_connect.observed_blocker)",
               "cleanup complete: \(.cleanup.complete)"
             ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -142,9 +144,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Require a successful product Connect
+      - name: Require successful A02 and A05 datapaths
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e '
+            .a02_transparent_tcp.succeeded == true and
+            .a02_transparent_tcp.evidence.success == true and
+            .a02_transparent_tcp.evidence.no_direct_client_exit.observed_packets == 0 and
+            .a05_udp_echo.succeeded == true and
+            .a05_udp_echo.evidence.success == true and
+            .cleanup.complete == true and
+            .cleanup.remaining_namespaces == 0 and
+            .cleanup.remaining_units == 0
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/report.json" >/dev/null

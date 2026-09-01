@@ -35,9 +35,10 @@ print_plan() {
         '  launch four distinct transient production-helper service instances;' \
         '  bind each helper and agent privately to its node-owned /run/volparossa;' \
         '  prove GetUnitByPID, MainPID, cgroup, network namespace and FD-store binding;' \
-        '  launch four real agents and a destination UDP echo application;' \
-        '  request Connect, then send one non-trusted application UDP datagram through ingress;' \
-        '  prove its exact reply, one selected Relay and zero direct Client-Exit packets;' \
+        '  launch four real agents and exact-policy TCP/UDP echo applications;' \
+        '  prove transparent TCP over Relay-only MPTCP/TLS and signed OPEN_TCP;' \
+        '  request UDP Connect, then send one non-trusted application datagram through ingress;' \
+        '  prove exact replies, selected Relays and zero direct Client-Exit packets;' \
         '  retain bounded evidence, then stop units and remove namespaces.'
 }
 
@@ -154,6 +155,8 @@ R1=$PREFIX-r1
 R2=$PREFIX-r2
 EXIT_NODE=$PREFIX-x
 DEST=$PREFIX-d
+A02_DESTINATION_IP=47.163.4.2
+A02_EXIT_SOURCE=47.163.4.1
 # PrivateTmp is part of both production service sandboxes and Debian mounts its
 # runtime tmpfs non-executable. Keep this disposable-VM stage on the executable
 # root filesystem so both transient units see and can execute the exact build.
@@ -169,11 +172,17 @@ DESTINATION_READY=false
 CONNECT_REQUESTED=false
 CONNECT_SUCCEEDED=false
 CONNECT_STATUS=-1
+A02_REQUESTED=false
+A02_SUCCEEDED=false
+A02_STATUS=-1
 A05_REQUESTED=false
 A05_SUCCEEDED=false
 A05_STATUS=-1
 OBSERVED_BLOCKER=NOT_REACHED
 CLEANUP_COMPLETE=false
+CLIENT_EXIT_ROUTE_ABSENT=false
+REMAINING_NAMESPACES=-1
+REMAINING_UNITS=-1
 HELPER_UNITS=
 AGENT_UNITS=
 DESTINATION_PID=
@@ -189,7 +198,11 @@ copy_artifacts() {
         roles-client.txt roles-relay1.txt roles-relay2.txt roles-exit.txt \
         helper-client.log helper-relay1.log helper-relay2.log helper-exit.log \
         agent-client.log agent-relay1.log agent-relay2.log agent-exit.log \
-        destination.log destination-udp-evidence.json helper-units.json \
+        destination.log destination-tcp-evidence.json destination-udp-evidence.json \
+        helper-units.json a02-client.json a02-client.err a02-client-fallback-route.txt \
+        a02-client-capture.json a02-client-capture.log a02-client-capture.err \
+        a02-exit-capture.json a02-exit-capture.log a02-exit-capture.err \
+        a02-evidence.json \
         a05-client.json a05-client.err a05-client-fallback-route.txt \
         a05-client-capture.json a05-client-capture.log a05-client-capture.err \
         a05-exit-capture.json a05-exit-capture.log a05-exit-capture.err \
@@ -232,6 +245,10 @@ write_report() {
     if [ -f "$WORK/helper-units.json" ]; then
         helper_records=$(cat "$WORK/helper-units.json" 2>/dev/null || printf '[]')
     fi
+    a02_evidence=null
+    if [ -f "$WORK/a02-evidence.json" ]; then
+        a02_evidence=$(cat "$WORK/a02-evidence.json" 2>/dev/null || printf 'null')
+    fi
     a05_evidence=null
     if [ -f "$WORK/a05-evidence.json" ]; then
         a05_evidence=$(cat "$WORK/a05-evidence.json" 2>/dev/null || printf 'null')
@@ -242,30 +259,41 @@ write_report() {
         --arg phase "$PHASE" \
         --arg blocker "$OBSERVED_BLOCKER" \
         --argjson topology "$TOPOLOGY_READY" \
+        --argjson client_exit_route_absent "$CLIENT_EXIT_ROUTE_ABSENT" \
         --argjson helpers "$HELPERS_READY" \
         --argjson agents "$AGENTS_READY" \
         --argjson destination "$DESTINATION_READY" \
         --argjson requested "$CONNECT_REQUESTED" \
         --argjson connected "$CONNECT_SUCCEEDED" \
         --argjson connect_status "$CONNECT_STATUS" \
+        --argjson a02_requested "$A02_REQUESTED" \
+        --argjson a02_succeeded "$A02_SUCCEEDED" \
+        --argjson a02_status "$A02_STATUS" \
         --argjson a05_requested "$A05_REQUESTED" \
         --argjson a05_succeeded "$A05_SUCCEEDED" \
         --argjson a05_status "$A05_STATUS" \
         --argjson cleanup "$CLEANUP_COMPLETE" \
+        --argjson remaining_namespaces "$REMAINING_NAMESPACES" \
+        --argjson remaining_units "$REMAINING_UNITS" \
         --argjson exit_status "$report_status" \
         --argjson helper_records "$helper_records" \
+        --argjson a02_evidence "$a02_evidence" \
         --argjson a05_evidence "$a05_evidence" \
         '{schema_version:1,report_kind:"volparossa-alpha-kvm-topology",
           source_revision:$commit,run_id:$run_id,last_phase:$phase,
           topology:{ready:$topology,direct_client_exit_adjacency:false,
+            client_exit_route_absent:$client_exit_route_absent,
             roles:["client","relay1","relay2","exit","destination"]},
           production_helpers:{ready:$helpers,instances:$helper_records},
           agents_ready:$agents,destination_ready:$destination,
           client_connect:{requested:$requested,succeeded:$connected,
             exit_status:$connect_status,observed_blocker:$blocker},
+          a02_transparent_tcp:{requested:$a02_requested,succeeded:$a02_succeeded,
+            exit_status:$a02_status,evidence:$a02_evidence},
           a05_udp_echo:{requested:$a05_requested,succeeded:$a05_succeeded,
             exit_status:$a05_status,evidence:$a05_evidence},
-          cleanup:{complete:$cleanup},runner_exit_status:$exit_status}' \
+          cleanup:{complete:$cleanup,remaining_namespaces:$remaining_namespaces,
+            remaining_units:$remaining_units},runner_exit_status:$exit_status}' \
         >"$output_directory/report.json"
     chown "$OUTPUT_UID:$OUTPUT_GID" "$output_directory/report.json"
     chmod 0600 "$output_directory/report.json"
@@ -285,6 +313,15 @@ cleanup() {
     done
     if [ -n "$DESTINATION_PID" ]; then
         kill -TERM "$DESTINATION_PID" 2>/dev/null || true
+        destination_stop_attempt=0
+        while kill -0 "$DESTINATION_PID" 2>/dev/null \
+            && [ "$destination_stop_attempt" -lt 50 ]; do
+            sleep 0.1
+            destination_stop_attempt=$((destination_stop_attempt + 1))
+        done
+        if kill -0 "$DESTINATION_PID" 2>/dev/null; then
+            kill -KILL "$DESTINATION_PID" 2>/dev/null || true
+        fi
         wait "$DESTINATION_PID" 2>/dev/null || true
     fi
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
@@ -293,14 +330,14 @@ cleanup() {
         ip netns del "$cleanup_ns" 2>/dev/null || true
     done
 
-    remaining_namespaces=$(ip netns list | awk -v prefix="$PREFIX-" \
+    REMAINING_NAMESPACES=$(ip netns list | awk -v prefix="$PREFIX-" \
         '$1 ~ ("^" prefix) { count++ } END { print count + 0 }')
-    remaining_units=0
+    REMAINING_UNITS=0
     for cleanup_unit in $AGENT_UNITS $HELPER_UNITS; do
         [ "$(unit_load_state "$cleanup_unit")" = not-found ] \
-            || remaining_units=$((remaining_units + 1))
+            || REMAINING_UNITS=$((REMAINING_UNITS + 1))
     done
-    if [ "$remaining_namespaces" -eq 0 ] && [ "$remaining_units" -eq 0 ]; then
+    if [ "$REMAINING_NAMESPACES" -eq 0 ] && [ "$REMAINING_UNITS" -eq 0 ]; then
         CLEANUP_COMPLETE=true
     else
         CLEANUP_COMPLETE=false
@@ -390,6 +427,8 @@ link_nodes "$CLIENT" cr2 10.241.12.1/30 "$R2" r2c 10.241.12.2/30
 link_nodes "$R1" r1x 10.241.21.1/30 "$EXIT_NODE" xr1 10.241.21.2/30
 link_nodes "$R2" r2x 10.241.22.1/30 "$EXIT_NODE" xr2 10.241.22.2/30
 link_nodes "$EXIT_NODE" xd 10.241.31.1/30 "$DEST" dx 10.241.31.2/30
+ip -n "$EXIT_NODE" address add 47.163.4.1/30 dev xd
+ip -n "$DEST" address add 47.163.4.2/30 dev dx
 add_public_underlay "$CLIENT" 43.159.1.1
 add_public_underlay "$R1" 44.160.1.1
 add_public_underlay "$R2" 45.161.2.1
@@ -402,12 +441,14 @@ ip -n "$R2" route add 43.159.1.1/32 via 10.241.12.1 dev r2c src 45.161.2.1
 ip -n "$R2" route add 46.162.3.1/32 via 10.241.22.2 dev r2x src 45.161.2.1
 ip -n "$EXIT_NODE" route add 44.160.1.1/32 via 10.241.21.1 dev xr1 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 45.161.2.1/32 via 10.241.22.1 dev xr2 src 46.162.3.1
-for forbidden in 10.241.21.2 10.241.22.2 10.241.31.1 10.241.31.2 46.162.3.1; do
+for forbidden in 10.241.21.2 10.241.22.2 10.241.31.1 10.241.31.2 46.162.3.1 \
+    47.163.4.1; do
     ip -n "$CLIENT" route add unreachable "$forbidden/32"
     if ip -n "$CLIENT" route get "$forbidden" >/dev/null 2>&1; then
         fail DIRECT_CLIENT_EXIT_REACHABLE
     fi
 done
+CLIENT_EXIT_ROUTE_ABSENT=true
 TOPOLOGY_READY=true
 
 PHASE=configuration
@@ -716,14 +757,14 @@ if role not in {"client", "exit"} or not interfaces:
 
 counters = (
     {
-        "relay1_outer_datagrams": 0,
-        "relay2_outer_datagrams": 0,
+        "relay1_wireguard_data_datagrams": 0,
+        "relay2_wireguard_data_datagrams": 0,
         "direct_client_exit_packets": 0,
     }
     if role == "client"
     else {
-        "relay1_outer_datagrams": 0,
-        "relay2_outer_datagrams": 0,
+        "relay1_wireguard_data_datagrams": 0,
+        "relay2_wireguard_data_datagrams": 0,
         "destination_request_datagrams": 0,
         "destination_response_datagrams": 0,
     }
@@ -777,7 +818,20 @@ while running and time.monotonic() < deadline:
                     "!HH", frame[offset + header_length : offset + header_length + 4]
                 )
             interface = sockets[capture]
-            is_control = source_port == 41000 or destination_port == 41000
+            transport_offset = offset + header_length
+            udp_length = 0
+            wireguard_message_type = 0
+            if protocol == socket.IPPROTO_UDP and len(frame) >= transport_offset + 12:
+                udp_length = struct.unpack(
+                    "!H", frame[transport_offset + 4 : transport_offset + 6]
+                )[0]
+                wireguard_message_type = struct.unpack(
+                    "<I", frame[transport_offset + 8 : transport_offset + 12]
+                )[0]
+            # WireGuard type 4 is encrypted transport data. Requiring a UDP length above 40
+            # excludes its zero-length keepalive form, so these counters do not mistake a
+            # handshake for traffic on an active MPTCP path.
+            is_wireguard_data = wireguard_message_type == 4 and udp_length > 40
             if role == "client":
                 if source == "43.159.1.1" and destination in {
                     "10.241.21.2",
@@ -787,22 +841,160 @@ while running and time.monotonic() < deadline:
                     "46.162.3.1",
                 }:
                     counters["direct_client_exit_packets"] += 1
-                if protocol == socket.IPPROTO_UDP and not is_control:
+                if protocol == socket.IPPROTO_UDP and is_wireguard_data:
                     if interface == "cr1" and source == "43.159.1.1" and destination == "44.160.1.1":
-                        counters["relay1_outer_datagrams"] += 1
+                        counters["relay1_wireguard_data_datagrams"] += 1
                     if interface == "cr2" and source == "43.159.1.1" and destination == "45.161.2.1":
-                        counters["relay2_outer_datagrams"] += 1
+                        counters["relay2_wireguard_data_datagrams"] += 1
             else:
-                if protocol == socket.IPPROTO_UDP and not is_control:
+                if protocol == socket.IPPROTO_UDP and is_wireguard_data:
                     if interface == "xr1" and source == "44.160.1.1" and destination == "46.162.3.1":
-                        counters["relay1_outer_datagrams"] += 1
+                        counters["relay1_wireguard_data_datagrams"] += 1
                     if interface == "xr2" and source == "45.161.2.1" and destination == "46.162.3.1":
-                        counters["relay2_outer_datagrams"] += 1
+                        counters["relay2_wireguard_data_datagrams"] += 1
                 if interface == "xd" and protocol == socket.IPPROTO_UDP:
                     if destination == "10.241.31.2" and destination_port == 18081:
                         counters["destination_request_datagrams"] += 1
                     if source == "10.241.31.2" and source_port == 18081:
                         counters["destination_response_datagrams"] += 1
+
+for capture in sockets:
+    capture.close()
+with open(output_path, "x", encoding="ascii") as output:
+    json.dump(
+        {
+            "schema_version": 1,
+            "capture_role": role,
+            "interfaces": interfaces,
+            "observed_frames": observed_frames,
+            "truncated": truncated,
+            **counters,
+        },
+        output,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    output.write("\n")
+PYTHON
+cat >"$WORK/bin/a02-observer.py" <<'PYTHON'
+import json
+import select
+import signal
+import socket
+import struct
+import sys
+import time
+
+role, output_path, ready_path, *interfaces = sys.argv[1:]
+if role not in {"client", "exit"} or not interfaces:
+    raise SystemExit("invalid bounded A02 observer arguments")
+
+counters = (
+    {
+        "relay1_wireguard_data_datagrams": 0,
+        "relay2_wireguard_data_datagrams": 0,
+        "direct_client_exit_packets": 0,
+    }
+    if role == "client"
+    else {
+        "relay1_wireguard_data_datagrams": 0,
+        "relay2_wireguard_data_datagrams": 0,
+        "destination_request_segments": 0,
+        "destination_response_segments": 0,
+    }
+)
+sockets = {}
+for interface in interfaces:
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    capture.bind((interface, 0))
+    capture.setblocking(False)
+    sockets[capture] = interface
+
+open(ready_path, "x", encoding="ascii").write("ready\n")
+running = True
+truncated = False
+observed_frames = 0
+
+
+def stop(*_unused):
+    global running
+    running = False
+
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+deadline = time.monotonic() + 180
+while running and time.monotonic() < deadline:
+    readable, _, _ = select.select(list(sockets), [], [], 0.2)
+    for capture in readable:
+        while True:
+            try:
+                frame = capture.recv(65535)
+            except BlockingIOError:
+                break
+            observed_frames += 1
+            if observed_frames > 131072:
+                truncated = True
+                running = False
+                break
+            if len(frame) < 34 or struct.unpack("!H", frame[12:14])[0] != 0x0800:
+                continue
+            offset = 14
+            header_length = (frame[offset] & 0x0F) * 4
+            if header_length < 20 or len(frame) < offset + header_length:
+                continue
+            protocol = frame[offset + 9]
+            source = socket.inet_ntoa(frame[offset + 12 : offset + 16])
+            destination = socket.inet_ntoa(frame[offset + 16 : offset + 20])
+            source_port = destination_port = 0
+            if protocol in {socket.IPPROTO_TCP, socket.IPPROTO_UDP} \
+                    and len(frame) >= offset + header_length + 4:
+                source_port, destination_port = struct.unpack(
+                    "!HH", frame[offset + header_length : offset + header_length + 4]
+                )
+            interface = sockets[capture]
+            transport_offset = offset + header_length
+            udp_length = 0
+            wireguard_message_type = 0
+            if protocol == socket.IPPROTO_UDP and len(frame) >= transport_offset + 12:
+                udp_length = struct.unpack(
+                    "!H", frame[transport_offset + 4 : transport_offset + 6]
+                )[0]
+                wireguard_message_type = struct.unpack(
+                    "<I", frame[transport_offset + 8 : transport_offset + 12]
+                )[0]
+            is_wireguard_data = wireguard_message_type == 4 and udp_length > 40
+            if role == "client":
+                if source == "43.159.1.1" and destination in {
+                    "10.241.21.2",
+                    "10.241.22.2",
+                    "10.241.31.1",
+                    "10.241.31.2",
+                    "46.162.3.1",
+                    "47.163.4.1",
+                    "47.163.4.2",
+                }:
+                    counters["direct_client_exit_packets"] += 1
+                if protocol == socket.IPPROTO_UDP and is_wireguard_data:
+                    if interface == "cr1" and source == "43.159.1.1" \
+                            and destination == "44.160.1.1":
+                        counters["relay1_wireguard_data_datagrams"] += 1
+                    if interface == "cr2" and source == "43.159.1.1" \
+                            and destination == "45.161.2.1":
+                        counters["relay2_wireguard_data_datagrams"] += 1
+            else:
+                if protocol == socket.IPPROTO_UDP and is_wireguard_data:
+                    if interface == "xr1" and source == "44.160.1.1" \
+                            and destination == "46.162.3.1":
+                        counters["relay1_wireguard_data_datagrams"] += 1
+                    if interface == "xr2" and source == "45.161.2.1" \
+                            and destination == "46.162.3.1":
+                        counters["relay2_wireguard_data_datagrams"] += 1
+                if interface == "xd" and protocol == socket.IPPROTO_TCP:
+                    if destination == "47.163.4.2" and destination_port == 18080:
+                        counters["destination_request_segments"] += 1
+                    if source == "47.163.4.2" and source_port == 18080:
+                        counters["destination_response_segments"] += 1
 
 for capture in sockets:
     capture.close()
@@ -834,7 +1026,17 @@ import sys
 udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp.bind(("10.241.31.2", 18081))
 udp.setblocking(False)
-open(sys.argv[1], "x", encoding="ascii").write("udp=10.241.31.2:18081\n")
+tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tcp.bind(("47.163.4.2", 18080))
+tcp.listen(8)
+tcp.setblocking(False)
+run_id = bytes.fromhex(sys.argv[4])
+tcp_prefix = b"volparossa-a02:" + run_id
+tcp_payload_bytes = 4 * 1024 * 1024
+open(sys.argv[1], "x", encoding="ascii").write(
+    "tcp=47.163.4.2:18080\nudp=10.241.31.2:18081\n"
+)
 running = True
 
 
@@ -845,39 +1047,81 @@ def stop(*_unused):
 
 signal.signal(signal.SIGTERM, stop)
 while running:
-    readable, _, _ = select.select([udp], [], [], 0.5)
+    readable, _, _ = select.select([udp, tcp], [], [], 0.5)
     if not readable:
         continue
-    payload, source = udp.recvfrom(2048)
-    if not payload or len(payload) > 1350:
-        continue
-    sent = udp.sendto(payload, source)
-    if sent != len(payload):
-        raise SystemExit("short UDP echo")
-    evidence = {
-        "schema_version": 1,
-        "listen": {"ip": "10.241.31.2", "port": 18081},
-        "source": {"ip": source[0], "port": source[1]},
-        "bytes": len(payload),
-        "sha256": hashlib.sha256(payload).hexdigest(),
-    }
-    if not os.path.exists(sys.argv[2]):
-        with open(sys.argv[2], "x", encoding="ascii") as output:
-            json.dump(evidence, output, sort_keys=True, separators=(",", ":"))
-            output.write("\n")
-            output.flush()
-            os.fsync(output.fileno())
-    print(json.dumps(evidence, sort_keys=True, separators=(",", ":")), flush=True)
+    if udp in readable:
+        payload, source = udp.recvfrom(2048)
+        if payload and len(payload) <= 1350:
+            sent = udp.sendto(payload, source)
+            if sent != len(payload):
+                raise SystemExit("short UDP echo")
+            evidence = {
+                "schema_version": 1,
+                "listen": {"ip": "10.241.31.2", "port": 18081},
+                "source": {"ip": source[0], "port": source[1]},
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            if not os.path.exists(sys.argv[2]):
+                with open(sys.argv[2], "x", encoding="ascii") as output:
+                    json.dump(evidence, output, sort_keys=True, separators=(",", ":"))
+                    output.write("\n")
+                    output.flush()
+                    os.fsync(output.fileno())
+            print(json.dumps(evidence, sort_keys=True, separators=(",", ":")), flush=True)
+    if tcp in readable:
+        connection, source = tcp.accept()
+        try:
+            connection.settimeout(90)
+            received = bytearray()
+            while len(received) < tcp_payload_bytes:
+                chunk = connection.recv(tcp_payload_bytes - len(received))
+                if not chunk:
+                    break
+                received.extend(chunk)
+            if len(received) != tcp_payload_bytes or not received.startswith(tcp_prefix):
+                continue
+            attempt_offset = len(tcp_prefix)
+            attempt = int.from_bytes(received[attempt_offset : attempt_offset + 4], "big")
+            if attempt >= 30:
+                continue
+            seed = tcp_prefix + attempt.to_bytes(4, "big")
+            expected_tcp = (seed * ((tcp_payload_bytes + len(seed) - 1) // len(seed)))[
+                :tcp_payload_bytes
+            ]
+            if bytes(received) != expected_tcp:
+                continue
+            connection.sendall(expected_tcp)
+            connection.shutdown(socket.SHUT_WR)
+            evidence = {
+                "schema_version": 1,
+                "listen": {"ip": "47.163.4.2", "port": 18080},
+                "source": {"ip": source[0], "port": source[1]},
+                "attempt": attempt,
+                "bytes": len(received),
+                "sha256": hashlib.sha256(received).hexdigest(),
+            }
+            evidence_path = os.path.join(sys.argv[3], f"tcp-evidence-{attempt}.json")
+            if not os.path.exists(evidence_path):
+                with open(evidence_path, "x", encoding="ascii") as output:
+                    json.dump(evidence, output, sort_keys=True, separators=(",", ":"))
+                    output.write("\n")
+                    output.flush()
+                    os.fsync(output.fileno())
+            print(json.dumps(evidence, sort_keys=True, separators=(",", ":")), flush=True)
+        finally:
+            connection.close()
 PYTHON
-chown root:root "$WORK/bin/a05-observer.py"
-chmod 0500 "$WORK/bin/a05-observer.py"
+chown root:root "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py"
+chmod 0500 "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py"
 chown "root:$AGENT_GID" "$WORK/bin/destination.py"
 chmod 0550 "$WORK/bin/destination.py"
 ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
     --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
     --no-new-privs -- \
     python3 "$WORK/bin/destination.py" "$WORK/destination/ready" \
-    "$WORK/destination/udp-evidence.json" \
+    "$WORK/destination/udp-evidence.json" "$WORK/destination" "$RUN_ID" \
     >"$WORK/destination.log" 2>&1 &
 DESTINATION_PID=$!
 
@@ -944,7 +1188,7 @@ capture_product_logs() {
     done
 }
 
-wait_a05_observer() {
+wait_observer() {
     observer_pid=$1
     observer_ready=$2
     observer_attempt=0
@@ -957,7 +1201,7 @@ wait_a05_observer() {
     return 1
 }
 
-stop_a05_observers() {
+stop_observers() {
     a05_observer_stop_status=0
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
@@ -972,6 +1216,220 @@ stop_a05_observers() {
     EXIT_OBSERVER_PID=
     return "$a05_observer_stop_status"
 }
+
+PHASE=a02-capture
+A02_REQUESTED=true
+A02_FALLBACK_ROUTE=$(ip -n "$CLIENT" -o route get "$A02_DESTINATION_IP" | sed -n '1p')
+printf '%s\n' "$A02_FALLBACK_ROUTE" >"$WORK/a02-client-fallback-route.txt"
+printf '%s\n' "$A02_FALLBACK_ROUTE" | grep -Eq '(^| )dev underlay( |$)' \
+    || fail A02_FALLBACK_ROUTE_INVALID
+if printf '%s\n' "$A02_FALLBACK_ROUTE" | grep -Eq '(^| )dev (cr1|cr2)( |$)'; then
+    fail DIRECT_CLIENT_EXIT_REACHABLE
+fi
+
+PHASE=a02-transparent-tcp-echo
+: >"$WORK/a02-client.err"
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    attempt_label=$(printf '%02d' "$attempt")
+    client_capture="$WORK/a02-client-capture-$attempt_label.json"
+    client_capture_ready="$WORK/a02-client-capture-$attempt_label.ready"
+    exit_capture="$WORK/a02-exit-capture-$attempt_label.json"
+    exit_capture_ready="$WORK/a02-exit-capture-$attempt_label.ready"
+    destination_evidence="$WORK/destination/tcp-evidence-$attempt.json"
+
+    ip netns exec "$CLIENT" python3 "$WORK/bin/a02-observer.py" \
+        client "$client_capture" "$client_capture_ready" \
+        cr1 cr2 underlay >"$WORK/a02-client-capture.log" \
+        2>"$WORK/a02-client-capture.err" &
+    CLIENT_OBSERVER_PID=$!
+    ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a02-observer.py" \
+        exit "$exit_capture" "$exit_capture_ready" \
+        xr1 xr2 xd >"$WORK/a02-exit-capture.log" \
+        2>"$WORK/a02-exit-capture.err" &
+    EXIT_OBSERVER_PID=$!
+    wait_observer "$CLIENT_OBSERVER_PID" "$client_capture_ready" \
+        || fail A02_CLIENT_CAPTURE_UNAVAILABLE
+    wait_observer "$EXIT_OBSERVER_PID" "$exit_capture_ready" \
+        || fail A02_EXIT_CAPTURE_UNAVAILABLE
+
+    set +e
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+        --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+        --no-new-privs -- python3 - "$RUN_ID" "$attempt" >"$WORK/a02-client.json" \
+        2>>"$WORK/a02-client.err" <<'PYTHON'
+import hashlib
+import json
+import socket
+import sys
+
+attempt = int(sys.argv[2])
+seed = b"volparossa-a02:" + bytes.fromhex(sys.argv[1]) + attempt.to_bytes(4, "big")
+payload_bytes = 4 * 1024 * 1024
+payload = (seed * ((payload_bytes + len(seed) - 1) // len(seed)))[:payload_bytes]
+destination = ("47.163.4.2", 18080)
+with socket.create_connection(destination, timeout=60) as application:
+    application.settimeout(90)
+    application.sendall(payload)
+    application.shutdown(socket.SHUT_WR)
+    response = bytearray()
+    while len(response) <= len(payload):
+        chunk = application.recv(min(4096, len(payload) + 1 - len(response)))
+        if not chunk:
+            break
+        response.extend(chunk)
+    local = application.getsockname()
+if bytes(response) != payload:
+    raise SystemExit("application received a substituted TCP response")
+json.dump(
+    {
+        "schema_version": 1,
+        "attempt": attempt,
+        "application": {"ip": local[0], "port": local[1]},
+        "destination": {"ip": destination[0], "port": destination[1]},
+        "response_source": {"ip": destination[0], "port": destination[1]},
+        "sent_bytes": len(payload),
+        "response_bytes": len(response),
+        "sent_sha256": hashlib.sha256(payload).hexdigest(),
+        "response_sha256": hashlib.sha256(response).hexdigest(),
+    },
+    sys.stdout,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+sys.stdout.write("\n")
+PYTHON
+    A02_STATUS=$?
+    set -e
+    evidence_attempt=0
+    while [ "$A02_STATUS" -eq 0 ] && [ "$evidence_attempt" -lt 100 ] \
+        && [ ! -s "$destination_evidence" ]; do
+        sleep 0.1
+        evidence_attempt=$((evidence_attempt + 1))
+    done
+    if ! stop_observers; then
+        A02_STATUS=1
+    fi
+    for evidence_file in "$WORK/a02-client.json" "$destination_evidence" \
+        "$client_capture" "$exit_capture"; do
+        if [ "$A02_STATUS" -eq 0 ] \
+            && { [ ! -s "$evidence_file" ] \
+                || ! jq -e . "$evidence_file" >/dev/null 2>&1; }; then
+            A02_STATUS=1
+        fi
+    done
+    if [ "$A02_STATUS" -eq 0 ]; then
+        install -o root -g root -m 0600 \
+            "$destination_evidence" "$WORK/destination-tcp-evidence.json"
+        install -o root -g root -m 0600 \
+            "$client_capture" "$WORK/a02-client-capture.json"
+        install -o root -g root -m 0600 \
+            "$exit_capture" "$WORK/a02-exit-capture.json"
+        break
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+done
+
+log_attempt=0
+while [ "$A02_STATUS" -eq 0 ] && [ "$log_attempt" -lt 300 ]; do
+    capture_product_logs
+    grep -F 'event=INGRESS_TCP_STREAM_COMPLETED' "$WORK/logs-client.txt" >/dev/null \
+        && grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-relay1.txt" >/dev/null \
+        && grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-relay2.txt" >/dev/null \
+        && grep -F 'event=MPTCP_EXIT_FLOW_COMPLETED' "$WORK/logs-exit.txt" >/dev/null \
+        && break
+    sleep 0.1
+    log_attempt=$((log_attempt + 1))
+done
+capture_product_logs
+
+for evidence_file in a02-client.json destination-tcp-evidence.json \
+    a02-client-capture.json a02-exit-capture.json; do
+    if [ ! -s "$WORK/$evidence_file" ] \
+        || ! jq -e . "$WORK/$evidence_file" >/dev/null 2>&1; then
+        A02_STATUS=1
+    fi
+done
+
+if [ "$A02_STATUS" -eq 0 ]; then
+    CLIENT_INGRESS_EVENT=false
+    RELAY1_MPTCP_EVENT=false
+    RELAY2_MPTCP_EVENT=false
+    EXIT_MPTCP_EVENT=false
+    grep -F 'event=INGRESS_TCP_STREAM_COMPLETED' "$WORK/logs-client.txt" >/dev/null \
+        && CLIENT_INGRESS_EVENT=true
+    grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-relay1.txt" >/dev/null \
+        && RELAY1_MPTCP_EVENT=true
+    grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-relay2.txt" >/dev/null \
+        && RELAY2_MPTCP_EVENT=true
+    grep -F 'event=MPTCP_EXIT_FLOW_COMPLETED' "$WORK/logs-exit.txt" >/dev/null \
+        && EXIT_MPTCP_EVENT=true
+    jq -S -c -n \
+        --slurpfile application "$WORK/a02-client.json" \
+        --slurpfile destination "$WORK/destination-tcp-evidence.json" \
+        --slurpfile client_capture "$WORK/a02-client-capture.json" \
+        --slurpfile exit_capture "$WORK/a02-exit-capture.json" \
+        --arg fallback_route "$A02_FALLBACK_ROUTE" \
+        --arg exit_source "$A02_EXIT_SOURCE" \
+        --argjson route_absent "$CLIENT_EXIT_ROUTE_ABSENT" \
+        --argjson ingress_event "$CLIENT_INGRESS_EVENT" \
+        --argjson relay1_event "$RELAY1_MPTCP_EVENT" \
+        --argjson relay2_event "$RELAY2_MPTCP_EVENT" \
+        --argjson exit_event "$EXIT_MPTCP_EVENT" \
+        '($application[0]) as $app
+        | ($destination[0]) as $destination
+        | ($client_capture[0]) as $client
+        | ($exit_capture[0]) as $exit
+        | (($app.destination == {ip:"47.163.4.2",port:18080})
+            and ($app.attempt == $destination.attempt)
+            and ($app.response_source == $app.destination)
+            and ($app.sent_bytes == $app.response_bytes)
+            and ($app.sent_sha256 == $app.response_sha256)
+            and ($app.sent_bytes == $destination.bytes)
+            and ($app.sent_sha256 == $destination.sha256)
+            and ($destination.listen == $app.destination)
+            and ($destination.source.ip == $exit_source)
+            and $route_absent
+            and ($client.relay1_wireguard_data_datagrams > 0)
+            and ($client.relay2_wireguard_data_datagrams > 0)
+            and ($exit.relay1_wireguard_data_datagrams > 0)
+            and ($exit.relay2_wireguard_data_datagrams > 0)
+            and ($client.direct_client_exit_packets == 0)
+            and ($client.truncated == false)
+            and ($exit.truncated == false)
+            and ($exit.destination_request_segments > 0)
+            and ($exit.destination_response_segments > 0)
+            and $ingress_event and $relay1_event and $relay2_event and $exit_event) as $success
+        | {schema_version:1,acceptance_id:"A02",success:$success,
+           transport:"IPPROTO_MPTCP over two Relay WireGuard paths, TLS 1.3",
+           application:$app,destination_echo:$destination,
+           path_evidence:{client_capture:$client,exit_capture:$exit,
+             relay_only_path_count:2,relay1_session_completed:$relay1_event,
+             relay2_session_completed:$relay2_event},
+           protected_flow:{helper_tproxy_ingress_completed:$ingress_event,
+             kernel_mptcp_negotiation_gate_passed:$exit_event,
+             tls_1_3_gate_passed:$exit_event,signed_open_tcp_gate_passed:$exit_event,
+             ordinary_tcp_fallback_allowed:false},
+           no_direct_client_exit:{topology_adjacency:false,route_absent:$route_absent,
+             fallback_route:$fallback_route,
+             observed_packets:$client.direct_client_exit_packets}}' \
+        >"$WORK/a02-evidence.json"
+    jq -e '.success == true' "$WORK/a02-evidence.json" >/dev/null 2>&1 \
+        || A02_STATUS=1
+fi
+
+if [ "$A02_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=$(grep -Eo 'event=INGRESS_TCP_[A-Z0-9_]+' \
+        "$WORK/logs-client.txt" 2>/dev/null | tail -n 1 | sed 's/^event=//' || true)
+    [ -n "$OBSERVED_BLOCKER" ] || OBSERVED_BLOCKER=A02_TRANSPARENT_TCP_UNAVAILABLE
+    PHASE=a02-blocked
+    exit 77
+fi
+
+A02_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a02-complete
 
 PHASE=client-connect
 CONNECT_REQUESTED=true
@@ -1025,9 +1483,9 @@ ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a05-observer.py" \
     xr1 xr2 xd >"$WORK/a05-exit-capture.log" \
     2>"$WORK/a05-exit-capture.err" &
 EXIT_OBSERVER_PID=$!
-wait_a05_observer "$CLIENT_OBSERVER_PID" "$WORK/a05-client-capture.ready" \
+wait_observer "$CLIENT_OBSERVER_PID" "$WORK/a05-client-capture.ready" \
     || fail A05_CLIENT_CAPTURE_UNAVAILABLE
-wait_a05_observer "$EXIT_OBSERVER_PID" "$WORK/a05-exit-capture.ready" \
+wait_observer "$EXIT_OBSERVER_PID" "$WORK/a05-exit-capture.ready" \
     || fail A05_EXIT_CAPTURE_UNAVAILABLE
 
 PHASE=a05-udp-echo
@@ -1073,7 +1531,7 @@ PYTHON
 A05_STATUS=$?
 set -e
 sleep 1
-if ! stop_a05_observers; then
+if ! stop_observers; then
     A05_STATUS=1
 fi
 if [ -f "$WORK/destination/udp-evidence.json" ] \
@@ -1103,14 +1561,14 @@ if [ "$A05_STATUS" -eq 0 ]; then
         | ($destination[0]) as $destination
         | ($client_capture[0]) as $client
         | ($exit_capture[0]) as $exit
-        | (if $client.relay1_outer_datagrams > 0
-              and $client.relay2_outer_datagrams == 0
-              and $exit.relay1_outer_datagrams > 0
-              and $exit.relay2_outer_datagrams == 0 then "relay1"
-           elif $client.relay2_outer_datagrams > 0
-              and $client.relay1_outer_datagrams == 0
-              and $exit.relay2_outer_datagrams > 0
-              and $exit.relay1_outer_datagrams == 0 then "relay2"
+        | (if $client.relay1_wireguard_data_datagrams > 0
+              and $client.relay2_wireguard_data_datagrams == 0
+              and $exit.relay1_wireguard_data_datagrams > 0
+              and $exit.relay2_wireguard_data_datagrams == 0 then "relay1"
+           elif $client.relay2_wireguard_data_datagrams > 0
+              and $client.relay1_wireguard_data_datagrams == 0
+              and $exit.relay2_wireguard_data_datagrams > 0
+              and $exit.relay1_wireguard_data_datagrams == 0 then "relay2"
            else "ambiguous" end) as $selected
         | (($app.destination == {ip:"10.241.31.2",port:18081})
             and ($app.response_source == $app.destination)

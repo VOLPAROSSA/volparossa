@@ -63,5 +63,22 @@ grep -F 'selected_relay:$selected' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A05",success:$success' "$GUEST" >/dev/null
 grep -F 'a05_udp_echo:{requested:$a05_requested,succeeded:$a05_succeeded' "$GUEST" \
     >/dev/null
+grep -F 'tcp.bind(("47.163.4.2", 18080))' "$GUEST" >/dev/null
+grep -F 'socket.create_connection(destination, timeout=60)' "$GUEST" >/dev/null
+grep -F '"relay1_wireguard_data_datagrams": 0' "$GUEST" >/dev/null
+grep -F 'wireguard_message_type == 4 and udp_length > 40' "$GUEST" >/dev/null
+grep -F 'tcp_payload_bytes = 4 * 1024 * 1024' "$GUEST" >/dev/null
+grep -F 'if observed_frames > 131072:' "$GUEST" >/dev/null
+grep -F 'destination_evidence="$WORK/destination/tcp-evidence-$attempt.json"' "$GUEST" \
+    >/dev/null
+grep -F '"$WORK/destination/udp-evidence.json"' "$GUEST" >/dev/null
+grep -F 'and ($app.attempt == $destination.attempt)' "$GUEST" >/dev/null
+grep -F 'destination_stop_attempt=0' "$GUEST" >/dev/null
+grep -F 'event=INGRESS_TCP_STREAM_COMPLETED' "$GUEST" >/dev/null
+grep -F 'event=MPTCP_EXIT_FLOW_COMPLETED' "$GUEST" >/dev/null
+grep -F 'ordinary_tcp_fallback_allowed:false' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A02",success:$success' "$GUEST" >/dev/null
+grep -F 'a02_transparent_tcp:{requested:$a02_requested,succeeded:$a02_succeeded' "$GUEST" \
+    >/dev/null
 
 printf '%s\n' 'KVM alpha topology static contract passed'
