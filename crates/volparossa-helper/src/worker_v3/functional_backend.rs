@@ -25,9 +25,12 @@ use std::{
 };
 
 use rustix::time::{ClockId, clock_gettime};
+use sha2::{Digest as _, Sha256};
 use volparossa_protocol::{
-    ClientSessionCapability, ExitReservation, ProtocolError, RelayAuthorization, RelayReservation,
-    RelayReservationRequest, ReplayCache, TimePolicy, VerifiedControlMessage, WireguardEndpoint,
+    ClientSessionCapability, ControlMessageType, ExitReservation, MAX_CONTROL_MESSAGE_SIZE,
+    NativeProbeStart, ObservationAddressFamily, ProtocolError, RelayAuthorization,
+    RelayReservation, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy,
+    VerifiedControlMessage, WireguardEndpoint, decode_canonical, native_probe_start_hash,
     relay_reservation_request_sha256, verify_control_message, verify_relay_reservation,
 };
 use volparossa_routing::{
@@ -2905,9 +2908,22 @@ fn verified_internal_activate_batch_plan(
 
 struct VerifiedActivationAuthority {
     context: ContextRole,
-    request: Option<VerifiedControlMessage<RelayReservationRequest>>,
+    client_request: Option<VerifiedRelayClientRequest>,
     relay: VerifiedControlMessage<RelayReservation>,
     exit: VerifiedControlMessage<RelayAuthorization>,
+}
+
+enum VerifiedRelayClientRequest {
+    Reservation {
+        request: VerifiedControlMessage<RelayReservationRequest>,
+        capability: VerifiedControlMessage<ClientSessionCapability>,
+        exit_reservation: Box<VerifiedControlMessage<ExitReservation>>,
+    },
+    NativeStart {
+        start: VerifiedControlMessage<NativeProbeStart>,
+        signed_sha256: [u8; 32],
+        start_hash: [u8; 32],
+    },
 }
 
 #[allow(
@@ -2923,7 +2939,7 @@ fn verify_activation_authority(
     replay_cache: &mut ReplayCache,
     replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
 ) -> Result<VerifiedActivationAuthority, BackendError> {
-    let (request, capability, exit_reservation) = if context == ContextRole::Relay {
+    let client_request = if context == ContextRole::Relay {
         let [client, exit] = activations else {
             return Err(BackendError::Invalid);
         };
@@ -2932,43 +2948,14 @@ fn verify_activation_authority(
         {
             return Err(BackendError::Invalid);
         }
-        let verified = verify_control_message::<RelayReservationRequest>(
+        Some(verify_relay_client_request(
             &client.signed_client_relay_request,
             now_ms,
-            TimePolicy::default(),
             replay_cache,
-        )
-        .map_err(|error| protocol_backend_error(&error))?;
-        replay_keys.push((*verified.sender_id(), *verified.nonce()));
-        let verified_capability = verify_control_message::<ClientSessionCapability>(
-            &verified.message().client_session_capability,
-            now_ms,
-            TimePolicy::default(),
-            replay_cache,
-        )
-        .map_err(|error| protocol_backend_error(&error))?;
-        replay_keys.push((
-            *verified_capability.sender_id(),
-            *verified_capability.nonce(),
-        ));
-        let verified_exit_reservation = verify_control_message::<ExitReservation>(
-            &verified.message().exit_reservation,
-            now_ms,
-            TimePolicy::default(),
-            replay_cache,
-        )
-        .map_err(|error| protocol_backend_error(&error))?;
-        replay_keys.push((
-            *verified_exit_reservation.sender_id(),
-            *verified_exit_reservation.nonce(),
-        ));
-        (
-            Some(verified),
-            Some(verified_capability),
-            Some(verified_exit_reservation),
-        )
+            replay_keys,
+        )?)
     } else {
-        (None, None, None)
+        None
     };
     let (relay, exit) = verify_relay_reservation(
         &activations[0].signed_relay_reservation,
@@ -3000,23 +2987,195 @@ fn verify_activation_authority(
     {
         return Err(BackendError::Invalid);
     }
-    if context == ContextRole::Relay
-        && !verified_relay_request_scope(
-            request.as_ref().ok_or(BackendError::Invalid)?,
-            capability.as_ref().ok_or(BackendError::Invalid)?,
-            exit_reservation.as_ref().ok_or(BackendError::Invalid)?,
-            &relay,
-            &exit,
-        )
-    {
-        return Err(BackendError::Invalid);
+    if context == ContextRole::Relay {
+        match client_request.as_ref().ok_or(BackendError::Invalid)? {
+            VerifiedRelayClientRequest::Reservation {
+                request,
+                capability,
+                exit_reservation,
+            } if verified_relay_request_scope(
+                request,
+                capability,
+                exit_reservation,
+                &relay,
+                &exit,
+            ) => {}
+            VerifiedRelayClientRequest::NativeStart {
+                start,
+                signed_sha256,
+                start_hash,
+            } if verified_native_start_scope(
+                key,
+                start,
+                signed_sha256,
+                start_hash,
+                &relay,
+                &exit,
+            ) => {}
+            _ => return Err(BackendError::Invalid),
+        }
     }
     Ok(VerifiedActivationAuthority {
         context,
-        request,
+        client_request,
         relay,
         exit,
     })
+}
+
+fn verify_relay_client_request(
+    encoded: &[u8],
+    now_ms: u64,
+    replay_cache: &mut ReplayCache,
+    replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
+) -> Result<VerifiedRelayClientRequest, BackendError> {
+    let envelope: SignedEnvelope = decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE)
+        .map_err(|error| protocol_backend_error(&error))?;
+    match ControlMessageType::try_from(envelope.message_type) {
+        Ok(ControlMessageType::RelayReservationRequest) => {
+            let request = verify_control_message::<RelayReservationRequest>(
+                encoded,
+                now_ms,
+                TimePolicy::default(),
+                replay_cache,
+            )
+            .map_err(|error| protocol_backend_error(&error))?;
+            replay_keys.push((*request.sender_id(), *request.nonce()));
+            let capability = verify_control_message::<ClientSessionCapability>(
+                &request.message().client_session_capability,
+                now_ms,
+                TimePolicy::default(),
+                replay_cache,
+            )
+            .map_err(|error| protocol_backend_error(&error))?;
+            replay_keys.push((*capability.sender_id(), *capability.nonce()));
+            let exit_reservation = verify_control_message::<ExitReservation>(
+                &request.message().exit_reservation,
+                now_ms,
+                TimePolicy::default(),
+                replay_cache,
+            )
+            .map_err(|error| protocol_backend_error(&error))?;
+            replay_keys.push((*exit_reservation.sender_id(), *exit_reservation.nonce()));
+            Ok(VerifiedRelayClientRequest::Reservation {
+                request,
+                capability,
+                exit_reservation: Box::new(exit_reservation),
+            })
+        }
+        Ok(ControlMessageType::NativeProbeStart) => {
+            let start = verify_control_message::<NativeProbeStart>(
+                encoded,
+                now_ms,
+                TimePolicy::default(),
+                replay_cache,
+            )
+            .map_err(|error| protocol_backend_error(&error))?;
+            replay_keys.push((*start.sender_id(), *start.nonce()));
+            let start_hash =
+                native_probe_start_hash(encoded).map_err(|error| protocol_backend_error(&error))?;
+            Ok(VerifiedRelayClientRequest::NativeStart {
+                start,
+                signed_sha256: Sha256::digest(encoded).into(),
+                start_hash,
+            })
+        }
+        _ => Err(BackendError::Invalid),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native Start must independently bind every actor and grant scope"
+)]
+fn verified_native_start_scope(
+    key: OpenLineageKey,
+    start: &VerifiedControlMessage<NativeProbeStart>,
+    signed_sha256: &[u8; 32],
+    start_hash: &[u8; 32],
+    relay: &VerifiedControlMessage<RelayReservation>,
+    authorization: &VerifiedControlMessage<RelayAuthorization>,
+) -> bool {
+    let start_message = start.message();
+    let relay_message = relay.message();
+    let authorization_message = authorization.message();
+    let Some(scope) = start_message.scope.as_ref() else {
+        return false;
+    };
+    let Some(data_relay) = scope.data_relay.as_ref() else {
+        return false;
+    };
+    let Some(control_relay) = scope.control.as_ref() else {
+        return false;
+    };
+    let Some(exit) = scope.exit.as_ref() else {
+        return false;
+    };
+    let Some(client_binding) = start_message.client_endpoint.as_ref() else {
+        return false;
+    };
+    let Some(client_endpoint) = client_binding.endpoint.as_ref() else {
+        return false;
+    };
+    let Some(relay_client_endpoint) = relay_message.relay_client_wireguard_endpoint.as_ref() else {
+        return false;
+    };
+    let Some(relay_exit_endpoint) = relay_message.relay_exit_wireguard_endpoint.as_ref() else {
+        return false;
+    };
+    let Some(exit_endpoint) = authorization_message.exit_wireguard_endpoint.as_ref() else {
+        return false;
+    };
+    let family_matches = [
+        client_endpoint,
+        relay_client_endpoint,
+        relay_exit_endpoint,
+        exit_endpoint,
+    ]
+    .iter()
+    .all(|endpoint| native_endpoint_family_matches(scope.address_family, endpoint));
+    let finalize_id = &start_hash[..16];
+
+    start.sender_public_key().as_slice() == scope.client_session_public_key
+        && start.sender_public_key().as_slice() == relay_message.client_session_public_key
+        && start.sender_public_key() != relay.sender_public_key()
+        && start.sender_public_key() != authorization.sender_public_key()
+        && scope.probe_id.as_slice() == key.context_id
+        && scope.probe_id == relay_message.reservation_id
+        && scope.probe_id == relay_message.route_context_id
+        && scope.attempt_id == relay_message.capability_id
+        && scope.client_session_id == relay_message.client_session_id
+        && scope.client_session_public_key == relay_message.client_session_public_key
+        && data_relay.node_id == relay_message.relay_node_id
+        && data_relay.peer_id == relay_message.relay_peer_id
+        && data_relay.public_key.as_slice() == relay.sender_public_key()
+        && control_relay.node_id == relay_message.control_relay_node_id
+        && control_relay.peer_id == relay_message.control_relay_peer_id
+        && exit.node_id == relay_message.exit_node_id
+        && exit.peer_id == relay_message.exit_peer_id
+        && exit.public_key.as_slice() == authorization.sender_public_key()
+        && relay_message.path_id == 1
+        && relay_message.allowed_transports.as_slice() == [scope.transport]
+        && relay_message.policy_hash == scope.policy_hash
+        && relay_message.created_at_ms == start_message.started_at_ms
+        && relay_message.expires_at_ms == start_message.expires_at_ms
+        && relay_message.expires_at_ms <= scope.attempt_expires_at_ms
+        && relay_message.hold_id == scope.probe_id
+        && relay_message.finalize_id.as_slice() == finalize_id
+        && relay_message.signed_client_relay_request_sha256.as_slice() == signed_sha256
+        && relay_message.client_wireguard_public_key == client_endpoint.public_key
+        && client_binding.helper_runtime_id.as_slice() != key.helper_runtime_id
+        && family_matches
+}
+
+fn native_endpoint_family_matches(family: i32, endpoint: &WireguardEndpoint) -> bool {
+    matches!(
+        (
+            ObservationAddressFamily::try_from(family),
+            endpoint.underlay_ip.len()
+        ),
+        (Ok(ObservationAddressFamily::Ipv4), 4) | (Ok(ObservationAddressFamily::Ipv6), 16)
+    )
 }
 
 fn verified_relay_request_scope(
@@ -3172,21 +3331,48 @@ fn verified_relay_activation_endpoints(
     let [client_activation, exit_activation] = activations else {
         return Err(BackendError::Invalid);
     };
-    let verified_request = authority.request.as_ref().ok_or(BackendError::Invalid)?;
-    let request = verified_request.message();
+    let client_request = authority
+        .client_request
+        .as_ref()
+        .ok_or(BackendError::Invalid)?;
     let relay = authority.relay.message();
-    let request_hash =
-        relay_reservation_request_sha256(&client_activation.signed_client_relay_request)
-            .map_err(|_| BackendError::Invalid)?;
+    let (request_sender, request_hash, client_peer) = match client_request {
+        VerifiedRelayClientRequest::Reservation { request, .. } => (
+            request.sender_public_key(),
+            relay_reservation_request_sha256(&client_activation.signed_client_relay_request)
+                .map_err(|_| BackendError::Invalid)?,
+            request
+                .message()
+                .client_wireguard_endpoint
+                .as_ref()
+                .and_then(verified_wireguard_endpoint)
+                .ok_or(BackendError::Invalid)?,
+        ),
+        VerifiedRelayClientRequest::NativeStart {
+            start,
+            signed_sha256,
+            ..
+        } => (
+            start.sender_public_key(),
+            *signed_sha256,
+            start
+                .message()
+                .client_endpoint
+                .as_ref()
+                .and_then(|binding| binding.endpoint.as_ref())
+                .and_then(verified_wireguard_endpoint)
+                .ok_or(BackendError::Invalid)?,
+        ),
+    };
     let signed_hash: [u8; 32] = relay
         .signed_client_relay_request_sha256
         .as_slice()
         .try_into()
         .map_err(|_| BackendError::Invalid)?;
     if request_hash != signed_hash
-        || verified_request.sender_public_key().as_slice() != relay.client_session_public_key
-        || verified_request.sender_public_key() == authority.relay.sender_public_key()
-        || verified_request.sender_public_key() == authority.exit.sender_public_key()
+        || request_sender.as_slice() != relay.client_session_public_key
+        || request_sender == authority.relay.sender_public_key()
+        || request_sender == authority.exit.sender_public_key()
         || client_activation.maximum_up_mbps
             != u32::try_from(relay.maximum_up_mbps).map_err(|_| BackendError::Invalid)?
         || client_activation.maximum_down_mbps
@@ -3225,11 +3411,6 @@ fn verified_relay_activation_endpoints(
     ) {
         return Err(BackendError::Invalid);
     }
-    let client_peer = request
-        .client_wireguard_endpoint
-        .as_ref()
-        .and_then(verified_wireguard_endpoint)
-        .ok_or(BackendError::Invalid)?;
     let exit_peer = authority
         .exit
         .message()
@@ -3875,9 +4056,10 @@ mod tests {
     use nix::unistd::{getegid, geteuid};
     use tempfile::tempdir;
     use volparossa_protocol::{
-        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, RelayAuthorization, RelayReservation,
-        SignedEnvelope, Transport, decode_canonical, generate_nonce, node_id_from_public_key,
-        sign_control_message,
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeProbeEndpointBinding,
+        NativeProbePathScope, NativeProbeStart, PreselectionActorBinding, RelayAuthorization,
+        RelayReservation, SignedEnvelope, Transport, decode_canonical, generate_nonce,
+        node_id_from_public_key, sign_control_message,
     };
     use volparossa_test_support::SignedRouteFixture;
 
@@ -6188,6 +6370,153 @@ mod tests {
         (key, binding, value, prepared, underlay, route)
     }
 
+    fn live_native_relay_activate_fixture() -> (
+        OpenLineageKey,
+        ActivateLeaseBatch,
+        [PreparedWorkerLease; 2],
+        UnderlayCandidate,
+        SignedRouteFixture,
+    ) {
+        live_native_relay_activate_fixture_with(|_| {})
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture converts the finalized-route fixture into the exact native Start grant"
+    )]
+    fn live_native_relay_activate_fixture_with(
+        mutate_start: impl FnOnce(&mut NativeProbeStart),
+    ) -> (
+        OpenLineageKey,
+        ActivateLeaseBatch,
+        [PreparedWorkerLease; 2],
+        UnderlayCandidate,
+        SignedRouteFixture,
+    ) {
+        let (mut key, _, mut value, prepared, underlay, route) = live_relay_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now_unix = now_ms / 1_000;
+        key.setup_expires_at_unix = now_unix + 5;
+        key.hard_expires_at_unix = now_unix + 10;
+        let expires_at_ms = now_ms + 20_000;
+        let relay = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
+        let request = decode_relay_request(&value.leases[0].signed_client_relay_request);
+        let attempt_id = [0x71; 16];
+        let data_relay = native_actor(
+            route.relay_key(0).expect("Relay key"),
+            route.relay_peer_id(0).expect("Relay peer ID"),
+            0x72,
+            expires_at_ms + 5_000,
+        );
+        let exit = native_actor(
+            route.exit_key(),
+            route.exit_peer_id(),
+            0x73,
+            expires_at_ms + 5_000,
+        );
+        let scope = NativeProbePathScope {
+            attempt_id: attempt_id.to_vec(),
+            probe_id: key.context_id.to_vec(),
+            candidate_set_hash: vec![0x74; 32],
+            candidate_ordinal: 1,
+            data_relay: Some(data_relay.clone()),
+            control: Some(data_relay),
+            exit: Some(exit),
+            client_session_id: route.client_session_id().to_vec(),
+            client_session_public_key: route.client_key().verifying_key().to_bytes().to_vec(),
+            transport: Transport::TcpMptcp as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: 1,
+            policy_hash: relay.policy_hash.clone(),
+            policy_expires_at_ms: expires_at_ms + 5_000,
+            challenge_hash: vec![0x75; 32],
+            attempt_expires_at_ms: expires_at_ms,
+        };
+        let mut start = NativeProbeStart {
+            permit_hash: vec![0x76; 32],
+            relay_ready_hash: vec![0x77; 32],
+            scope: Some(scope),
+            client_endpoint: Some(NativeProbeEndpointBinding {
+                helper_runtime_id: vec![0x78; 32],
+                route_context_id: key.context_id.to_vec(),
+                endpoint: request.client_wireguard_endpoint.clone(),
+                prepared_lease_commitment: vec![0x79; 32],
+            }),
+            started_at_ms: now_ms,
+            expires_at_ms,
+            nonce: generate_nonce().to_vec(),
+        };
+        mutate_start(&mut start);
+        let start_nonce: [u8; 32] = start.nonce.as_slice().try_into().expect("Start nonce");
+        let signed_start = sign_control_message(
+            &start,
+            route.client_key(),
+            start.started_at_ms,
+            start.expires_at_ms,
+            start_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed native Start");
+        let signed_sha256: [u8; 32] = Sha256::digest(&signed_start).into();
+        let start_hash = native_probe_start_hash(&signed_start).expect("native Start hash");
+        let policy_hash = relay.policy_hash;
+        let grant = resign_consistent_grant(&route, |relay, authorization| {
+            relay.reservation_id = key.context_id.to_vec();
+            relay.route_context_id = key.context_id.to_vec();
+            relay.path_id = 1;
+            relay.client_session_id = route.client_session_id().to_vec();
+            relay.allowed_transports = vec![Transport::TcpMptcp as i32];
+            relay.policy_hash.clone_from(&policy_hash);
+            relay.created_at_ms = now_ms;
+            relay.expires_at_ms = expires_at_ms;
+            relay.capability_id = attempt_id.to_vec();
+            relay.hold_id = key.context_id.to_vec();
+            relay.finalize_id = start_hash[..16].to_vec();
+            relay.control_relay_node_id = route.relay_node_id(0).expect("Relay node ID").to_vec();
+            relay.control_relay_peer_id = route.relay_peer_id(0).expect("Relay peer ID").to_vec();
+            relay.signed_client_relay_request_sha256 = signed_sha256.to_vec();
+
+            authorization.reservation_id = key.context_id.to_vec();
+            authorization.route_context_id = key.context_id.to_vec();
+            authorization.path_id = 1;
+            authorization.client_session_id = route.client_session_id().to_vec();
+            authorization.allowed_transports = vec![Transport::TcpMptcp as i32];
+            authorization.policy_hash.clone_from(&policy_hash);
+            authorization.created_at_ms = now_ms;
+            authorization.expires_at_ms = expires_at_ms;
+            authorization.capability_id = attempt_id.to_vec();
+            authorization.hold_id = key.context_id.to_vec();
+            authorization.finalize_id = start_hash[..16].to_vec();
+            authorization.control_relay_node_id =
+                route.relay_node_id(0).expect("Relay node ID").to_vec();
+            authorization.control_relay_peer_id =
+                route.relay_peer_id(0).expect("Relay peer ID").to_vec();
+        });
+        for activation in &mut value.leases {
+            activation.signed_relay_reservation.clone_from(&grant);
+        }
+        value.leases[0].signed_client_relay_request = signed_start;
+        (key, value, prepared, underlay, route)
+    }
+
+    fn native_actor(
+        key: &SigningKey,
+        peer_id: &[u8],
+        seed: u8,
+        expires_at_ms: u64,
+    ) -> PreselectionActorBinding {
+        let public_key = key.verifying_key().to_bytes();
+        PreselectionActorBinding {
+            node_id: node_id_from_public_key(&public_key).to_vec(),
+            peer_id: peer_id.to_vec(),
+            public_key: public_key.to_vec(),
+            advertisement_sequence: 1,
+            advertisement_expires_at_ms: expires_at_ms,
+            advertisement_payload_hash: vec![seed; 32],
+            capability_expires_at_ms: expires_at_ms,
+        }
+    }
+
     fn live_relay_probe_fixture() -> (
         OpenLineageKey,
         BackendBinding,
@@ -6273,7 +6602,15 @@ mod tests {
         route: &SignedRouteFixture,
         mutate: impl FnOnce(&mut RelayReservation, &mut RelayAuthorization),
     ) -> Vec<u8> {
-        let mut relay = decode_relay_reservation(&route.relay_reservations()[0]);
+        resign_consistent_grant_from(route, &route.relay_reservations()[0], mutate)
+    }
+
+    fn resign_consistent_grant_from(
+        route: &SignedRouteFixture,
+        encoded: &[u8],
+        mutate: impl FnOnce(&mut RelayReservation, &mut RelayAuthorization),
+    ) -> Vec<u8> {
+        let mut relay = decode_relay_reservation(encoded);
         let mut exit = decode_relay_authorization(&relay.exit_authorization);
         mutate(&mut relay, &mut exit);
         let exit_nonce: [u8; 32] = exit.nonce.as_slice().try_into().expect("exit nonce");
@@ -6705,6 +7042,186 @@ mod tests {
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].role, WireguardRole::RelayClient as i32);
         assert_eq!(commits[1].role, WireguardRole::RelayExit as i32);
+    }
+
+    #[test]
+    fn relay_activate_accepts_exact_signed_native_start_grant() {
+        let (key, value, prepared, underlay, _) = live_native_relay_activate_fixture();
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verify_relay_fixture_plan(
+            &replay,
+            key,
+            &prepared,
+            underlay,
+            &value,
+            unix_milliseconds().expect("fixture time"),
+        )
+        .expect("verified native Relay pair");
+        assert_eq!(lock_replay_cache(&replay).len(), 3);
+        let [client, exit] = plan.leases.as_slice() else {
+            panic!("two native Relay endpoint activations")
+        };
+        assert_eq!(client.peer_public_key, value.leases[0].peer_public_key);
+        assert_eq!(exit.peer_public_key, value.leases[1].peer_public_key);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one substitution matrix proves the complete native activation scope and replay rollback"
+    )]
+    fn native_start_scope_hash_signature_and_path_substitutions_fail_closed() {
+        let mutations: [fn(&mut NativeProbeStart); 6] = [
+            |start| {
+                start.scope.as_mut().expect("scope").policy_hash[0] ^= 1;
+            },
+            |start| {
+                let scope = start.scope.as_mut().expect("scope");
+                scope.probe_id[0] ^= 1;
+                start
+                    .client_endpoint
+                    .as_mut()
+                    .expect("Client binding")
+                    .route_context_id
+                    .clone_from(&scope.probe_id);
+            },
+            |start| {
+                let key = SigningKey::from_bytes(&[0x81; 32]);
+                let public_key = key.verifying_key().to_bytes();
+                let actor = start
+                    .scope
+                    .as_mut()
+                    .expect("scope")
+                    .data_relay
+                    .as_mut()
+                    .expect("data Relay");
+                actor.node_id = node_id_from_public_key(&public_key).to_vec();
+                actor.public_key = public_key.to_vec();
+            },
+            |start| {
+                let key = SigningKey::from_bytes(&[0x82; 32]);
+                let public_key = key.verifying_key().to_bytes();
+                let actor = start
+                    .scope
+                    .as_mut()
+                    .expect("scope")
+                    .control
+                    .as_mut()
+                    .expect("control Relay");
+                actor.node_id = node_id_from_public_key(&public_key).to_vec();
+                actor.public_key = public_key.to_vec();
+            },
+            |start| {
+                let key = SigningKey::from_bytes(&[0x83; 32]);
+                let public_key = key.verifying_key().to_bytes();
+                let actor = start
+                    .scope
+                    .as_mut()
+                    .expect("scope")
+                    .exit
+                    .as_mut()
+                    .expect("Exit");
+                actor.node_id = node_id_from_public_key(&public_key).to_vec();
+                actor.public_key = public_key.to_vec();
+            },
+            |start| {
+                start
+                    .client_endpoint
+                    .as_mut()
+                    .expect("Client binding")
+                    .endpoint
+                    .as_mut()
+                    .expect("Client endpoint")
+                    .public_key[0] ^= 1;
+            },
+        ];
+        for mutate in mutations {
+            let (key, value, prepared, underlay, _) =
+                live_native_relay_activate_fixture_with(mutate);
+            let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+            assert_eq!(
+                verify_relay_fixture_plan(
+                    &replay,
+                    key,
+                    &prepared,
+                    underlay,
+                    &value,
+                    unix_milliseconds().expect("fixture time"),
+                ),
+                Err(BackendError::Invalid)
+            );
+            assert_eq!(lock_replay_cache(&replay).len(), 0);
+        }
+
+        let (key, mut value, prepared, underlay, route) = live_native_relay_activate_fixture();
+        let grant = resign_consistent_grant_from(
+            &route,
+            &value.leases[0].signed_relay_reservation,
+            |relay, _| relay.signed_client_relay_request_sha256[0] ^= 1,
+        );
+        for activation in &mut value.leases {
+            activation.signed_relay_reservation.clone_from(&grant);
+        }
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_relay_fixture_plan(
+                &replay,
+                key,
+                &prepared,
+                underlay,
+                &value,
+                unix_milliseconds().expect("fixture time"),
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 0);
+
+        let (key, mut value, prepared, underlay, _) = live_native_relay_activate_fixture();
+        *value.leases[0]
+            .signed_client_relay_request
+            .last_mut()
+            .expect("Start signature") ^= 1;
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_relay_fixture_plan(
+                &replay,
+                key,
+                &prepared,
+                underlay,
+                &value,
+                unix_milliseconds().expect("fixture time"),
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 0);
+
+        let (key, mut value, mut prepared, underlay, route) = live_native_relay_activate_fixture();
+        let grant = resign_consistent_grant_from(
+            &route,
+            &value.leases[0].signed_relay_reservation,
+            |relay, authorization| {
+                relay.path_id = 2;
+                authorization.path_id = 2;
+            },
+        );
+        for (activation, prepared) in value.leases.iter_mut().zip(&mut prepared) {
+            activation.path_id = 2;
+            activation.signed_relay_reservation.clone_from(&grant);
+            prepared.path_id = 2;
+        }
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_relay_fixture_plan(
+                &replay,
+                key,
+                &prepared,
+                underlay,
+                &value,
+                unix_milliseconds().expect("fixture time"),
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 0);
     }
 
     #[test]

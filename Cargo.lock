@@ -4438,6 +4438,7 @@ dependencies = [
  "prost",
  "rand_core 0.6.4",
  "rustix",
+ "sha2",
  "socket2 0.6.5",
  "subtle",
  "tempfile",
