@@ -71,6 +71,15 @@ static void backend_zero(void *memory, size_t len)
     }
 }
 
+static bool valid_transport_mode(uint32_t minimum_paths,
+                                 vmp_transport_mode_t transport_mode)
+{
+    return (transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC &&
+            minimum_paths >= 2U && minimum_paths <= VMP_MAX_PATHS) ||
+           (transport_mode == VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP &&
+            minimum_paths == 1U);
+}
+
 static void backend_mark_terminal(
     mqvpn_backend_t *backend, vmp_mqvpn_backend_terminal_t reason)
 {
@@ -1187,8 +1196,8 @@ static vmp_transport_error_t exit_backend_create(
 {
     (void)factory_context;
     if (start == NULL || out_session == NULL ||
-        start->transport_mode != VMP_TRANSPORT_MODE_MULTIPATH_QUIC ||
-        start->minimum_paths < 2U) {
+        !valid_transport_mode(start->minimum_paths,
+                              start->transport_mode)) {
         return VMP_TRANSPORT_INVALID;
     }
     *out_session = NULL;
@@ -1222,9 +1231,16 @@ static vmp_transport_error_t exit_backend_create(
             start->tls_private_key_pem.len) == MQVPN_OK &&
         mqvpn_config_set_auth_key(config, auth) == MQVPN_OK &&
         mqvpn_config_set_max_clients(config, 1) == MQVPN_OK &&
-        mqvpn_config_set_multipath(config, 1) == MQVPN_OK &&
+        mqvpn_config_set_multipath(
+            config,
+            start->transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC
+                ? 1
+                : 0) == MQVPN_OK &&
         mqvpn_config_set_scheduler(
-            config, MQVPN_SCHED_VOLPAROSSA_EDT) == MQVPN_OK &&
+            config,
+            start->transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC
+                ? MQVPN_SCHED_VOLPAROSSA_EDT
+                : MQVPN_SCHED_MINRTT) == MQVPN_OK &&
         mqvpn_config_set_cc(config, MQVPN_CC_BBR2) == MQVPN_OK &&
         mqvpn_config_set_reinjection(config, MQVPN_REINJ_OFF) == MQVPN_OK &&
         mqvpn_config_set_reorder_enabled(config, MQVPN_REORDER_OFF) ==
