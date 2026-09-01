@@ -503,6 +503,40 @@ impl DiscoveryService {
         Ok(context)
     }
 
+    /// Consume an outbound transport failure only when it belongs to the exact active
+    /// client-hop transaction, returning its unchanged caller context.
+    ///
+    /// A stale or foreign failure retains the complete transaction so its originating service
+    /// can still bind, cancel, or consume the matching event. This provides a terminal failure
+    /// seam without exposing a request-ID equality oracle on the affine dispatch itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns a correlation error together with the exact unchanged transaction when the
+    /// service, authenticated peer, or request identifier does not match.
+    pub fn consume_preselection_observation_outbound_failure_with_context<Context>(
+        &mut self,
+        transaction: ClientPreselectionTransaction<Context>,
+        event_peer: PeerId,
+        event_request: OutboundRequestId,
+    ) -> Result<Context, ClientPreselectionCancelFailure<Context>> {
+        if !self.client_preselection_dispatch_is_active(&transaction.dispatch)
+            || transaction.dispatch.expected_peer_id != event_peer
+            || transaction.dispatch.request_id != event_request
+        {
+            return Err(ClientPreselectionCancelFailure {
+                transaction: Box::new(transaction),
+                error: PreselectionDispatchError::Correlation,
+            });
+        }
+        let ClientPreselectionTransaction {
+            dispatch: _,
+            context,
+        } = transaction;
+        self.preselection_transaction.client_active = None;
+        Ok(context)
+    }
+
     /// Send one canonical preselection observation over its request-derived authenticated peer.
     ///
     /// The exact target and native family are decoded only from `request`. The connection witness

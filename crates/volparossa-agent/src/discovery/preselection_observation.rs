@@ -9,6 +9,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
+use libp2p::{PeerId, request_response::OutboundRequestId};
 use rand_core::{OsRng, RngCore};
 use tokio::time::Instant;
 use volparossa_core::{Bandwidth, IpFamily, ObservedNetworkPrefix};
@@ -163,6 +164,10 @@ const COOLDOWN_MS: u64 = 30_000;
     )
 )]
 const COOLDOWN: Duration = Duration::from_secs(30);
+/// A proven local transport drop has already released the exact service slot. Keep admission
+/// bounded while allowing the command-level one-second retry to refresh its candidate snapshot.
+const OUTBOUND_FAILURE_COOLDOWN_MS: u64 = 250;
+const OUTBOUND_FAILURE_COOLDOWN: Duration = Duration::from_millis(250);
 
 #[cfg_attr(
     not(test),
@@ -1497,6 +1502,33 @@ impl PendingPreselectionAttempt {
         self.cancel_at(terminal_ms, terminal_mono)
     }
 
+    fn cool_after_outbound_failure(
+        self,
+    ) -> Result<CoolingPreselectionAttemptGate, PreselectionAttemptFailure> {
+        let terminal_ms = crate::unix_millis();
+        let terminal_mono = Instant::now();
+        if terminal_ms < self.pending.created_at_ms || terminal_mono < self.pending.prepared_at_mono
+        {
+            return Err(PreselectionAttemptFailure {
+                gate: None,
+                error: PreselectionAttemptError::InvalidTime,
+            });
+        }
+        cooling_gate_with_delay(
+            self.gate,
+            self.pending.created_at_ms,
+            terminal_ms,
+            self.pending.prepared_at_mono,
+            terminal_mono,
+            OUTBOUND_FAILURE_COOLDOWN_MS,
+            OUTBOUND_FAILURE_COOLDOWN,
+        )
+        .ok_or(PreselectionAttemptFailure {
+            gate: None,
+            error: PreselectionAttemptError::InvalidTime,
+        })
+    }
+
     fn cancel_at(
         self,
         terminal_ms: u64,
@@ -1601,6 +1633,30 @@ impl DispatchedPreselectionAttempt {
     ) -> Result<CoolingPreselectionAttemptGate, PreselectionOwnerTransitionFailure> {
         match service.cancel_preselection_observation_transaction(self.transaction) {
             Ok(attempt) => attempt.cancel().map_err(into_owner_transition_failure),
+            Err(failure) => Err(PreselectionOwnerTransitionFailure::Retained(Box::new(
+                Self {
+                    transaction: failure.into_transaction(),
+                },
+            ))),
+        }
+    }
+
+    /// Consume one exact service-correlated outbound transport failure and retain all attempt
+    /// tombstones while shortening only its local retry gate.
+    pub(super) fn consume_outbound_failure(
+        self,
+        service: &mut DiscoveryService,
+        event_peer: PeerId,
+        event_request: OutboundRequestId,
+    ) -> Result<CoolingPreselectionAttemptGate, PreselectionOwnerTransitionFailure> {
+        match service.consume_preselection_observation_outbound_failure_with_context(
+            self.transaction,
+            event_peer,
+            event_request,
+        ) {
+            Ok(attempt) => attempt
+                .cool_after_outbound_failure()
+                .map_err(into_owner_transition_failure),
             Err(failure) => Err(PreselectionOwnerTransitionFailure::Retained(Box::new(
                 Self {
                     transaction: failure.into_transaction(),
@@ -2723,13 +2779,33 @@ fn cooling_gate(
     not_before_mono: Instant,
     terminal_mono: Instant,
 ) -> Option<CoolingPreselectionAttemptGate> {
+    cooling_gate_with_delay(
+        gate,
+        not_before_ms,
+        terminal_ms,
+        not_before_mono,
+        terminal_mono,
+        COOLDOWN_MS,
+        COOLDOWN,
+    )
+}
+
+fn cooling_gate_with_delay(
+    gate: PreselectionAttemptGate,
+    not_before_ms: u64,
+    terminal_ms: u64,
+    not_before_mono: Instant,
+    terminal_mono: Instant,
+    delay_ms: u64,
+    delay: Duration,
+) -> Option<CoolingPreselectionAttemptGate> {
     if terminal_ms < not_before_ms || terminal_mono < not_before_mono {
         return None;
     }
     Some(CoolingPreselectionAttemptGate {
         gate,
-        ready_at_ms: terminal_ms.checked_add(COOLDOWN_MS)?,
-        ready_at: terminal_mono.checked_add(COOLDOWN)?,
+        ready_at_ms: terminal_ms.checked_add(delay_ms)?,
+        ready_at: terminal_mono.checked_add(delay)?,
     })
 }
 
@@ -5166,7 +5242,7 @@ mod tests {
         );
         assert_eq!(product.matches("pub(super) struct ").count(), 9);
         assert_eq!(product.matches("pub(super) enum ").count(), 5);
-        assert_eq!(product.matches("pub(super) fn ").count(), 13);
+        assert_eq!(product.matches("pub(super) fn ").count(), 14);
         assert_eq!(product.matches("pub(crate) struct ").count(), 7);
         assert_eq!(product.matches("pub(crate) enum ").count(), 1);
         assert_eq!(product.matches("pub(crate) fn ").count(), 6);
@@ -5290,8 +5366,12 @@ mod tests {
             .split_once("\n}\n\nfn preselection_attempt_error(")
             .expect("dispatched owner implementation end")
             .0;
-        assert_eq!(dispatched_impl.matches("pub(super) fn ").count(), 2);
+        assert_eq!(dispatched_impl.matches("pub(super) fn ").count(), 3);
         assert!(dispatched_impl.contains("self.transaction, arrival"));
+        assert!(
+            dispatched_impl
+                .contains("consume_preselection_observation_outbound_failure_with_context(")
+        );
         assert!(dispatched_impl.contains("transaction: *transaction,"));
         assert!(dispatched_impl.contains("failure.into_transaction()"));
         for forbidden in [

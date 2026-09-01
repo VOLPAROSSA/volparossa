@@ -2508,6 +2508,55 @@ impl DiscoveryRuntime {
         }
     }
 
+    fn handle_client_preselection_outbound_failure(
+        &mut self,
+        peer: Libp2pPeerId,
+        request_id: request_response::OutboundRequestId,
+    ) -> bool {
+        let owner = std::mem::replace(&mut self.client_preselection, ClientPreselectionOwner::Lost);
+        let ClientPreselectionOwner::Active(active) = owner else {
+            self.client_preselection = owner;
+            return false;
+        };
+        let ActiveClientPreselection {
+            dispatch,
+            transports,
+            reply,
+            request_deadline,
+            attempt_deadline,
+            terminal_error,
+        } = active;
+        match dispatch.consume_outbound_failure(&mut self.service, peer, request_id) {
+            Ok(gate) => {
+                self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                let _ = reply.send(Err(ClientPreselectionError::Transport));
+                true
+            }
+            Err(PreselectionOwnerTransitionFailure::Retained(dispatch)) => {
+                self.client_preselection =
+                    ClientPreselectionOwner::Active(ActiveClientPreselection {
+                        dispatch: *dispatch,
+                        transports,
+                        reply,
+                        request_deadline,
+                        attempt_deadline,
+                        terminal_error,
+                    });
+                false
+            }
+            Err(PreselectionOwnerTransitionFailure::Cooling(gate)) => {
+                self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                let _ = reply.send(Err(ClientPreselectionError::Transport));
+                true
+            }
+            Err(PreselectionOwnerTransitionFailure::Closed) => {
+                self.client_preselection = ClientPreselectionOwner::Closed;
+                let _ = reply.send(Err(ClientPreselectionError::Transport));
+                true
+            }
+        }
+    }
+
     fn maintain_client_preselection(&mut self) {
         let owner = std::mem::replace(&mut self.client_preselection, ClientPreselectionOwner::Lost);
         match owner {
@@ -4352,13 +4401,34 @@ impl DiscoveryRuntime {
                 self.relay_advertisement_requests.remove(&request_id);
             }
             SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
-                request_response::Event::OutboundFailure { .. },
+                request_response::Event::OutboundFailure {
+                    peer,
+                    request_id,
+                    error,
+                    ..
+                },
             )) => {
-                // The opaque service slot remains active until its local timer consumes the exact
-                // transaction. A raw failure cannot safely identify or cancel an affine owner.
+                let failure_code = match error {
+                    request_response::OutboundFailure::DialFailure => {
+                        "PRESELECTION_OUTBOUND_DIAL_FAILED"
+                    }
+                    request_response::OutboundFailure::Timeout => "PRESELECTION_OUTBOUND_TIMED_OUT",
+                    request_response::OutboundFailure::ConnectionClosed => {
+                        "PRESELECTION_OUTBOUND_CONNECTION_CLOSED"
+                    }
+                    request_response::OutboundFailure::UnsupportedProtocols => {
+                        "PRESELECTION_OUTBOUND_PROTOCOL_UNSUPPORTED"
+                    }
+                    request_response::OutboundFailure::Io(_) => "PRESELECTION_OUTBOUND_IO_FAILED",
+                };
+                let owned = self.handle_client_preselection_outbound_failure(peer, request_id);
                 state.write().await.log(
                     LogLevel::Warn,
-                    "PRESELECTION_OUTBOUND_FAILED",
+                    if owned {
+                        failure_code
+                    } else {
+                        "PRESELECTION_OUTBOUND_FAILURE_UNOWNED"
+                    },
                     unix_millis(),
                 );
             }
@@ -19077,11 +19147,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_outbound_failure_retains_active_slot_until_owner_timeout() {
+    async fn exact_outbound_failure_releases_owner_after_bounded_short_cooldown() {
         let ActiveClientPreselectionFixture {
             mut fixture,
             mut control_service,
-            mut response,
+            response,
             ..
         } = Box::pin(active_client_preselection_fixture()).await;
         let failure =
@@ -19096,29 +19166,8 @@ mod tests {
         .await;
 
         assert!(matches!(
-            fixture.runtime.client_preselection,
-            ClientPreselectionOwner::Active(_)
-        ));
-        assert!(
-            fixture
-                .runtime
-                .service
-                .client_preselection_slot_active_for_test()
-        );
-        assert!(matches!(
-            response.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ));
-
-        let ClientPreselectionOwner::Active(active) = &mut fixture.runtime.client_preselection
-        else {
-            panic!("raw failure must retain active owner");
-        };
-        active.request_deadline = Instant::now();
-        fixture.runtime.maintain_client_preselection();
-        assert!(matches!(
-            response.await.expect("owner timeout"),
-            Err(ClientPreselectionError::Timeout)
+            response.await.expect("exact outbound failure"),
+            Err(ClientPreselectionError::Transport)
         ));
         assert!(
             !fixture
@@ -19129,6 +19178,13 @@ mod tests {
         assert!(matches!(
             fixture.runtime.client_preselection,
             ClientPreselectionOwner::Cooling(_)
+        ));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        fixture.runtime.maintain_client_preselection();
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
         ));
     }
 
@@ -19550,17 +19606,12 @@ mod tests {
             2,
         );
 
-        let failure_arm = product
-            .split_once(
-                "BehaviourEvent::PreselectionObservation(\n                request_response::Event::OutboundFailure { .. },",
-            )
-            .expect("opaque outbound failure arm")
-            .1
-            .split_once("SwarmEvent::Behaviour(BehaviourEvent::ExitForward(event))")
-            .expect("outbound failure arm end")
-            .0;
-        assert!(!failure_arm.contains("request_id"));
-        assert!(!failure_arm.contains("cancel_client_preselection"));
+        let failure_handler =
+            braced_item(product, "fn handle_client_preselection_outbound_failure(");
+        assert!(failure_handler.contains("dispatch.consume_outbound_failure("));
+        assert!(failure_handler.contains("PreselectionOwnerTransitionFailure::Retained(dispatch)"));
+        assert!(product.contains("PRESELECTION_OUTBOUND_CONNECTION_CLOSED"));
+        assert!(product.contains("PRESELECTION_OUTBOUND_FAILURE_UNOWNED"));
         let maintenance = braced_item(product, "fn maintain_client_preselection(");
         assert!(maintenance.contains("active.request_deadline"));
         assert!(maintenance.contains("active.attempt_deadline"));
