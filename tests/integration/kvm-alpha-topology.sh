@@ -42,6 +42,8 @@ print_plan() {
         '  constrain each Relay path and prove aggregate MPTCP download throughput;' \
         '  remove one data-carrying Relay during a second uninterrupted download;' \
         '  request UDP Connect, then send one non-trusted application datagram through ingress;' \
+        '  send two deterministic real HTTP/3 transfers over the native MPQUIC route;' \
+        '  remove one MPQUIC Relay while the second HTTP/3 transfer remains active;' \
         '  prove exact replies, selected Relays and zero direct Client-Exit packets;' \
         '  retain bounded evidence, then stop units and remove namespaces.'
 }
@@ -135,7 +137,7 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 
 for command_name in awk busctl cat chmod chown cut date grep install ip jq kill \
     mkdir mktemp python3 readlink runuser sed setpriv sha256sum sleep stat systemctl \
-    systemd-run systemd-sysusers tail tc tr; do
+    systemd-run systemd-sysusers tail tc timeout tr; do
     command -v "$command_name" >/dev/null 2>&1 \
         || { printf 'required guest tool unavailable: %s\n' "$command_name" >&2; exit 69; }
 done
@@ -145,6 +147,8 @@ for executable in volparossa volparossa-agent volparossa-helper; do
 done
 [ -x "$binary_directory/examples/acceptance-policy-fixture" ] \
     || { printf '%s\n' 'acceptance policy fixture unavailable' >&2; exit 69; }
+[ -x "$binary_directory/examples/http3-acceptance-fixture" ] \
+    || { printf '%s\n' 'HTTP/3 acceptance fixture unavailable' >&2; exit 69; }
 if [ ! -f "$mpquic_binary" ] || [ ! -x "$mpquic_binary" ] \
     || [ -L "$mpquic_binary" ]; then
     printf '%s\n' 'pinned native MPQUIC executable unavailable' >&2
@@ -207,6 +211,12 @@ A04_STATUS=-1
 A05_REQUESTED=false
 A05_SUCCEEDED=false
 A05_STATUS=-1
+A06_REQUESTED=false
+A06_SUCCEEDED=false
+A06_STATUS=-1
+A07_REQUESTED=false
+A07_SUCCEEDED=false
+A07_STATUS=-1
 OBSERVED_BLOCKER=NOT_REACHED
 CLEANUP_COMPLETE=false
 CLIENT_EXIT_ROUTE_ABSENT=false
@@ -216,6 +226,8 @@ HELPER_UNITS=
 MPQUIC_UNITS=
 AGENT_UNITS=
 DESTINATION_PID=
+HTTP3_SERVER_PID=
+HTTP3_CLIENT_PID=
 DOWNLOAD_CLIENT_PID=
 CLIENT_OBSERVER_PID=
 EXIT_OBSERVER_PID=
@@ -247,7 +259,19 @@ copy_artifacts() {
         a05-client.json a05-client.err a05-client-fallback-route.txt \
         a05-client-capture.json a05-client-capture.log a05-client-capture.err \
         a05-exit-capture.json a05-exit-capture.log a05-exit-capture.err \
-        a05-evidence.json; do
+        a05-evidence.json \
+        http3-server.log a06-disconnect.out a06-disconnect.err \
+        a06-client.json a06-client.err \
+        destination-a06-evidence.json a06-client-fallback-route.txt \
+        a06-client-capture.json a06-client-capture.log a06-client-capture.err \
+        a06-exit-capture.json a06-exit-capture.log a06-exit-capture.err \
+        a06-native-paths.txt a06-native-paths.json a06-evidence.json \
+        a07-client.json a07-client.err destination-a07-evidence.json \
+        a07-client-capture.json a07-client-capture.log a07-client-capture.err \
+        a07-exit-capture.json a07-exit-capture.log a07-exit-capture.err \
+        a07-native-before.txt a07-native-before.json \
+        a07-native-after.txt a07-native-after.json \
+        a07-removal.json a07-evidence.json; do
         if [ -f "$WORK/$artifact" ] && [ ! -L "$WORK/$artifact" ]; then
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 \
                 "$WORK/$artifact" "$output_directory/$artifact"
@@ -306,6 +330,14 @@ write_report() {
     if [ -f "$WORK/a05-evidence.json" ]; then
         a05_evidence=$(cat "$WORK/a05-evidence.json" 2>/dev/null || printf 'null')
     fi
+    a06_evidence=null
+    if [ -f "$WORK/a06-evidence.json" ]; then
+        a06_evidence=$(cat "$WORK/a06-evidence.json" 2>/dev/null || printf 'null')
+    fi
+    a07_evidence=null
+    if [ -f "$WORK/a07-evidence.json" ]; then
+        a07_evidence=$(cat "$WORK/a07-evidence.json" 2>/dev/null || printf 'null')
+    fi
     jq -S -c -n \
         --arg commit "$expected_commit" \
         --arg run_id "$RUN_ID" \
@@ -332,6 +364,12 @@ write_report() {
         --argjson a05_requested "$A05_REQUESTED" \
         --argjson a05_succeeded "$A05_SUCCEEDED" \
         --argjson a05_status "$A05_STATUS" \
+        --argjson a06_requested "$A06_REQUESTED" \
+        --argjson a06_succeeded "$A06_SUCCEEDED" \
+        --argjson a06_status "$A06_STATUS" \
+        --argjson a07_requested "$A07_REQUESTED" \
+        --argjson a07_succeeded "$A07_SUCCEEDED" \
+        --argjson a07_status "$A07_STATUS" \
         --argjson cleanup "$CLEANUP_COMPLETE" \
         --argjson remaining_namespaces "$REMAINING_NAMESPACES" \
         --argjson remaining_units "$REMAINING_UNITS" \
@@ -342,6 +380,8 @@ write_report() {
         --argjson a03_evidence "$a03_evidence" \
         --argjson a04_evidence "$a04_evidence" \
         --argjson a05_evidence "$a05_evidence" \
+        --argjson a06_evidence "$a06_evidence" \
+        --argjson a07_evidence "$a07_evidence" \
         '{schema_version:1,report_kind:"volparossa-alpha-kvm-topology",
           source_revision:$commit,run_id:$run_id,last_phase:$phase,
           topology:{ready:$topology,direct_client_exit_adjacency:false,
@@ -361,6 +401,10 @@ write_report() {
             exit_status:$a04_status,evidence:$a04_evidence},
           a05_udp_echo:{requested:$a05_requested,succeeded:$a05_succeeded,
             exit_status:$a05_status,evidence:$a05_evidence},
+          a06_http3_mpquic:{requested:$a06_requested,succeeded:$a06_succeeded,
+            exit_status:$a06_status,evidence:$a06_evidence},
+          a07_http3_relay_failover:{requested:$a07_requested,succeeded:$a07_succeeded,
+            exit_status:$a07_status,evidence:$a07_evidence},
           cleanup:{complete:$cleanup,remaining_namespaces:$remaining_namespaces,
             remaining_units:$remaining_units},runner_exit_status:$exit_status}' \
         >"$output_directory/report.json"
@@ -379,9 +423,28 @@ cleanup() {
         wait "$DOWNLOAD_CLIENT_PID" 2>/dev/null || true
         DOWNLOAD_CLIENT_PID=
     fi
+    if [ -n "$HTTP3_CLIENT_PID" ]; then
+        kill -TERM "$HTTP3_CLIENT_PID" 2>/dev/null || true
+        wait "$HTTP3_CLIENT_PID" 2>/dev/null || true
+        HTTP3_CLIENT_PID=
+    fi
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
+    if [ -n "$HTTP3_SERVER_PID" ]; then
+        kill -TERM "$HTTP3_SERVER_PID" 2>/dev/null || true
+        http3_stop_attempt=0
+        while kill -0 "$HTTP3_SERVER_PID" 2>/dev/null \
+            && [ "$http3_stop_attempt" -lt 50 ]; do
+            sleep 0.1
+            http3_stop_attempt=$((http3_stop_attempt + 1))
+        done
+        if kill -0 "$HTTP3_SERVER_PID" 2>/dev/null; then
+            kill -KILL "$HTTP3_SERVER_PID" 2>/dev/null || true
+        fi
+        wait "$HTTP3_SERVER_PID" 2>/dev/null || true
+        HTTP3_SERVER_PID=
+    fi
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
         [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
     done
@@ -460,6 +523,9 @@ install -d -o root -g "$AGENT_GID" -m 0755 "$WORK/bin/examples"
 install -o root -g "$AGENT_GID" -m 0555 \
     "$binary_directory/examples/acceptance-policy-fixture" \
     "$WORK/bin/examples/acceptance-policy-fixture"
+install -o root -g "$AGENT_GID" -m 0555 \
+    "$binary_directory/examples/http3-acceptance-fixture" \
+    "$WORK/bin/examples/http3-acceptance-fixture"
 binary_directory=$WORK/bin
 mpquic_binary=$WORK/bin/volparossa-mpquic
 
@@ -1237,6 +1303,163 @@ with open(output_path, "x", encoding="ascii") as output:
     )
     output.write("\n")
 PYTHON
+cat >"$WORK/bin/a06-observer.py" <<'PYTHON'
+import json
+import os
+import select
+import signal
+import socket
+import struct
+import sys
+import time
+
+role, output_path, ready_path, marker_path, *interfaces = sys.argv[1:]
+if role not in {"client", "exit"} or not interfaces:
+    raise SystemExit("invalid bounded A06 observer arguments")
+
+counters = (
+    {
+        "relay1_wireguard_data_datagrams": 0,
+        "relay2_wireguard_data_datagrams": 0,
+        "direct_client_exit_packets": 0,
+    }
+    if role == "client"
+    else {
+        "relay1_wireguard_data_datagrams": 0,
+        "relay2_wireguard_data_datagrams": 0,
+        "destination_request_datagrams": 0,
+        "destination_response_datagrams": 0,
+    }
+)
+sockets = {}
+for interface in interfaces:
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    capture.bind((interface, 0))
+    capture.setblocking(False)
+    sockets[capture] = interface
+
+open(ready_path, "x", encoding="ascii").write("ready\n")
+running = True
+truncated = False
+observed_frames = 0
+marker_observed = False
+before_marker = None
+
+
+def stop(*_unused):
+    global running
+    running = False
+
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+deadline = time.monotonic() + 300
+while running and time.monotonic() < deadline:
+    if marker_path != "-" and not marker_observed and os.path.exists(marker_path):
+        before_marker = dict(counters)
+        marker_observed = True
+    readable, _, _ = select.select(list(sockets), [], [], 0.2)
+    for capture in readable:
+        while True:
+            try:
+                frame = capture.recv(65535)
+            except BlockingIOError:
+                break
+            observed_frames += 1
+            if observed_frames > 131072:
+                truncated = True
+                running = False
+                break
+            if len(frame) < 34 or struct.unpack("!H", frame[12:14])[0] != 0x0800:
+                continue
+            offset = 14
+            header_length = (frame[offset] & 0x0F) * 4
+            if header_length < 20 or len(frame) < offset + header_length:
+                continue
+            protocol = frame[offset + 9]
+            source = socket.inet_ntoa(frame[offset + 12 : offset + 16])
+            destination = socket.inet_ntoa(frame[offset + 16 : offset + 20])
+            source_port = destination_port = 0
+            if protocol == socket.IPPROTO_UDP and len(frame) >= offset + header_length + 4:
+                source_port, destination_port = struct.unpack(
+                    "!HH", frame[offset + header_length : offset + header_length + 4]
+                )
+            interface = sockets[capture]
+            transport_offset = offset + header_length
+            udp_length = 0
+            wireguard_message_type = 0
+            if protocol == socket.IPPROTO_UDP and len(frame) >= transport_offset + 12:
+                udp_length = struct.unpack(
+                    "!H", frame[transport_offset + 4 : transport_offset + 6]
+                )[0]
+                wireguard_message_type = struct.unpack(
+                    "<I", frame[transport_offset + 8 : transport_offset + 12]
+                )[0]
+            is_wireguard_data = wireguard_message_type == 4 and udp_length > 40
+            if role == "client":
+                if source == "43.159.1.1" and destination in {
+                    "10.241.21.2",
+                    "10.241.22.2",
+                    "10.241.31.1",
+                    "10.241.31.2",
+                    "46.162.3.1",
+                    "47.163.4.1",
+                    "47.163.4.2",
+                }:
+                    counters["direct_client_exit_packets"] += 1
+                if protocol == socket.IPPROTO_UDP and is_wireguard_data:
+                    if interface == "cr1" and {source, destination} == {
+                        "43.159.1.1",
+                        "44.160.1.1",
+                    }:
+                        counters["relay1_wireguard_data_datagrams"] += 1
+                    if interface == "cr2" and {source, destination} == {
+                        "43.159.1.1",
+                        "45.161.2.1",
+                    }:
+                        counters["relay2_wireguard_data_datagrams"] += 1
+            else:
+                if protocol == socket.IPPROTO_UDP and is_wireguard_data:
+                    if interface == "xr1" and {source, destination} == {
+                        "44.160.1.1",
+                        "46.162.3.1",
+                    }:
+                        counters["relay1_wireguard_data_datagrams"] += 1
+                    if interface == "xr2" and {source, destination} == {
+                        "45.161.2.1",
+                        "46.162.3.1",
+                    }:
+                        counters["relay2_wireguard_data_datagrams"] += 1
+                if interface == "xd" and protocol == socket.IPPROTO_UDP:
+                    if destination == "47.163.4.2" and destination_port == 443:
+                        counters["destination_request_datagrams"] += 1
+                    if source == "47.163.4.2" and source_port == 443:
+                        counters["destination_response_datagrams"] += 1
+
+for capture in sockets:
+    capture.close()
+after_marker = None
+if before_marker is not None:
+    after_marker = {key: counters[key] - before_marker[key] for key in counters}
+with open(output_path, "x", encoding="ascii") as output:
+    json.dump(
+        {
+            "schema_version": 1,
+            "capture_role": role,
+            "interfaces": interfaces,
+            "observed_frames": observed_frames,
+            "truncated": truncated,
+            "marker_observed": marker_observed,
+            "before_marker": before_marker,
+            "after_marker": after_marker,
+            **counters,
+        },
+        output,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    output.write("\n")
+PYTHON
 cat >"$WORK/bin/mptcp-download-client.py" <<'PYTHON'
 import hashlib
 import json
@@ -1473,8 +1696,10 @@ while running:
         finally:
             connection.close()
 PYTHON
-chown root:root "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py"
-chmod 0500 "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py"
+chown root:root "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py" \
+    "$WORK/bin/a06-observer.py"
+chmod 0500 "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py" \
+    "$WORK/bin/a06-observer.py"
 chown root:root "$WORK/bin/mptcp-download-client.py"
 chmod 0555 "$WORK/bin/mptcp-download-client.py"
 chown "root:$AGENT_GID" "$WORK/bin/destination.py"
@@ -1585,6 +1810,116 @@ stop_observers() {
     CLIENT_OBSERVER_PID=
     EXIT_OBSERVER_PID=
     return "$a05_observer_stop_status"
+}
+
+capture_native_mpquic_paths() {
+    native_prefix=$1
+    native_requirement=$2
+    native_text="$WORK/$native_prefix.txt"
+    native_json="$WORK/$native_prefix.json"
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" paths \
+        >"$native_text" || return 1
+    python3 - "$native_text" "$native_json" "$R1_PEER" "$R2_PEER" \
+        "$native_requirement" <<'PYTHON'
+import json
+import re
+import sys
+
+source_path, output_path, relay1_peer, relay2_peer, requirement = sys.argv[1:]
+if requirement not in {"both", "relay2"}:
+    raise SystemExit("invalid native-path requirement")
+pattern = re.compile(
+    r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
+    r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)"
+)
+groups = {}
+for line in open(source_path, encoding="ascii"):
+    match = pattern.fullmatch(line.rstrip("\n"))
+    if match is None:
+        continue
+    context, path_id, relay_peer, exit_peer, state, rtt_us, user_bytes = match.groups()
+    if relay_peer not in {relay1_peer, relay2_peer}:
+        continue
+    relay = "relay1" if relay_peer == relay1_peer else "relay2"
+    record = {
+        "path_id": int(path_id),
+        "relay": relay,
+        "relay_peer_id": relay_peer,
+        "exit_peer_id": exit_peer,
+        "state": int(state),
+        "smoothed_rtt_us": int(rtt_us),
+        "user_bytes": int(user_bytes),
+    }
+    if any(existing["relay"] == relay for existing in groups.setdefault(context, [])):
+        raise SystemExit("duplicate native path for one relay")
+    groups[context].append(record)
+
+required = {"relay1", "relay2"} if requirement == "both" else {"relay2"}
+candidates = [
+    (context, paths)
+    for context, paths in groups.items()
+    if required.issubset({path["relay"] for path in paths})
+]
+if len(candidates) != 1:
+    raise SystemExit("exact active native route context was unavailable")
+context, paths = candidates[0]
+paths.sort(key=lambda path: path["path_id"])
+if len({path["path_id"] for path in paths}) != len(paths):
+    raise SystemExit("native path IDs were not distinct")
+with open(output_path, "w", encoding="ascii") as output:
+    json.dump(
+        {
+            "schema_version": 1,
+            "source": "agent local-control native MPQUIC counters",
+            "route_context_id": context,
+            "requirement": requirement,
+            "paths": paths,
+        },
+        output,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    output.write("\n")
+PYTHON
+}
+
+wait_native_mpquic_paths() {
+    wait_prefix=$1
+    wait_requirement=$2
+    native_attempt=0
+    while [ "$native_attempt" -lt 300 ]; do
+        if capture_native_mpquic_paths "$wait_prefix" "$wait_requirement"; then
+            return 0
+        fi
+        sleep 0.1
+        native_attempt=$((native_attempt + 1))
+    done
+    return 1
+}
+
+start_http3_observers() {
+    http3_prefix=$1
+    http3_marker=$2
+    ip netns exec "$CLIENT" python3 "$WORK/bin/a06-observer.py" \
+        client "$WORK/$http3_prefix-client-capture.json" \
+        "$WORK/$http3_prefix-client-capture.ready" "$http3_marker" \
+        cr1 cr2 underlay >"$WORK/$http3_prefix-client-capture.log" \
+        2>"$WORK/$http3_prefix-client-capture.err" &
+    CLIENT_OBSERVER_PID=$!
+    ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a06-observer.py" \
+        exit "$WORK/$http3_prefix-exit-capture.json" \
+        "$WORK/$http3_prefix-exit-capture.ready" "$http3_marker" \
+        xr1 xr2 xd >"$WORK/$http3_prefix-exit-capture.log" \
+        2>"$WORK/$http3_prefix-exit-capture.err" &
+    EXIT_OBSERVER_PID=$!
+    if ! wait_observer "$CLIENT_OBSERVER_PID" \
+        "$WORK/$http3_prefix-client-capture.ready" \
+        || ! wait_observer "$EXIT_OBSERVER_PID" \
+        "$WORK/$http3_prefix-exit-capture.ready"; then
+        stop_observers || true
+        return 1
+    fi
 }
 
 tc_sent_bytes() {
@@ -2390,4 +2725,292 @@ fi
 A05_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a05-complete
+
+PHASE=a06-reset-single-path-route
+"$binary_directory/volparossa" \
+    --control-socket "$WORK/runtime-client/control/agent.sock" disconnect \
+    >"$WORK/a06-disconnect.out" 2>"$WORK/a06-disconnect.err" \
+    || fail A06_SINGLE_PATH_ROUTE_DISCONNECT_FAILED
+attempt=0
+while [ "$attempt" -lt 300 ]; do
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" status \
+        >"$WORK/status-client.txt" || true
+    if grep -Fx 'connected: false' "$WORK/status-client.txt" >/dev/null \
+        && grep -Fx 'active contexts: 0' "$WORK/status-client.txt" >/dev/null; then
+        break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ "$attempt" -lt 300 ] || fail A06_SINGLE_PATH_ROUTE_NOT_IDLE
+
+timeout --signal=TERM --kill-after=5s 420s \
+    ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+    --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --no-new-privs -- \
+    "$WORK/bin/examples/http3-acceptance-fixture" server \
+    47.163.4.2:443 "$WORK/destination/http3-cert.der" \
+    "$WORK/destination/http3-server.ready" "$WORK/destination" "$RUN_ID" \
+    >"$WORK/http3-server.log" 2>&1 &
+HTTP3_SERVER_PID=$!
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    [ -s "$WORK/destination/http3-server.ready" ] && break
+    kill -0 "$HTTP3_SERVER_PID" 2>/dev/null || break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ -s "$WORK/destination/http3-server.ready" ] || fail A06_HTTP3_SERVER_UNAVAILABLE
+
+PHASE=a06-http3-mpquic
+A06_REQUESTED=true
+A06_STATUS=1
+A06_FALLBACK_ROUTE=$(ip -n "$CLIENT" -o route get 47.163.4.2 | sed -n '1p')
+printf '%s\n' "$A06_FALLBACK_ROUTE" >"$WORK/a06-client-fallback-route.txt"
+printf '%s\n' "$A06_FALLBACK_ROUTE" | grep -Eq '(^| )dev underlay( |$)' \
+    || fail A06_FALLBACK_ROUTE_INVALID
+if printf '%s\n' "$A06_FALLBACK_ROUTE" | grep -Eq '(^| )dev (cr1|cr2)( |$)'; then
+    fail DIRECT_CLIENT_EXIT_REACHABLE
+fi
+start_http3_observers a06 - || fail A06_CAPTURE_UNAVAILABLE
+set +e
+timeout --signal=TERM --kill-after=5s 200s \
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+    --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --no-new-privs -- \
+    "$WORK/bin/examples/http3-acceptance-fixture" client a06 \
+    43.159.1.1:0 47.163.4.2:443 "$WORK/destination/http3-cert.der" \
+    "$RUN_ID" "$WORK/a06-client.json" 2>"$WORK/a06-client.err"
+A06_STATUS=$?
+set -e
+destination_attempt=0
+while [ "$A06_STATUS" -eq 0 ] && [ "$destination_attempt" -lt 100 ] \
+    && [ ! -s "$WORK/destination/server-a06.json" ]; do
+    sleep 0.1
+    destination_attempt=$((destination_attempt + 1))
+done
+stop_observers || A06_STATUS=1
+if [ -s "$WORK/destination/server-a06.json" ]; then
+    install -o root -g root -m 0600 "$WORK/destination/server-a06.json" \
+        "$WORK/destination-a06-evidence.json"
+fi
+if [ "$A06_STATUS" -eq 0 ] \
+    && ! wait_native_mpquic_paths a06-native-paths both; then
+    A06_STATUS=1
+fi
+for evidence_file in a06-client.json destination-a06-evidence.json \
+    a06-client-capture.json a06-exit-capture.json a06-native-paths.json; do
+    if [ "$A06_STATUS" -eq 0 ] \
+        && { [ ! -s "$WORK/$evidence_file" ] \
+            || ! jq -e . "$WORK/$evidence_file" >/dev/null 2>&1; }; then
+        A06_STATUS=1
+    fi
+done
+if [ "$A06_STATUS" -eq 0 ]; then
+    jq -S -c -n \
+        --slurpfile application "$WORK/a06-client.json" \
+        --slurpfile destination "$WORK/destination-a06-evidence.json" \
+        --slurpfile client_capture "$WORK/a06-client-capture.json" \
+        --slurpfile exit_capture "$WORK/a06-exit-capture.json" \
+        --slurpfile native "$WORK/a06-native-paths.json" \
+        --arg fallback_route "$A06_FALLBACK_ROUTE" \
+        --arg relay1_peer "$R1_PEER" --arg relay2_peer "$R2_PEER" \
+        '($application[0]) as $app | ($destination[0]) as $destination
+        | ($client_capture[0]) as $client | ($exit_capture[0]) as $exit
+        | ($native[0]) as $native
+        | ($native.paths | map(select(.relay == "relay1")) | .[0]) as $native_r1
+        | ($native.paths | map(select(.relay == "relay2")) | .[0]) as $native_r2
+        | (($app.protocol == "HTTP/3") and ($app.http_version == "HTTP/3")
+            and ($app.negotiated_alpn == "h3")
+            and ($app.application.ip == "43.159.1.1")
+            and ($app.destination == {ip:"47.163.4.2",port:443})
+            and ($app.request_bytes == 4194304) and ($app.response_bytes == 8388608)
+            and ($app.request_sha256 == $destination.request_sha256)
+            and ($app.response_sha256 == $destination.response_sha256)
+            and ($destination.protocol == "HTTP/3")
+            and ($destination.http_version == "HTTP/3")
+            and ($destination.negotiated_alpn == "h3")
+            and ($destination.listen == $app.destination)
+            and ($destination.source.ip == "47.163.4.1")
+            and ($client.relay1_wireguard_data_datagrams > 0)
+            and ($client.relay2_wireguard_data_datagrams > 0)
+            and ($exit.relay1_wireguard_data_datagrams > 0)
+            and ($exit.relay2_wireguard_data_datagrams > 0)
+            and ($client.direct_client_exit_packets == 0)
+            and ($client.truncated == false) and ($exit.truncated == false)
+            and ($exit.destination_request_datagrams > 0)
+            and ($exit.destination_response_datagrams > 0)
+            and ($native_r1.relay_peer_id == $relay1_peer)
+            and ($native_r2.relay_peer_id == $relay2_peer)
+            and ($native_r1.path_id != $native_r2.path_id)
+            and ($native_r1.state == 3) and ($native_r2.state == 3)
+            and ($native_r1.user_bytes > 0) and ($native_r2.user_bytes > 0)) as $success
+        | {schema_version:1,acceptance_id:"A06",success:$success,
+           transport:"real HTTP/3 over genuine native Multipath QUIC",
+           application:$app,destination:$destination,
+           native_mpquic:{route_context_id:$native.route_context_id,
+             required_path_count:2,paths:$native.paths},
+           path_evidence:{client_capture:$client,exit_capture:$exit},
+           no_direct_client_exit:{topology_adjacency:false,route_absent:true,
+             fallback_route:$fallback_route,observed_packets:$client.direct_client_exit_packets},
+           ordinary_quic_fallback_allowed:false}' >"$WORK/a06-evidence.json"
+    jq -e '.success == true' "$WORK/a06-evidence.json" >/dev/null 2>&1 \
+        || A06_STATUS=1
+fi
+if [ "$A06_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A06_HTTP3_MPQUIC_NOT_PROVEN
+    PHASE=a06-blocked
+    exit 77
+fi
+A06_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a06-complete
+
+PHASE=a07-active-http3-relay-removal
+A07_REQUESTED=true
+A07_STATUS=1
+start_http3_observers a07 "$WORK/a07-relay-removal.marker" \
+    || fail A07_CAPTURE_UNAVAILABLE
+timeout --signal=TERM --kill-after=5s 200s \
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+    --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --no-new-privs -- \
+    "$WORK/bin/examples/http3-acceptance-fixture" client a07 \
+    43.159.1.1:0 47.163.4.2:443 "$WORK/destination/http3-cert.der" \
+    "$RUN_ID" "$WORK/a07-client.json" 2>"$WORK/a07-client.err" &
+HTTP3_CLIENT_PID=$!
+attempt=0
+while [ "$attempt" -lt 1800 ]; do
+    [ -s "$WORK/destination/a07-active.ready" ] && break
+    kill -0 "$HTTP3_CLIENT_PID" 2>/dev/null || break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ -s "$WORK/destination/a07-active.ready" ] \
+    || fail A07_HTTP3_FLOW_NOT_ACTIVE
+kill -0 "$HTTP3_CLIENT_PID" 2>/dev/null \
+    || fail A07_HTTP3_FLOW_ENDED_BEFORE_RELAY_REMOVAL
+wait_native_mpquic_paths a07-native-before both \
+    || fail A07_NATIVE_PATH_COUNTERS_UNAVAILABLE
+ip -n "$R1" link set r1c down
+ip -n "$R1" link set r1x down
+A07_R1C_STATE=$(ip -n "$R1" -j link show dev r1c | jq -er '.[0].operstate')
+A07_R1X_STATE=$(ip -n "$R1" -j link show dev r1x | jq -er '.[0].operstate')
+if [ "$A07_R1C_STATE" != DOWN ] || [ "$A07_R1X_STATE" != DOWN ]; then
+    fail A07_RELAY_REMOVAL_FAILED
+fi
+kill -0 "$HTTP3_CLIENT_PID" 2>/dev/null \
+    || fail A07_HTTP3_FLOW_ENDED_DURING_RELAY_REMOVAL
+install -o root -g root -m 0600 /dev/null "$WORK/a07-relay-removal.marker"
+install -o "$AGENT_UID" -g "$AGENT_GID" -m 0600 /dev/null \
+    "$WORK/destination/a07.release"
+set +e
+wait "$HTTP3_CLIENT_PID"
+A07_STATUS=$?
+set -e
+HTTP3_CLIENT_PID=
+destination_attempt=0
+while [ "$A07_STATUS" -eq 0 ] && [ "$destination_attempt" -lt 100 ] \
+    && [ ! -s "$WORK/destination/server-a07.json" ]; do
+    sleep 0.1
+    destination_attempt=$((destination_attempt + 1))
+done
+stop_observers || A07_STATUS=1
+if [ -s "$WORK/destination/server-a07.json" ]; then
+    install -o root -g root -m 0600 "$WORK/destination/server-a07.json" \
+        "$WORK/destination-a07-evidence.json"
+fi
+if [ "$A07_STATUS" -eq 0 ] \
+    && ! wait_native_mpquic_paths a07-native-after relay2; then
+    A07_STATUS=1
+fi
+ip -n "$R1" link set r1x up
+ip -n "$R1" link set r1c up
+set +e
+wait "$HTTP3_SERVER_PID"
+HTTP3_SERVER_STATUS=$?
+set -e
+HTTP3_SERVER_PID=
+[ "$HTTP3_SERVER_STATUS" -eq 0 ] || A07_STATUS=1
+for evidence_file in a07-client.json destination-a07-evidence.json \
+    a07-client-capture.json a07-exit-capture.json \
+    a07-native-before.json a07-native-after.json; do
+    if [ "$A07_STATUS" -eq 0 ] \
+        && { [ ! -s "$WORK/$evidence_file" ] \
+            || ! jq -e . "$WORK/$evidence_file" >/dev/null 2>&1; }; then
+        A07_STATUS=1
+    fi
+done
+jq -S -c -n --arg relay relay1 \
+    --arg relay_client_operstate "$A07_R1C_STATE" \
+    --arg relay_exit_operstate "$A07_R1X_STATE" \
+    '{schema_version:1,removed_relay:$relay,process_active_at_removal:true,
+      removed_links:{relay_client_operstate:$relay_client_operstate,
+        relay_exit_operstate:$relay_exit_operstate}}' >"$WORK/a07-removal.json"
+if [ "$A07_STATUS" -eq 0 ]; then
+    jq -S -c -n \
+        --slurpfile application "$WORK/a07-client.json" \
+        --slurpfile destination "$WORK/destination-a07-evidence.json" \
+        --slurpfile client_capture "$WORK/a07-client-capture.json" \
+        --slurpfile exit_capture "$WORK/a07-exit-capture.json" \
+        --slurpfile a06_native "$WORK/a06-native-paths.json" \
+        --slurpfile native_before "$WORK/a07-native-before.json" \
+        --slurpfile native_after "$WORK/a07-native-after.json" \
+        --slurpfile removal "$WORK/a07-removal.json" \
+        '($application[0]) as $app | ($destination[0]) as $destination
+        | ($client_capture[0]) as $client | ($exit_capture[0]) as $exit
+        | ($a06_native[0]) as $a06_native | ($native_before[0]) as $before
+        | ($native_after[0]) as $after | ($removal[0]) as $removal
+        | ($before.paths | map(select(.relay == "relay2")) | .[0]) as $before_r2
+        | ($after.paths | map(select(.relay == "relay2")) | .[0]) as $after_r2
+        | (($app.protocol == "HTTP/3") and ($app.http_version == "HTTP/3")
+            and ($app.negotiated_alpn == "h3")
+            and ($app.destination == {ip:"47.163.4.2",port:443})
+            and ($app.request_bytes == 4194304) and ($app.response_bytes == 33554432)
+            and ($app.request_sha256 == $destination.request_sha256)
+            and ($app.response_sha256 == $destination.response_sha256)
+            and ($destination.protocol == "HTTP/3")
+            and ($destination.http_version == "HTTP/3")
+            and ($destination.negotiated_alpn == "h3")
+            and ($destination.release_observed == true)
+            and ($destination.source.ip == "47.163.4.1")
+            and $removal.process_active_at_removal
+            and ($removal.removed_links.relay_client_operstate == "DOWN")
+            and ($removal.removed_links.relay_exit_operstate == "DOWN")
+            and $client.marker_observed and $exit.marker_observed
+            and ($client.before_marker.relay1_wireguard_data_datagrams > 0)
+            and ($client.before_marker.relay2_wireguard_data_datagrams > 0)
+            and ($exit.before_marker.relay1_wireguard_data_datagrams > 0)
+            and ($exit.before_marker.relay2_wireguard_data_datagrams > 0)
+            and ($client.after_marker.relay2_wireguard_data_datagrams > 0)
+            and ($exit.after_marker.relay2_wireguard_data_datagrams > 0)
+            and ($client.direct_client_exit_packets == 0)
+            and ($client.truncated == false) and ($exit.truncated == false)
+            and ($exit.destination_request_datagrams > 0)
+            and ($exit.destination_response_datagrams > 0)
+            and ($a06_native.route_context_id == $before.route_context_id)
+            and ($before.route_context_id == $after.route_context_id)
+            and ($after_r2.path_id == $before_r2.path_id)
+            and ($after_r2.user_bytes > $before_r2.user_bytes)) as $success
+        | {schema_version:1,acceptance_id:"A07",success:$success,
+           transport:"active HTTP/3 flow retained by genuine MPQUIC after Relay removal",
+           application:$app,destination:$destination,relay_removal:$removal,
+           native_mpquic:{route_context_id:$after.route_context_id,
+             before_removal:$before.paths,after_removal:$after.paths},
+           path_evidence:{client_capture:$client,exit_capture:$exit},
+           application_flow_completed:true,ordinary_quic_fallback_allowed:false,
+           direct_client_exit_packets:$client.direct_client_exit_packets}' \
+        >"$WORK/a07-evidence.json"
+    jq -e '.success == true' "$WORK/a07-evidence.json" >/dev/null 2>&1 \
+        || A07_STATUS=1
+fi
+if [ "$A07_STATUS" -ne 0 ]; then
+    OBSERVED_BLOCKER=A07_ACTIVE_HTTP3_RELAY_FAILOVER_NOT_PROVEN
+    PHASE=a07-blocked
+    exit 77
+fi
+A07_SUCCEEDED=true
+OBSERVED_BLOCKER=NONE
+PHASE=a07-complete
 exit 0

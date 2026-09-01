@@ -36,6 +36,8 @@ grep -F 'VMP_BUILD_JOBS=2 VMP_RUN_TESTS=no' "$WORKFLOW" >/dev/null
 grep -F -- '--mpquic "$VOLPAROSSA_ALPHA_MPQUIC"' "$WORKFLOW" >/dev/null
 grep -F 'scp_to "$mpquic_path" /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
 grep -F -- '--mpquic /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
+grep -F -- '-p volparossa-test-support --example http3-acceptance-fixture' "$HOST" \
+    >/dev/null
 
 [ "$(grep -Fc 'launch_helper client "$CLIENT"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay0 "$R0"' "$GUEST")" -eq 1 ]
@@ -133,6 +135,29 @@ grep -F 'process_active_at_removal:$process_active_at_removal' "$GUEST" >/dev/nu
 grep -F 'after_marker.relay2_wireguard_data_datagrams > 0' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A04",success:$success' "$GUEST" >/dev/null
 grep -F 'a04_mptcp_relay_failover:{requested:$a04_requested,succeeded:$a04_succeeded' "$GUEST" \
+    >/dev/null
+grep -F 'http3-acceptance-fixture" server' "$GUEST" >/dev/null
+grep -F 'http3-acceptance-fixture" client a06' "$GUEST" >/dev/null
+grep -F 'http3-acceptance-fixture" client a07' "$GUEST" >/dev/null
+grep -F 'connected: false' "$GUEST" >/dev/null
+grep -F 'active contexts: 0' "$GUEST" >/dev/null
+grep -F 'destination == "47.163.4.2" and destination_port == 443' "$GUEST" \
+    >/dev/null
+grep -F 'capture_native_mpquic_paths()' "$GUEST" >/dev/null
+grep -F 'agent local-control native MPQUIC counters' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A06",success:$success' "$GUEST" >/dev/null
+grep -F 'a06_http3_mpquic:{requested:$a06_requested,succeeded:$a06_succeeded' "$GUEST" \
+    >/dev/null
+grep -F 'ip -n "$R1" link set r1c down' "$GUEST" >/dev/null
+grep -F 'a07-active.ready' "$GUEST" >/dev/null
+grep -F 'ordinary_quic_fallback_allowed:false' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A07",success:$success' "$GUEST" >/dev/null
+grep -F 'a07_http3_relay_failover:{requested:$a07_requested,succeeded:$a07_succeeded' "$GUEST" \
+    >/dev/null
+grep -F 'Require successful A02 through A07 datapaths' "$WORKFLOW" >/dev/null
+grep -F '.a06_http3_mpquic.evidence.native_mpquic.required_path_count == 2' "$WORKFLOW" \
+    >/dev/null
+grep -F '.a07_http3_relay_failover.evidence.application_flow_completed == true' "$WORKFLOW" \
     >/dev/null
 
 printf '%s\n' 'KVM alpha topology static contract passed'
