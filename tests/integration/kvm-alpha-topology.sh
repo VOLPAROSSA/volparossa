@@ -352,7 +352,7 @@ copy_artifacts() {
         a01-bootstrap1-remaining-link-after.json \
         a01-bootstrap2-remaining-link-before.json \
         a01-bootstrap2-remaining-link-after.json \
-        a01-initial-peers.txt \
+        a01-expected-peers.json a01-initial-peers.txt \
         a01-bootstrap1-connect.out a01-bootstrap1-connect.err \
         a01-bootstrap1-paths.txt a01-bootstrap1-selection.json \
         a01-bootstrap1-disconnect.out a01-bootstrap1-disconnect.err \
@@ -1047,6 +1047,13 @@ printf '%s\n' "$CLIENT_PEER" "$B1_PEER" "$B2_PEER" "$R0_PEER" "$R1_PEER" \
 if [ "$(awk 'END { print NR + 0 }' "$WORK/peer-identities.txt")" -ne 7 ]; then
     fail IDENTITY_INITIALISATION_FAILED
 fi
+jq -S -c -n \
+    --arg client "$CLIENT_PEER" --arg bootstrap1 "$B1_PEER" --arg bootstrap2 "$B2_PEER" \
+    --arg relay0 "$R0_PEER" --arg relay1 "$R1_PEER" --arg relay2 "$R2_PEER" \
+    --arg exit "$EXIT_PEER" \
+    '{client:$client,bootstrap1:$bootstrap1,bootstrap2:$bootstrap2,
+      relay0:$relay0,relay1:$relay1,relay2:$relay2,exit:$exit}' \
+    >"$WORK/a01-expected-peers.json"
 
 "$binary_directory/examples/acceptance-policy-fixture" "$WORK"
 chown "$AGENT_UID:$AGENT_GID" "$WORK/development-policy.manifest" \

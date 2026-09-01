@@ -4040,6 +4040,29 @@ impl DiscoveryRuntime {
         }
     }
 
+    /// Re-announces the small desired provider-key set after the DHT gains usable connectivity.
+    ///
+    /// `start_providing` can begin while a freshly started service has only configured routing
+    /// addresses and no established QUIC connection. Keeping the signed advertisement served and
+    /// retrying its one or two capability indexes is both bounded and authority-free; withdrawing
+    /// the advertisement on that transient query timeout makes startup order observable forever.
+    async fn reannounce_local_providers(&mut self, state: &Arc<RwLock<AgentState>>) {
+        let keys = self
+            .active_provider_keys
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if self.service.provide(&key).is_err() {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "ADVERTISEMENT_PROVIDER_FAILED",
+                    unix_millis(),
+                );
+            }
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one exhaustive v4 swarm dispatcher keeps every protocol direction fail closed"
@@ -4082,6 +4105,7 @@ impl DiscoveryRuntime {
                 self.observed_endpoints
                     .insert(peer_id, (remote.to_string(), multiaddr_ip(&remote)));
                 state.write().await.peer_connected(peer_id.to_string());
+                self.reannounce_local_providers(state).await;
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
@@ -4126,13 +4150,13 @@ impl DiscoveryRuntime {
                     ..
                 },
             )) => {
-                self.withdraw_local();
                 state.write().await.log(
                     LogLevel::Warn,
                     "ADVERTISEMENT_PROVIDER_FAILED",
                     unix_millis(),
                 );
                 self.provider_queries.remove(&id);
+                self.reannounce_local_providers(state).await;
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed { id, step, .. },
