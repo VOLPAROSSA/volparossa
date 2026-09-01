@@ -331,9 +331,11 @@ impl DiscoveryBehaviour {
         kad_config.set_provider_publication_interval(Some(Duration::from_secs(180)));
         let mut kademlia =
             kad::Behaviour::with_config(local_peer_id, MemoryStore::new(local_peer_id), kad_config);
-        // Voluntary service nodes are explicit private-overlay DHT servers. Waiting for libp2p's
-        // public external-address heuristic leaves a disposable/private topology permanently in
-        // client mode, so no Relay or Exit provider record can be stored or discovered.
+        // Voluntary service nodes and role-less bootstrap contacts are explicit private-overlay
+        // DHT servers. Waiting for libp2p's public external-address heuristic leaves a
+        // disposable/private topology permanently in client mode, while making bootstrap-only
+        // contacts clients leaves Relay and Exit provider records with no shared storage hop.
+        // Bootstrap contacts still carry no authority: they store signed capability indexes only.
         kademlia.set_mode(Some(kademlia_mode_for_roles(protocol_roles)));
         let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
         let dcutr = dcutr::Behaviour::new(local_peer_id);
@@ -378,7 +380,7 @@ impl DiscoveryBehaviour {
 }
 
 const fn kademlia_mode_for_roles(roles: DiscoveryProtocolRoles) -> kad::Mode {
-    if roles.relay() || roles.exit() {
+    if roles.relay() || roles.exit() || !roles.client() {
         kad::Mode::Server
     } else {
         kad::Mode::Client
@@ -1899,7 +1901,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn service_roles_are_private_kademlia_servers() {
+    fn service_and_bootstrap_roles_are_private_kademlia_servers() {
         assert_eq!(
             kademlia_mode_for_roles(DiscoveryProtocolRoles::new(true, false, false)),
             kad::Mode::Client
@@ -1907,6 +1909,7 @@ mod tests {
         for roles in [
             DiscoveryProtocolRoles::new(false, true, false),
             DiscoveryProtocolRoles::new(false, false, true),
+            DiscoveryProtocolRoles::new(false, false, false),
             DiscoveryProtocolRoles::new(true, true, true),
         ] {
             assert_eq!(kademlia_mode_for_roles(roles), kad::Mode::Server);
