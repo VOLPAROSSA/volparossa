@@ -60,6 +60,8 @@ pub enum ExitForwardOperation {
     NativeProbeResult = 9,
     /// Data-Relay-to-Exit activation after the Client committed the exact final UDP route.
     UdpSessionStart = 10,
+    /// Data-Relay-to-Exit activation framing for one exact committed MPTCP path set.
+    MptcpSessionStart = 11,
 }
 
 /// Endpoint-bearing data-Relay request for the selected Exit's private readiness phase.
@@ -302,6 +304,19 @@ impl ExitForwardRequest {
             }
             ExitForwardOperation::UdpSessionStart => {
                 decode_canonical::<crate::UdpSessionStartRequest>(
+                    &self.canonical_request,
+                    frame_limit(),
+                )
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+            }
+            ExitForwardOperation::MptcpSessionStart => {
+                validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
+                if self.exit_node_id == self.control_relay_node_id {
+                    return Err(ForwardingRpcError::InvalidFrame);
+                }
+                decode_canonical::<crate::MptcpSessionStartRequest>(
                     &self.canonical_request,
                     frame_limit(),
                 )
@@ -900,6 +915,7 @@ fn validate_granted_responses(
             validate_exact_types(responses, &[ControlMessageType::NativeProbeExitResult])
         }
         ExitForwardOperation::UdpSessionStart => validate_udp_session_signal(responses),
+        ExitForwardOperation::MptcpSessionStart => validate_mptcp_session_signal(responses),
         ExitForwardOperation::Unspecified => Err(ForwardingRpcError::InvalidOperation(0)),
     }
 }
@@ -978,6 +994,7 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
         | ExitForwardOperation::NativeProbeReady
         | ExitForwardOperation::NativeProbeResult
         | ExitForwardOperation::UdpSessionStart
+        | ExitForwardOperation::MptcpSessionStart
         | ExitForwardOperation::Unspecified => {
             Err(ForwardingRpcError::InvalidOperation(operation as i32))
         }
@@ -989,6 +1006,16 @@ fn validate_udp_session_signal(responses: &[Vec<u8>]) -> Result<(), ForwardingRp
         return Err(ForwardingRpcError::InvalidFrame);
     };
     decode_canonical::<crate::UdpExitSessionSignal>(encoded, frame_limit())
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)
+}
+
+fn validate_mptcp_session_signal(responses: &[Vec<u8>]) -> Result<(), ForwardingRpcError> {
+    let [encoded] = responses else {
+        return Err(ForwardingRpcError::InvalidFrame);
+    };
+    decode_canonical::<crate::ExitMptcpSessionSignal>(encoded, frame_limit())
         .map_err(|_| ForwardingRpcError::InvalidFrame)?
         .validate()
         .map_err(|_| ForwardingRpcError::InvalidFrame)

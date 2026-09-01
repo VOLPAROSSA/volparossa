@@ -6,6 +6,7 @@ mod advertisement_tests;
 mod advertisements;
 mod connection_provenance;
 mod forwarding;
+mod mptcp_session;
 mod peerlink;
 mod preselection_forwarder;
 mod preselection_responder;
@@ -56,6 +57,9 @@ pub use forwarding::{
 use forwarding::{
     ExitForwardCodec, UpstreamExitForwardCodec, exit_forward_behaviour,
     exit_forward_upstream_behaviour,
+};
+pub use mptcp_session::{
+    ExitMptcpSessionSignal, MptcpSessionFrameError, MptcpSessionPathProof, MptcpSessionStartRequest,
 };
 pub use peerlink::{PeerLink, PeerLinkError};
 use preselection_forwarder::PreselectionForwarderState;

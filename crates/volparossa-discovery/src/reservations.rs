@@ -53,6 +53,8 @@ pub enum DatapathRelayOperation {
     NativeProbeAuthorize = 5,
     /// Commit the exact data Relay and obtain the Exit's committed UDP session signal.
     UdpSessionStart = 6,
+    /// Forward one exact committed MPTCP path proof set to the selected Exit.
+    MptcpSessionStart = 7,
 }
 
 /// Canonical direct datapath-relay request.
@@ -166,6 +168,18 @@ impl DatapathRelayRequest {
                     return Err(DatapathRelayRpcError::InvalidFrame);
                 }
                 decode_canonical::<crate::UdpSessionStartRequest>(
+                    &self.client_signed_request,
+                    frame_limit(),
+                )
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+            }
+            DatapathRelayOperation::MptcpSessionStart => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                decode_canonical::<crate::MptcpSessionStartRequest>(
                     &self.client_signed_request,
                     frame_limit(),
                 )
@@ -367,6 +381,9 @@ impl DatapathRelayResponse {
                     DatapathRelayOperation::UdpSessionStart => {
                         return validate_udp_session_signal(&self.signed_response);
                     }
+                    DatapathRelayOperation::MptcpSessionStart => {
+                        return validate_mptcp_session_signal(&self.signed_response);
+                    }
                     DatapathRelayOperation::Unspecified => {
                         return Err(DatapathRelayRpcError::InvalidOperation(self.operation));
                     }
@@ -440,6 +457,13 @@ impl DatapathRelayResponse {
 
 fn validate_udp_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcError> {
     decode_canonical::<crate::UdpExitSessionSignal>(encoded, frame_limit())
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+}
+
+fn validate_mptcp_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcError> {
+    decode_canonical::<crate::ExitMptcpSessionSignal>(encoded, frame_limit())
         .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
         .validate()
         .map_err(|_| DatapathRelayRpcError::InvalidFrame)
