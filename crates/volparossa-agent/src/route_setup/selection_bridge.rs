@@ -856,9 +856,21 @@ pub(crate) struct PreparedPreselectionEvidence {
 /// Relay-ready/helper-backed stages; none is projected into the local control protocol.
 #[must_use = "native client preselection must remain owned by the route coordinator"]
 pub(crate) struct ClientNativePreselection {
+    batch: ClientNativeProbeBatchOwner,
+    awaiting_relay_ready: native_preselection::AwaitingNativeRelayReady,
+}
+
+/// Affine owner shared by every per-path phase in one native candidate-set attempt.
+///
+/// Current signed native grants bind each candidate to its own helper route context and path one.
+/// The committed helper owners therefore remain a bounded vector until the protocol can authorize
+/// candidate ordinals inside one shared multi-lease context. Proofs and contexts advance together.
+#[must_use = "native path-batch ownership must remain affine"]
+struct ClientNativeProbeBatchOwner {
     owner: native_preselection::NativePreselectionAttemptOwner,
     replay: volparossa_protocol::ReplayCache,
-    awaiting_relay_ready: native_preselection::AwaitingNativeRelayReady,
+    proofs: Vec<native_preselection::BoundNativePathProof>,
+    prepared_owners: Vec<RuntimeBoundPreparedLeaseBatch>,
 }
 
 /// Terminal proof-to-evidence rejection with cooldown ownership retained.
@@ -870,16 +882,14 @@ struct PreselectionEvidenceJoinFailure {
 /// Verified data-Relay readiness awaiting one same-runtime helper Prepare.
 #[must_use = "verified Relay readiness must remain with its affine native attempt"]
 pub(crate) struct ClientNativeRelayReady {
-    owner: native_preselection::NativePreselectionAttemptOwner,
-    replay: volparossa_protocol::ReplayCache,
+    batch: ClientNativeProbeBatchOwner,
     armed: native_preselection::ArmedNativeProbe,
 }
 
 /// Helper-prepared local endpoint awaiting exact activation before Start can be signed.
 #[must_use = "a prepared native Client context must be activated or destroyed"]
 pub(crate) struct PreparedClientNativeProbe {
-    owner: native_preselection::NativePreselectionAttemptOwner,
-    replay: volparossa_protocol::ReplayCache,
+    batch: ClientNativeProbeBatchOwner,
     armed: native_preselection::ArmedNativeProbe,
     prepared_owner: RuntimeBoundPreparedLeaseBatch,
     helper_runtime_id: [u8; 32],
@@ -895,8 +905,7 @@ pub(crate) struct PreparedClientNativeProbe {
 /// Helper-prepared Client context with exact standard Relay activation authority attached.
 #[must_use = "an authorized native Client context must be activated or destroyed"]
 pub(crate) struct AuthorizedPreparedClientNativeProbe {
-    owner: native_preselection::NativePreselectionAttemptOwner,
-    replay: volparossa_protocol::ReplayCache,
+    batch: ClientNativeProbeBatchOwner,
     awaiting: native_preselection::AwaitingNativeResult,
     prepared_owner: RuntimeBoundPreparedLeaseBatch,
     helper_runtime_id: [u8; 32],
@@ -910,8 +919,7 @@ pub(crate) struct AuthorizedPreparedClientNativeProbe {
 /// Signed Start dispatched to the exact data Relay and awaiting local helper commit proof.
 #[must_use = "a started native Client probe must consume helper proof or be destroyed"]
 pub(crate) struct AwaitingClientNativeProbeResult {
-    owner: native_preselection::NativePreselectionAttemptOwner,
-    replay: volparossa_protocol::ReplayCache,
+    batch: ClientNativeProbeBatchOwner,
     awaiting: native_preselection::AwaitingNativeResult,
     signed_relay_result: Vec<u8>,
     prepared_owner: RuntimeBoundPreparedLeaseBatch,
@@ -922,13 +930,15 @@ pub(crate) struct AwaitingClientNativeProbeResult {
     prepared_lease_commitment: [u8; 32],
 }
 
-/// Terminal cryptographic path proof plus remaining affine candidate ownership.
-#[must_use = "native proof ownership must remain with later route admission"]
+/// One or more terminal cryptographic path proofs plus remaining affine candidate ownership.
+#[must_use = "native proof-batch ownership must remain with later route admission"]
 pub(crate) struct CompletedClientNativeProbe {
-    _owner: native_preselection::NativePreselectionAttemptOwner,
-    _proof: native_preselection::BoundNativePathProof,
-    _prepared_owner: RuntimeBoundPreparedLeaseBatch,
+    batch: ClientNativeProbeBatchOwner,
 }
+
+// One path accepts Request, Permit, Relay Ready, Relay reservation, nested Exit authorization,
+// Relay Result, and nested Exit Result envelopes into the shared fail-closed replay cache.
+const CLIENT_NATIVE_REPLAY_ENTRIES_PER_PATH: usize = 7;
 
 /// Failure while binding the exact helper lifecycle to the native probe transcript.
 #[derive(Debug, Error)]
@@ -966,21 +976,39 @@ pub(crate) async fn begin_client_native_preselection(
     prepared: PreparedPreselectionEvidence,
     discovery: &DiscoveryControlHandle,
 ) -> Result<ClientNativePreselection, native_preselection::NativePreselectionError> {
-    let mut owner = native_preselection::begin_native_preselection(prepared)?;
-    let awaiting = owner
-        .begin_next()?
-        .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
-    let dispatch = awaiting.into_forward_dispatch()?;
     let replay_capacity = volparossa_protocol::MAX_NATIVE_PROBE_CANDIDATES
-        .checked_mul(3)
+        .checked_mul(CLIENT_NATIVE_REPLAY_ENTRIES_PER_PATH)
         .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
-    let mut replay = volparossa_protocol::ReplayCache::new(replay_capacity)?;
-    let awaiting_relay_ready = dispatch.execute(discovery, &mut replay).await?;
-    Ok(ClientNativePreselection {
-        owner,
-        replay,
-        awaiting_relay_ready,
-    })
+    ClientNativeProbeBatchOwner {
+        owner: native_preselection::begin_native_preselection(prepared)?,
+        replay: volparossa_protocol::ReplayCache::new(replay_capacity)?,
+        proofs: Vec::new(),
+        prepared_owners: Vec::new(),
+    }
+    .dispatch_next_permit(discovery)
+    .await
+}
+
+impl ClientNativeProbeBatchOwner {
+    /// Consume exactly one remaining candidate into the selected control-Relay Permit RPC.
+    async fn dispatch_next_permit(
+        mut self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<ClientNativePreselection, native_preselection::NativePreselectionError> {
+        if self.proofs.len() != self.prepared_owners.len() {
+            return Err(native_preselection::NativePreselectionError::InvalidCandidateSet);
+        }
+        let awaiting = self
+            .owner
+            .begin_next()?
+            .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+        let dispatch = awaiting.into_forward_dispatch()?;
+        let awaiting_relay_ready = dispatch.execute(discovery, &mut self.replay).await?;
+        Ok(ClientNativePreselection {
+            batch: self,
+            awaiting_relay_ready,
+        })
+    }
 }
 
 impl ClientNativePreselection {
@@ -990,19 +1018,14 @@ impl ClientNativePreselection {
         discovery: &DiscoveryControlHandle,
     ) -> Result<ClientNativeRelayReady, ClientNativeProbeError> {
         let Self {
-            owner,
-            mut replay,
+            mut batch,
             awaiting_relay_ready,
         } = self;
         let armed = awaiting_relay_ready
             .into_relay_ready_dispatch()?
-            .execute(discovery, &mut replay)
+            .execute(discovery, &mut batch.replay)
             .await?;
-        Ok(ClientNativeRelayReady {
-            owner,
-            replay,
-            armed,
-        })
+        Ok(ClientNativeRelayReady { batch, armed })
     }
 }
 
@@ -1074,8 +1097,7 @@ impl ClientNativeRelayReady {
             .ok_or(ClientNativeProbeError::HelperCorrelation)?
             .clone();
         Ok(PreparedClientNativeProbe {
-            owner: self.owner,
-            replay: self.replay,
+            batch: self.batch,
             armed: self.armed,
             prepared_owner: prepared,
             helper_runtime_id,
@@ -1096,7 +1118,7 @@ impl PreparedClientNativeProbe {
         &self.endpoint_binding
     }
 
-    /// Destroy authority retained from the first successful local Prepare.
+    /// Destroy authority retained from this successful local Prepare.
     pub(crate) fn destroy_request(&self) -> DestroyContext {
         self.prepared_owner.destroy_request()
     }
@@ -1117,8 +1139,7 @@ impl PreparedClientNativeProbe {
         discovery: &DiscoveryControlHandle,
     ) -> Result<AuthorizedPreparedClientNativeProbe, ClientNativeProbeError> {
         let Self {
-            owner,
-            mut replay,
+            mut batch,
             armed,
             prepared_owner,
             helper_runtime_id,
@@ -1148,7 +1169,7 @@ impl PreparedClientNativeProbe {
             awaiting.encoded_start(),
             &signed_relay_reservation,
             now_ms,
-            &mut replay,
+            &mut batch.replay,
         )?;
         let activation = ActivateLeaseBatch {
             route_context_id: route_context_id.to_vec(),
@@ -1169,8 +1190,7 @@ impl PreparedClientNativeProbe {
             }],
         };
         Ok(AuthorizedPreparedClientNativeProbe {
-            owner,
-            replay,
+            batch,
             awaiting,
             prepared_owner,
             helper_runtime_id,
@@ -1279,8 +1299,7 @@ impl AuthorizedPreparedClientNativeProbe {
             .execute(discovery)
             .await?;
         Ok(AwaitingClientNativeProbeResult {
-            owner: self.owner,
-            replay: self.replay,
+            batch: self.batch,
             awaiting,
             signed_relay_result,
             prepared_owner: self.prepared_owner,
@@ -1347,13 +1366,27 @@ impl AwaitingClientNativeProbeResult {
                 transmitted_bytes_after_baseline: lease.transmitted_bytes,
             },
             &self.signed_relay_result,
-            &mut self.replay,
+            &mut self.batch.replay,
         )?;
-        Ok(CompletedClientNativeProbe {
-            _owner: self.owner,
-            _proof: proof,
-            _prepared_owner: self.prepared_owner,
-        })
+        self.batch.proofs.push(proof);
+        self.batch.prepared_owners.push(self.prepared_owner);
+        Ok(CompletedClientNativeProbe { batch: self.batch })
+    }
+}
+
+impl CompletedClientNativeProbe {
+    /// Number of exact per-path Result proofs retained with committed helper contexts.
+    pub(crate) fn completed_path_count(&self) -> usize {
+        debug_assert_eq!(self.batch.proofs.len(), self.batch.prepared_owners.len());
+        self.batch.proofs.len()
+    }
+
+    /// Consume the next affine candidate through its exact selected control Relay.
+    pub(crate) async fn dispatch_next_permit(
+        self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<ClientNativePreselection, ClientNativeProbeError> {
+        Ok(self.batch.dispatch_next_permit(discovery).await?)
     }
 }
 
@@ -5347,6 +5380,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine-owner regression audits every queued candidate and expiry boundary"
+    )]
     fn native_owner_consumes_live_a1_receipts_then_mints_an_independent_bounded_attempt() {
         let (snapshot, _) = snapshot_fixture();
         let completed = preselection_freshness_attempt(
@@ -5425,6 +5462,45 @@ mod tests {
             minted_at_ms,
             minted_at,
             expected_expiry,
+        );
+        for expected_ordinal in 2_u32..=3 {
+            let awaiting = owner
+                .begin_next_for_test(minted_at_ms + 1, minted_at + Duration::from_millis(1))
+                .expect("live next candidate")
+                .expect("required candidate exists");
+            let dispatch = awaiting
+                .into_forward_dispatch()
+                .expect("exact client-hop wrapper");
+            let (control_peer, request) = dispatch.request_for_test();
+            let envelope: SignedEnvelope =
+                decode_canonical(request.canonical_request(), MAX_CONTROL_MESSAGE_SIZE)
+                    .expect("signed native Permit request");
+            let request: volparossa_protocol::NativeProbePermitRequest = decode_canonical(
+                &envelope.payload,
+                volparossa_protocol::MAX_CONTROL_PAYLOAD_SIZE,
+            )
+            .expect("permit request payload");
+            let scope = request.scope.expect("path scope");
+            assert_eq!(scope.candidate_ordinal, expected_ordinal);
+            assert_eq!(
+                scope.data_relay.as_ref(),
+                candidate_set
+                    .data_relays
+                    .get(usize::try_from(expected_ordinal - 1).expect("bounded ordinal"))
+            );
+            assert_eq!(scope.control, candidate_set.control);
+            assert_eq!(scope.exit, candidate_set.exit);
+            assert_eq!(
+                control_peer.to_bytes(),
+                candidate_set.control.as_ref().expect("control").peer_id
+            );
+        }
+        assert!(
+            owner
+                .begin_next_for_test(minted_at_ms + 1, minted_at + Duration::from_millis(1))
+                .expect("live exhausted owner")
+                .is_none(),
+            "every candidate must be consumed exactly once"
         );
 
         let (snapshot, _) = snapshot_fixture();

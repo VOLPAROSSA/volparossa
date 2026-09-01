@@ -1083,14 +1083,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   route readiness. Empty local `Connect` now derives one explicit operator-configured address
   family and minimum/local/conservative capacity profile, chooses the first enabled transport
   deterministically (UDP, then TCP, then browser QUIC), and invokes that actor-owned preselection
-  boundary. A private affine native continuation consumes the handoff, mints its independent
-  bounded candidate owner, wraps the first signed native Permit request with the exact selected
-  control-Relay and Exit lineage, and dispatches it through `request_exit_forward` only to that
-  control Relay. Exact wrapper/correlation/operation/Exit checks and protocol verification consume
-  a granted Permit. The affine continuation then sends the exact endpoint-free request/Permit pair
-  directly to only the selected data Relay over typed `NativeProbeReady` framing, verifies the
-  wrapper identity, operation, status and signed `NativeProbeRelayReady`, and retains the remaining
-  candidates and replay state with that readiness. The next typed seam binds a same-connection
+  boundary. UDP requires exactly one native path; TCP MPTCP requires the configured selection
+  minimum; browser Multipath QUIC requires the greater of that minimum and its own configured
+  minimum, with both multipath cases rejecting fewer than two paths or an enabled degraded
+  fallback. A private affine native continuation consumes the handoff, mints its independent
+  bounded candidate owner, wraps each required signed native Permit request in candidate order with
+  the exact selected control-Relay and Exit lineage, and dispatches it through
+  `request_exit_forward` only to that control Relay. Exact wrapper/correlation/operation/Exit checks
+  and protocol verification consume each granted Permit. The affine continuation then sends each
+  exact endpoint-free request/Permit pair directly to only its selected data Relay over typed
+  `NativeProbeReady` framing, verifies the wrapper identity, operation, status and signed
+  `NativeProbeRelayReady`, and retains the remaining candidates and shared replay state with that
+  readiness. The next typed seam binds a same-connection
   helper runtime and one exact prepared Client lease into the native endpoint commitment and
   retains exact Destroy authority. It signs `NativeProbeStart` while the lease is still prepared,
   sends it only to that data Relay over the distinct `NativeProbeAuthorize` operation, and permits
@@ -1105,11 +1109,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   chain and byte-identical Exit retry. The later affine states build exact Activate/Commit requests,
   dispatch that already-authorized Start only after exact helper activation, and verify the
   correlated `NativeProbeRelayResult` together with non-zero helper commit facts.
-  Connect still returns `Unavailable` before helper Prepare; disconnect therefore drops only this
-  pre-helper owner before global helper cleanup. The discovery actor still lacks the Relay-side
-  native Ready/Authorize/Start provider and Relay-to-Exit transport wiring, and the helper Relay
-  activation verifier still accepts only a standard `RelayReservationRequest` rather than this
-  exact signed native Start. The client dataplane challenge injector is also absent, so no native
+  Production Connect repeats that exact Prepare/Authorize/Activate/Start/Commit/Result chain until
+  the required count is proven, retains every proof and committed helper context affinely, and
+  fails closed with agent-scoped cleanup if any later candidate or path phase fails; it never
+  degrades to the first completed path. Current native grants bind each candidate to its unique
+  `probe_id` route context and `path_id = 1`, so this is necessarily one helper lifecycle per path;
+  one shared multi-lease helper context remains blocked on a corresponding signed
+  Exit/Relay-grant generalization. Connect still returns `Unavailable` after this proof batch
+  because later route admission is absent. The discovery actor still lacks the production
+  Relay/Exit Ready producer and later Start/Result execution. Its Relay-to-Exit Authorize
+  responder and helper-side exact native-Start activation verifier are present, but remain
+  unreachable until Ready retains the prepared Relay/Exit endpoints and affine phase owner. The
+  client dataplane challenge injector is also absent, so no native
   result, route admission or usable dataplane proof exists yet.
   The swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no

@@ -145,7 +145,15 @@ impl ClientRouteControl {
 
         let result = begin_client_route(config, discovery).await;
         let result = match result {
-            Ok(ready) => Box::pin(complete_client_native_probe(ready, discovery, helper)).await,
+            Ok((ready, required_native_paths)) => {
+                Box::pin(complete_required_client_native_paths(
+                    ready,
+                    required_native_paths,
+                    discovery,
+                    helper,
+                ))
+                .await
+            }
             Err(error) => Err(error),
         };
         let mut state = self.state.lock().await;
@@ -167,7 +175,74 @@ impl ClientRouteControl {
     }
 }
 
-/// Drive the first selected path through the exact helper runtime and both signed native RPCs.
+/// Repeat an affine Ready-to-proof lifecycle until the selected transport's hard minimum is met.
+async fn drive_required_native_paths<
+    Ready,
+    Completed,
+    Error,
+    Complete,
+    CompleteFuture,
+    Continue,
+    ContinueFuture,
+    Count,
+>(
+    mut ready: Ready,
+    required_paths: usize,
+    mut complete: Complete,
+    mut continue_with: Continue,
+    completed_path_count: Count,
+) -> Result<Completed, Error>
+where
+    Complete: FnMut(Ready) -> CompleteFuture,
+    CompleteFuture: Future<Output = Result<Completed, Error>>,
+    Continue: FnMut(Completed) -> ContinueFuture,
+    ContinueFuture: Future<Output = Result<Ready, Error>>,
+    Count: Fn(&Completed) -> usize,
+{
+    debug_assert!(required_paths != 0);
+    loop {
+        let completed = complete(ready).await?;
+        if completed_path_count(&completed) >= required_paths {
+            return Ok(completed);
+        }
+        ready = continue_with(completed).await?;
+    }
+}
+
+/// Establish every required native path, retaining each exact proof and helper context affinely.
+async fn complete_required_client_native_paths(
+    ready: selection_bridge::ClientNativeRelayReady,
+    required_paths: usize,
+    discovery: &DiscoveryControlHandle,
+    helper: &HelperClient,
+) -> Result<selection_bridge::CompletedClientNativeProbe, ClientRouteConnectError> {
+    let result = Box::pin(drive_required_native_paths(
+        ready,
+        required_paths,
+        |ready| complete_client_native_probe(ready, discovery, helper),
+        |completed| async move {
+            let preselection = completed
+                .dispatch_next_permit(discovery)
+                .await
+                .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
+            preselection
+                .dispatch_relay_ready(discovery)
+                .await
+                .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)
+        },
+        selection_bridge::CompletedClientNativeProbe::completed_path_count,
+    ))
+    .await;
+    if result.is_err() {
+        // A later affine protocol join may have consumed its exact current helper owner. The
+        // existing agent-scoped token is the only authority that can close all earlier committed
+        // per-probe contexts as one fail-closed rollback.
+        let _ = helper.cleanup_owned().await;
+    }
+    result
+}
+
+/// Drive one selected path through the exact helper runtime and both signed native RPCs.
 ///
 /// A helper-side context is destroyed immediately when the affine runtime owner is still
 /// available. Failures at consuming protocol joins fall back to the existing agent-scoped cleanup
@@ -226,8 +301,8 @@ async fn complete_client_native_probe(
 async fn begin_client_route(
     config: &Config,
     discovery: &DiscoveryControlHandle,
-) -> Result<selection_bridge::ClientNativeRelayReady, ClientRouteConnectError> {
-    let parameters = client_preselection_parameters(config)?;
+) -> Result<(selection_bridge::ClientNativeRelayReady, usize), ClientRouteConnectError> {
+    let (parameters, required_native_paths) = client_preselection_plan(config)?;
     let prepared = discovery
         .prepare_client_preselection(parameters)
         .await
@@ -235,24 +310,23 @@ async fn begin_client_route(
     let preselection = selection_bridge::begin_client_native_preselection(prepared, discovery)
         .await
         .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
-    preselection
+    let ready = preselection
         .dispatch_relay_ready(discovery)
         .await
-        .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)
+        .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
+    Ok((ready, required_native_paths))
 }
 
 fn client_preselection_parameters(
     config: &Config,
 ) -> Result<ClientPreselectionParameters, ClientRouteConnectError> {
-    let transport = if config.udp.enabled {
-        Transport::UdpSinglePath
-    } else if config.tcp.enabled {
-        Transport::TcpMptcp
-    } else if config.quic.enabled {
-        Transport::MultipathQuic
-    } else {
-        return Err(ClientRouteConnectError::InvalidProfile);
-    };
+    client_preselection_plan(config).map(|(parameters, _required_native_paths)| parameters)
+}
+
+fn client_preselection_plan(
+    config: &Config,
+) -> Result<(ClientPreselectionParameters, usize), ClientRouteConnectError> {
+    let (transport, required_native_paths) = client_native_path_requirement(config)?;
     let address_family = match config.routing.client_address_family {
         ClientAddressFamily::Ipv4 => volparossa_protocol::ObservationAddressFamily::Ipv4,
         ClientAddressFamily::Ipv6 => volparossa_protocol::ObservationAddressFamily::Ipv6,
@@ -279,13 +353,7 @@ fn client_preselection_parameters(
     }
     let multipath = transport != Transport::UdpSinglePath;
     let minimum_other_relays = if multipath {
-        usize::from(
-            config
-                .selection
-                .minimum_multipath_paths
-                .saturating_sub(1)
-                .max(1),
-        )
+        required_native_paths.saturating_sub(1)
     } else {
         1
     };
@@ -300,19 +368,62 @@ fn client_preselection_parameters(
     } else {
         1
     };
-    Ok(ClientPreselectionParameters::new(
-        transport,
-        address_family,
-        minimum_capacity,
-        local_profile_capacity,
-        conservative_capacity_ceiling,
-        minimum_other_relays,
-        maximum_other_relays,
-        config
-            .network
-            .candidate_pool_size
-            .min(volparossa_selection::MAXIMUM_SELECTION_CANDIDATES),
+    Ok((
+        ClientPreselectionParameters::new(
+            transport,
+            address_family,
+            minimum_capacity,
+            local_profile_capacity,
+            conservative_capacity_ceiling,
+            minimum_other_relays,
+            maximum_other_relays,
+            config
+                .network
+                .candidate_pool_size
+                .min(volparossa_selection::MAXIMUM_SELECTION_CANDIDATES),
+        ),
+        required_native_paths,
     ))
+}
+
+fn client_native_path_requirement(
+    config: &Config,
+) -> Result<(Transport, usize), ClientRouteConnectError> {
+    if config.udp.enabled {
+        return Ok((Transport::UdpSinglePath, 1));
+    }
+    let (transport, required_paths) = if config.tcp.enabled {
+        if config.tcp.allow_plain_tcp_fallback {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        (
+            Transport::TcpMptcp,
+            usize::from(config.selection.minimum_multipath_paths),
+        )
+    } else if config.quic.enabled {
+        if !config.quic.require_multipath || config.quic.allow_degraded_single_path {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        (
+            Transport::MultipathQuic,
+            usize::from(
+                config
+                    .selection
+                    .minimum_multipath_paths
+                    .max(config.quic.minimum_paths),
+            ),
+        )
+    } else {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    };
+    let maximum_paths = usize::from(config.selection.maximum_multipath_paths);
+    if required_paths < 2
+        || required_paths > maximum_paths
+        || required_paths > usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)
+    {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    }
+    Ok((transport, required_paths))
 }
 
 fn map_preselection_error(_: ClientPreselectionError) -> ClientRouteConnectError {
@@ -3687,6 +3798,121 @@ mod tests {
         assert_eq!(
             client_preselection_parameters(&config).err(),
             Some(ClientRouteConnectError::InvalidProfile)
+        );
+    }
+
+    #[test]
+    fn connect_path_requirement_is_exact_and_never_degrades_multipath() {
+        let mut config = Config::default();
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Ok((Transport::UdpSinglePath, 1))
+        );
+
+        config.udp.enabled = false;
+        config.selection.minimum_multipath_paths = 4;
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Ok((Transport::TcpMptcp, 4))
+        );
+        let parameters = client_preselection_parameters(&config).expect("MPTCP parameters");
+        let (_, _, _, _, _, minimum_other, _, _) = parameters.fields_for_test();
+        assert_eq!(minimum_other, 3);
+
+        config.tcp.enabled = false;
+        config.selection.minimum_multipath_paths = 2;
+        config.quic.minimum_paths = 3;
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Ok((Transport::MultipathQuic, 3))
+        );
+        let parameters = client_preselection_parameters(&config).expect("MPQUIC parameters");
+        let (_, _, _, _, _, minimum_other, _, _) = parameters.fields_for_test();
+        assert_eq!(minimum_other, 2);
+
+        config.quic.allow_degraded_single_path = true;
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Err(ClientRouteConnectError::InvalidProfile)
+        );
+        config.quic.allow_degraded_single_path = false;
+        config.quic.minimum_paths = 1;
+        config.selection.minimum_multipath_paths = 1;
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Err(ClientRouteConnectError::InvalidProfile)
+        );
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct FakeNativeReady {
+        completed_paths: Vec<u32>,
+        next_path: u32,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct FakeNativeCompleted {
+        paths: Vec<u32>,
+    }
+
+    #[tokio::test]
+    async fn required_path_driver_stops_after_one_udp_or_the_exact_multipath_minimum() {
+        for required_paths in [1_usize, 2, 4] {
+            let completed = drive_required_native_paths(
+                FakeNativeReady {
+                    completed_paths: Vec::new(),
+                    next_path: 1,
+                },
+                required_paths,
+                |mut ready| async move {
+                    ready.completed_paths.push(ready.next_path);
+                    Ok::<_, ClientRouteConnectError>(FakeNativeCompleted {
+                        paths: ready.completed_paths,
+                    })
+                },
+                |completed| async move {
+                    let next_path = u32::try_from(completed.paths.len() + 1)
+                        .expect("bounded native path count");
+                    Ok(FakeNativeReady {
+                        completed_paths: completed.paths,
+                        next_path,
+                    })
+                },
+                |completed| completed.paths.len(),
+            )
+            .await
+            .expect("required paths complete");
+            assert_eq!(
+                completed.paths,
+                (1..=u32::try_from(required_paths).expect("bounded requirement"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn required_path_driver_fails_closed_without_single_path_fallback() {
+        let result = drive_required_native_paths(
+            FakeNativeReady {
+                completed_paths: Vec::new(),
+                next_path: 1,
+            },
+            2,
+            |mut ready| async move {
+                ready.completed_paths.push(ready.next_path);
+                Ok::<_, ClientRouteConnectError>(FakeNativeCompleted {
+                    paths: ready.completed_paths,
+                })
+            },
+            |_completed| async {
+                Err::<FakeNativeReady, _>(ClientRouteConnectError::NativePermitUnavailable)
+            },
+            |completed| completed.paths.len(),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(ClientRouteConnectError::NativePermitUnavailable)
         );
     }
 
