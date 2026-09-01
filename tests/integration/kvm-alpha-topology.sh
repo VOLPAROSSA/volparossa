@@ -337,7 +337,10 @@ capture_host_state() {
 copy_artifacts() {
     for artifact in \
         connect-client.out connect-client.err \
-        logs-client.txt logs-relay0.txt logs-relay1.txt logs-relay2.txt logs-exit.txt \
+        logs-client.txt logs-bootstrap1.txt logs-bootstrap2.txt \
+        logs-relay0.txt logs-relay1.txt logs-relay2.txt logs-exit.txt \
+        peers-client.txt peers-bootstrap1.txt peers-bootstrap2.txt \
+        peers-relay0.txt peers-relay1.txt peers-relay2.txt peers-exit.txt \
         status-client.txt status-relay0.txt status-relay1.txt status-relay2.txt status-exit.txt \
         roles-client.txt roles-relay0.txt roles-relay1.txt roles-relay2.txt roles-exit.txt \
         helper-client.log helper-relay0.log helper-relay1.log helper-relay2.log helper-exit.log \
@@ -705,6 +708,22 @@ cleanup() {
             kill -KILL "$DESTINATION_PID" 2>/dev/null || true
         fi
         wait "$DESTINATION_PID" 2>/dev/null || true
+    fi
+
+    # Early A01 failures happen before capture_product_logs() is defined. Query every still-live
+    # product socket here, before retiring the services, so the next functional blocker is
+    # observable without weakening cleanup or rerunning the KVM topology just for diagnostics.
+    if [ -x "$binary_directory/volparossa" ]; then
+        for cleanup_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
+            cleanup_socket=$WORK/runtime-$cleanup_node/control/agent.sock
+            [ -S "$cleanup_socket" ] || continue
+            "$binary_directory/volparossa" --control-socket "$cleanup_socket" \
+                logs --limit 400 >"$WORK/logs-$cleanup_node.txt" 2>/dev/null || true
+            "$binary_directory/volparossa" --control-socket "$cleanup_socket" \
+                peers >"$WORK/peers-$cleanup_node.txt" 2>/dev/null || true
+            "$binary_directory/volparossa" --control-socket "$cleanup_socket" \
+                status >"$WORK/status-$cleanup_node.txt" 2>/dev/null || true
+        done
     fi
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_unit in $MPQUIC_UNITS; do retire_unit "$cleanup_unit" || true; done
