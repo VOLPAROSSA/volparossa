@@ -21,7 +21,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr as InternetSocketAddr},
     num::{NonZeroU32, NonZeroU64},
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Condvar, Mutex, OnceLock,
@@ -5705,6 +5705,54 @@ impl std::fmt::Debug for DurableCustodyPublicationStartOutcome {
 #[must_use = "confirmed absence is the only result which may release durable worker ownership"]
 struct ConfirmedWorkerGenerationAbsent {
     coordinates: WorkerGenerationCoordinates,
+}
+
+/// The sole worker namespace capability still needed after exact generation reap.
+///
+/// The complete authenticated recovery source is consumed to construct this value. That
+/// transition closes the independently duplicated recovery namespace immediately; only the
+/// smaller restart pair remains until exact descriptor-store removal is proven.
+#[must_use = "post-reap restart custody must be removed exactly or retained for cleanup retry"]
+struct ReapedWorkerRestartCustody {
+    coordinates: WorkerGenerationCoordinates,
+    restart: crate::worker_sandbox::PinnedWorkerRestartCustody,
+}
+
+impl WorkerRecoveryIdentitySource {
+    fn into_reaped_restart_custody(
+        self,
+        reaped: &ConfirmedWorkerGenerationAbsent,
+    ) -> ReapedWorkerRestartCustody {
+        if self.pending.coordinates != reaped.coordinates {
+            std::process::abort();
+        }
+        let Self {
+            pending,
+            durable_prepare_anchor: _,
+            restart_custody,
+        } = self;
+        // Reap proof has replaced every live-process identity use. Close the authenticated
+        // recovery duplicate now instead of retaining it through parent and manager cleanup.
+        drop(pending);
+        ReapedWorkerRestartCustody {
+            coordinates: reaped.coordinates,
+            restart: restart_custody,
+        }
+    }
+}
+
+impl ReapedWorkerRestartCustody {
+    fn context_id(&self) -> ContextId {
+        self.coordinates.context_id
+    }
+
+    fn borrowed_pidfd(&self) -> BorrowedFd<'_> {
+        self.restart.borrowed_pidfd()
+    }
+
+    fn borrowed_network_namespace(&self) -> BorrowedFd<'_> {
+        self.restart.borrowed_network_namespace()
+    }
 }
 
 impl std::fmt::Debug for ConfirmedWorkerGenerationAbsent {
