@@ -1119,6 +1119,16 @@ mod tests {
                 .env("LC_ALL", "C")
                 .output()
                 .expect("launch disposable app namespace");
+            if unprivileged_user_namespace_policy_denied(
+                output.status.code(),
+                &output.stdout,
+                &output.stderr,
+            ) {
+                eprintln!(
+                    "skipped live client-ingress veth proof: user namespaces denied by runner policy"
+                );
+                return;
+            }
             assert!(
                 output.status.success(),
                 "disposable ingress smoke failed\nstdout: {}\nstderr: {}",
@@ -1128,6 +1138,52 @@ mod tests {
             return;
         }
         run_parent_smoke();
+    }
+
+    fn unprivileged_user_namespace_policy_denied(
+        status_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> bool {
+        status_code == Some(1)
+            && stdout.is_empty()
+            && matches!(
+                stderr,
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/gid_map: Operation not permitted\n"
+            )
+    }
+
+    #[test]
+    fn disposable_namespace_policy_skip_is_exact_and_fail_closed() {
+        let denied =
+            b"unshare: write failed /proc/self/uid_map: Operation not permitted\n".as_slice();
+        assert!(unprivileged_user_namespace_policy_denied(
+            Some(1),
+            b"",
+            denied
+        ));
+        assert!(!unprivileged_user_namespace_policy_denied(
+            Some(2),
+            b"",
+            denied
+        ));
+        assert!(!unprivileged_user_namespace_policy_denied(
+            Some(1),
+            b"unexpected output\n",
+            denied
+        ));
+        assert!(!unprivileged_user_namespace_policy_denied(
+            Some(1),
+            b"",
+            b"unshare: write failed /proc/self/uid_map: Permission denied\n"
+        ));
+        assert!(!unprivileged_user_namespace_policy_denied(
+            Some(1),
+            b"",
+            b"unshare: write failed /proc/self/uid_map: Operation not permitted\nextra\n"
+        ));
     }
 
     #[allow(clippy::too_many_lines)] // One disposable topology proves forward and exact reply delivery.

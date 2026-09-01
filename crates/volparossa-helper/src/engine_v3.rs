@@ -6613,48 +6613,74 @@ mod tests {
 
     #[tokio::test]
     async fn client_ingress_lifecycle_is_unavailable_before_backend_state_or_network() {
-        let engine = HelperEngine::new([9; 32], 1_000);
+        let engine = HelperEngine::with_components(
+            [9; 32],
+            1_000,
+            Arc::new(UnavailableLeaseBackend),
+            Arc::new(FixedHandles(AtomicU64::new(0))),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
         let operations = [
-            helper_request::Operation::PrepareClientIngress(PrepareClientIngress {
-                client_runtime_id: vec![7; 16],
-                setup_expires_at_unix: 120,
-                hard_expires_at_unix: 900,
-            }),
-            helper_request::Operation::AcquireIngressSocket(AcquireIngressSocket {
-                client_runtime_id: vec![7; 16],
-                ingress_handle: vec![8; 32],
-                socket_handle: vec![9; 32],
-                descriptor_kind: IngressSocketKind::TransparentUdp as i32,
-                address_family: IngressAddressFamily::Ipv4 as i32,
-            }),
-            helper_request::Operation::ActivateClientIngress(ActivateClientIngress {
-                client_runtime_id: vec![7; 16],
-                ingress_handle: vec![8; 32],
-                receipts: client_ingress_receipts(),
-            }),
-            helper_request::Operation::DestroyClientIngress(DestroyClientIngress {
-                client_runtime_id: vec![7; 16],
-                ingress_handle: vec![8; 32],
-            }),
+            (
+                helper_request::Operation::PrepareClientIngress(PrepareClientIngress {
+                    client_runtime_id: vec![7; 16],
+                    setup_expires_at_unix: 120,
+                    hard_expires_at_unix: 900,
+                }),
+                HelperResult::Unavailable,
+                "CLIENT_INGRESS_PREPARE_FAILED",
+                false,
+            ),
+            (
+                helper_request::Operation::AcquireIngressSocket(AcquireIngressSocket {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                    socket_handle: vec![9; 32],
+                    descriptor_kind: IngressSocketKind::TransparentUdp as i32,
+                    address_family: IngressAddressFamily::Ipv4 as i32,
+                }),
+                HelperResult::NotFound,
+                "INGRESS_ABSENT",
+                false,
+            ),
+            (
+                helper_request::Operation::ActivateClientIngress(ActivateClientIngress {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                    receipts: client_ingress_receipts(),
+                }),
+                HelperResult::NotFound,
+                "INGRESS_ABSENT",
+                false,
+            ),
+            (
+                helper_request::Operation::DestroyClientIngress(DestroyClientIngress {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                }),
+                HelperResult::Ok,
+                "CLIENT_INGRESS_ALREADY_ABSENT",
+                true,
+            ),
         ];
-        for (index, operation) in operations.into_iter().enumerate() {
+        for (index, (operation, expected_result, expected_diagnostic, expected_outcome)) in
+            operations.into_iter().enumerate()
+        {
             let execution = engine
                 .execute_with_descriptor(request(
                     u8::try_from(index + 40).expect("bounded request ID"),
                     operation,
                 ))
                 .await;
-            assert_eq!(execution.response.result, HelperResult::Unavailable as i32);
-            assert_eq!(
-                execution.response.diagnostic_code,
-                "CLIENT_INGRESS_UNAVAILABLE"
-            );
-            assert!(execution.response.outcome.is_none());
+            assert_eq!(execution.response.result, expected_result as i32);
+            assert_eq!(execution.response.diagnostic_code, expected_diagnostic);
+            assert_eq!(execution.response.outcome.is_some(), expected_outcome);
             assert!(execution.descriptor.is_none());
         }
         let state = engine.inner.state.lock().await;
         assert!(state.contexts.is_empty());
-        assert!(state.cache.is_empty());
+        assert!(state.ingress.is_none());
+        assert!(state.ingress_acquire_request_ids.is_empty());
     }
 
     #[tokio::test]
