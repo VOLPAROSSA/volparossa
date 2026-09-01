@@ -1526,7 +1526,48 @@ MayOwn first private namespaces did not become stable|namespaces|may-own-launch
 MayOwn first pre-exec barrier is not manager-bound|preexec-barrier|may-own-launch
 MayOwn first external pre-exec observer did not arm|preexec-observer|may-own-launch
 MayOwn first freeze handshake path is unsafe|handshake-path|may-own-launch
+MayOwn first debugger commands could not be written|debugger-command-write|may-own-first-crash
+MayOwn first debugger identity is unavailable|debugger-identity|may-own-first-crash
+MayOwn first debugger exited before exec-catch readiness|exec-catch-exit|may-own-first-crash
+MayOwn first debugger did not arm its exec catch|exec-catch-timeout|may-own-first-crash
+MayOwn first debugger readiness record is invalid|exec-catch-marker|may-own-first-crash
+MayOwn first pre-exec barrier could not be released|preexec-release|may-own-first-crash
+MayOwn first debugger exited before helper exec|helper-exec-exit|may-own-first-crash
+MayOwn first helper exec was not observed|helper-exec-timeout|may-own-first-crash
+MayOwn first external pre-exec observer did not retire|preexec-observer-retire|may-own-first-crash
+MayOwn first mount keeper identity is unavailable|mount-keeper-identity|may-own-first-crash
+MayOwn first driver-side observer could not be started|driver-observer-start|may-own-first-crash
+MayOwn first driver-side observer exited before identity proof|identity-observer-exit|may-own-first-crash
+MayOwn first invocation identity did not appear|identity-timeout|may-own-first-crash
+MayOwn first invocation is not hook-bound|identity-binding|may-own-first-crash
+MayOwn first service shape is not production-exact|service-shape|may-own-first-crash
+MayOwn cgroup freezer is unavailable|freezer-shape|may-own-first-crash
+MayOwn first debugger driver release could not be published|driver-release|may-own-first-crash
+MayOwn first debugger exited before the freeze fence|freeze-fence-exit|may-own-first-crash
+MayOwn first debugger did not reach the crash boundary|freeze-fence-timeout|may-own-first-crash
+MayOwn first kill-ready marker is invalid|kill-marker|may-own-first-crash
+MayOwn cgroup did not freeze before the first crash|cgroup-freeze|may-own-first-crash
+MayOwn first freeze release could not be published|freeze-release|may-own-first-crash
+MayOwn first forced-crash debugger did not complete|debugger-complete|may-own-first-crash
+MayOwn first crash did not settle|crash-settle|may-own-first-crash
+MayOwn first forced-crash fence is not exact|crash-fence|may-own-first-crash
+MayOwn first crash freezer was not retired before restart|cgroup-thaw|may-own-first-crash
+MayOwn first driver-side observer did not terminate at the forced crash|driver-observer-stop|may-own-first-crash
+MayOwn first crash time is unavailable|crash-time|may-own-first-crash
+MayOwn first crash did not preserve exact Relay custody|custody-preservation|may-own-first-crash
 EOF
+
+may_own_first_crash_segment=$temporary_directory/may-own-first-crash.segment
+sed -n '/^[[:space:]]*driver_phase=may-own-first-crash$/,/^[[:space:]]*driver_phase=may-own-second-crash$/p' \
+    "$live_gate" >"$may_own_first_crash_segment"
+may_own_first_crash_reasons=$temporary_directory/may-own-first-crash.reasons
+sed -n "s/.*failed '\([^']*\)'.*/\1/p" \
+    "$may_own_first_crash_segment" >"$may_own_first_crash_reasons"
+test "$(wc -l <"$may_own_first_crash_reasons")" -eq 29
+while IFS= read -r may_own_first_crash_reason; do
+    test "$(grep -Fc "'$may_own_first_crash_reason')" \
+        "$branch_failure_functions")" -eq 1
+done <"$may_own_first_crash_reasons"
 
 for may_own_preexec_category in \
     arguments \

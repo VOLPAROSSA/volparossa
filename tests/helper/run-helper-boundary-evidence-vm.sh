@@ -497,6 +497,64 @@ non_retained_may_own_launch_failure_category() {
             printf '%s\n' preexec-observer ;;
         'MayOwn first freeze handshake path is unsafe')
             printf '%s\n' handshake-path ;;
+        'MayOwn first debugger commands could not be written')
+            printf '%s\n' debugger-command-write ;;
+        'MayOwn first debugger identity is unavailable')
+            printf '%s\n' debugger-identity ;;
+        'MayOwn first debugger exited before exec-catch readiness')
+            printf '%s\n' exec-catch-exit ;;
+        'MayOwn first debugger did not arm its exec catch')
+            printf '%s\n' exec-catch-timeout ;;
+        'MayOwn first debugger readiness record is invalid')
+            printf '%s\n' exec-catch-marker ;;
+        'MayOwn first pre-exec barrier could not be released')
+            printf '%s\n' preexec-release ;;
+        'MayOwn first debugger exited before helper exec')
+            printf '%s\n' helper-exec-exit ;;
+        'MayOwn first helper exec was not observed')
+            printf '%s\n' helper-exec-timeout ;;
+        'MayOwn first external pre-exec observer did not retire')
+            printf '%s\n' preexec-observer-retire ;;
+        'MayOwn first mount keeper identity is unavailable')
+            printf '%s\n' mount-keeper-identity ;;
+        'MayOwn first driver-side observer could not be started')
+            printf '%s\n' driver-observer-start ;;
+        'MayOwn first driver-side observer exited before identity proof')
+            printf '%s\n' identity-observer-exit ;;
+        'MayOwn first invocation identity did not appear')
+            printf '%s\n' identity-timeout ;;
+        'MayOwn first invocation is not hook-bound')
+            printf '%s\n' identity-binding ;;
+        'MayOwn first service shape is not production-exact')
+            printf '%s\n' service-shape ;;
+        'MayOwn cgroup freezer is unavailable')
+            printf '%s\n' freezer-shape ;;
+        'MayOwn first debugger driver release could not be published')
+            printf '%s\n' driver-release ;;
+        'MayOwn first debugger exited before the freeze fence')
+            printf '%s\n' freeze-fence-exit ;;
+        'MayOwn first debugger did not reach the crash boundary')
+            printf '%s\n' freeze-fence-timeout ;;
+        'MayOwn first kill-ready marker is invalid')
+            printf '%s\n' kill-marker ;;
+        'MayOwn cgroup did not freeze before the first crash')
+            printf '%s\n' cgroup-freeze ;;
+        'MayOwn first freeze release could not be published')
+            printf '%s\n' freeze-release ;;
+        'MayOwn first forced-crash debugger did not complete')
+            printf '%s\n' debugger-complete ;;
+        'MayOwn first crash did not settle')
+            printf '%s\n' crash-settle ;;
+        'MayOwn first forced-crash fence is not exact')
+            printf '%s\n' crash-fence ;;
+        'MayOwn first crash freezer was not retired before restart')
+            printf '%s\n' cgroup-thaw ;;
+        'MayOwn first driver-side observer did not terminate at the forced crash')
+            printf '%s\n' driver-observer-stop ;;
+        'MayOwn first crash time is unavailable')
+            printf '%s\n' crash-time ;;
+        'MayOwn first crash did not preserve exact Relay custody')
+            printf '%s\n' custody-preservation ;;
         *) return 1 ;;
     esac
 }
