@@ -20,7 +20,7 @@ use preselection_sampler::{
 };
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
     net::IpAddr,
     path::PathBuf,
@@ -93,12 +93,12 @@ use volparossa_routing::{
     PublicUdpEndpoint, WireguardRole,
 };
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
-use volparossa_wireguard::RelayEndpointLease;
+use volparossa_wireguard::{ExitEndpointLease, RelayEndpointLease};
 
 use crate::{
     advertisement::{AdvertisementPublisher, LocalAdvertisementInput},
     endpoint_leases::{
-        bind_prepared_exit_endpoint_lease, bind_prepared_relay_endpoint_lease,
+        bind_prepared_exit_endpoint_leases, bind_prepared_relay_endpoint_lease,
         protocol_endpoint_for_native,
     },
     helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
@@ -582,6 +582,15 @@ struct PreparedNativeProbeReady {
     ready: IssuedNativeProbeRelayReady,
     endpoint: RelayEndpointLease,
     helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+/// One shared Exit helper Prepare for every exact path signed into a native attempt.
+struct ExitNativeReadyAttempt {
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+    exit_leases: Vec<ExitEndpointLease>,
+    ready_paths: HashSet<u32>,
+    candidate_set_hash: [u8; 32],
+    expires_at_ms: u64,
 }
 
 /// Relay-owned affine Start plus the exact already-prepared helper endpoint pair.
@@ -1308,7 +1317,7 @@ pub struct DiscoveryRuntime {
     prepared_native_authorization_helpers:
         HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
     active_native_relay_helpers: HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
-    exit_native_ready_helpers: HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
+    exit_native_ready_attempts: HashMap<[u8; FORWARD_ID_BYTES], ExitNativeReadyAttempt>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
     datapath_index: HashMap<DatapathKey, request_response::OutboundRequestId>,
     completed_datapath: HashMap<DatapathKey, CompletedDatapath>,
@@ -1435,7 +1444,7 @@ impl DiscoveryRuntime {
             prepared_native_authorizations: HashMap::new(),
             prepared_native_authorization_helpers: HashMap::new(),
             active_native_relay_helpers: HashMap::new(),
-            exit_native_ready_helpers: HashMap::new(),
+            exit_native_ready_attempts: HashMap::new(),
             pending_datapath: HashMap::new(),
             datapath_index: HashMap::new(),
             completed_datapath: HashMap::new(),
@@ -1497,6 +1506,7 @@ impl DiscoveryRuntime {
                 _ = maintenance.tick() => {
                     self.synchronize_exit_policy(&state).await;
                     let now_ms = unix_millis();
+                    self.destroy_expired_exit_native_attempts(now_ms).await;
                     let relay_purged = self
                         .relay_service
                         .as_mut()
@@ -1518,6 +1528,7 @@ impl DiscoveryRuntime {
                 _ = reservation_maintenance.tick() => {
                     self.synchronize_exit_policy(&state).await;
                     let now_ms = unix_millis();
+                    self.destroy_expired_exit_native_attempts(now_ms).await;
                     let relay_purged = self
                         .relay_service
                         .as_mut()
@@ -1566,6 +1577,7 @@ impl DiscoveryRuntime {
                 }
             }
         }
+        self.destroy_expired_exit_native_attempts(u64::MAX).await;
         self.cancel_client_preselection(ClientPreselectionError::Closed);
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
         self.reject_queued_outbound_commands();
@@ -3856,11 +3868,7 @@ impl DiscoveryRuntime {
         }
     }
 
-    fn handle_provider_peers(
-        &mut self,
-        kind: ProviderQueryKind,
-        providers: std::collections::HashSet<Libp2pPeerId>,
-    ) {
+    fn handle_provider_peers(&mut self, kind: ProviderQueryKind, providers: HashSet<Libp2pPeerId>) {
         self.purge_completed(Instant::now());
         let now_ms = unix_millis();
         let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
@@ -4252,6 +4260,7 @@ impl DiscoveryRuntime {
             helper_owner.helper_runtime_id(),
             endpoint.route_context_id(),
             endpoint.exit_facing_handle().as_bytes(),
+            endpoint.path_id(),
             endpoint.exit_facing_endpoint(),
         ) else {
             let _ = self.helper.destroy_context(&helper_owner).await;
@@ -4912,12 +4921,14 @@ impl DiscoveryRuntime {
                 native.helper_owner.helper_runtime_id(),
                 native.endpoint.route_context_id(),
                 native.endpoint.client_facing_handle().as_bytes(),
+                native.endpoint.path_id(),
                 native.endpoint.client_facing_endpoint(),
             );
             let relay_exit_endpoint = native_endpoint_binding(
                 native.helper_owner.helper_runtime_id(),
                 native.endpoint.route_context_id(),
                 native.endpoint.exit_facing_handle().as_bytes(),
+                native.endpoint.path_id(),
                 native.endpoint.exit_facing_endpoint(),
             );
             let ready = match (relay_client_endpoint, relay_exit_endpoint) {
@@ -5297,6 +5308,31 @@ impl DiscoveryRuntime {
         tokio::spawn(async move {
             let _ = helper.destroy_context(&owner).await;
         });
+    }
+
+    async fn destroy_expired_exit_native_attempts(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .exit_native_ready_attempts
+            .iter()
+            .filter_map(|(attempt_id, attempt)| {
+                (attempt.expires_at_ms <= now_ms).then_some(*attempt_id)
+            })
+            .collect::<Vec<_>>();
+        let mut destroyed = 0;
+        for attempt_id in expired {
+            let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) else {
+                continue;
+            };
+            if self
+                .helper
+                .destroy_context(&attempt.helper_owner)
+                .await
+                .is_ok()
+            {
+                destroyed += 1;
+            }
+        }
+        destroyed
     }
 
     fn fail_relay_forward(
@@ -5814,29 +5850,79 @@ impl DiscoveryRuntime {
         ) else {
             reject!("NATIVE_PROBE_READY_EXIT_HELPER_SCOPE_REJECTED");
         };
-        let Ok(helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
-            reject!("NATIVE_PROBE_READY_EXIT_HELPER_PREPARE_UNAVAILABLE");
-        };
-        let Ok(exit_lease) =
-            bind_prepared_exit_endpoint_lease(&prepare, helper_owner.prepared().clone())
-        else {
-            let _ = self.helper.destroy_context(&helper_owner).await;
-            reject!("NATIVE_PROBE_READY_EXIT_HELPER_BIND_REJECTED");
-        };
-        let Some(probe_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.probe_id) else {
-            let _ = self.helper.destroy_context(&helper_owner).await;
+        let Some(attempt_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id) else {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         };
-        if self.exit_native_ready_helpers.contains_key(&probe_id) {
-            let _ = self.helper.destroy_context(&helper_owner).await;
+        let Some(candidate_set_hash) = fixed_bytes::<32>(&scope.candidate_set_hash) else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        if self
+            .exit_native_ready_attempts
+            .get(&attempt_id)
+            .is_some_and(|attempt| {
+                attempt.helper_owner.prepare() != &prepare
+                    || attempt.candidate_set_hash != candidate_set_hash
+                    || attempt.expires_at_ms != scope.attempt_expires_at_ms
+                    || attempt.ready_paths.contains(&scope.candidate_ordinal)
+            })
+        {
             reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
         }
+        if !self.exit_native_ready_attempts.contains_key(&attempt_id) {
+            if self.exit_native_ready_attempts.len() >= MAX_CONCURRENT_FORWARDING_STREAMS {
+                reject!("NATIVE_PROBE_READY_EXIT_CAPACITY");
+            }
+            let Ok(helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
+                reject!("NATIVE_PROBE_READY_EXIT_HELPER_PREPARE_UNAVAILABLE");
+            };
+            let Ok(exit_batch) =
+                bind_prepared_exit_endpoint_leases(&prepare, helper_owner.prepared().clone())
+            else {
+                let _ = self.helper.destroy_context(&helper_owner).await;
+                reject!("NATIVE_PROBE_READY_EXIT_HELPER_BIND_REJECTED");
+            };
+            let previous = self.exit_native_ready_attempts.insert(
+                attempt_id,
+                ExitNativeReadyAttempt {
+                    helper_owner,
+                    exit_leases: exit_batch.exit_leases().to_vec(),
+                    ready_paths: HashSet::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
+                    candidate_set_hash,
+                    expires_at_ms: scope.attempt_expires_at_ms,
+                },
+            );
+            debug_assert!(
+                previous.is_none(),
+                "native Exit attempt already checked vacant"
+            );
+        }
+        let Some((helper_runtime_id, exit_lease)) = self
+            .exit_native_ready_attempts
+            .get(&attempt_id)
+            .and_then(|attempt| {
+                attempt
+                    .exit_leases
+                    .iter()
+                    .find(|lease| lease.path_id() == scope.candidate_ordinal)
+                    .copied()
+                    .map(|lease| (attempt.helper_owner.helper_runtime_id(), lease))
+            })
+        else {
+            if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                self.destroy_helper_owner(attempt.helper_owner);
+            }
+            reject!("NATIVE_PROBE_READY_EXIT_HELPER_BIND_REJECTED");
+        };
         let Some(connection) = self
             .service
             .bind_native_probe_data_relay_connection(authenticated_data_relay, connection_id)
             .ok()
         else {
-            let _ = self.helper.destroy_context(&helper_owner).await;
+            if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                self.destroy_helper_owner(attempt.helper_owner);
+            }
             reject!("NATIVE_PROBE_READY_EXIT_CONNECTION_REJECTED");
         };
         let identity = &self.identity;
@@ -5848,7 +5934,7 @@ impl DiscoveryRuntime {
                     &data_relay_node_id,
                     &authenticated_data_relay.to_bytes(),
                     relay_exit_endpoint,
-                    helper_owner.helper_runtime_id(),
+                    helper_runtime_id,
                     exit_lease,
                     now_ms,
                     self.local_public_key,
@@ -5857,9 +5943,14 @@ impl DiscoveryRuntime {
                 .ok()
         });
         let Some(accepted) = accepted else {
-            let _ = self.helper.destroy_context(&helper_owner).await;
             reject!("NATIVE_PROBE_READY_EXIT_SERVICE_REJECTED");
         };
+        let Some(attempt) = self.exit_native_ready_attempts.get_mut(&attempt_id) else {
+            reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
+        };
+        if !attempt.ready_paths.insert(scope.candidate_ordinal) {
+            reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
+        }
         let response = ExitForwardResponse::granted(
             request.forward_id().to_vec(),
             ExitForwardOperation::NativeProbeReady,
@@ -5868,11 +5959,11 @@ impl DiscoveryRuntime {
             vec![accepted.encoded().to_vec()],
         );
         let Ok(response) = response else {
-            let _ = self.helper.destroy_context(&helper_owner).await;
+            if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                self.destroy_helper_owner(attempt.helper_owner);
+            }
             reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
         };
-        self.exit_native_ready_helpers
-            .insert(probe_id, helper_owner);
         if self
             .service
             .send_native_probe_ready_response(
@@ -5883,8 +5974,8 @@ impl DiscoveryRuntime {
             )
             .is_err()
         {
-            if let Some(owner) = self.exit_native_ready_helpers.remove(&probe_id) {
-                self.destroy_helper_owner(owner);
+            if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                self.destroy_helper_owner(attempt.helper_owner);
             }
             log_relay_forward_admission(
                 Some(state),
@@ -7989,7 +8080,7 @@ fn verified_native_probe_ready_forward_scope(
         && request.exit_peer_id() == exit.peer_id
         && ready
             .relay_exit_endpoint()
-            .is_some_and(|binding| binding.route_context_id == scope.probe_id))
+            .is_some_and(|binding| binding.route_context_id == scope.attempt_id))
     .then(|| scope.clone())
 }
 
@@ -8032,8 +8123,11 @@ fn native_service_prepare_request(
     lease_roles: &[WireguardRole],
     now_ms: u64,
 ) -> Option<PrepareLeaseBatch> {
-    if scope.probe_id.len() != FORWARD_ID_BYTES
-        || scope.probe_id.iter().all(|byte| *byte == 0)
+    if scope.attempt_id.len() != FORWARD_ID_BYTES
+        || scope.attempt_id.iter().all(|byte| *byte == 0)
+        || !(1..=u32::try_from(volparossa_protocol::MAX_NATIVE_PROBE_PATHS).ok()?)
+            .contains(&scope.required_path_count)
+        || !(1..=scope.required_path_count).contains(&scope.candidate_ordinal)
         || scope.attempt_expires_at_ms <= now_ms.saturating_add(1_000)
         || !matches!(
             (role, lease_roles),
@@ -8046,18 +8140,33 @@ fn native_service_prepare_request(
         return None;
     }
     let expires_at_unix = scope.attempt_expires_at_ms / 1_000;
-    (expires_at_unix > unix_seconds()).then(|| PrepareLeaseBatch {
-        route_context_id: scope.probe_id.clone(),
-        role: role as i32,
-        mptcp_accepted_addrs: 1,
-        mptcp_subflows: 1,
-        leases: lease_roles
+    let leases = match role {
+        ContextRole::Relay => lease_roles
             .iter()
             .map(|lease_role| LeasePlan {
-                path_id: 1,
+                path_id: scope.candidate_ordinal,
                 role: *lease_role as i32,
             })
             .collect(),
+        ContextRole::Exit => (1..=scope.required_path_count)
+            .map(|path_id| LeasePlan {
+                path_id,
+                role: WireguardRole::Exit as i32,
+            })
+            .collect(),
+        ContextRole::Unspecified | ContextRole::Client => return None,
+    };
+    let local_path_count = match role {
+        ContextRole::Exit => scope.required_path_count,
+        ContextRole::Relay => 1,
+        ContextRole::Unspecified | ContextRole::Client => return None,
+    };
+    (expires_at_unix > unix_seconds()).then(|| PrepareLeaseBatch {
+        route_context_id: scope.attempt_id.clone(),
+        role: role as i32,
+        mptcp_accepted_addrs: local_path_count,
+        mptcp_subflows: local_path_count,
+        leases,
         setup_expires_at_unix: expires_at_unix,
         hard_expires_at_unix: expires_at_unix,
     })
@@ -8067,6 +8176,7 @@ fn native_endpoint_binding(
     helper_runtime_id: [u8; 32],
     route_context_id: &[u8; FORWARD_ID_BYTES],
     lease_handle: &[u8; 32],
+    path_id: u32,
     endpoint: volparossa_wireguard::PublicWireGuardEndpoint,
 ) -> Option<NativeProbeEndpointBinding> {
     let wire = protocol_endpoint_for_native(endpoint);
@@ -8082,6 +8192,7 @@ fn native_endpoint_binding(
         route_context_id: route_context_id.to_vec(),
         endpoint: Some(wire),
         prepared_lease_commitment: commitment.to_vec(),
+        path_id,
     })
 }
 
@@ -9725,6 +9836,7 @@ mod tests {
             policy_expires_at_ms: fixture.policy.expires_at_ms(),
             challenge_hash: vec![0x34; 32],
             attempt_expires_at_ms: request_expires_at_ms,
+            required_path_count: 1,
         };
         let nonce = [0x35; 32];
         let permit_request = NativeProbePermitRequest {
@@ -10106,8 +10218,11 @@ mod tests {
     fn native_service_prepare_plan_is_role_exact_and_deadline_bound() {
         let now_ms = unix_millis();
         let scope = NativeProbePathScope {
+            attempt_id: vec![0x36; FORWARD_ID_BYTES],
             probe_id: vec![0x37; FORWARD_ID_BYTES],
+            candidate_ordinal: 2,
             attempt_expires_at_ms: now_ms.saturating_add(60_000),
+            required_path_count: 3,
             ..NativeProbePathScope::default()
         };
         let relay = native_service_prepare_request(
@@ -10117,10 +10232,10 @@ mod tests {
             now_ms,
         )
         .expect("relay prepare plan");
-        assert_eq!(relay.route_context_id, scope.probe_id);
+        assert_eq!(relay.route_context_id, scope.attempt_id);
         assert_eq!(relay.role, ContextRole::Relay as i32);
         assert_eq!(relay.leases.len(), 2);
-        assert!(relay.leases.iter().all(|lease| lease.path_id == 1));
+        assert!(relay.leases.iter().all(|lease| lease.path_id == 2));
 
         let exit = native_service_prepare_request(
             &scope,
@@ -10129,8 +10244,18 @@ mod tests {
             now_ms,
         )
         .expect("exit prepare plan");
-        assert_eq!(exit.leases.len(), 1);
-        assert_eq!(exit.leases[0].role, WireguardRole::Exit as i32);
+        assert_eq!(exit.leases.len(), 3);
+        assert_eq!(
+            exit.leases
+                .iter()
+                .map(|lease| (lease.path_id, lease.role))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, WireguardRole::Exit as i32),
+                (2, WireguardRole::Exit as i32),
+                (3, WireguardRole::Exit as i32),
+            ]
+        );
 
         assert!(
             native_service_prepare_request(
@@ -10224,7 +10349,7 @@ mod tests {
             .0;
         let datapath_handler = braced_item(production, "async fn handle_datapath_event(");
         assert!(datapath_handler.contains("DatapathRelayOperation::NativeProbeAuthorize"));
-        assert!(datapath_handler.contains("self.begin_native_probe_authorization("));
+        assert!(datapath_handler.contains("self.begin_native_probe_start_authorization("));
 
         let relay_dispatch = braced_item(production, "fn begin_native_probe_authorization(");
         for required in [
@@ -10257,9 +10382,10 @@ mod tests {
         let relay_accept = relay_complete
             .find(".accept_native_probe_start_with(")
             .expect("standard nested Relay reservation");
-        let client_reply = relay_complete
+        let client_reply = relay_complete[relay_accept..]
             .find(".send_datapath_relay_response(native.channel, response)")
-            .expect("direct response to authenticated Client hop");
+            .map(|offset| relay_accept + offset)
+            .expect("direct response to authenticated Client hop after Relay acceptance");
         assert!(relay_accept < client_reply);
     }
 

@@ -6626,6 +6626,7 @@ mod tests {
             policy_expires_at_ms: expires_at_ms + 5_000,
             challenge_hash: vec![0x75; 32],
             attempt_expires_at_ms: expires_at_ms,
+            required_path_count: 2,
         };
         let mut start = NativeProbeStart {
             permit_hash: vec![0x76; 32],
@@ -6636,6 +6637,7 @@ mod tests {
                 route_context_id: key.context_id.to_vec(),
                 endpoint: request.client_wireguard_endpoint.clone(),
                 prepared_lease_commitment: vec![0x79; 32],
+                path_id: 1,
             }),
             started_at_ms: now_ms,
             expires_at_ms,

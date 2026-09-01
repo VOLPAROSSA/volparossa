@@ -29,6 +29,18 @@ pub struct LocalEndpointLeaseBatch {
     client_leases: Vec<ClientEndpointLease>,
 }
 
+/// One exact helper-prepared Exit lease set for a shared native attempt.
+pub(crate) struct LocalExitEndpointLeaseBatch {
+    exit_leases: Vec<ExitEndpointLease>,
+}
+
+impl LocalExitEndpointLeaseBatch {
+    /// Borrow the complete path-sorted Exit lease set.
+    pub(crate) fn exit_leases(&self) -> &[ExitEndpointLease] {
+        &self.exit_leases
+    }
+}
+
 impl LocalEndpointLeaseBatch {
     /// Return the opaque helper context capability for local lifecycle calls.
     #[must_use]
@@ -124,22 +136,28 @@ pub(crate) fn bind_prepared_relay_endpoint_lease(
     request: &PrepareLeaseBatch,
     response: PreparedLeaseBatch,
 ) -> Result<RelayEndpointLease, EndpointLeaseBindingError> {
+    let path_id = request
+        .leases
+        .first()
+        .map(|lease| lease.path_id)
+        .filter(|path_id| (1..=u32::from(MAX_PATHS)).contains(path_id))
+        .ok_or(EndpointLeaseBindingError::InvalidPreparePlan)?;
     let expected = validate_exact_service_prepare_plan(
         request,
         ContextRole::Relay,
         &[
-            (1, WireguardRole::RelayClient),
-            (1, WireguardRole::RelayExit),
+            (path_id, WireguardRole::RelayClient),
+            (path_id, WireguardRole::RelayExit),
         ],
     )?;
     let route_context_id = prepare_route_context_id(request)?;
     let context_handle = HelperContextHandle::try_from(response.context_handle.as_slice())?;
     let mut parsed = parse_response(response.leases, &expected, context_handle)?;
     let client = parsed
-        .remove(&(1, WireguardRole::RelayClient))
+        .remove(&(path_id, WireguardRole::RelayClient))
         .ok_or(EndpointLeaseBindingError::IdentityMismatch)?;
     let exit = parsed
-        .remove(&(1, WireguardRole::RelayExit))
+        .remove(&(path_id, WireguardRole::RelayExit))
         .ok_or(EndpointLeaseBindingError::IdentityMismatch)?;
     if !parsed.is_empty() {
         return Err(EndpointLeaseBindingError::IdentityMismatch);
@@ -149,7 +167,7 @@ pub(crate) fn bind_prepared_relay_endpoint_lease(
         context_handle,
         client.handle,
         exit.handle,
-        1,
+        path_id,
         EndpointRole::RelayClient,
         EndpointRole::RelayExit,
         client.endpoint,
@@ -158,39 +176,55 @@ pub(crate) fn bind_prepared_relay_endpoint_lease(
     .map_err(Into::into)
 }
 
+/// Bind one through eight exact helper-prepared Exit paths into one shared attempt batch.
+pub(crate) fn bind_prepared_exit_endpoint_leases(
+    request: &PrepareLeaseBatch,
+    response: PreparedLeaseBatch,
+) -> Result<LocalExitEndpointLeaseBatch, EndpointLeaseBindingError> {
+    let path_count = request.leases.len();
+    if !(1..=usize::from(MAX_PATHS)).contains(&path_count) {
+        return Err(EndpointLeaseBindingError::InvalidPreparePlan);
+    }
+    let identities = (1..=u32::try_from(path_count)
+        .map_err(|_| EndpointLeaseBindingError::InvalidPreparePlan)?)
+        .map(|path_id| (path_id, WireguardRole::Exit))
+        .collect::<Vec<_>>();
+    let expected = validate_exact_service_prepare_plan(request, ContextRole::Exit, &identities)?;
+    let route_context_id = prepare_route_context_id(request)?;
+    let context_handle = HelperContextHandle::try_from(response.context_handle.as_slice())?;
+    let parsed = parse_response(response.leases, &expected, context_handle)?;
+    let exit_leases = parsed
+        .into_iter()
+        .map(|((path_id, _role), value)| {
+            ExitEndpointLease::new(
+                route_context_id,
+                context_handle,
+                value.handle,
+                path_id,
+                EndpointRole::Exit,
+                value.endpoint,
+            )
+            .map_err(Into::into)
+        })
+        .collect::<Result<Vec<_>, EndpointLeaseBindingError>>()?;
+    Ok(LocalExitEndpointLeaseBatch { exit_leases })
+}
+
 /// Bind one exact helper-prepared Exit endpoint to its opaque local capability.
 ///
 /// # Errors
 ///
 /// Returns an error unless the request is exactly one path-one Exit lease and the response
 /// reproduces that identity with valid direct-assigned endpoint material.
+#[cfg(test)]
 pub(crate) fn bind_prepared_exit_endpoint_lease(
     request: &PrepareLeaseBatch,
     response: PreparedLeaseBatch,
 ) -> Result<ExitEndpointLease, EndpointLeaseBindingError> {
-    let expected = validate_exact_service_prepare_plan(
-        request,
-        ContextRole::Exit,
-        &[(1, WireguardRole::Exit)],
-    )?;
-    let route_context_id = prepare_route_context_id(request)?;
-    let context_handle = HelperContextHandle::try_from(response.context_handle.as_slice())?;
-    let mut parsed = parse_response(response.leases, &expected, context_handle)?;
-    let exit = parsed
-        .remove(&(1, WireguardRole::Exit))
-        .ok_or(EndpointLeaseBindingError::IdentityMismatch)?;
-    if !parsed.is_empty() {
-        return Err(EndpointLeaseBindingError::IdentityMismatch);
-    }
-    ExitEndpointLease::new(
-        route_context_id,
-        context_handle,
-        exit.handle,
-        1,
-        EndpointRole::Exit,
-        exit.endpoint,
-    )
-    .map_err(Into::into)
+    let mut batch = bind_prepared_exit_endpoint_leases(request, response)?.exit_leases;
+    (batch.len() == 1)
+        .then(|| batch.remove(0))
+        .ok_or(EndpointLeaseBindingError::InvalidPreparePlan)
 }
 
 /// Convert one already validated helper endpoint into its canonical signed-control shape.
@@ -444,20 +478,20 @@ mod tests {
         let relay_request = request(
             ContextRole::Relay,
             &[
-                (1, WireguardRole::RelayClient),
-                (1, WireguardRole::RelayExit),
+                (2, WireguardRole::RelayClient),
+                (2, WireguardRole::RelayExit),
             ],
         );
         let relay = bind_prepared_relay_endpoint_lease(
             &relay_request,
             response(vec![
-                prepared(1, WireguardRole::RelayExit, 2, 40_002),
-                prepared(1, WireguardRole::RelayClient, 1, 40_001),
+                prepared(2, WireguardRole::RelayExit, 2, 40_002),
+                prepared(2, WireguardRole::RelayClient, 1, 40_001),
             ]),
         )
         .expect("bound relay pair");
         assert_eq!(relay.route_context_id(), &[7; 16]);
-        assert_eq!(relay.path_id(), 1);
+        assert_eq!(relay.path_id(), 2);
         assert_eq!(
             relay.client_facing_handle().as_bytes(),
             &[1; HELPER_HANDLE_BYTES]
@@ -476,6 +510,27 @@ mod tests {
         assert_eq!(exit.route_context_id(), &[7; 16]);
         assert_eq!(exit.path_id(), 1);
         assert_eq!(exit.lease_handle().as_bytes(), &[3; HELPER_HANDLE_BYTES]);
+
+        let exit_batch_request = request(
+            ContextRole::Exit,
+            &[(1, WireguardRole::Exit), (2, WireguardRole::Exit)],
+        );
+        let exit_batch = bind_prepared_exit_endpoint_leases(
+            &exit_batch_request,
+            response(vec![
+                prepared(2, WireguardRole::Exit, 4, 40_004),
+                prepared(1, WireguardRole::Exit, 3, 40_003),
+            ]),
+        )
+        .expect("bound shared Exit path batch");
+        assert_eq!(
+            exit_batch
+                .exit_leases()
+                .iter()
+                .map(ExitEndpointLease::path_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
 
         assert_eq!(
             bind_prepared_relay_endpoint_lease(

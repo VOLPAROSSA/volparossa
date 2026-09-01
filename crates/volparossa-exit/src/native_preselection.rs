@@ -395,6 +395,7 @@ impl PreparedNativeProbeExitProjection {
                 route_context_id: lease.route_context_id().to_vec(),
                 endpoint: Some(endpoint),
                 prepared_lease_commitment: commitment.to_vec(),
+                path_id: lease.path_id(),
             },
         })
     }
@@ -1398,6 +1399,7 @@ mod tests {
             policy_expires_at_ms,
             challenge_hash: native_probe_challenge_hash(&CHALLENGE).to_vec(),
             attempt_expires_at_ms: ATTEMPT_EXPIRY_MS,
+            required_path_count: 2,
         }
     }
 
@@ -1533,6 +1535,7 @@ mod tests {
             route_context_id: route_context_id.to_vec(),
             endpoint: Some(endpoint),
             prepared_lease_commitment: commitment.to_vec(),
+            path_id: scope.candidate_ordinal,
         }
     }
 

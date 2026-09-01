@@ -109,6 +109,9 @@ pub struct NativeProbePathScope {
     pub challenge_hash: Vec<u8>,
     #[prost(uint64, tag = "16")]
     pub attempt_expires_at_ms: u64,
+    /// Exact number of native paths that must complete inside this attempt.
+    #[prost(uint32, tag = "17")]
+    pub required_path_count: u32,
 }
 
 /// Ephemeral-client-signed endpoint-free request for one Exit permit.
@@ -159,6 +162,9 @@ pub struct NativeProbeEndpointBinding {
     pub endpoint: Option<WireguardEndpoint>,
     #[prost(bytes = "vec", tag = "4")]
     pub prepared_lease_commitment: Vec<u8>,
+    /// Exact context-local helper path bound by the signed scope.
+    #[prost(uint32, tag = "5")]
+    pub path_id: u32,
 }
 
 /// Exit-signed readiness delivered only to the exact data Relay.
@@ -767,10 +773,11 @@ impl NativeProbePathScope {
         require_nonzero::<KEY_LENGTH>(&self.challenge_hash, "native scope challenge hash")?;
         if !(1..=u32::try_from(MAX_NATIVE_PROBE_PATHS).unwrap_or(u32::MAX))
             .contains(&self.candidate_ordinal)
+            || !(1..=u32::try_from(MAX_NATIVE_PROBE_PATHS).unwrap_or(u32::MAX))
+                .contains(&self.required_path_count)
+            || self.candidate_ordinal > self.required_path_count
         {
-            return Err(ProtocolError::InvalidField(
-                "native scope candidate ordinal",
-            ));
+            return Err(ProtocolError::InvalidField("native scope path cardinality"));
         }
         let relay = required_actor(self.data_relay.as_ref(), "native scope data relay")?;
         let control = required_actor(self.control.as_ref(), "native scope control")?;
@@ -796,6 +803,24 @@ impl NativeProbePathScope {
             &self.policy_hash,
             self.policy_expires_at_ms,
         )?;
+        match Transport::try_from(self.transport)
+            .map_err(|_| ProtocolError::InvalidField("native scope transport path cardinality"))?
+        {
+            Transport::UdpSinglePath if self.required_path_count != 1 => {
+                return Err(ProtocolError::InvalidField(
+                    "native scope UDP path cardinality",
+                ));
+            }
+            Transport::TcpMptcp | Transport::MultipathQuic if self.required_path_count < 2 => {
+                return Err(ProtocolError::InvalidField(
+                    "native scope multipath cardinality",
+                ));
+            }
+            Transport::Unspecified => {
+                return Err(ProtocolError::InvalidField("native scope transport"));
+            }
+            Transport::UdpSinglePath | Transport::TcpMptcp | Transport::MultipathQuic => {}
+        }
         if self.attempt_expires_at_ms == 0
             || self.attempt_expires_at_ms > self.policy_expires_at_ms
             || self.attempt_expires_at_ms > actor_ceiling(relay)
@@ -822,6 +847,7 @@ impl NativeProbeEndpointBinding {
             .ok_or(ProtocolError::InvalidField("native endpoint"))?;
         endpoint.validate("native endpoint")?;
         if self.route_context_id != scope.attempt_id
+            || self.path_id != scope.candidate_ordinal
             || !endpoint_family_matches(endpoint, scope_family(scope)?)
         {
             return Err(ProtocolError::InvalidField("native endpoint scope"));
@@ -2253,6 +2279,7 @@ mod tests {
                 policy_expires_at_ms: EXPIRY + 30_000,
                 challenge_hash: native_probe_challenge_hash(&challenge).to_vec(),
                 attempt_expires_at_ms: EXPIRY,
+                required_path_count: 2,
             };
             Self {
                 client,
@@ -2349,6 +2376,7 @@ mod tests {
                 listen_port: 10_000 + u32::from(port),
             }),
             prepared_lease_commitment: vec![port; 32],
+            path_id: 2,
         }
     }
 
@@ -2554,6 +2582,7 @@ mod tests {
         assert!(set.validate().is_err(), "ten candidates must fail closed");
 
         let mut bounded_ordinal = fixture.scope.clone();
+        bounded_ordinal.required_path_count = 8;
         bounded_ordinal.candidate_ordinal = 8;
         bounded_ordinal.data_relay = Some(candidates[7].clone());
         assert!(bounded_ordinal.validate().is_ok());

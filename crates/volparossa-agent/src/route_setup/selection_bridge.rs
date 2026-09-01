@@ -989,13 +989,14 @@ impl ClientNativePreparedBindFailure {
 /// selected control Relay.
 pub(crate) async fn begin_client_native_preselection(
     prepared: PreparedPreselectionEvidence,
+    required_path_count: usize,
     discovery: &DiscoveryControlHandle,
 ) -> Result<ClientNativePreselection, native_preselection::NativePreselectionError> {
     let replay_capacity = volparossa_protocol::MAX_NATIVE_PROBE_CANDIDATES
         .checked_mul(CLIENT_NATIVE_REPLAY_ENTRIES_PER_PATH)
         .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
     ClientNativeProbeBatchOwner {
-        owner: native_preselection::begin_native_preselection(prepared)?,
+        owner: native_preselection::begin_native_preselection(prepared, required_path_count)?,
         replay: volparossa_protocol::ReplayCache::new(replay_capacity)?,
         armed: Vec::new(),
         proofs: Vec::new(),
@@ -1154,6 +1155,7 @@ impl ClientNativeRelayReady {
                 route_context_id: route_context_id.to_vec(),
                 endpoint: Some(local_endpoint),
                 prepared_lease_commitment: commitment.to_vec(),
+                path_id,
             };
             let relay_endpoint = relay_binding
                 .endpoint
@@ -5481,6 +5483,7 @@ mod tests {
         let minted_at = Instant::now();
         let mut owner = native_preselection::begin_native_preselection_for_test(
             prepared,
+            2,
             minted_at_ms,
             minted_at,
         )
@@ -5597,6 +5600,7 @@ mod tests {
         assert!(matches!(
             native_preselection::begin_native_preselection_for_test(
                 expired,
+                2,
                 NOW_MS + 5_000,
                 Instant::now(),
             ),

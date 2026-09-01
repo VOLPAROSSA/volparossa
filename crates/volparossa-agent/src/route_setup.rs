@@ -300,9 +300,13 @@ async fn begin_client_route(
         .prepare_client_preselection(parameters)
         .await
         .map_err(map_preselection_error)?;
-    let preselection = selection_bridge::begin_client_native_preselection(prepared, discovery)
-        .await
-        .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
+    let preselection = selection_bridge::begin_client_native_preselection(
+        prepared,
+        required_native_paths,
+        discovery,
+    )
+    .await
+    .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
     let ready = preselection
         .dispatch_relay_ready(discovery)
         .await

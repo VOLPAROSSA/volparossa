@@ -117,7 +117,8 @@ impl NativeProbeReadyForwardRequest {
             .as_ref()
             .ok_or(ForwardingRpcError::InvalidFrame)?;
         validate_fixed_nonzero::<PUBLIC_KEY_LENGTH>(&wire.public_key)?;
-        if !matches!(wire.underlay_ip.len(), 4 | 16)
+        if !(1..=u32::try_from(MAX_RELAY_PATHS).unwrap_or(u32::MAX)).contains(&endpoint.path_id)
+            || !matches!(wire.underlay_ip.len(), 4 | 16)
             || wire.underlay_ip.iter().all(|byte| *byte == 0)
             || u16::try_from(wire.listen_port)
                 .ok()
@@ -1529,6 +1530,7 @@ mod tests {
                 listen_port: 40_001,
             }),
             prepared_lease_commitment: vec![6; NODE_ID_LENGTH],
+            path_id: 1,
         }
     }
 

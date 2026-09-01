@@ -243,12 +243,20 @@ impl NativeAttemptDeadline {
 /// Consume one opaque A1 handoff and mint a fresh, independently expiring sampler owner.
 pub(super) fn begin_native_preselection(
     prepared: PreparedPreselectionEvidence,
+    required_path_count: usize,
 ) -> Result<NativePreselectionAttemptOwner, NativePreselectionError> {
-    begin_native_preselection_at(prepared, crate::unix_millis(), Instant::now(), &mut OsRng)
+    begin_native_preselection_at(
+        prepared,
+        required_path_count,
+        crate::unix_millis(),
+        Instant::now(),
+        &mut OsRng,
+    )
 }
 
 fn begin_native_preselection_at<R>(
     prepared: PreparedPreselectionEvidence,
+    required_path_count: usize,
     trusted_now_ms: u64,
     trusted_now: Instant,
     rng: &mut R,
@@ -262,8 +270,31 @@ where
         relays,
         exit,
     } = consume_prepared_handoff(prepared, trusted_now_ms)?;
+    if !(1..=MAX_NATIVE_PROBE_PATHS).contains(&required_path_count)
+        || required_path_count > relays.len()
+        || matches!(
+            volparossa_protocol::Transport::try_from(candidate_set.transport),
+            Ok(volparossa_protocol::Transport::UdpSinglePath) if required_path_count != 1
+        )
+        || matches!(
+            volparossa_protocol::Transport::try_from(candidate_set.transport),
+            Ok(
+                volparossa_protocol::Transport::TcpMptcp
+                    | volparossa_protocol::Transport::MultipathQuic
+            ) if required_path_count < 2
+        )
+    {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
     let deadline = native_attempt_deadline(&candidate_set, trusted_now_ms, trusted_now)?;
-    let pending = mint_path_authorities(&candidate_set, relays, &exit, deadline, rng)?;
+    let pending = mint_path_authorities(
+        &candidate_set,
+        relays,
+        &exit,
+        required_path_count,
+        deadline,
+        rng,
+    )?;
     Ok(NativePreselectionAttemptOwner {
         _snapshot: snapshot,
         candidate_set,
@@ -377,6 +408,7 @@ fn mint_path_authorities<R>(
     candidate_set: &NativeProbeCandidateSet,
     relays: Vec<NativeCandidateProjection>,
     exit: &NativeCandidateProjection,
+    required_path_count: usize,
     deadline: NativeAttemptDeadline,
     rng: &mut R,
 ) -> Result<VecDeque<PendingNativeProbeAuthority>, NativePreselectionError>
@@ -388,7 +420,7 @@ where
     let mut probe_ids = HashSet::with_capacity(relays.len());
     let mut challenges = HashSet::with_capacity(relays.len());
     let mut pending = VecDeque::with_capacity(relays.len());
-    for (index, relay) in relays.into_iter().take(MAX_NATIVE_PROBE_PATHS).enumerate() {
+    for (index, relay) in relays.into_iter().take(required_path_count).enumerate() {
         let candidate_ordinal =
             u32::try_from(index + 1).map_err(|_| NativePreselectionError::InvalidCandidateSet)?;
         let probe_id = unique_random::<ID_BYTES, _>(rng, &mut probe_ids)?;
@@ -415,6 +447,8 @@ where
             policy_expires_at_ms: candidate_set.policy_expires_at_ms,
             challenge_hash: native_probe_challenge_hash(&challenge).to_vec(),
             attempt_expires_at_ms: deadline.expires_at_ms,
+            required_path_count: u32::try_from(required_path_count)
+                .map_err(|_| NativePreselectionError::InvalidCandidateSet)?,
         };
         let request = NativeProbePermitRequest {
             scope: Some(scope),
@@ -457,16 +491,26 @@ where
             deadline,
         });
     }
+    if pending.len() != required_path_count {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
     Ok(pending)
 }
 
 #[cfg(test)]
 pub(super) fn begin_native_preselection_for_test(
     prepared: PreparedPreselectionEvidence,
+    required_path_count: usize,
     trusted_now_ms: u64,
     trusted_now: Instant,
 ) -> Result<NativePreselectionAttemptOwner, NativePreselectionError> {
-    begin_native_preselection_at(prepared, trusted_now_ms, trusted_now, &mut OsRng)
+    begin_native_preselection_at(
+        prepared,
+        required_path_count,
+        trusted_now_ms,
+        trusted_now,
+        &mut OsRng,
+    )
 }
 
 impl NativePreselectionAttemptOwner {
@@ -1490,6 +1534,7 @@ mod dispatch_tests {
             policy_expires_at_ms: expires_at_ms + 1_000,
             challenge_hash: native_probe_challenge_hash(&[12; KEY_BYTES]).to_vec(),
             attempt_expires_at_ms: expires_at_ms,
+            required_path_count: 2,
         };
         let request = NativeProbePermitRequest {
             scope: Some(scope.clone()),
@@ -1694,6 +1739,7 @@ mod dispatch_tests {
                 listen_port: port,
             }),
             prepared_lease_commitment: vec![seed + 2; KEY_BYTES],
+            path_id: 1,
         }
     }
 
