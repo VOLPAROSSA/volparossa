@@ -195,8 +195,12 @@ A02_EXIT_SOURCE=47.163.4.1
 # PrivateTmp is part of both production service sandboxes and Debian mounts its
 # runtime tmpfs non-executable. Keep this disposable-VM stage on the executable
 # root filesystem so both transient units see and can execute the exact build.
-WORK=$(mktemp -d "/opt/volparossa-alpha-topology.$RUN_ID.XXXXXX")
-case $WORK in /opt/volparossa-alpha-topology.*) ;; *) exit 69 ;; esac
+# Keep every nested AF_UNIX path below Linux SUN_LEN, including the longest
+# bootstrap control socket, while retaining a run-bound disposable root.
+WORK=$(mktemp -d "/opt/va.$RUN_ID.XXXXXX")
+case $WORK in /opt/va.*) ;; *) exit 69 ;; esac
+longest_control_socket=$WORK/runtime-bootstrap1/control/agent.sock
+[ "${#longest_control_socket}" -lt 108 ] || exit 69
 chmod 0700 "$WORK"
 
 PHASE=identity-setup
