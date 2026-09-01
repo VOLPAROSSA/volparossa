@@ -16,8 +16,8 @@ use tokio::process::Command as ProcessCommand;
 use tracing_subscriber::EnvFilter;
 use volparossa_identity::IdentityStore;
 use volparossa_local_control::{
-    ControlResponse, Empty, LogQuery, NodeRole, RoleChange, control_request::Operation,
-    control_response::Payload,
+    ConnectRequest, ControlResponse, Empty, LogQuery, NodeRole, RoleChange, SessionTransport,
+    control_request::Operation, control_response::Payload,
 };
 
 const DEFAULT_CONFIG: &str = "/etc/volparossa/config.yaml";
@@ -75,8 +75,12 @@ enum CliCommand {
     Stop,
     /// Show agent status.
     Status,
-    /// Establish policy-approved route contexts.
-    Connect,
+    /// Establish a policy-approved route context for one explicit transport.
+    Connect {
+        /// Product transport to establish.
+        #[arg(long, value_enum, default_value = "single-path-udp")]
+        transport: ConnectTransport,
+    },
     /// Drain and remove all route contexts.
     Disconnect,
     /// Show locally known peers.
@@ -146,6 +150,26 @@ enum VoluntaryRole {
     Exit,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ConnectTransport {
+    Mptcp,
+    SinglePathUdp,
+    MultipathQuic,
+}
+
+impl ConnectTransport {
+    const fn request(self) -> ConnectRequest {
+        let transport = match self {
+            Self::Mptcp => SessionTransport::Mptcp,
+            Self::SinglePathUdp => SessionTransport::SinglePathUdp,
+            Self::MultipathQuic => SessionTransport::MultipathQuic,
+        };
+        ConnectRequest {
+            transport: Some(transport as i32),
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
     /// Parse and fail-closed validate the configured YAML file.
@@ -179,9 +203,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 control::request(&cli.control_socket, Operation::Status(Empty {})).await?;
             print_response(response)
         }
-        CliCommand::Connect => {
+        CliCommand::Connect { transport } => {
             let response =
-                control::request(&cli.control_socket, Operation::Connect(Empty {})).await?;
+                control::request(&cli.control_socket, Operation::Connect(transport.request()))
+                    .await?;
             print_response(response)
         }
         CliCommand::Disconnect => {
@@ -248,8 +273,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
             if !report.is_usable() {
                 bail!("demo cannot start because required doctor checks failed");
             }
-            let response =
-                control::request(&cli.control_socket, Operation::Connect(Empty {})).await?;
+            let response = control::request(
+                &cli.control_socket,
+                Operation::Connect(ConnectTransport::SinglePathUdp.request()),
+            )
+            .await?;
             print_response(response)
         }
     }
@@ -473,6 +501,7 @@ mod tests {
             &["volparossa", "stop"],
             &["volparossa", "status"],
             &["volparossa", "connect"],
+            &["volparossa", "connect", "--transport", "multipath-quic"],
             &["volparossa", "disconnect"],
             &["volparossa", "peers"],
             &["volparossa", "paths"],

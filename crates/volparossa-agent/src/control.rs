@@ -18,8 +18,9 @@ use tokio::{
 };
 use volparossa_config::{Config, RolesConfig};
 use volparossa_local_control::{
-    CONTROL_PROTOCOL_VERSION, ControlRequest, ControlResponse, ControlResult, Empty, LogLevel,
-    NodeRole, control_request, control_response, read_request, write_response,
+    CONTROL_PROTOCOL_VERSION, ConnectRequest, ControlRequest, ControlResponse, ControlResult,
+    Empty, LogLevel, NodeRole, SessionTransport, control_request, control_response, read_request,
+    write_response,
 };
 
 use crate::{
@@ -185,8 +186,8 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
                 control_response::Payload::Status(status),
             )
         }
-        control_request::Operation::Connect(_) => {
-            Box::pin(connect_response(request_id, context)).await
+        control_request::Operation::Connect(connect) => {
+            Box::pin(connect_response(request_id, connect, context)).await
         }
         control_request::Operation::Disconnect(_) => {
             Box::pin(disconnect_response(request_id, context)).await
@@ -259,7 +260,11 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
     clippy::too_many_lines,
     reason = "the control boundary maps every fail-closed route phase to one stable diagnostic"
 )]
-async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
+async fn connect_response(
+    request_id: Vec<u8>,
+    request: ConnectRequest,
+    context: &ControlContext,
+) -> ControlResponse {
     {
         let mut state = context.state.write().await;
         if !state.policy_active(unix_millis()) {
@@ -273,8 +278,21 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             );
         }
     }
+    let Some(profile) = requested_connect_profile(&context.config, request.transport) else {
+        context
+            .state
+            .write()
+            .await
+            .log(LogLevel::Warn, "CONNECT_PROFILE_INVALID", unix_millis());
+        return response(
+            request_id,
+            ControlResult::InvalidRequest,
+            "CLIENT_ROUTE_PROFILE_INVALID",
+            control_response::Payload::Ack(Empty {}),
+        );
+    };
     let (result, diagnostic, log_code, log_level) = match Box::pin(context.routes.connect(
-        &context.config,
+        &profile,
         &context.discovery,
         &context.helper,
     ))
@@ -418,6 +436,26 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
         diagnostic,
         control_response::Payload::Ack(Empty {}),
     )
+}
+
+fn requested_connect_profile(config: &Config, transport: Option<i32>) -> Option<Config> {
+    let Some(transport) = transport else {
+        return Some(config.clone());
+    };
+    let transport = SessionTransport::try_from(transport).ok()?;
+    let enabled = match transport {
+        SessionTransport::Mptcp => config.tcp.enabled,
+        SessionTransport::SinglePathUdp => config.udp.enabled,
+        SessionTransport::MultipathQuic => config.quic.enabled,
+    };
+    if !enabled {
+        return None;
+    }
+    let mut profile = config.clone();
+    profile.tcp.enabled = transport == SessionTransport::Mptcp;
+    profile.udp.enabled = transport == SessionTransport::SinglePathUdp;
+    profile.quic.enabled = transport == SessionTransport::MultipathQuic;
+    Some(profile)
 }
 
 async fn disconnect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
@@ -664,5 +702,33 @@ mod tests {
             exit: false,
         };
         assert!(changed_roles(roles, NodeRole::Client, false).client);
+    }
+
+    #[test]
+    fn explicit_connect_transport_selects_only_that_enabled_product_path() {
+        let config = Config::default();
+        for (transport, expected) in [
+            (SessionTransport::Mptcp, (true, false, false)),
+            (SessionTransport::SinglePathUdp, (false, true, false)),
+            (SessionTransport::MultipathQuic, (false, false, true)),
+        ] {
+            let profile = requested_connect_profile(&config, Some(transport as i32))
+                .expect("enabled transport profile");
+            assert_eq!(
+                (
+                    profile.tcp.enabled,
+                    profile.udp.enabled,
+                    profile.quic.enabled
+                ),
+                expected
+            );
+        }
+
+        let mut disabled = config;
+        disabled.quic.enabled = false;
+        assert!(
+            requested_connect_profile(&disabled, Some(SessionTransport::MultipathQuic as i32))
+                .is_none()
+        );
     }
 }

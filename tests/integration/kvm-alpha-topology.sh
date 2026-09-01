@@ -2584,6 +2584,7 @@ a01_select_route() {
         set +e
         "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-client/control/agent.sock" connect \
+            --transport multipath-quic \
             >"$WORK/a01-$selection_label-connect.out" \
             2>>"$WORK/a01-$selection_label-connect.err"
         selection_status=$?
@@ -3738,6 +3739,7 @@ while [ "$attempt" -lt 30 ]; do
     set +e
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-client/control/agent.sock" connect \
+        --transport single-path-udp \
         >"$WORK/connect-client.out" 2>"$WORK/connect-client.err"
     CONNECT_STATUS=$?
     set -e
