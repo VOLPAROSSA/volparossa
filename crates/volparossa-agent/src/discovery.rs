@@ -8628,7 +8628,7 @@ impl DiscoveryRuntime {
         let Ok(verified) = verified else {
             return AdvertisementCommitOutcome::rejected(Some((
                 LogLevel::Warn,
-                "ADVERTISEMENT_VERIFY_FAILED",
+                "ADVERTISEMENT_SIGNATURE_VERIFY_FAILED",
                 now_ms,
             )));
         };
@@ -8745,7 +8745,7 @@ impl DiscoveryRuntime {
             if replayed || active_replays >= self.forwarded_replay_capacity {
                 return AdvertisementCommitOutcome::rejected(Some((
                     LogLevel::Warn,
-                    "ADVERTISEMENT_VERIFY_FAILED",
+                    "ADVERTISEMENT_FORWARDED_REPLAY_REJECTED",
                     clock.unix_ms,
                 )));
             }
@@ -8763,7 +8763,7 @@ impl DiscoveryRuntime {
         {
             return AdvertisementCommitOutcome::rejected(Some((
                 LogLevel::Warn,
-                "ADVERTISEMENT_VERIFY_FAILED",
+                "ADVERTISEMENT_DIRECT_REPLAY_REJECTED",
                 clock.unix_ms,
             )));
         }
