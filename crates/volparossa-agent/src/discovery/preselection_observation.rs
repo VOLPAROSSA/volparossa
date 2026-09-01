@@ -3120,7 +3120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owner_dispatch_fails_closed_and_cools_when_connection_provenance_is_absent() {
+    async fn owner_dispatch_waits_for_response_binding_when_connection_provenance_is_absent() {
         let fixture = preselection_snapshot_fixture(1, false).await;
         let started_at_mono = Instant::now();
         let pending = PreselectionAttemptGate::new()
@@ -3145,13 +3145,12 @@ mod tests {
         )
         .expect("client discovery service");
 
-        let failure = match pending.dispatch(&mut service) {
-            Ok(_) => panic!("a request-derived target without live provenance must not dispatch"),
-            Err(failure) => failure,
-        };
-        let PreselectionOwnerTransitionFailure::Cooling(cooling) = failure else {
-            panic!("terminal dispatch rejection must retain only cooling authority");
-        };
+        let dispatch = pending.dispatch(&mut service).unwrap_or_else(|_| {
+            panic!("request-response must be allowed to dial the exact target")
+        });
+        let cooling = dispatch
+            .cancel(&mut service)
+            .unwrap_or_else(|_| panic!("exact queued dispatch must remain cancellable"));
         assert_eq!(cooling.gate.tombstones.len(), 1);
         assert_eq!(cooling.gate.batch_tombstones.len(), 1);
         assert!(cooling.gate.replay.is_empty());
