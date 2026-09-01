@@ -208,16 +208,18 @@ impl Agent {
             self.metrics.clone(),
             shutdown_tx.subscribe(),
         ));
-        let (mut tcp_ingress_task, mut ingress_task) = spawn_client_ingress_tasks(
-            client_ingress.as_ref().map(Arc::clone),
-            Arc::clone(&self.state),
-            Arc::clone(&self.config),
-            self.discovery_control.clone(),
-            self.helper.clone(),
-            routes.clone(),
-            routes.clone(),
-            &shutdown_tx,
-        );
+        let (mut tcp_ingress_task, mut ingress_task, mut dns_ingress_task) =
+            spawn_client_ingress_tasks(
+                client_ingress.as_ref().map(Arc::clone),
+                Arc::clone(&self.state),
+                Arc::clone(&self.config),
+                self.discovery_control.clone(),
+                self.helper.clone(),
+                routes.clone(),
+                routes.clone(),
+                routes.clone(),
+                &shutdown_tx,
+            );
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
             () = &mut shutdown => Ok(()),
@@ -234,6 +236,7 @@ impl Agent {
             },
             _ = &mut ingress_task => Err(AgentError::Task),
             _ = &mut tcp_ingress_task => Err(AgentError::Task),
+            _ = &mut dns_ingress_task => Err(AgentError::Task),
         };
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
@@ -242,6 +245,7 @@ impl Agent {
         stop_task(&mut metrics_task).await;
         stop_task(&mut ingress_task).await;
         stop_task(&mut tcp_ingress_task).await;
+        stop_task(&mut dns_ingress_task).await;
         routes.disconnect().await;
         drop(socket_guard);
         if let Some(client_ingress) = client_ingress {
@@ -284,11 +288,17 @@ fn spawn_client_ingress_tasks(
     helper: HelperClient,
     tcp_routes: ClientRouteControl,
     udp_routes: ClientRouteControl,
+    dns_routes: ClientRouteControl,
     shutdown: &watch::Sender<bool>,
-) -> (JoinHandle<()>, JoinHandle<()>) {
+) -> (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>) {
     let udp_config = Arc::clone(&config);
     let udp_discovery = discovery.clone();
     let udp_helper = helper.clone();
+    let dns_runtime = runtime.clone();
+    let dns_state = Arc::clone(&state);
+    let dns_config = Arc::clone(&udp_config);
+    let dns_discovery = udp_discovery.clone();
+    let dns_helper = udp_helper.clone();
     let tcp = tokio::spawn(run_client_tcp_ingress(
         runtime.clone(),
         Arc::clone(&state),
@@ -307,7 +317,16 @@ fn spawn_client_ingress_tasks(
         udp_routes,
         shutdown.subscribe(),
     ));
-    (tcp, udp)
+    let dns = tokio::spawn(run_client_dns_ingress(
+        dns_runtime,
+        dns_state,
+        dns_config,
+        dns_discovery,
+        dns_helper,
+        dns_routes,
+        shutdown.subscribe(),
+    ));
+    (tcp, udp, dns)
 }
 
 #[allow(
@@ -655,6 +674,162 @@ async fn run_client_udp_ingress(
                 .await
                 .log(LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis());
         }
+    }
+}
+
+/// Owns the helper-acquired DNS socket. Every accepted query is policy-bound to its QNAME and
+/// crosses the existing single-relay protected QUIC route; this actor never opens a resolver
+/// socket on the Client.
+#[allow(clippy::single_match_else, clippy::too_many_lines)]
+async fn run_client_dns_ingress(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let Some(runtime) = runtime else {
+        wait_for_shutdown(&mut shutdown).await;
+        return;
+    };
+    let Ok(descriptor) = runtime.duplicate_ipv4_dns_udp_poll_descriptor() else {
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "INGRESS_DNS_POLL_FAILED", unix_millis());
+        return;
+    };
+    let Ok(poll) = AsyncFd::new(descriptor) else {
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "INGRESS_DNS_POLL_FAILED", unix_millis());
+        return;
+    };
+    loop {
+        let mut ready = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
+                    return;
+                }
+                continue;
+            }
+            result = poll.readable() => match result {
+                Ok(ready) => ready,
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "INGRESS_DNS_POLL_FAILED",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            },
+        };
+        let now_ms = unix_millis();
+        let Some(policy) = state.read().await.active_policy(now_ms) else {
+            ready.clear_ready();
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        routes.disconnect().await;
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(INGRESS_POLICY_BACKOFF) => {}
+            }
+            continue;
+        };
+        let ingress = match runtime.try_receive_ipv4_dns_udp(&policy, now_ms) {
+            Ok(ingress) => ingress,
+            Err(ClientIngressUdpError::Receive(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                ready.clear_ready();
+                continue;
+            }
+            Err(ClientIngressUdpError::Policy(_)) => {
+                ready.clear_ready();
+                state.write().await.record_policy_rejection();
+                continue;
+            }
+            Err(_) => {
+                ready.clear_ready();
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_QUERY_REJECTED",
+                    unix_millis(),
+                );
+                continue;
+            }
+        };
+        ready.clear_ready();
+        if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
+            .await
+            .is_err()
+        {
+            state.write().await.log(
+                LogLevel::Warn,
+                "INGRESS_DNS_ROUTE_UNAVAILABLE",
+                unix_millis(),
+            );
+            continue;
+        }
+        if routes
+            .activate_dns_ingress(ingress, &policy, now_ms)
+            .await
+            .is_err()
+        {
+            routes.disconnect().await;
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, "INGRESS_DNS_QUERY_REJECTED", unix_millis());
+            continue;
+        }
+        let response = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
+                    return;
+                }
+                routes.disconnect().await;
+                continue;
+            }
+            result = routes.receive_udp_response() => match result {
+                Ok(response) => response,
+                Err(_) => {
+                    routes.disconnect().await;
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_RESPONSE_UNAVAILABLE",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+            },
+        };
+        let sent = runtime
+            .send_ipv4_udp_response(
+                response.application(),
+                response.remote(),
+                response.payload(),
+            )
+            .await
+            .is_ok();
+        routes.disconnect().await;
+        state.write().await.log(
+            if sent { LogLevel::Info } else { LogLevel::Warn },
+            if sent {
+                "INGRESS_DNS_QUERY_COMPLETED"
+            } else {
+                "INGRESS_DNS_REPLY_FAILED"
+            },
+            unix_millis(),
+        );
     }
 }
 

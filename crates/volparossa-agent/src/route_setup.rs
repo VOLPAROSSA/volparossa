@@ -92,8 +92,8 @@ use volparossa_wireguard::{HELPER_HANDLE_BYTES, HelperContextHandle, PublicWireG
 
 use crate::{
     client_ingress::{
-        BrowserQuicFlowBinding, PolicyAuthorizedTcpIngress, PolicyAuthorizedUdpIngress,
-        RouteAuthorizedUdpIngress,
+        BrowserQuicFlowBinding, PolicyAuthorizedDnsIngress, PolicyAuthorizedTcpIngress,
+        PolicyAuthorizedUdpIngress, RouteAuthorizedUdpIngress,
     },
     discovery::{
         AdvertisementPayloadHash, ClientPreselectionError, ClientPreselectionParameters,
@@ -410,6 +410,36 @@ impl ClientRouteControl {
         let mut profile = config.clone();
         profile.tcp.enabled = false;
         profile.udp.enabled = false;
+        Box::pin(self.connect(&profile, discovery, helper)).await
+    }
+
+    /// Ensure one relay-only single-path QUIC route is ready for UDP or protected DNS.
+    pub(crate) async fn ensure_single_udp(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !config.udp.enabled {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        {
+            let state = self.state.lock().await;
+            match &*state {
+                ClientRouteControlState::Established(established)
+                    if matches!(established.transport, ClientTransportState::UdpReady(_)) =>
+                {
+                    return Ok(ClientRouteProgress::UdpRouteReady);
+                }
+                ClientRouteControlState::Idle => {}
+                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
+                    return Err(ClientRouteConnectError::Busy);
+                }
+            }
+        }
+        let mut profile = config.clone();
+        profile.tcp.enabled = false;
+        profile.quic.enabled = false;
         Box::pin(self.connect(&profile, discovery, helper)).await
     }
 
@@ -777,6 +807,97 @@ impl ClientRouteControl {
                 *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
                     transport: ClientTransportState::UdpActive(active),
                     tcp_flow: None,
+                    route: None,
+                    orchestrator,
+                    helper,
+                }));
+                Ok(ClientRouteProgress::TransportActive)
+            }
+            Err(failure) => {
+                let _ = failure.route.disconnect().await;
+                let _ = orchestrator.shutdown().await;
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Idle;
+                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+            }
+        }
+    }
+
+    /// Bind one helper-intercepted DNS request to this single-relay route and queue it to the Exit.
+    pub(crate) async fn activate_dns_ingress(
+        &self,
+        ingress: PolicyAuthorizedDnsIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        let previous = {
+            let mut state = self.state.lock().await;
+            std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
+        };
+        let established = match previous {
+            ClientRouteControlState::Established(established) => established,
+            other => {
+                let mut state = self.state.lock().await;
+                *state = other;
+                return Err(ClientRouteConnectError::Busy);
+            }
+        };
+        let EstablishedClientRoute {
+            transport,
+            route,
+            orchestrator,
+            helper,
+        } = *established;
+        let ClientTransportState::UdpReady(ready) = transport else {
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                transport,
+                route,
+                orchestrator,
+                helper,
+            }));
+            return Err(ClientRouteConnectError::Busy);
+        };
+        if route.is_some() {
+            let _ = Box::pin(ready.disconnect()).await;
+            if let Some(route) = route {
+                let _ = route.disconnect().await;
+            }
+            let _ = orchestrator.shutdown().await;
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Idle;
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let Ok(authorized) = ready.bind_dns_ingress(ingress, policy, now_ms) else {
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                transport: ClientTransportState::UdpReady(ready),
+                route: None,
+                orchestrator,
+                helper,
+            }));
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        };
+        let (flow, signed_authorization) = authorized.activation();
+        match ready
+            .activate(flow, signed_authorization, MAXIMUM_CALL_DURATION, now_ms)
+            .await
+        {
+            Ok(mut active) => {
+                active.return_path = Some(ClientUdpReturnPath {
+                    application: authorized.source(),
+                    remote: authorized.destination(),
+                });
+                if active.client.send_payload(authorized.payload()).is_err() {
+                    let _ = active.shutdown().await;
+                    let _ = orchestrator.shutdown().await;
+                    let mut state = self.state.lock().await;
+                    *state = ClientRouteControlState::Idle;
+                    return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+                }
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    transport: ClientTransportState::UdpActive(active),
                     route: None,
                     orchestrator,
                     helper,
@@ -3918,6 +4039,25 @@ impl CertificateBoundProductionUdpRoute {
     fn bind_ingress(
         &self,
         ingress: PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<RouteAuthorizedUdpIngress, ()> {
+        let protocol = self
+            .prepared
+            .route
+            .established
+            .owner
+            .as_ref()
+            .and_then(PreparedContextOwner::protocol)
+            .ok_or(())?;
+        ingress
+            .bind_to_route(&self.prepared.path, &protocol.coordinator, policy, now_ms)
+            .map_err(|_| ())
+    }
+
+    fn bind_dns_ingress(
+        &self,
+        ingress: PolicyAuthorizedDnsIngress,
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<RouteAuthorizedUdpIngress, ()> {

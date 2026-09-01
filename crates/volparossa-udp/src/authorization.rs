@@ -130,6 +130,9 @@ impl<'a> UdpAuthorizationScope<'a> {
             self.policy
                 .authorize_ip(now_ms, address, TransportProtocol::Udp, port)?;
             AuthorizedDestination::Ip(address)
+        } else if port == 53 {
+            let hostname = self.policy.authorize_dns_name(now_ms, &message.hostname)?;
+            AuthorizedDestination::DnsHostname(hostname)
         } else {
             self.policy.authorize_domain(
                 now_ms,
@@ -154,6 +157,7 @@ impl<'a> UdpAuthorizationScope<'a> {
 
 enum AuthorizedDestination {
     Hostname(String),
+    DnsHostname(String),
     Ip(IpAddr),
 }
 
@@ -217,6 +221,20 @@ impl AuthorizedUdpFlow {
             && matches!(self.destination, AuthorizedDestination::Ip(address) if address == destination.ip())
     }
 
+    /// Return whether this is the dedicated protected DNS service for one exact signed name.
+    #[must_use]
+    pub fn matches_dns_name(&self, hostname: &str) -> bool {
+        self.port == 53
+            && matches!(&self.destination, AuthorizedDestination::DnsHostname(name) if name == hostname)
+    }
+
+    pub(crate) fn dns_name(&self) -> Option<&str> {
+        match &self.destination {
+            AuthorizedDestination::DnsHostname(name) => Some(name),
+            AuthorizedDestination::Hostname(_) | AuthorizedDestination::Ip(_) => None,
+        }
+    }
+
     /// Fail closed before creating an association from a stale authorization.
     ///
     /// # Errors
@@ -254,6 +272,9 @@ impl AuthorizedUdpFlow {
                     .map(|socket| socket.ip())
                     .find(|address| is_permitted_egress(*address))
                     .ok_or(UdpError::ResolutionFailed)?
+            }
+            AuthorizedDestination::DnsHostname(_) => {
+                return Err(UdpError::InvalidBinding("DNS flow cannot open UDP egress"));
             }
         };
         Ok(PinnedUdpFlow {
@@ -378,7 +399,7 @@ fn parse_ip(bytes: &[u8]) -> Result<IpAddr, UdpError> {
     }
 }
 
-fn is_permitted_egress(address: IpAddr) -> bool {
+pub(crate) fn is_permitted_egress(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => permitted_v4(address),
         IpAddr::V6(address) => permitted_v6(address),

@@ -18,7 +18,7 @@ use volparossa_wireguard::{HelperContextHandle, overlay_addresses};
 
 use crate::{
     AuthorizedUdpFlow, DatagramLimits, ExitUdpBridge, ManagedQuinnEndpoint, QuicUdpAssociation,
-    UdpAuthorizationScope, UdpBridgeStats, UdpError, VerifiedSingleRelayPath,
+    UdpAuthorizationScope, UdpBridgeStats, UdpError, VerifiedSingleRelayPath, dns::ExitDnsBridge,
     endpoint_from_bound_owned_fd, read_authorized_udp_flow, write_udp_authorization,
 };
 
@@ -345,7 +345,12 @@ impl SingleRelayUdpClient {
 #[must_use = "the accepted UDP bridge must be run or dropped before route destruction"]
 pub struct SingleRelayUdpExit {
     endpoint: ManagedQuinnEndpoint,
-    bridge: ExitUdpBridge,
+    bridge: SingleRelayExitBridge,
+}
+
+enum SingleRelayExitBridge {
+    Datagram(ExitUdpBridge),
+    Dns(ExitDnsBridge),
 }
 
 /// Bound QUIC listener for one committed Exit route.
@@ -413,9 +418,16 @@ impl SingleRelayUdpExitListener {
                 authorization_timeout,
             )
             .await?;
-            let pinned = flow.resolve_and_pin(now_ms).await?;
             let association = QuicUdpAssociation::new(connection, path, &flow, now_ms)?;
-            ExitUdpBridge::connect(association, pinned, now_ms, limits).await
+            if flow.dns_name().is_some() {
+                ExitDnsBridge::new(association, &flow, now_ms, limits)
+                    .map(SingleRelayExitBridge::Dns)
+            } else {
+                let pinned = flow.resolve_and_pin(now_ms).await?;
+                ExitUdpBridge::connect(association, pinned, now_ms, limits)
+                    .await
+                    .map(SingleRelayExitBridge::Datagram)
+            }
         }
         .await;
         match attempt {
@@ -478,7 +490,10 @@ impl SingleRelayUdpExit {
     /// Returns the first association, socket, size, or resource-limit error.
     pub async fn run(self) -> Result<UdpBridgeStats, UdpError> {
         let Self { endpoint, bridge } = self;
-        let result = bridge.run().await;
+        let result = match bridge {
+            SingleRelayExitBridge::Datagram(bridge) => bridge.run().await,
+            SingleRelayExitBridge::Dns(bridge) => bridge.run().await,
+        };
         endpoint.shutdown().await;
         result
     }

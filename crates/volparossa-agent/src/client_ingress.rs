@@ -27,8 +27,8 @@ use volparossa_protocol::{ReplayCache, TimePolicy};
 use volparossa_reservation::{CoordinatorError, ReservationCoordinator};
 use volparossa_routing::{PrepareClientIngress, REQUIRED_INGRESS_SOCKETS};
 use volparossa_udp::{
-    AuthorizedUdpFlow, MAX_UDP_PAYLOAD_BYTES, UdpAuthorizationScope, UdpError,
-    VerifiedSingleRelayPath,
+    AuthorizedUdpFlow, MAX_DNS_MESSAGE_BYTES, MAX_UDP_PAYLOAD_BYTES, UdpAuthorizationScope,
+    UdpError, VerifiedSingleRelayPath, parse_dns_query,
 };
 
 use crate::{
@@ -64,6 +64,11 @@ const IPV6_TRANSPARENT_TCP: ClientIngressSocketIdentity = ClientIngressSocketIde
 
 const IPV4_TRANSPARENT_UDP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
     ClientIngressSocketKind::TransparentUdp,
+    ClientIngressSocketFamily::Ipv4,
+);
+
+const IPV4_DNS_UDP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
+    ClientIngressSocketKind::DnsUdp,
     ClientIngressSocketFamily::Ipv4,
 );
 
@@ -198,6 +203,45 @@ impl ClientIngressRuntime {
     pub(crate) fn duplicate_ipv4_udp_poll_descriptor(&self) -> Result<OwnedFd, io::Error> {
         let socket = self.active.socket(IPV4_TRANSPARENT_UDP).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "IPv4 UDP ingress unavailable")
+        })?;
+        duplicate_descriptor_cloexec(&socket.descriptor())
+    }
+
+    /// Receive one dedicated DNS datagram and authorize only its bounded A/AAAA query name.
+    pub(crate) fn try_receive_ipv4_dns_udp(
+        &self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<PolicyAuthorizedDnsIngress, ClientIngressUdpError> {
+        let socket = self
+            .active
+            .socket(IPV4_DNS_UDP)
+            .ok_or(ClientIngressUdpError::DescriptorUnavailable)?;
+        let SocketAddr::V4(local) = socket.local_address() else {
+            return Err(ClientIngressUdpError::DescriptorUnavailable);
+        };
+        let mut payload = vec![0_u8; MAX_DNS_MESSAGE_BYTES];
+        let received = receive_udp_with_original_destination(
+            &socket.descriptor(),
+            KernelIngressSocketKind::DnsUdp,
+            KernelIngressSocketFamily::Ipv4,
+            local.port(),
+            &mut payload,
+        )
+        .map_err(ClientIngressUdpError::Receive)?;
+        payload.truncate(received.bytes());
+        PolicyAuthorizedDnsIngress::authorize(
+            received.source(),
+            received.original_destination(),
+            payload,
+            policy,
+            now_ms,
+        )
+    }
+
+    pub(crate) fn duplicate_ipv4_dns_udp_poll_descriptor(&self) -> Result<OwnedFd, io::Error> {
+        let socket = self.active.socket(IPV4_DNS_UDP).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "IPv4 DNS UDP ingress unavailable")
         })?;
         duplicate_descriptor_cloexec(&socket.descriptor())
     }
@@ -630,6 +674,101 @@ impl PolicyAuthorizedUdpIngress {
             signed_authorization,
             source: self.source,
             destination: self.destination,
+            payload: self.payload,
+        })
+    }
+}
+
+/// One helper-intercepted DNS query bound to an active domain policy rule.
+#[must_use = "a policy-authorized DNS query must be route-bound or dropped"]
+pub(crate) struct PolicyAuthorizedDnsIngress {
+    source: SocketAddrV4,
+    resolver: SocketAddrV4,
+    payload: Vec<u8>,
+    hostname: String,
+    policy_hash: [u8; 32],
+    expires_at_ms: u64,
+}
+
+impl PolicyAuthorizedDnsIngress {
+    fn authorize(
+        source: SocketAddr,
+        resolver: SocketAddr,
+        payload: Vec<u8>,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<Self, ClientIngressUdpError> {
+        let (SocketAddr::V4(source), SocketAddr::V4(resolver)) = (source, resolver) else {
+            return Err(ClientIngressUdpError::AddressFamily);
+        };
+        if source.port() == 0 || resolver.port() != 53 {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        let query = parse_dns_query(&payload).map_err(ClientIngressUdpError::Authorization)?;
+        let hostname = policy
+            .authorize_dns_name(now_ms, query.name())
+            .map_err(ClientIngressUdpError::Policy)?;
+        let expires_at_ms = now_ms
+            .checked_add(INGRESS_UDP_FLOW_TTL_MS)
+            .ok_or(ClientIngressUdpError::Clock)?
+            .min(policy.expires_at_ms());
+        if expires_at_ms <= now_ms {
+            return Err(ClientIngressUdpError::Clock);
+        }
+        Ok(Self {
+            source,
+            resolver,
+            payload,
+            hostname,
+            policy_hash: *policy.policy_hash(),
+            expires_at_ms,
+        })
+    }
+
+    pub(crate) fn bind_to_route(
+        self,
+        path: &VerifiedSingleRelayPath,
+        coordinator: &ReservationCoordinator,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<RouteAuthorizedUdpIngress, ClientIngressUdpError> {
+        if now_ms >= self.expires_at_ms
+            || self.policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() != 1
+        {
+            return Err(ClientIngressUdpError::PolicyBinding);
+        }
+        let hostname = policy
+            .authorize_dns_name(now_ms, &self.hostname)
+            .map_err(ClientIngressUdpError::Policy)?;
+        let signed_authorization = coordinator
+            .sign_udp_hostname(
+                *path.route_context_id(),
+                self.policy_hash,
+                &hostname,
+                53,
+                INGRESS_UDP_IDLE_TIMEOUT_MS,
+                now_ms,
+                self.expires_at_ms.min(path.expires_at_ms()),
+            )
+            .map_err(ClientIngressUdpError::Sign)?;
+        let mut replay = ReplayCache::new(1)
+            .map_err(|error| ClientIngressUdpError::Authorization(error.into()))?;
+        let flow = UdpAuthorizationScope::new(path, policy)
+            .verify(
+                &signed_authorization,
+                now_ms,
+                TimePolicy::default(),
+                &mut replay,
+            )
+            .map_err(ClientIngressUdpError::Authorization)?;
+        if !flow.matches_dns_name(&hostname) {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        Ok(RouteAuthorizedUdpIngress {
+            flow,
+            signed_authorization,
+            source: self.source,
+            destination: self.resolver,
             payload: self.payload,
         })
     }

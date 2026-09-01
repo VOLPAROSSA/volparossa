@@ -16,6 +16,7 @@
 mod association;
 mod authorization;
 mod bridge;
+mod dns;
 mod endpoint;
 mod framing;
 mod path;
@@ -24,6 +25,7 @@ mod session;
 pub use association::{MAX_UDP_PAYLOAD_BYTES, QuicUdpAssociation, UdpAssociationState};
 pub use authorization::{AuthorizedUdpFlow, PinnedUdpFlow, UdpAuthorizationScope};
 pub use bridge::{DatagramLimits, ExitUdpBridge, UdpBridgeStats};
+pub use dns::{BoundedDnsQuery, DnsQueryType, MAX_DNS_MESSAGE_BYTES, parse_dns_query};
 pub use endpoint::{ManagedQuinnEndpoint, endpoint_from_bound_owned_fd};
 pub use framing::{read_authorized_udp_flow, write_udp_authorization};
 pub use path::VerifiedSingleRelayPath;
