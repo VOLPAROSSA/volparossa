@@ -29,8 +29,14 @@ pub use framing::{read_authorized_udp_flow, write_udp_authorization};
 pub use path::VerifiedSingleRelayPath;
 pub use session::{
     CommittedQuicUdpTransport, CommittedUdpRole, ProtectedExitUdpTarget, SingleRelayUdpClient,
-    SingleRelayUdpExit,
+    SingleRelayUdpExit, committed_quic_udp_socket_request,
 };
+
+/// Fixed protected-overlay port on which a committed Exit single-relay UDP session listens.
+///
+/// Both endpoint roles derive the address from the route context and path; sharing this one port
+/// removes any unsigned underlay or arbitrary-target signal from Client activation.
+pub const SINGLE_RELAY_UDP_EXIT_PORT: u16 = 44_443;
 
 use thiserror::Error;
 

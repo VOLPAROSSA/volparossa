@@ -10,8 +10,11 @@ use bytes::Bytes;
 use quinn::{ClientConfig, ServerConfig};
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{ReplayCache, TimePolicy};
-use volparossa_routing::{TransportSocketKind, TransportSocketReady, WireguardRole};
-use volparossa_wireguard::overlay_addresses;
+use volparossa_routing::{
+    AcquireTransportSocket, TransportSocketAddress, TransportSocketKind, TransportSocketReady,
+    WireguardRole,
+};
+use volparossa_wireguard::{HelperContextHandle, overlay_addresses};
 
 use crate::{
     AuthorizedUdpFlow, DatagramLimits, ExitUdpBridge, ManagedQuinnEndpoint, QuicUdpAssociation,
@@ -35,6 +38,48 @@ impl CommittedUdpRole {
             Self::Exit => WireguardRole::Exit,
         }
     }
+}
+
+/// Build the exact helper request for a Client or Exit QUIC socket in a committed route.
+///
+/// The local address is derived from the verified single-Relay path. The returned request is
+/// always explicitly unconnected; callers cannot supply an underlay address or direct Exit peer.
+///
+/// # Errors
+///
+/// Rejects an invalid helper handle, zero port, or route/path that cannot derive its canonical
+/// overlay endpoint.
+pub fn committed_quic_udp_socket_request(
+    context_handle: &[u8],
+    path: &VerifiedSingleRelayPath,
+    role: CommittedUdpRole,
+    local_port: u16,
+) -> Result<AcquireTransportSocket, UdpError> {
+    if local_port == 0 {
+        return Err(UdpError::InvalidBinding("helper UDP local port"));
+    }
+    let handle = HelperContextHandle::try_from(context_handle)
+        .map_err(|_| UdpError::InvalidBinding("helper route context handle"))?;
+    let path_id = u8::try_from(path.path_id())
+        .map_err(|_| UdpError::InvalidBinding("single-relay path id"))?;
+    let addresses = overlay_addresses(*path.route_context_id(), path_id)
+        .map_err(|_| UdpError::InvalidBinding("single-relay overlay"))?;
+    let address = match role {
+        CommittedUdpRole::Client => addresses.client,
+        CommittedUdpRole::Exit => addresses.exit,
+    };
+    Ok(AcquireTransportSocket {
+        route_context_id: path.route_context_id().to_vec(),
+        context_handle: handle.as_bytes().to_vec(),
+        path_id: path.path_id(),
+        role: role.wire_role() as i32,
+        descriptor_kind: TransportSocketKind::QuicUdpUnconnected as i32,
+        expected_local: Some(TransportSocketAddress {
+            address: address.octets().to_vec(),
+            port: u32::from(local_port),
+        }),
+        expected_remote: None,
+    })
 }
 
 /// Affine helper-returned QUIC UDP descriptor bound to one verified route path.
@@ -378,9 +423,7 @@ impl SingleRelayUdpExit {
     }
 }
 
-fn transport_address(
-    address: &volparossa_routing::TransportSocketAddress,
-) -> Result<SocketAddr, UdpError> {
+fn transport_address(address: &TransportSocketAddress) -> Result<SocketAddr, UdpError> {
     let ip = match address.address.as_slice() {
         [a, b, c, d] => IpAddr::V4(Ipv4Addr::new(*a, *b, *c, *d)),
         bytes if bytes.len() == 16 => {
@@ -412,12 +455,57 @@ mod tests {
     use rustls::RootCertStore;
     use rustls_pki_types::PrivatePkcs8KeyDer;
     use tokio::net::UdpSocket;
+    use volparossa_routing::{TransportSocketAddress, WireguardRole};
+    use volparossa_wireguard::overlay_addresses;
 
-    use super::{CommittedQuicUdpTransport, CommittedUdpRole, ProtectedExitUdpTarget};
+    use super::{
+        CommittedQuicUdpTransport, CommittedUdpRole, ProtectedExitUdpTarget,
+        committed_quic_udp_socket_request,
+    };
     use crate::{
         AuthorizedUdpFlow, DatagramLimits, ExitUdpBridge, QuicUdpAssociation,
         VerifiedSingleRelayPath,
     };
+
+    #[test]
+    fn helper_requests_derive_client_and_exit_sockets_from_one_verified_path() {
+        let path = VerifiedSingleRelayPath::test_path(1_700_000_005_000);
+        let client =
+            committed_quic_udp_socket_request(&[9; 32], &path, CommittedUdpRole::Client, 40_001)
+                .expect("Client helper request");
+        let exit = committed_quic_udp_socket_request(
+            &[9; 32],
+            &path,
+            CommittedUdpRole::Exit,
+            crate::SINGLE_RELAY_UDP_EXIT_PORT,
+        )
+        .expect("Exit helper request");
+        let addresses = overlay_addresses(*path.route_context_id(), 1).expect("overlay");
+
+        assert_eq!(client.route_context_id, path.route_context_id());
+        assert_eq!(client.path_id, path.path_id());
+        assert_eq!(client.role, WireguardRole::Client as i32);
+        assert_eq!(
+            client.expected_local,
+            Some(TransportSocketAddress {
+                address: addresses.client.octets().to_vec(),
+                port: 40_001,
+            })
+        );
+        assert!(client.expected_remote.is_none());
+        assert_eq!(exit.route_context_id, client.route_context_id);
+        assert_eq!(exit.context_handle, client.context_handle);
+        assert_eq!(exit.path_id, client.path_id);
+        assert_eq!(exit.role, WireguardRole::Exit as i32);
+        assert_eq!(
+            exit.expected_local,
+            Some(TransportSocketAddress {
+                address: addresses.exit.octets().to_vec(),
+                port: u32::from(crate::SINGLE_RELAY_UDP_EXIT_PORT),
+            })
+        );
+        assert!(exit.expected_remote.is_none());
+    }
 
     #[tokio::test]
     async fn adopted_client_and_exit_descriptors_carry_one_udp_echo() {
@@ -526,9 +614,9 @@ mod tests {
         let local = socket.local_addr().unwrap();
         let metadata = volparossa_routing::TransportSocketReady {
             path_id: 1,
-            role: volparossa_routing::WireguardRole::Client as i32,
+            role: WireguardRole::Client as i32,
             descriptor_kind: volparossa_routing::TransportSocketKind::QuicUdpUnconnected as i32,
-            local: Some(volparossa_routing::TransportSocketAddress {
+            local: Some(TransportSocketAddress {
                 address: match local.ip() {
                     IpAddr::V4(address) => address.octets().to_vec(),
                     IpAddr::V6(address) => address.octets().to_vec(),

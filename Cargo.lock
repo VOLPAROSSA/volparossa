@@ -4324,7 +4324,10 @@ dependencies = [
  "libc",
  "libp2p",
  "nix",
+ "quinn",
  "rand_core 0.6.4",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",
@@ -4352,6 +4355,7 @@ dependencies = [
  "volparossa-routing",
  "volparossa-selection",
  "volparossa-test-support",
+ "volparossa-udp",
  "volparossa-wireguard",
  "zeroize",
 ]

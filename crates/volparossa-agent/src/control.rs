@@ -386,6 +386,12 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             "CONNECT_TRANSPORT_RUNTIME_UNAVAILABLE",
             LogLevel::Warn,
         ),
+        Err(ClientRouteConnectError::UdpExitSessionSignalUnavailable) => (
+            ControlResult::Unavailable,
+            "UDP_EXIT_SESSION_SIGNAL_UNAVAILABLE",
+            "CONNECT_UDP_EXIT_SESSION_SIGNAL_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
     };
     context
         .state

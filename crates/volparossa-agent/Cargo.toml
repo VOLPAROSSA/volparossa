@@ -15,7 +15,10 @@ hex.workspace = true
 libc.workspace = true
 libp2p.workspace = true
 nix.workspace = true
+quinn.workspace = true
 rand_core.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
 sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +45,7 @@ volparossa-relay = { path = "../volparossa-relay", version = "=0.1.0" }
 volparossa-reservation = { path = "../volparossa-reservation", version = "=0.1.0" }
 volparossa-routing = { path = "../volparossa-routing", version = "=0.1.0" }
 volparossa-selection = { path = "../volparossa-selection", version = "=0.1.0" }
+volparossa-udp = { path = "../volparossa-udp", version = "=0.1.0" }
 volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
 
 [dev-dependencies]
