@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     num::NonZeroU64,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -115,6 +116,24 @@ pub(super) struct BoundConnectionObservation {
     generation: NonZeroU64,
     prefix: NativeNetworkPrefix,
 }
+
+/// Affine proof that one native Exit-permit request arrived over an exact authenticated
+/// control-Relay connection.
+///
+/// Multiple connections and relayed control-plane connectivity remain valid: this is connection
+/// provenance, not native datapath or public-prefix evidence. The value exposes no peer,
+/// address, prefix, generation, or connection identifier. It can be consumed only by
+/// [`crate::DiscoveryService`] while sending the corresponding native Permit response. Creating
+/// it neither verifies a signed request nor mutates Exit replay state.
+#[must_use = "a bound native-probe control connection must gate one response or be dropped"]
+pub struct BoundNativeProbeControlConnection {
+    instance: Arc<ConnectionProvenanceInstance>,
+    peer_id: PeerId,
+    connection_id: ConnectionId,
+    generation: NonZeroU64,
+}
+
+struct ConnectionProvenanceInstance;
 
 impl BoundConnectionObservation {
     /// Consume one exact client connection proof into its freshness-safe public prefix.
@@ -378,6 +397,25 @@ impl ConnectionRegistry {
             prefix: witness_prefix,
         })
     }
+
+    fn consume_bound_native_probe_control(
+        &self,
+        bound: BoundNativeProbeControlConnection,
+        expected_peer_id: PeerId,
+    ) -> bool {
+        let BoundNativeProbeControlConnection {
+            instance: _,
+            peer_id,
+            connection_id,
+            generation,
+        } = bound;
+        if self.poisoned || peer_id != expected_peer_id {
+            return false;
+        }
+        self.records.get(&connection_id).is_some_and(|record| {
+            record.peer_id == expected_peer_id && record.generation == generation
+        })
+    }
 }
 
 impl Default for ConnectionRegistry {
@@ -395,12 +433,14 @@ impl Default for ConnectionRegistry {
 // This item and its empty event must be syntactically public for the generated handler associated
 // type of public DiscoveryBehaviour. Their containing module is private and neither is re-exported.
 pub struct ConnectionProvenanceBehaviour {
+    instance: Arc<ConnectionProvenanceInstance>,
     registry: ConnectionRegistry,
 }
 
 impl ConnectionProvenanceBehaviour {
     pub(super) fn new() -> Self {
         Self {
+            instance: Arc::new(ConnectionProvenanceInstance),
             registry: ConnectionRegistry::default(),
         }
     }
@@ -421,6 +461,38 @@ impl ConnectionProvenanceBehaviour {
     ) -> Option<BoundConnectionObservation> {
         self.registry
             .bind(witness, expected_peer_id, expected_connection_id)
+    }
+
+    pub(super) fn bind_native_probe_control(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+    ) -> Option<BoundNativeProbeControlConnection> {
+        if self.registry.poisoned {
+            return None;
+        }
+        let record = self.registry.records.get(&connection_id)?;
+        if record.peer_id != peer_id {
+            return None;
+        }
+        Some(BoundNativeProbeControlConnection {
+            instance: Arc::clone(&self.instance),
+            peer_id,
+            connection_id,
+            generation: record.generation,
+        })
+    }
+
+    pub(super) fn consume_bound_native_probe_control(
+        &self,
+        bound: BoundNativeProbeControlConnection,
+        expected_peer_id: PeerId,
+    ) -> bool {
+        if !Arc::ptr_eq(&bound.instance, &self.instance) {
+            return false;
+        }
+        self.registry
+            .consume_bound_native_probe_control(bound, expected_peer_id)
     }
 }
 
@@ -714,6 +786,55 @@ mod tests {
             bound.prefix.bytes,
             NativePrefixBytes::Ipv4([1, 1, 1])
         ));
+    }
+
+    #[test]
+    fn native_permit_control_binding_is_exact_but_allows_multiple_and_relayed_connections() {
+        let peer = PeerId::random();
+        let relay = PeerId::random();
+        let first = dialer("/ip4/1.1.1.8/tcp/443");
+        let second = listener(
+            &format!("/ip4/8.8.8.8/tcp/443/p2p/{relay}/p2p-circuit"),
+            "/memory/17",
+        );
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        established(&mut behaviour, peer, 1, &first, 0);
+        established(&mut behaviour, peer, 2, &second, 1);
+
+        let first_bound = behaviour
+            .bind_native_probe_control(peer, ConnectionId::new_unchecked(1))
+            .expect("first exact authenticated connection");
+        assert!(behaviour.consume_bound_native_probe_control(first_bound, peer));
+
+        let relayed_bound = behaviour
+            .bind_native_probe_control(peer, ConnectionId::new_unchecked(2))
+            .expect("relayed control connection remains valid provenance");
+        assert!(behaviour.consume_bound_native_probe_control(relayed_bound, peer));
+
+        let cross_service = behaviour
+            .bind_native_probe_control(peer, ConnectionId::new_unchecked(1))
+            .expect("originating service binding");
+        let mut other_service = ConnectionProvenanceBehaviour::new();
+        established(&mut other_service, peer, 1, &first, 0);
+        assert!(!other_service.consume_bound_native_probe_control(cross_service, peer));
+
+        let stale = behaviour
+            .bind_native_probe_control(peer, ConnectionId::new_unchecked(1))
+            .expect("pre-change binding");
+        let changed = dialer("/ip4/1.1.1.9/tcp/443");
+        change(&mut behaviour, peer, 1, &first, &changed);
+        assert!(!behaviour.consume_bound_native_probe_control(stale, peer));
+
+        let foreign = behaviour
+            .bind_native_probe_control(peer, ConnectionId::new_unchecked(1))
+            .expect("post-change binding");
+        assert!(!behaviour.consume_bound_native_probe_control(foreign, PeerId::random()));
+
+        let closed_bound = behaviour
+            .bind_native_probe_control(peer, ConnectionId::new_unchecked(1))
+            .expect("pre-close binding");
+        closed(&mut behaviour, peer, 1, &changed, 1);
+        assert!(!behaviour.consume_bound_native_probe_control(closed_bound, peer));
     }
 
     #[test]
@@ -1183,10 +1304,25 @@ mod tests {
             1
         );
         assert_eq!(production.matches(concat!("checked_", "add(1)")).count(), 1);
-        assert_eq!(production.matches(concat!("pub ", "struct ")).count(), 1);
+        assert_eq!(production.matches(concat!("pub ", "struct ")).count(), 2);
         assert_eq!(production.matches(concat!("pub ", "enum ")).count(), 1);
         assert!(production.contains(concat!("pub struct ConnectionProvenance", "Behaviour {")));
         assert!(production.contains(concat!("pub enum ConnectionProvenance", "Event {}")));
+        assert!(production.contains(concat!(
+            "pub struct BoundNativeProbeControl",
+            "Connection {"
+        )));
+        let token = production
+            .split(concat!(
+                "pub struct BoundNativeProbeControl",
+                "Connection {"
+            ))
+            .nth(1)
+            .expect("native Permit connection token")
+            .split('}')
+            .next()
+            .expect("native Permit token body");
+        assert!(!token.contains("pub "));
         assert!(production.contains("Swarm guarantees ConnectionIds are unique and never reused"));
         let defaults = production
             .split("impl Default for ConnectionRegistry")
@@ -1215,7 +1351,15 @@ mod tests {
         assert_eq!(crate_source.matches(event_from).count(), 1);
         assert!(!crate_source.contains(concat!("pub mod connection_", "provenance")));
         assert!(!crate_source.contains(concat!("pub ", "fn connection_", "provenance")));
-        assert!(!crate_source.contains(concat!("pub use connection_", "provenance")));
+        assert_eq!(
+            crate_source
+                .matches(concat!(
+                    "pub use connection_provenance::BoundNativeProbeControl",
+                    "Connection;"
+                ))
+                .count(),
+            1
+        );
         assert!(!crate_source.contains(concat!(
             "ConnectionProvenance(ConnectionProvenance",
             "Event)"
