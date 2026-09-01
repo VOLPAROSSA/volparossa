@@ -1171,6 +1171,13 @@ static mqvpn_exit_path_t *exit_path_for_peer(
     return NULL;
 }
 
+static bool exit_path_send_failure_is_recoverable(int error)
+{
+    return error == EAGAIN || error == ENOBUFS || error == ENETDOWN ||
+           error == ENETUNREACH || error == EHOSTUNREACH ||
+           error == ECONNREFUSED || error == EMSGSIZE;
+}
+
 static void exit_send_packet(mqvpn_path_handle_t path_handle,
                              const uint8_t *packet, size_t packet_len,
                              const struct sockaddr *peer,
@@ -1180,10 +1187,18 @@ static void exit_send_packet(mqvpn_path_handle_t path_handle,
     mqvpn_exit_backend_t *backend = user_context;
     mqvpn_exit_path_t *path = exit_path_for_peer(backend, peer);
     if (path == NULL || peer_len != path->peer_len || packet == NULL ||
-        packet_len == 0U ||
-        sendto(path->fd, packet, packet_len, 0, peer, peer_len) !=
-            (ssize_t)packet_len) {
+        packet_len == 0U) {
         if (backend != NULL) {
+            vmp_mqvpn_exit_backend_enter_terminal(
+                &backend->lifecycle, VMP_MQVPN_EXIT_TERMINAL_ENGINE);
+        }
+        return;
+    }
+    const ssize_t sent =
+        sendto(path->fd, packet, packet_len, 0, peer, peer_len);
+    if (sent != (ssize_t)packet_len) {
+        const int error = errno;
+        if (sent >= 0 || !exit_path_send_failure_is_recoverable(error)) {
             vmp_mqvpn_exit_backend_enter_terminal(
                 &backend->lifecycle, VMP_MQVPN_EXIT_TERMINAL_ENGINE);
         }
