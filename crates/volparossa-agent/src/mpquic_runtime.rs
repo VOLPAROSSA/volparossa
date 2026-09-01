@@ -1514,6 +1514,11 @@ impl ProductionMpquicSession {
     ///
     /// The frame remains inside the authenticated CONNECT-IP tunnel and targets only its fixed
     /// server address. The Exit consumes it as control data; it is never emitted as Internet UDP.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale or mismatched flow, an invalid application port or control
+    /// frame, an unexpected native assignment, or failure to submit the protected inner packet.
     pub async fn authorize_browser_quic(
         &self,
         flow: &AuthorizedUdpFlow,

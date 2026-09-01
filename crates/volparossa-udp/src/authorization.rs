@@ -228,16 +228,16 @@ impl AuthorizedUdpFlow {
     pub fn matches_exact_ip_destination(&self, destination: SocketAddr) -> bool {
         self.port == destination.port()
             && match self.destination {
-                AuthorizedDestination::Ip(address) => address == destination.ip(),
                 AuthorizedDestination::Hostname {
                     pinned_address: Some(address),
                     ..
-                } => address == destination.ip(),
+                }
+                | AuthorizedDestination::Ip(address) => address == destination.ip(),
                 AuthorizedDestination::Hostname {
                     pinned_address: None,
                     ..
-                } => false,
-                AuthorizedDestination::DnsHostname(_) => false,
+                }
+                | AuthorizedDestination::DnsHostname(_) => false,
             }
     }
 

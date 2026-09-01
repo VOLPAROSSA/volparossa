@@ -204,6 +204,10 @@ impl ClientMptcpTransport {
     }
 
     /// Borrows the adopted, genuinely negotiated MPTCP stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics after the initial stream has been affinely moved into an independent flow owner.
     #[must_use]
     pub fn stream(&self) -> &MptcpStream {
         self.initial_stream

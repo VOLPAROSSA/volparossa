@@ -825,8 +825,7 @@ async fn run_client_dns_ingress(
             );
             continue;
         }
-        if routes
-            .activate_dns_ingress(ingress, &policy, now_ms)
+        if Box::pin(routes.activate_dns_ingress(ingress, &policy, now_ms))
             .await
             .is_err()
         {

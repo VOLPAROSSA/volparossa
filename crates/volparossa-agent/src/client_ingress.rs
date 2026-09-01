@@ -520,7 +520,7 @@ enum BrowserQuicIngressState {
     Pending {
         source: SocketAddrV4,
         destination: SocketAddrV4,
-        inspector: QuicInitialInspector,
+        inspector: Box<QuicInitialInspector>,
         datagrams: Vec<Vec<u8>>,
         bytes: usize,
     },
@@ -551,6 +551,10 @@ impl BrowserQuicIngressGate {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded affine QUIC Initial reassembly and policy transition"
+    )]
     pub(crate) fn inspect(
         &mut self,
         ingress: ObservedUdpIngress,
@@ -606,7 +610,7 @@ impl BrowserQuicIngressGate {
             self.state = BrowserQuicIngressState::Pending {
                 source: ingress.source,
                 destination: ingress.destination,
-                inspector,
+                inspector: Box::new(inspector),
                 datagrams: Vec::new(),
                 bytes: 0,
             };
