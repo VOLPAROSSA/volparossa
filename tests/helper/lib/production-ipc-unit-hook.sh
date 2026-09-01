@@ -301,7 +301,9 @@ start_failure_stage_is_safe() {
         functional-exit-cleanup-parent-custody|\
         functional-exit-cleanup-parent-custody-pidfd|\
         functional-exit-cleanup-parent-custody-procfd|\
-        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker|\
+        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-one|\
+        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-two|\
+        functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-three-plus|\
         functional-exit-cleanup-parent-custody-foreign-netns-other|\
         functional-exit-cleanup-parent-custody-fd-scan|\
         functional-exit-cleanup-parent-custody-clear|\
@@ -442,7 +444,9 @@ advance_start_failure_stage() {
         functional-exit-cleanup-fdstore-absence:functional-exit-cleanup-parent-custody|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-pidfd|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-procfd|\
-        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns-exit-worker|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-one|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-two|\
+        functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-three-plus|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-foreign-netns-other|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-fd-scan|\
         functional-exit-cleanup-parent-custody:functional-exit-cleanup-parent-custody-clear|\
@@ -4945,14 +4949,65 @@ wait_for_helper_no_worker_custody() {
     done
 }
 
+count_parent_namespace_identity_fds() {
+    [ "$#" -eq 2 ] || return 1
+    hook_custody_count_parent_pid=$1
+    hook_custody_count_expected_identity=$2
+    number_is_safe "$hook_custody_count_parent_pid" || return 1
+    kernel_object_identity_is_safe \
+        "$hook_custody_count_expected_identity" || return 1
+    hook_custody_exact_namespace_count=0
+    hook_custody_count_total=0
+    for hook_custody_count_path in \
+        /proc/"$hook_custody_count_parent_pid"/fd/*; do
+        [ -L "$hook_custody_count_path" ] || return 1
+        hook_custody_count_fd=${hook_custody_count_path##*/}
+        fd_number_is_safe "$hook_custody_count_fd" || return 1
+        hook_custody_count_total=$((hook_custody_count_total + 1))
+        [ "$hook_custody_count_total" -le 512 ] || return 1
+        hook_custody_count_target=$(readlink \
+            "$hook_custody_count_path" 2>/dev/null) || return 1
+        case $hook_custody_count_target in
+            net:\[[1-9][0-9]*\])
+                hook_custody_count_identity=$( \
+                    capture_parent_namespace_fd_identity \
+                        "$hook_custody_count_parent_pid" \
+                        "$hook_custody_count_fd"
+                ) || return 1
+                if [ "$hook_custody_count_identity" = \
+                    "$hook_custody_count_expected_identity" ]; then
+                    hook_custody_exact_namespace_count=$((
+                        hook_custody_exact_namespace_count + 1
+                    ))
+                fi
+                ;;
+        esac
+    done
+    [ "$hook_custody_count_total" -ge 1 ] \
+        && [ "$hook_custody_exact_namespace_count" -ge 1 ]
+}
+
 refine_parent_custody_failure_stage() {
+    [ "$#" -eq 1 ] || return 1
+    hook_custody_refine_parent_pid=$1
+    number_is_safe "$hook_custody_refine_parent_pid" || return 1
     [ "$hook_custody_failure_stage" = foreign-netns ] || return 0
     kernel_object_identity_is_safe "$hook_custody_observed_identity" || return 1
     if kernel_object_identity_is_safe \
         "${hook_functional_exit_worker_namespace:-}" \
         && [ "$hook_custody_observed_identity" = \
             "$hook_functional_exit_worker_namespace" ]; then
-        hook_custody_failure_stage=foreign-netns-exit-worker
+        count_parent_namespace_identity_fds \
+            "$hook_custody_refine_parent_pid" \
+            "$hook_functional_exit_worker_namespace" || return 1
+        case $hook_custody_exact_namespace_count in
+            1) hook_custody_failure_stage=foreign-netns-exit-worker-one ;;
+            2) hook_custody_failure_stage=foreign-netns-exit-worker-two ;;
+            3|[4-9]|[1-9][0-9]*)
+                hook_custody_failure_stage=foreign-netns-exit-worker-three-plus
+                ;;
+            *) return 1 ;;
+        esac
     else
         hook_custody_failure_stage=foreign-netns-other
     fi
@@ -4974,9 +5029,12 @@ advance_parent_custody_failure_diagnostic() {
             hook_custody_failure_stage=clear
         fi
     fi
-    refine_parent_custody_failure_stage || return 1
+    refine_parent_custody_failure_stage \
+        "$hook_custody_expected_parent_pid" || return 1
     case $hook_custody_failure_stage in
-        pidfd|procfd|foreign-netns-exit-worker|foreign-netns-other|fd-scan|clear) ;;
+        pidfd|procfd|foreign-netns-exit-worker-one|\
+        foreign-netns-exit-worker-two|foreign-netns-exit-worker-three-plus|\
+        foreign-netns-other|fd-scan|clear) ;;
         *) return 1 ;;
     esac
     advance_start_failure_stage \

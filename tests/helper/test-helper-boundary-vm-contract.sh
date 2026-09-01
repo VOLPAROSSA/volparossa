@@ -1888,7 +1888,9 @@ for non_retained_production_stage in \
     functional-exit-cleanup-parent-custody \
     functional-exit-cleanup-parent-custody-pidfd \
     functional-exit-cleanup-parent-custody-procfd \
-    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-one \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-two \
+    functional-exit-cleanup-parent-custody-foreign-netns-exit-worker-three-plus \
     functional-exit-cleanup-parent-custody-foreign-netns-other \
     functional-exit-cleanup-parent-custody-fd-scan \
     functional-exit-cleanup-parent-custody-clear \
