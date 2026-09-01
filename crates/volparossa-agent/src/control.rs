@@ -374,6 +374,12 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             "CONNECT_ROUTE_ADMISSION_UNAVAILABLE",
             LogLevel::Warn,
         ),
+        Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable) => (
+            ControlResult::Unavailable,
+            "MPTCP_EXIT_LISTENER_SIGNAL_UNAVAILABLE",
+            "CONNECT_MPTCP_EXIT_LISTENER_SIGNAL_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
         Err(ClientRouteConnectError::TransportRuntimeUnavailable) => (
             ControlResult::Unavailable,
             "TRANSPORT_RUNTIME_UNAVAILABLE",

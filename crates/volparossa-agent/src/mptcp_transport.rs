@@ -5,9 +5,10 @@ use std::{collections::BTreeSet, io, net::SocketAddr};
 use thiserror::Error;
 use volparossa_mptcp::{MptcpListener, MptcpStream};
 use volparossa_routing::{
-    AddMptcpEndpoint, MptcpEndpointMode, RemoveMptcpEndpoint, TransportSocketAddress,
-    TransportSocketKind, WireguardRole,
+    AcquireTransportSocket, AddMptcpEndpoint, MptcpEndpointMode, RemoveMptcpEndpoint,
+    TransportSocketAddress, TransportSocketKind, WireguardRole,
 };
+use volparossa_wireguard::{WireGuardError, overlay_addresses};
 
 use crate::helper::{AcquiredTransportSocket, HelperClient, HelperClientError};
 
@@ -19,7 +20,79 @@ pub struct ClientMptcpTransport {
     active_paths: Vec<u32>,
 }
 
+/// Exact Exit listener tuple received through the authenticated route control plane.
+///
+/// Construction is crate-private so an untrusted local caller cannot turn an arbitrary overlay
+/// tuple into transport authority. The production Exit response verifier is the intended owner of
+/// this constructor once its wire signal is connected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ExitMptcpListenerSignal {
+    route_context_id: [u8; 16],
+    path_id: u32,
+    port: u16,
+}
+
+impl ExitMptcpListenerSignal {
+    #[allow(
+        dead_code,
+        reason = "the authenticated Exit wire verifier is the next bounded caller"
+    )]
+    pub(crate) fn new(
+        route_context_id: [u8; 16],
+        path_id: u32,
+        port: u16,
+    ) -> Result<Self, MptcpTransportError> {
+        let path_id_u8 = u8::try_from(path_id).map_err(|_| MptcpTransportError::InvalidMetadata)?;
+        overlay_addresses(route_context_id, path_id_u8)?;
+        if port == 0 {
+            return Err(MptcpTransportError::InvalidMetadata);
+        }
+        Ok(Self {
+            route_context_id,
+            path_id,
+            port,
+        })
+    }
+
+    pub(crate) const fn route_context_id(self) -> [u8; 16] {
+        self.route_context_id
+    }
+
+    pub(crate) const fn path_id(self) -> u32 {
+        self.path_id
+    }
+
+    pub(crate) const fn port(self) -> u16 {
+        self.port
+    }
+}
+
 impl ClientMptcpTransport {
+    /// Acquire and adopt the exact connected MPTCP descriptor for a verified Exit signal.
+    ///
+    /// The helper creates the socket inside the committed Client route namespace. Both endpoint
+    /// addresses are derived from the same route/path overlay, so this operation cannot connect to
+    /// an Exit underlay address or bypass the selected Relay.
+    pub(crate) async fn acquire_and_activate(
+        helper: &HelperClient,
+        signal: ExitMptcpListenerSignal,
+        context_handle: Vec<u8>,
+        local_port: u16,
+        selected_paths: impl IntoIterator<Item = u32>,
+    ) -> Result<Self, MptcpTransportError> {
+        let selected_paths = selected_path_ids(selected_paths)?;
+        let request = client_acquire_request(signal, context_handle.clone(), local_port)?;
+        let acquired = helper.acquire_transport_socket(request).await?;
+        Self::activate(
+            helper,
+            acquired,
+            signal.route_context_id.to_vec(),
+            context_handle,
+            selected_paths,
+        )
+        .await
+    }
+
     /// Adopts a committed helper descriptor and registers at least two exact selected paths.
     ///
     /// # Errors
@@ -92,6 +165,83 @@ impl ClientMptcpTransport {
     }
 }
 
+/// A helper-owned Exit listener plus its exact MPTCP path announcements.
+#[allow(
+    dead_code,
+    reason = "the standard Exit responder will retain this owner after signalling is connected"
+)]
+pub(crate) struct ExitMptcpTransport {
+    listener: MptcpListener,
+    route_context_id: Vec<u8>,
+    context_handle: Vec<u8>,
+    active_paths: Vec<u32>,
+}
+
+#[allow(
+    dead_code,
+    reason = "the standard Exit responder will retain this owner after signalling is connected"
+)]
+impl ExitMptcpTransport {
+    /// Acquire the real `IPPROTO_MPTCP` listener inside a committed Exit route namespace.
+    pub(crate) async fn acquire_and_activate(
+        helper: &HelperClient,
+        signal: ExitMptcpListenerSignal,
+        context_handle: Vec<u8>,
+        selected_paths: impl IntoIterator<Item = u32>,
+    ) -> Result<Self, MptcpTransportError> {
+        let paths = selected_path_ids(selected_paths)?;
+        let request = exit_acquire_request(signal, context_handle.clone())?;
+        let acquired = helper.acquire_transport_socket(request).await?;
+        let listener = adopt_exit_listener(acquired)?;
+        let mut active_paths = Vec::with_capacity(paths.len());
+        for path_id in paths {
+            let request = AddMptcpEndpoint {
+                route_context_id: signal.route_context_id.to_vec(),
+                context_handle: context_handle.clone(),
+                path_id,
+                mode: MptcpEndpointMode::Signal as i32,
+                backup: false,
+            };
+            if let Err(error) = helper.add_mptcp_endpoint(request).await {
+                rollback_paths(
+                    helper,
+                    &signal.route_context_id,
+                    &context_handle,
+                    &active_paths,
+                )
+                .await;
+                return Err(MptcpTransportError::Helper(error));
+            }
+            active_paths.push(path_id);
+        }
+        Ok(Self {
+            listener,
+            route_context_id: signal.route_context_id.to_vec(),
+            context_handle,
+            active_paths,
+        })
+    }
+
+    /// Borrow the bound real MPTCP listener.
+    pub(crate) const fn listener(&self) -> &MptcpListener {
+        &self.listener
+    }
+
+    /// Remove every exact Exit endpoint before releasing the listener.
+    pub(crate) async fn shutdown(self, helper: &HelperClient) -> Result<(), MptcpTransportError> {
+        for path_id in self.active_paths.iter().rev().copied() {
+            helper
+                .remove_mptcp_endpoint(RemoveMptcpEndpoint {
+                    route_context_id: self.route_context_id.clone(),
+                    context_handle: self.context_handle.clone(),
+                    path_id,
+                })
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 /// Adopts an exact committed Exit MPTCP listener capability.
 ///
 /// # Errors
@@ -151,6 +301,55 @@ fn socket_address(
     Ok(SocketAddr::new(address, port))
 }
 
+fn client_acquire_request(
+    signal: ExitMptcpListenerSignal,
+    context_handle: Vec<u8>,
+    local_port: u16,
+) -> Result<AcquireTransportSocket, MptcpTransportError> {
+    if local_port == 0 || local_port == signal.port {
+        return Err(MptcpTransportError::InvalidMetadata);
+    }
+    let path_id = u8::try_from(signal.path_id).map_err(|_| MptcpTransportError::InvalidMetadata)?;
+    let addresses = overlay_addresses(signal.route_context_id, path_id)?;
+    Ok(AcquireTransportSocket {
+        route_context_id: signal.route_context_id.to_vec(),
+        context_handle,
+        path_id: signal.path_id,
+        role: WireguardRole::Client as i32,
+        descriptor_kind: TransportSocketKind::MptcpConnected as i32,
+        expected_local: Some(transport_address(addresses.client, local_port)),
+        expected_remote: Some(transport_address(addresses.exit, signal.port)),
+    })
+}
+
+#[allow(
+    dead_code,
+    reason = "the standard Exit responder calls this through ExitMptcpTransport"
+)]
+fn exit_acquire_request(
+    signal: ExitMptcpListenerSignal,
+    context_handle: Vec<u8>,
+) -> Result<AcquireTransportSocket, MptcpTransportError> {
+    let path_id = u8::try_from(signal.path_id).map_err(|_| MptcpTransportError::InvalidMetadata)?;
+    let addresses = overlay_addresses(signal.route_context_id, path_id)?;
+    Ok(AcquireTransportSocket {
+        route_context_id: signal.route_context_id.to_vec(),
+        context_handle,
+        path_id: signal.path_id,
+        role: WireguardRole::Exit as i32,
+        descriptor_kind: TransportSocketKind::MptcpListener as i32,
+        expected_local: Some(transport_address(addresses.exit, signal.port)),
+        expected_remote: None,
+    })
+}
+
+fn transport_address(address: std::net::Ipv6Addr, port: u16) -> TransportSocketAddress {
+    TransportSocketAddress {
+        address: address.octets().to_vec(),
+        port: u32::from(port),
+    }
+}
+
 fn selected_path_ids(
     paths: impl IntoIterator<Item = u32>,
 ) -> Result<Vec<u32>, MptcpTransportError> {
@@ -173,6 +372,9 @@ pub enum MptcpTransportError {
     /// The privileged helper rejected an exact endpoint mutation.
     #[error("helper MPTCP endpoint operation failed")]
     Helper(#[from] HelperClientError),
+    /// The route/path overlay tuple was not canonical.
+    #[error("MPTCP overlay scope is invalid")]
+    Topology(#[from] WireGuardError),
     /// The kernel rejected adoption or validation of the MPTCP descriptor.
     #[error("kernel rejected the helper-owned MPTCP descriptor")]
     Io(#[from] io::Error),
@@ -211,5 +413,44 @@ mod tests {
         invalid.address = vec![127, 0, 0, 1];
         invalid.port = 0;
         assert!(socket_address(Some(&invalid)).is_err());
+    }
+
+    #[test]
+    fn client_and_exit_acquisition_share_one_canonical_listener_signal() {
+        let route_context_id = [71; 16];
+        let signal = ExitMptcpListenerSignal::new(route_context_id, 2, 44_443).expect("signal");
+        let client = client_acquire_request(signal, vec![9; 32], 52_001).expect("client");
+        let exit = exit_acquire_request(signal, vec![8; 32]).expect("exit");
+        let addresses = overlay_addresses(route_context_id, 2).expect("overlay");
+
+        assert_eq!(client.route_context_id, route_context_id);
+        assert_eq!(client.path_id, 2);
+        assert_eq!(client.role, WireguardRole::Client as i32);
+        assert_eq!(
+            client.expected_local,
+            Some(transport_address(addresses.client, 52_001))
+        );
+        assert_eq!(
+            client.expected_remote,
+            Some(transport_address(addresses.exit, 44_443))
+        );
+        assert_eq!(exit.route_context_id, route_context_id);
+        assert_eq!(exit.path_id, 2);
+        assert_eq!(exit.role, WireguardRole::Exit as i32);
+        assert_eq!(
+            exit.expected_local,
+            Some(transport_address(addresses.exit, 44_443))
+        );
+        assert!(exit.expected_remote.is_none());
+    }
+
+    #[test]
+    fn listener_signal_and_client_source_port_fail_closed() {
+        assert!(ExitMptcpListenerSignal::new([0; 16], 1, 44_443).is_err());
+        assert!(ExitMptcpListenerSignal::new([7; 16], 0, 44_443).is_err());
+        assert!(ExitMptcpListenerSignal::new([7; 16], 1, 0).is_err());
+        let signal = ExitMptcpListenerSignal::new([7; 16], 1, 44_443).expect("signal");
+        assert!(client_acquire_request(signal, vec![1; 32], 0).is_err());
+        assert!(client_acquire_request(signal, vec![1; 32], 44_443).is_err());
     }
 }

@@ -29,7 +29,7 @@ use std::{
 };
 
 use libp2p::PeerId as Libp2pPeerId;
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, oneshot, watch},
@@ -80,6 +80,7 @@ use crate::{
         HelperClient, HelperClientError, PrepareLeaseBatchFailure, PrepareReconciliationAuthority,
         RuntimeBoundPreparedLeaseBatch,
     },
+    mptcp_transport::{ClientMptcpTransport, ExitMptcpListenerSignal},
 };
 use retirement::{PreparedContextOwner, RetirementOutcome, RetirementSink, RetirementSupervisor};
 
@@ -103,6 +104,30 @@ enum ClientRouteControlState {
     #[default]
     Idle,
     Connecting,
+    Established(Box<EstablishedClientRoute>),
+}
+
+struct EstablishedClientRoute {
+    transport: ActiveClientTransport,
+    route: ProductionRoute,
+    orchestrator: ProductionRouteOrchestrator,
+    helper: HelperClient,
+}
+
+enum ActiveClientTransport {
+    TcpMptcp(ClientMptcpTransport),
+}
+
+impl EstablishedClientRoute {
+    async fn shutdown(self) {
+        match self.transport {
+            ActiveClientTransport::TcpMptcp(transport) => {
+                let _ = transport.shutdown(&self.helper).await;
+            }
+        }
+        let _ = self.route.disconnect().await;
+        let _ = self.orchestrator.shutdown().await;
+    }
 }
 
 /// Detail-free current production boundary reached by a successful native-path bootstrap.
@@ -129,6 +154,7 @@ pub(crate) enum ClientRouteConnectError {
     NativeRemoteRetirementUnavailable,
     NativeTransportIdentityUnavailable,
     RouteAdmissionUnavailable,
+    MptcpExitListenerSignalUnavailable,
     TransportRuntimeUnavailable,
 }
 
@@ -172,9 +198,9 @@ impl ClientRouteControl {
         };
         let mut state = self.state.lock().await;
         match result {
-            Ok(progress) => {
-                *state = ClientRouteControlState::Idle;
-                Ok(progress)
+            Ok(established) => {
+                *state = ClientRouteControlState::Established(Box::new(established));
+                Ok(ClientRouteProgress::TransportActive)
             }
             Err(error) => {
                 *state = ClientRouteControlState::Idle;
@@ -185,7 +211,13 @@ impl ClientRouteControl {
 
     /// Cancels any pre-route affine ownership; helper cleanup remains a separate fail-closed step.
     pub(crate) async fn disconnect(&self) {
-        *self.state.lock().await = ClientRouteControlState::Idle;
+        let previous = {
+            let mut state = self.state.lock().await;
+            std::mem::replace(&mut *state, ClientRouteControlState::Idle)
+        };
+        if let ClientRouteControlState::Established(established) = previous {
+            established.shutdown().await;
+        }
     }
 }
 
@@ -194,7 +226,7 @@ async fn admit_completed_native_route(
     _config: &Config,
     discovery: &DiscoveryControlHandle,
     helper: &HelperClient,
-) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+) -> Result<EstablishedClientRoute, ClientRouteConnectError> {
     let Ok(admission) = completed.into_route_admission() else {
         let _ = helper.cleanup_owned().await;
         return Err(ClientRouteConnectError::RouteAdmissionUnavailable);
@@ -213,12 +245,23 @@ async fn admit_completed_native_route(
     let attempt = orchestrator.connect(continuation, discovery.clone());
     match attempt.wait().await {
         Ok(route) => {
-            // A committed route is not a successful Connect until its configured real transport
-            // owner has also adopted helper descriptors and become usable. The provider signal
-            // needed to construct that owner is the next typed production boundary.
-            let _ = route.disconnect().await;
-            let _ = orchestrator.shutdown().await;
-            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+            // The listener tuple must come from an authenticated Exit response after its helper
+            // context has committed. Passing `None` keeps Connect fail closed until that exact
+            // wire signal is implemented; `activate_committed_transport` already owns the real
+            // helper-FD adoption seam used once the verifier supplies it.
+            match activate_committed_transport(&route, helper, None).await {
+                Ok(transport) => Ok(EstablishedClientRoute {
+                    transport,
+                    route,
+                    orchestrator,
+                    helper: helper.clone(),
+                }),
+                Err(error) => {
+                    let _ = route.disconnect().await;
+                    let _ = orchestrator.shutdown().await;
+                    Err(error)
+                }
+            }
         }
         Err(ProductionRouteError::NativeTransportIdentityUnavailable) => {
             let _ = orchestrator.shutdown().await;
@@ -229,6 +272,51 @@ async fn admit_completed_native_route(
             Err(ClientRouteConnectError::RouteAdmissionUnavailable)
         }
     }
+}
+
+async fn activate_committed_transport(
+    route: &ProductionRoute,
+    helper: &HelperClient,
+    mptcp_listener: Option<ExitMptcpListenerSignal>,
+) -> Result<ActiveClientTransport, ClientRouteConnectError> {
+    match route.selected_transport() {
+        Some(Transport::TcpMptcp) => {
+            let signal = mptcp_listener
+                .ok_or(ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+            if !route.accepts_mptcp_listener(signal) {
+                return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+            }
+            let local_port = random_mptcp_source_port(signal.port())?;
+            ClientMptcpTransport::acquire_and_activate(
+                helper,
+                signal,
+                route.context_handle().to_vec(),
+                local_port,
+                route.active_path_ids().iter().copied(),
+            )
+            .await
+            .map(ActiveClientTransport::TcpMptcp)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+        }
+        Some(Transport::UdpSinglePath | Transport::MultipathQuic | Transport::Unspecified)
+        | None => Err(ClientRouteConnectError::TransportRuntimeUnavailable),
+    }
+}
+
+fn random_mptcp_source_port(exit_listener_port: u16) -> Result<u16, ClientRouteConnectError> {
+    const FIRST_DYNAMIC_PORT: u16 = 49_152;
+    const DYNAMIC_PORT_COUNT: u16 = u16::MAX - FIRST_DYNAMIC_PORT + 1;
+    for _ in 0..8 {
+        let mut bytes = [0_u8; 2];
+        OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let port = FIRST_DYNAMIC_PORT + (u16::from_le_bytes(bytes) % DYNAMIC_PORT_COUNT);
+        if port != exit_listener_port {
+            return Ok(port);
+        }
+    }
+    Err(ClientRouteConnectError::TransportRuntimeUnavailable)
 }
 
 /// Repeat an affine Ready-to-proof lifecycle until the selected transport's hard minimum is met.
@@ -1937,7 +2025,7 @@ fn select_verified_probe_subset_with_rng<P, R>(
 ) -> Result<SelectedProbeSet<P::Probe>, RouteSetupError>
 where
     P: ClientReservationProtocol,
-    R: rand_core::RngCore + ?Sized,
+    R: RngCore + ?Sized,
 {
     let maximum = usize::try_from(request.final_path_upper()?)
         .map_err(|_| RouteSetupError::Invalid("final path upper"))?;
@@ -2440,6 +2528,38 @@ impl ProductionRoute {
     #[must_use]
     pub(crate) fn warm_path_ids(&self) -> &[u32] {
         &self.established.warm_path_ids
+    }
+
+    /// Exact single transport admitted by the signed reservation.
+    #[must_use]
+    pub(crate) fn selected_transport(&self) -> Option<Transport> {
+        let [transport] = self
+            .established
+            .request
+            .parameters
+            .allowed_transports
+            .as_slice()
+        else {
+            return None;
+        };
+        Some(*transport)
+    }
+
+    /// Opaque helper context handle for transport descriptor acquisition.
+    #[must_use]
+    pub(crate) fn context_handle(&self) -> &[u8] {
+        &self.established.commit_proof.context_handle
+    }
+
+    /// Whether an authenticated Exit listener signal belongs to this committed path set.
+    #[must_use]
+    pub(crate) fn accepts_mptcp_listener(&self, signal: ExitMptcpListenerSignal) -> bool {
+        signal.route_context_id() == self.established.request.parameters.route_context_id
+            && self
+                .established
+                .relay_grants
+                .iter()
+                .any(|grant| ReservationSession::grant_path_id(grant) == signal.path_id())
     }
 
     /// Run exact Destroy-first teardown and wait for its retirement result.
@@ -4154,7 +4274,7 @@ mod tests {
     #[derive(Default)]
     struct ZeroRng;
 
-    impl rand_core::RngCore for ZeroRng {
+    impl RngCore for ZeroRng {
         fn next_u32(&mut self) -> u32 {
             0
         }
