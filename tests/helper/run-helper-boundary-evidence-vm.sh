@@ -249,6 +249,139 @@ non_retained_proof_failure_reason_is_safe() {
     esac
 }
 
+non_retained_blocked_category() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        'required Debian tool is unavailable: '*)
+            non_retained_blocked_tool=${1#required Debian tool is unavailable: }
+            case $non_retained_blocked_tool in
+                awk|base64|busctl|cat|chmod|chown|cmp|cp|date|dpkg|find|flock|gdb|\
+                getent|git|id|install|ip|jq|mkfifo|mktemp|mv|nft|nm|nsenter|paste|\
+                ping|prlimit|readlink|rm|sed|setpriv|sha256sum|sleep|sort|stat|\
+                systemctl|systemd-detect-virt|systemd-run|tc|timeout|tr|uname|wc|wg)
+                    printf 'tool-%s\n' "$non_retained_blocked_tool"
+                    ;;
+                *) return 1 ;;
+            esac
+            ;;
+        'execution requires root inside the disposable VM'|\
+        'operating-system identity is unavailable'|\
+        'execution requires Debian 13'|\
+        'execution requires Debian 13 amd64 on x86_64'|\
+        'PID 1 is not the system systemd manager'|\
+        'containers cannot provide the required disposable-host evidence'|\
+        'execution is restricted to a recognised disposable virtual machine'|\
+        'the systemd manager version is unavailable'|\
+        'execution requires exact systemd v257'|\
+        'the system systemd manager is not operational')
+            printf '%s\n' environment
+            ;;
+        'the fixed root-owned systemd bus client is unavailable')
+            printf '%s\n' tool-busctl
+            ;;
+        'the fixed root-owned setpriv credential trampoline is unavailable')
+            printf '%s\n' tool-setpriv
+            ;;
+        'the systemd-resolved service UID is unavailable'|\
+        'the systemd-resolved service GID is unavailable'|\
+        'the systemd-resolved service UID is non-canonical'|\
+        'the systemd-resolved service GID is non-canonical')
+            printf '%s\n' service-identity
+            ;;
+        'the canonical root-owned system bus socket is unavailable'|\
+        'the canonical root-owned systemd notify socket is unavailable'|\
+        'the disposable host /run/volparossa path must initially be absent')
+            printf '%s\n' service-runtime
+            ;;
+        'the helper-boundary evidence validator is not one executable regular file')
+            printf '%s\n' validator-helper-boundary
+            ;;
+        'the restart evidence validator is not one executable regular file')
+            printf '%s\n' validator-restart
+            ;;
+        'the fixed root-owned debugger is unavailable'|\
+        'the fixed debugger could not be hashed')
+            printf '%s\n' debugger
+            ;;
+        'the repository owner UID is unavailable'|\
+        'the repository owner GID is unavailable'|\
+        'the repository must be owned by one canonical unprivileged identity')
+            printf '%s\n' workspace-owner
+            ;;
+        'build target/debug/volparossa-helper as an unprivileged workspace user first')
+            printf '%s\n' workspace-helper-missing
+            ;;
+        'the helper source must be one bounded workspace-owned 0755 regular file')
+            printf '%s\n' workspace-helper-metadata
+            ;;
+        'build the production IPC probe as an unprivileged workspace user first')
+            printf '%s\n' workspace-probe-missing
+            ;;
+        'the production IPC probe must be one bounded workspace-owned 0755 regular file')
+            printf '%s\n' workspace-probe-metadata
+            ;;
+        'the production IPC unit hook must be one executable regular file with one hard link')
+            printf '%s\n' workspace-hook-missing
+            ;;
+        'the production IPC unit hook has unsafe workspace metadata')
+            printf '%s\n' workspace-hook-metadata
+            ;;
+        'the restart observer must be one executable regular file with one hard link')
+            printf '%s\n' workspace-observer-missing
+            ;;
+        'the restart observer has unsafe workspace metadata')
+            printf '%s\n' workspace-observer-metadata
+            ;;
+        '/var/tmp is not the canonical root-owned sticky staging parent')
+            printf '%s\n' staging-parent
+            ;;
+        'the repository root cannot be established'|\
+        'the live proof is not running from the exact repository root'|\
+        'the source commit cannot be established'|\
+        'the source commit is not a canonical Git revision'|\
+        'the source worktree state cannot be established'|\
+        'the source worktree must be clean before live evidence execution')
+            printf '%s\n' source
+            ;;
+        'the kernel release cannot be established'|\
+        'the kernel release is not bounded ASCII metadata'|\
+        'the execution environment metadata exceeds its fixed bound'|\
+        'the execution start time cannot be established')
+            printf '%s\n' metadata
+            ;;
+        'no collision-free synthetic service identity range is available')
+            printf '%s\n' identity-range
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_blocked_status_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$1" -eq 77 ]
+}
+
+report_non_retained_blocked_category() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    [ "$(grep -Ec '^BLOCKED: ' "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_blocked_record=$(grep -E '^BLOCKED: ' \
+        "$non_retained_diagnostic") || return 1
+    non_retained_blocked_reason=${non_retained_blocked_record#BLOCKED: }
+    non_retained_blocked_category=$(non_retained_blocked_category \
+        "$non_retained_blocked_reason") || return 1
+    printf 'non-retained helper-boundary PR smoke blocked category: %s\n' \
+        "$non_retained_blocked_category" >&2
+}
+
 non_retained_driver_phase_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -259,6 +392,9 @@ non_retained_driver_phase_is_safe() {
         production-launch|\
         production-observation|\
         production-retirement|\
+        restart-launch|\
+        restart-observation|\
+        restart-retirement|\
         final-verification)
             return 0
             ;;
@@ -278,6 +414,7 @@ non_retained_final_checkpoint_is_safe() {
         report-times|\
         report-generation|\
         report-validation|\
+        restart-report-validation|\
         publication-fence|\
         stage-retirement)
             return 0
@@ -312,6 +449,616 @@ report_non_retained_proof_failure_reason() {
         "$non_retained_failure_reason" >&2
 }
 
+non_retained_boundary_validator_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        capture-unsafe|\
+        status-invalid|\
+        stdout-nonempty|\
+        status-zero|\
+        stderr-empty|\
+        input-size|\
+        json-value|\
+        canonical-encoding|\
+        source-artifacts|\
+        environment|\
+        clock-format|\
+        clock-order|\
+        invocations|\
+        lifecycle|\
+        host-state|\
+        fixed-contract)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_non_retained_boundary_validator_failure_category() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_validator_diagnostic=$1
+    [ -f "$non_retained_validator_diagnostic" ] \
+        && [ ! -L "$non_retained_validator_diagnostic" ] || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_validator_diagnostic" \
+        2>/dev/null || true)" = "1:$(id -u):600" ] || return 1
+    non_retained_validator_diagnostic_size=$(stat -Lc '%s' \
+        "$non_retained_validator_diagnostic") || return 1
+    [ "$non_retained_validator_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_validator_diagnostic" || return 1
+
+    non_retained_validator_failure_record='live worker-identity proof failed: the helper-boundary report failed strict validation'
+    [ "$(grep -Fxc "$non_retained_validator_failure_record" \
+        "$non_retained_validator_diagnostic")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'live worker-identity proof failed: ' \
+        "$non_retained_validator_diagnostic")" -eq 1 ] || return 1
+    non_retained_validator_prefix=VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=
+    [ "$(grep -Fc "$non_retained_validator_prefix" \
+        "$non_retained_validator_diagnostic")" -eq 1 ] || return 1
+    non_retained_validator_pattern='^VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=(capture-unsafe|status-invalid|stdout-nonempty|status-zero|stderr-empty|input-size|json-value|canonical-encoding|source-artifacts|environment|clock-format|clock-order|invocations|lifecycle|host-state|fixed-contract)$'
+    [ "$(grep -Ec "$non_retained_validator_pattern" \
+        "$non_retained_validator_diagnostic")" -eq 1 ] || return 1
+    non_retained_validator_stage=$(grep -E "$non_retained_validator_pattern" \
+        "$non_retained_validator_diagnostic") || return 1
+    non_retained_validator_stage=${non_retained_validator_stage#"$non_retained_validator_prefix"}
+    non_retained_boundary_validator_stage_is_safe \
+        "$non_retained_validator_stage" || return 1
+    printf 'non-retained helper-boundary PR smoke report-validation category: %s\n' \
+        "$non_retained_validator_stage" >&2
+}
+
+non_retained_restart_successor_debugger_category_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        exec-not-caught|\
+        breakpoint-not-installed|\
+        breakpoint-not-reached|\
+        marker-invalid|\
+        observer-manager-binding|\
+        observer-precrash-record|\
+        observer-fdstore-read|\
+        observer-fdstore-count|\
+        observer-fdstore-name|\
+        observer-journal-read|\
+        observer-journal-value|\
+        observer-invocation-read|\
+        observer-invocation-reuse|\
+        observer-mainpid-reuse|\
+        observer-restart-count|\
+        observer-socket-change|\
+        observer-time|\
+        observer-starttime|\
+        observer-record-build|\
+        observer-record-publication|\
+        observer-timeout|\
+        observer-other|\
+        post-observer)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_restart_retirement_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        adoption|identity|initial-snapshot|stop-request|stop-wait|reset-failed|\
+        reset-wait|fdstore-clean|post-clean|final-reset|collection)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_restart_readiness_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight|clock-read|clock-backwards|lineage-pid|lineage-invocation|\
+        socket-capture|\
+        initial-journal-value|stage-transition|bind-runtime-read|\
+        bind-runtime-value|final-journal-read|final-journal-value|journal-next|\
+        journal-state-before|journal-state-after|journal-state-change|\
+        socket-stability|final-lineage-pid|final-lineage-invocation|timeout)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_restart_readiness_failure_detail_category() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_readiness_diagnostic=$1
+    [ -f "$non_retained_readiness_diagnostic" ] \
+        && [ ! -L "$non_retained_readiness_diagnostic" ] || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_readiness_diagnostic" \
+        2>/dev/null || true)" = "1:$(id -u):600" ] || return 1
+    non_retained_readiness_diagnostic_size=$(stat -Lc '%s' \
+        "$non_retained_readiness_diagnostic") || return 1
+    [ "$non_retained_readiness_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_readiness_diagnostic" || return 1
+    non_retained_readiness_prefix=VOLPAROSSA_HELPER_LIVE_RESTART_READINESS_DIAGNOSTIC_V1=
+    [ "$(grep -Fc "$non_retained_readiness_prefix" \
+        "$non_retained_readiness_diagnostic")" -eq 1 ] || return 1
+    non_retained_readiness_line=$(grep -F \
+        "$non_retained_readiness_prefix" \
+        "$non_retained_readiness_diagnostic") || return 1
+    case $non_retained_readiness_line in
+        "$non_retained_readiness_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    non_retained_readiness_detail=${non_retained_readiness_line#"$non_retained_readiness_prefix"}
+    non_retained_restart_readiness_stage_is_safe \
+        "$non_retained_readiness_detail" || return 1
+    printf '%s\n' "$non_retained_readiness_detail"
+}
+
+non_retained_restart_retirement_failure_detail_category() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_retirement_diagnostic=$1
+    [ -f "$non_retained_retirement_diagnostic" ] \
+        && [ ! -L "$non_retained_retirement_diagnostic" ] || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_retirement_diagnostic" \
+        2>/dev/null || true)" = "1:$(id -u):600" ] || return 1
+    non_retained_retirement_diagnostic_size=$(stat -Lc '%s' \
+        "$non_retained_retirement_diagnostic") || return 1
+    [ "$non_retained_retirement_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_retirement_diagnostic" || return 1
+    non_retained_retirement_prefix=VOLPAROSSA_HELPER_LIVE_RESTART_RETIREMENT_DIAGNOSTIC_V1=
+    [ "$(grep -Fc "$non_retained_retirement_prefix" \
+        "$non_retained_retirement_diagnostic")" -eq 1 ] || return 1
+    non_retained_retirement_line=$(grep -F \
+        "$non_retained_retirement_prefix" \
+        "$non_retained_retirement_diagnostic") || return 1
+    case $non_retained_retirement_line in
+        "$non_retained_retirement_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    non_retained_retirement_detail=${non_retained_retirement_line#"$non_retained_retirement_prefix"}
+    non_retained_restart_retirement_stage_is_safe \
+        "$non_retained_retirement_detail" || return 1
+    printf '%s\n' "$non_retained_retirement_detail"
+}
+
+non_retained_restart_launch_failure_category() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        'restart debugger symbols could not be inspected'|\
+        'restart debugger symbols are not exact and unique')
+            printf '%s\n' debugger-symbols ;;
+        'restart ownership marker could not be derived'|\
+        'restart ownership marker is non-canonical'|\
+        'restart ownership marker is unsafe')
+            printf '%s\n' ownership-marker ;;
+        'restart debugger path was not initially absent')
+            printf '%s\n' debugger-paths ;;
+        'singleton restart unit name is unsafe'|\
+        'singleton restart unit name is not distinct'|\
+        'singleton restart unit state could not be determined'|\
+        'singleton restart unit name is already loaded'|\
+        'singleton restart unit could not be launched')
+            printf '%s\n' unit-launch ;;
+        'singleton restart launch envelope is invalid')
+            printf '%s\n' launch-envelope ;;
+        'singleton restart manager binding is invalid')
+            printf '%s\n' manager-binding ;;
+        'singleton restart precrash identity did not appear')
+            printf '%s\n' precrash-record ;;
+        'singleton restart initial MainPID is unavailable')
+            printf '%s\n' initial-mainpid-read ;;
+        'singleton restart initial MainPID is invalid')
+            printf '%s\n' initial-mainpid-shape ;;
+        'singleton restart initial invocation is not hook-bound')
+            printf '%s\n' initial-invocation-binding ;;
+        'singleton restart initial MainPID is not hook-bound')
+            printf '%s\n' initial-mainpid-binding ;;
+        'singleton restart initial hook PID is unavailable')
+            printf '%s\n' initial-hook-pid-read ;;
+        'singleton restart initial hook PID is invalid')
+            printf '%s\n' initial-hook-pid-shape ;;
+        'singleton restart initial ControlPID is not hook-bound')
+            printf '%s\n' initial-controlpid-binding ;;
+        'singleton restart initial hook starttime is unavailable')
+            printf '%s\n' initial-hook-starttime ;;
+        'restart mount keeper PID is invalid'|\
+        'restart mount keeper starttime is unavailable'|\
+        'restart mount namespace keeper did not survive')
+            printf '%s\n' mount-keeper ;;
+        'initial restart debugger commands could not be written')
+            printf '%s\n' debugger-command ;;
+        'initial forced-crash debugger did not complete')
+            printf '%s\n' debugger-execution ;;
+        'initial forced-crash start failure record was not consumed exactly')
+            printf '%s\n' initial-start-failure ;;
+        'post-crash restart MainPID is unavailable'|\
+        'post-crash forced-helper MainPID is not zero')
+            printf '%s\n' sigkill-mainpid ;;
+        'post-crash restart count is unavailable'|\
+        'post-crash forced-helper restart count is not zero')
+            printf '%s\n' sigkill-restart-count ;;
+        'restart unit result is unavailable'|\
+        'post-crash forced-helper result is not signal')
+            printf '%s\n' sigkill-result ;;
+        'restart ExecMainCode is unavailable'|\
+        'post-crash forced-helper code is not CLD_KILLED')
+            printf '%s\n' sigkill-code ;;
+        'restart ExecMainStatus is unavailable'|\
+        'post-crash forced-helper status is not SIGKILL')
+            printf '%s\n' sigkill-status ;;
+        'post-crash failed invocation lost its exact ownership fence')
+            printf '%s\n' ownership-fence ;;
+        'forced-crash boundary record is unavailable')
+            printf '%s\n' crash-record ;;
+        'initial debugger log is unsafe'|\
+        'initial debugger log exceeds 1 MiB')
+            printf '%s\n' debugger-log ;;
+        'forced-crash time is unavailable')
+            printf '%s\n' crash-time ;;
+        'post-crash exact custody was not preserved')
+            printf '%s\n' exact-custody ;;
+        'restart successor did not become manager-bound'|\
+        'restart successor changed before its pre-exec barrier')
+            printf '%s\n' successor-mainpid ;;
+        'restart successor pre-exec barrier did not appear'|\
+        'restart successor pre-exec barrier is oversized'|\
+        'restart successor barrier invocation is unavailable'|\
+        'restart successor barrier PID is unavailable'|\
+        'restart successor barrier expectation could not be created'|\
+        'restart successor barrier expectation is unavailable'|\
+        'restart successor pre-exec barrier is not manager-bound')
+            printf '%s\n' successor-barrier ;;
+        'restart successor starttime is unavailable'|\
+        'restart successor count is unavailable'|\
+        'restart successor count is not exactly one'|\
+        'restart successor lost the ownership marker'|\
+        'restart successor lineage could not be adopted'|\
+        'restart successor invocation is invalid'|\
+        'restart successor lineage changed after adoption')
+            printf '%s\n' successor-identity ;;
+        'successor debugger commands could not be written')
+            printf '%s\n' successor-debugger-command ;;
+        'successor debugger starttime is unavailable'|\
+        'successor debugger exited before arming'|\
+        'successor debugger did not arm'|\
+        'successor debugger readiness record is unsafe'|\
+        'successor debugger readiness record is oversized'|\
+        'successor debugger readiness record is invalid')
+            printf '%s\n' successor-debugger-start ;;
+        'restart successor release FIFO changed before release'|\
+        'restart successor pre-exec barrier could not be released'|\
+        'restart successor release FIFO changed after release')
+            printf '%s\n' successor-release ;;
+        'successor recovery-boundary debugger did not complete'|\
+        'successor recovery boundary is not exact')
+            printf '%s\n' successor-debugger-execution ;;
+        'successor debugger failure classification is invalid')
+            printf '%s\n' successor-debugger-classification ;;
+        'successor recovery-boundary debugger failed: '*)
+            non_retained_restart_successor_detail=${1#successor recovery-boundary debugger failed: }
+            non_retained_restart_successor_debugger_category_is_safe \
+                "$non_retained_restart_successor_detail" || return 1
+            printf 'successor-debugger-%s\n' \
+                "$non_retained_restart_successor_detail"
+            ;;
+        'successor debugger log is unsafe'|\
+        'successor debugger log exceeds 1 MiB')
+            printf '%s\n' successor-debugger-log ;;
+        'restart ExactPresent settlement did not complete')
+            printf '%s\n' successor-settlement ;;
+        'restart successor start failure record is invalid'|\
+        'restart successor pending start failure record is unsafe'|\
+        'restart successor start failure category is invalid')
+            printf '%s\n' successor-start-record ;;
+        'restart successor readiness diagnostic is invalid')
+            printf '%s\n' successor-start-readiness-classification ;;
+        'restart successor start hook failed during preflight')
+            printf '%s\n' successor-start-preflight ;;
+        'restart successor start hook failed during recovery wait')
+            printf '%s\n' successor-start-recovery ;;
+        'restart successor start hook failed during lineage validation')
+            printf '%s\n' successor-start-lineage ;;
+        'restart successor start hook failed during descriptor settlement')
+            printf '%s\n' successor-start-descriptor ;;
+        'restart successor start hook failed during journal settlement')
+            printf '%s\n' successor-start-journal ;;
+        'restart successor start hook failed during socket validation')
+            printf '%s\n' successor-start-socket ;;
+        'restart successor start hook failed during publication')
+            printf '%s\n' successor-start-publication ;;
+        'restart successor invocation record is unavailable'|\
+        'restart successor invocation record is invalid'|\
+        'restart settlement changed the adopted successor invocation')
+            printf '%s\n' successor-settlement-binding ;;
+        'restart boundary starttime is unavailable')
+            printf '%s\n' successor-starttime-boundary-read ;;
+        'restart boundary starttime is invalid')
+            printf '%s\n' successor-starttime-boundary-shape ;;
+        'restart successor starttime is unavailable after descriptor settlement')
+            printf '%s\n' successor-starttime-post-detach-read ;;
+        'restart successor starttime changed after recovery')
+            printf '%s\n' successor-starttime-post-detach-change ;;
+        'restart successor retirement failure category is invalid')
+            printf '%s\n' successor-retirement-classification ;;
+        'restart successor retirement diagnostic could not be reported')
+            printf '%s\n' successor-retirement-classification ;;
+        'restart successor could not be retired')
+            printf '%s\n' successor-retirement ;;
+        'restart unit was not collected')
+            printf '%s\n' successor-collection ;;
+        'restart journal lock remained held')
+            printf '%s\n' successor-lock-held ;;
+        'restart journal lock could not be opened after retirement')
+            printf '%s\n' successor-lock-open ;;
+        'restart runtime did not retire cleanly')
+            printf '%s\n' successor-runtime-retirement ;;
+        'restart final journal could not be revalidated')
+            printf '%s\n' successor-final-journal-read ;;
+        'restart final journal proof is invalid')
+            printf '%s\n' successor-final-journal-value ;;
+        'internal production proof failure state is inconsistent')
+            printf '%s\n' successor-proof-state ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_restart_initial_hook_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight|\
+        publication|\
+        ack-path|\
+        ack-payload|\
+        ack-lineage|\
+        ack-pins|\
+        ack-timeout|\
+        post-lineage|\
+        post-pins|\
+        cleanup|\
+        terminal-publication|\
+        terminal-ack-path|\
+        terminal-ack-payload|\
+        terminal-ack-lineage|\
+        terminal-ack-pins|\
+        terminal-ack-timeout|\
+        terminal-post-lineage|\
+        terminal-post-pins)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_restart_initial_driver_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        appearance|\
+        unsafe-pending-path|\
+        main-pid|\
+        restart-count|\
+        invocation|\
+        marker|\
+        start-payload|\
+        hook-payload|\
+        terminal-payload|\
+        stable-inode|\
+        unlink|\
+        absence|\
+        control-pid|\
+        hook-identity|\
+        hook-quiescence)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_restart_initial_failure_detail_category() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_restart_initial_detail_file=$1
+    non_retained_restart_initial_hook_prefix=VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_HOOK_V1=
+    non_retained_restart_initial_driver_prefix=VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_DRIVER_V1=
+    non_retained_restart_initial_start_prefix=VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_START_V1=
+    non_retained_restart_initial_hook_count=$(grep -Fc \
+        "$non_retained_restart_initial_hook_prefix" \
+        "$non_retained_restart_initial_detail_file" || true)
+    non_retained_restart_initial_driver_count=$(grep -Fc \
+        "$non_retained_restart_initial_driver_prefix" \
+        "$non_retained_restart_initial_detail_file" || true)
+    non_retained_restart_initial_start_count=$(grep -Fc \
+        "$non_retained_restart_initial_start_prefix" \
+        "$non_retained_restart_initial_detail_file" || true)
+    case $non_retained_restart_initial_hook_count:$non_retained_restart_initial_driver_count in
+        *[!0-9:]*|:*|*:) return 1 ;;
+    esac
+    case $non_retained_restart_initial_start_count in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$non_retained_restart_initial_hook_count" -eq 0 ] \
+        && [ "$non_retained_restart_initial_driver_count" -eq 0 ]; then
+        printf '%s\n' initial-diagnostic-absent
+        return 0
+    fi
+    if [ $((non_retained_restart_initial_hook_count \
+        + non_retained_restart_initial_driver_count)) -ne 1 ]; then
+        printf '%s\n' initial-diagnostic-invalid
+        return 0
+    fi
+    if [ "$non_retained_restart_initial_hook_count" -eq 1 ]; then
+        if [ "$non_retained_restart_initial_start_count" -ne 0 ]; then
+            printf '%s\n' initial-diagnostic-invalid
+            return 0
+        fi
+        non_retained_restart_initial_detail_line=$(grep -F \
+            "$non_retained_restart_initial_hook_prefix" \
+            "$non_retained_restart_initial_detail_file") || return 1
+        case $non_retained_restart_initial_detail_line in
+            "$non_retained_restart_initial_hook_prefix"*) ;;
+            *)
+                printf '%s\n' initial-diagnostic-invalid
+                return 0
+                ;;
+        esac
+        non_retained_restart_initial_detail_stage=${non_retained_restart_initial_detail_line#"$non_retained_restart_initial_hook_prefix"}
+        if non_retained_restart_initial_hook_failure_stage_is_safe \
+            "$non_retained_restart_initial_detail_stage"; then
+            printf 'initial-hook-%s\n' \
+                "$non_retained_restart_initial_detail_stage"
+        else
+            printf '%s\n' initial-diagnostic-invalid
+        fi
+        return 0
+    fi
+    non_retained_restart_initial_detail_line=$(grep -F \
+        "$non_retained_restart_initial_driver_prefix" \
+        "$non_retained_restart_initial_detail_file") || return 1
+    case $non_retained_restart_initial_detail_line in
+        "$non_retained_restart_initial_driver_prefix"*) ;;
+        *)
+            printf '%s\n' initial-diagnostic-invalid
+            return 0
+            ;;
+    esac
+    non_retained_restart_initial_detail_stage=${non_retained_restart_initial_detail_line#"$non_retained_restart_initial_driver_prefix"}
+    if non_retained_restart_initial_driver_failure_stage_is_safe \
+        "$non_retained_restart_initial_detail_stage"; then
+        if [ "$non_retained_restart_initial_start_count" -eq 0 ]; then
+            printf 'initial-driver-%s\n' \
+                "$non_retained_restart_initial_detail_stage"
+        elif [ "$non_retained_restart_initial_start_count" -eq 1 ] \
+            && [ "$non_retained_restart_initial_detail_stage" = start-payload ]; then
+            non_retained_restart_initial_start_line=$(grep -F \
+                "$non_retained_restart_initial_start_prefix" \
+                "$non_retained_restart_initial_detail_file") || return 1
+            case $non_retained_restart_initial_start_line in
+                "$non_retained_restart_initial_start_prefix"*) ;;
+                *)
+                    printf '%s\n' initial-diagnostic-invalid
+                    return 0
+                    ;;
+            esac
+            non_retained_restart_initial_start_stage=${non_retained_restart_initial_start_line#"$non_retained_restart_initial_start_prefix"}
+            if non_retained_production_launch_stage_is_safe \
+                "$non_retained_restart_initial_start_stage"; then
+                printf 'initial-driver-start-payload-%s\n' \
+                    "$non_retained_restart_initial_start_stage"
+            else
+                printf '%s\n' initial-diagnostic-invalid
+            fi
+        else
+            printf '%s\n' initial-diagnostic-invalid
+        fi
+    else
+        printf '%s\n' initial-diagnostic-invalid
+    fi
+}
+
+report_non_retained_restart_launch_failure_category() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_restart_failure_prefix='live worker-identity proof failed: '
+    [ "$(grep -Fc "$non_retained_restart_failure_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_restart_failure_line=$(grep -F \
+        "$non_retained_restart_failure_prefix" "$non_retained_diagnostic") \
+        || return 1
+    case $non_retained_restart_failure_line in
+        "$non_retained_restart_failure_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    non_retained_restart_failure_reason=${non_retained_restart_failure_line#"$non_retained_restart_failure_prefix"}
+    if [ "$non_retained_restart_failure_reason" = \
+        'initial forced-crash start failure record was not consumed exactly' ] \
+        || [ "$non_retained_restart_failure_reason" = \
+            'initial forced-crash terminal handshake was not released exactly' ]; then
+        non_retained_restart_failure_category=$( \
+            non_retained_restart_initial_failure_detail_category \
+                "$non_retained_diagnostic"
+        ) || return 1
+    elif [ "$non_retained_restart_failure_reason" = \
+        'restart successor could not be retired' ]; then
+        non_retained_restart_retirement_detail=$( \
+            non_retained_restart_retirement_failure_detail_category \
+                "$non_retained_diagnostic"
+        ) || return 1
+        non_retained_restart_failure_category=successor-retirement-$non_retained_restart_retirement_detail
+    elif [ "$non_retained_restart_failure_reason" = \
+        'restart successor start hook failed during socket validation' ]; then
+        non_retained_restart_readiness_detail=$( \
+            non_retained_restart_readiness_failure_detail_category \
+                "$non_retained_diagnostic"
+        ) || return 1
+        non_retained_restart_failure_category=successor-start-readiness-$non_retained_restart_readiness_detail
+    elif [ "$non_retained_restart_failure_reason" = \
+        'restart successor start hook failed during journal settlement' ] \
+        && grep -Fq \
+            'VOLPAROSSA_HELPER_LIVE_RESTART_READINESS_DIAGNOSTIC_V1=' \
+            "$non_retained_diagnostic"; then
+        non_retained_restart_readiness_detail=$( \
+            non_retained_restart_readiness_failure_detail_category \
+                "$non_retained_diagnostic"
+        ) || return 1
+        non_retained_restart_failure_category=successor-start-readiness-$non_retained_restart_readiness_detail
+    else
+        non_retained_restart_failure_category=$( \
+            non_retained_restart_launch_failure_category \
+                "$non_retained_restart_failure_reason"
+        ) || return 1
+    fi
+    printf 'non-retained helper-boundary PR smoke restart-launch category: %s\n' \
+        "$non_retained_restart_failure_category" >&2
+}
+
+report_non_retained_restart_launch_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_restart_launch_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_RESTART_LAUNCH_DIAGNOSTIC_V1=captures-(yes|no),json-(yes|no),fresh-(yes|no),stdout-(empty|unit-only|nonempty|unsafe),stderr-(empty|nonempty|unsafe),manager-no$'
+    [ "$(grep -Ec "$non_retained_restart_launch_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_restart_launch_diagnostic=$(grep -E \
+        "$non_retained_restart_launch_diagnostic_pattern" \
+        "$non_retained_diagnostic") || return 1
+    printf 'non-retained helper-boundary PR smoke restart launch diagnostic: %s\n' \
+        "${non_retained_restart_launch_diagnostic#VOLPAROSSA_HELPER_LIVE_RESTART_LAUNCH_DIAGNOSTIC_V1=}" >&2
+}
+
+report_non_retained_restart_crash_record_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_restart_crash_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=
+    [ "$(grep -Fc "$non_retained_restart_crash_diagnostic_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_restart_crash_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=record-(absent|unsafe),observer-(fdstore-read|fdstore-count|fdstore-name|journal-read|journal-value|control-binding|pin-open|pin-change|process-live|wireguard-live|publication|manager-binding|precrash|stderr-empty|stderr-other|stderr-unsafe)$'
+    [ "$(grep -Ec "$non_retained_restart_crash_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_restart_crash_diagnostic=$(grep -E \
+        "$non_retained_restart_crash_diagnostic_pattern" \
+        "$non_retained_diagnostic") || return 1
+    printf 'non-retained helper-boundary PR smoke restart crash-record diagnostic: %s\n' \
+        "${non_retained_restart_crash_diagnostic#VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=}" >&2
+}
+
 report_non_retained_driver_phase() {
     [ "$#" -eq 1 ] || return 1
     non_retained_diagnostic=$1
@@ -326,7 +1073,7 @@ report_non_retained_driver_phase() {
     non_retained_driver_phase_prefix=VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=
     [ "$(grep -Ec "^$non_retained_driver_phase_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_driver_phase_pattern='^VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|final-verification)$'
+    non_retained_driver_phase_pattern='^VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|final-verification)$'
     [ "$(grep -Ec "$non_retained_driver_phase_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_mixed_diagnostic_pattern='^(live worker-identity proof failed: predicate rejected: |VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=)'
@@ -354,7 +1101,7 @@ report_non_retained_final_checkpoint() {
     non_retained_checkpoint_prefix=VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=
     [ "$(grep -Ec "^$non_retained_checkpoint_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_checkpoint_pattern='^VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|publication-fence|stage-retirement)$'
+    non_retained_checkpoint_pattern='^VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|restart-report-validation|publication-fence|stage-retirement)$'
     [ "$(grep -Ec "$non_retained_checkpoint_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_checkpoint=$(grep -E "$non_retained_checkpoint_pattern" \
@@ -658,7 +1405,9 @@ script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd -P)
 manifest=$script_directory/debian13-amd64-image-v1.json
 report_validator=$script_directory/validate-helper-boundary-evidence-v1.sh
+restart_report_validator=$script_directory/validate-helper-restart-exact-present-evidence-v1.sh
 environment_validator=$script_directory/validate-helper-boundary-vm-environment-v1.sh
+restart_environment_validator=$script_directory/validate-helper-restart-vm-environment-v1.sh
 qemu_supervisor=$script_directory/qemu-pidfd-supervisor.py
 manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
 image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
@@ -693,7 +1442,8 @@ jq -e \
     }' "$manifest" >/dev/null || blocked 'the Debian image manifest semantics are not exact'
 jq -S -c . "$manifest" | cmp -s - "$manifest" \
     || blocked 'the Debian image manifest serialization is not canonical'
-for fixed_tool in "$report_validator" "$environment_validator" "$qemu_supervisor"; do
+for fixed_tool in "$report_validator" "$restart_report_validator" \
+    "$environment_validator" "$restart_environment_validator" "$qemu_supervisor"; do
     if [ ! -f "$fixed_tool" ] || [ -L "$fixed_tool" ] \
         || [ "$(stat -Lc '%h' "$fixed_tool" 2>/dev/null || true)" != 1 ]; then
         blocked "a fixed evidence tool is unavailable: ${fixed_tool##*/}"
@@ -1293,7 +2043,12 @@ scrub_sensitive_run_state() {
         guest-host-key guest-host-key.pub known-hosts user-data meta-data \
         guest-setup.sh guest-proof.sh helper-boundary-evidence-v1.json \
         helper-boundary-proof.stderr.log helper-boundary-evidence-v1.json.sha256 \
-        vm-environment-v1.json validator.stdout validator.stderr \
+        helper-restart-exact-present-evidence-v1.json \
+        helper-restart-exact-present-evidence-v1.json.sha256 \
+        helper-restart-vm-environment-v1.json restart-validator.stdout \
+        restart-validator.stderr restart-environment-validator.stdout \
+        restart-environment-validator.stderr vm-environment-v1.json \
+        validator.stdout validator.stderr \
         environment-validator.stdout environment-validator.stderr vm-console.log \
         console.fifo console.done
     do
@@ -1435,6 +2190,7 @@ console_fifo=$run_directory/console.fifo
 guest_setup=$run_directory/guest-setup.sh
 guest_proof=$run_directory/guest-proof.sh
 retrieved_report=$run_directory/helper-boundary-evidence-v1.json
+retrieved_restart_report=$run_directory/helper-restart-exact-present-evidence-v1.json
 retrieved_stderr=$run_directory/helper-boundary-proof.stderr.log
 
 qemu-img create -q -f qcow2 -F qcow2 -b "$image_path" "$overlay" 12G \
@@ -1500,7 +2256,7 @@ case $archive_sha256 in *[!0-9a-f]*|'') exit 64 ;; esac
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
-    build-essential ca-certificates cargo cmake curl dbus git iproute2 iputils-ping jq nftables \
+    build-essential ca-certificates cargo cmake curl dbus gdb git iproute2 iputils-ping jq nftables \
     pkg-config rustc sudo util-linux wireguard-tools
 test "$(rustc --version | awk '{print $2}')" = 1.85.0
 test "$(cargo --version | awk '{print $2}')" = 1.85.0
@@ -1567,7 +2323,7 @@ set +e
 # hash-verified executable staging copies.
 # shellcheck disable=SC2024
 sudo -n -- ./tests/helper/require-live-worker-identity-proof.sh --execute --yes \
-    >/home/volparossa/helper-boundary-evidence-v1.json \
+    >/home/volparossa/helper-proof-reports.jsonl \
     2>/home/volparossa/helper-boundary-proof.stderr.log
 proof_status=$?
 set -e
@@ -1577,9 +2333,18 @@ test "$(stat -c '%s' /home/volparossa/helper-boundary-proof.stderr.log)" -le 104
 if test "$proof_status" -ne 0; then
     exit "$proof_status"
 fi
-chmod 0600 /home/volparossa/helper-boundary-evidence-v1.json
+test "$(wc -l </home/volparossa/helper-proof-reports.jsonl)" -eq 2
+sed -n '1p' /home/volparossa/helper-proof-reports.jsonl \
+    >/home/volparossa/helper-boundary-evidence-v1.json
+sed -n '2p' /home/volparossa/helper-proof-reports.jsonl \
+    >/home/volparossa/helper-restart-exact-present-evidence-v1.json
+rm -f -- /home/volparossa/helper-proof-reports.jsonl
+chmod 0600 /home/volparossa/helper-boundary-evidence-v1.json \
+    /home/volparossa/helper-restart-exact-present-evidence-v1.json
 test "$(stat -c '%s' /home/volparossa/helper-boundary-evidence-v1.json)" -ge 1
 test "$(stat -c '%s' /home/volparossa/helper-boundary-evidence-v1.json)" -le 32768
+test "$(stat -c '%s' /home/volparossa/helper-restart-exact-present-evidence-v1.json)" -ge 1
+test "$(stat -c '%s' /home/volparossa/helper-restart-exact-present-evidence-v1.json)" -le 32768
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 GUEST_PROOF
 chmod 0700 "$guest_proof"
@@ -1870,7 +2635,13 @@ fi
 install -m 0600 -- "$retrieved_stderr" "$proof_stderr_log"
 if [ "$guest_status" -ne 0 ]; then
     if [ "$proof_mode" = non-retained-pr-smoke ]; then
-        if report_non_retained_proof_failure_reason "$proof_stderr_log"; then
+        if non_retained_blocked_status_is_exact "$guest_status" \
+            && report_non_retained_blocked_category "$proof_stderr_log"; then
+            :
+        elif report_non_retained_boundary_validator_failure_category \
+            "$proof_stderr_log"; then
+            :
+        elif report_non_retained_proof_failure_reason "$proof_stderr_log"; then
             if [ "$non_retained_failure_reason" = worker-launch-status ]; then
                 report_non_retained_worker_launch_diagnostic \
                     "$proof_stderr_log" || true
@@ -1879,6 +2650,15 @@ if [ "$guest_status" -ne 0 ]; then
                     "$proof_stderr_log" || true
             elif [ "$non_retained_failure_reason" = production-launch-status ]; then
                 report_non_retained_production_launch_diagnostic \
+                    "$proof_stderr_log" || true
+            fi
+        elif report_non_retained_restart_launch_failure_category \
+            "$proof_stderr_log"; then
+            if [ "$non_retained_restart_failure_category" = launch-envelope ]; then
+                report_non_retained_restart_launch_diagnostic \
+                    "$proof_stderr_log" || true
+            elif [ "$non_retained_restart_failure_category" = crash-record ]; then
+                report_non_retained_restart_crash_record_diagnostic \
                     "$proof_stderr_log" || true
             fi
         else
@@ -1893,6 +2673,10 @@ fi
 bounded_run retrieve-report 2 guest_scp_from_raw \
     /home/volparossa/helper-boundary-evidence-v1.json "$retrieved_report" \
     || failed 'the canonical helper-boundary report could not be retrieved'
+bounded_run retrieve-restart-report 2 guest_scp_from_raw \
+    /home/volparossa/helper-restart-exact-present-evidence-v1.json \
+    "$retrieved_restart_report" \
+    || failed 'the canonical restart report could not be retrieved'
 
 guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
 reap_qemu yes || failed 'the restricted proof VM did not power off cleanly'
@@ -1927,6 +2711,22 @@ retrieved_report_size=$(stat -Lc '%s' "$retrieved_report")
 if [ "$retrieved_report_size" -lt 1 ] || [ "$retrieved_report_size" -gt 32768 ]; then
     failed 'the retrieved report size is outside the evidence bound'
 fi
+restart_validator_stdout=$run_directory/restart-validator.stdout
+restart_validator_stderr=$run_directory/restart-validator.stderr
+set +e
+"$restart_report_validator" "$retrieved_restart_report" \
+    >"$restart_validator_stdout" 2>"$restart_validator_stderr"
+restart_validator_status=$?
+set -e
+[ "$restart_validator_status" -eq 0 ] \
+    || failed 'the retrieved restart report failed local validation'
+if [ -s "$restart_validator_stdout" ] || [ -s "$restart_validator_stderr" ]; then
+    failed 'the local restart report validator was not silent'
+fi
+jq -e --arg commit "$expected_commit" \
+    '.overall == "PASS" and .observed_source.commit_sha == $commit' \
+    "$retrieved_restart_report" >/dev/null \
+    || failed 'the restart report is not a PASS for the expected commit'
 
 late_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}') \
     || failed 'the late source HEAD fence failed'
@@ -1945,6 +2745,11 @@ report_hash=$(sha256sum "$retrieved_report" | awk '{print $1}') \
     || failed 'the retained report hash could not be calculated'
 report_hash_file=$run_directory/helper-boundary-evidence-v1.json.sha256
 printf '%s  helper-boundary-evidence-v1.json\n' "$report_hash" >"$report_hash_file"
+restart_report_hash=$(sha256sum "$retrieved_restart_report" | awk '{print $1}') \
+    || failed 'the retained restart report hash could not be calculated'
+restart_report_hash_file=$run_directory/helper-restart-exact-present-evidence-v1.json.sha256
+printf '%s  helper-restart-exact-present-evidence-v1.json\n' \
+    "$restart_report_hash" >"$restart_report_hash_file"
 successful_environment=$run_directory/vm-environment-v1.json
 jq -S -c -n \
     --arg commit "$expected_commit" \
@@ -1962,6 +2767,23 @@ jq -S -c -n \
       report_sha256: $report_sha256,
       schema_version: 1,
       status: "PASS"}' >"$successful_environment"
+successful_restart_environment=$run_directory/helper-restart-vm-environment-v1.json
+jq -S -c -n \
+    --arg commit "$expected_commit" \
+    --arg image_sha512 "$image_sha512" \
+    --arg report_sha256 "$restart_report_hash" \
+    --arg release_build 20260826-2582 \
+    '{expected_commit: $commit,
+      guest: {architecture: "amd64", cargo_version: "1.85.0",
+        debian_version: "13", rustc_version: "1.85.0", systemd_version: 257,
+        virtualization: "kvm"},
+      image_release_build: $release_build,
+      image_sha512: $image_sha512,
+      proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"},
+      report_kind: "volparossa-helper-restart-vm-environment",
+      report_sha256: $report_sha256,
+      schema_version: 1,
+      status: "PASS"}' >"$successful_restart_environment"
 
 environment_validator_stdout=$run_directory/environment-validator.stdout
 environment_validator_stderr=$run_directory/environment-validator.stderr
@@ -1976,6 +2798,21 @@ set -e
 if [ -s "$environment_validator_stdout" ] || [ -s "$environment_validator_stderr" ]; then
     failed 'the local VM-environment validator was not silent'
 fi
+restart_environment_validator_stdout=$run_directory/restart-environment-validator.stdout
+restart_environment_validator_stderr=$run_directory/restart-environment-validator.stderr
+set +e
+"$restart_environment_validator" "$successful_restart_environment" \
+    "$retrieved_restart_report" "$expected_commit" "$image_sha512" \
+    >"$restart_environment_validator_stdout" \
+    2>"$restart_environment_validator_stderr"
+restart_environment_validator_status=$?
+set -e
+[ "$restart_environment_validator_status" -eq 0 ] \
+    || failed 'the restart VM-environment record failed local validation'
+if [ -s "$restart_environment_validator_stdout" ] \
+    || [ -s "$restart_environment_validator_stderr" ]; then
+    failed 'the restart VM-environment validator was not silent'
+fi
 
 if [ "$proof_mode" = retained-main ]; then
     install -m 0600 -- "$retrieved_report" \
@@ -1983,6 +2820,12 @@ if [ "$proof_mode" = retained-main ]; then
     install -m 0600 -- "$report_hash_file" \
         "$output_directory/helper-boundary-evidence-v1.json.sha256"
     install -m 0600 -- "$successful_environment" "$environment_report"
+    install -m 0600 -- "$retrieved_restart_report" \
+        "$output_directory/helper-restart-exact-present-evidence-v1.json"
+    install -m 0600 -- "$restart_report_hash_file" \
+        "$output_directory/helper-restart-exact-present-evidence-v1.json.sha256"
+    install -m 0600 -- "$successful_restart_environment" \
+        "$output_directory/helper-restart-vm-environment-v1.json"
     printf '%s\n' \
         'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
 else

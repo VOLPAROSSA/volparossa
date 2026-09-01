@@ -85,6 +85,22 @@ pub fn production_functional_journal_is_exactly_settled() -> bool {
     ownership_journal::production_functional_journal_is_exactly_settled()
 }
 
+/// Read-only fixed-path proof that the singleton KVM restart target is durably
+/// `CleanupConfirmed` while its exact systemd custody is still present.
+#[doc(hidden)]
+#[must_use]
+pub fn production_functional_journal_is_exactly_restart_cleanup_confirmed() -> bool {
+    ownership_journal::production_functional_journal_is_exactly_restart_cleanup_confirmed()
+}
+
+/// Read-only fixed-path proof that the singleton KVM restart target joined the three earlier
+/// functional tombstones as one exact recovered `Absent` tombstone.
+#[doc(hidden)]
+#[must_use]
+pub fn production_functional_journal_is_exactly_restart_settled() -> bool {
+    ownership_journal::production_functional_journal_is_exactly_restart_settled()
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::{needs_drop, size_of};

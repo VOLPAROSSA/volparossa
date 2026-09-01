@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volparossa.org/schemas/helper-restart-exact-present-evidence-v1.schema.json",
+  "title": "VOLPAROSSA singleton CleanupConfirmed ExactPresent restart evidence v1",
+  "$comment": "SPDX-License-Identifier: GPL-3.0-only. One <=32768-byte LF-terminated jq -S -c line. The shell validator additionally enforces ordering, digest equality and the exact ordered check IDs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["checks", "enumerated_host_state", "environment", "finished_at", "generated_at", "invocation_ids", "observed_artifact_hashes", "observed_source", "overall", "report_kind", "restart", "retirement", "schema_version", "scope", "started_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "report_kind": {"const": "volparossa-helper-restart-exact-present-evidence"},
+    "observed_source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commit_sha", "worktree_clean"],
+      "properties": {"commit_sha": {"$ref": "#/$defs/revision"}, "worktree_clean": {"const": true}}
+    },
+    "observed_artifact_hashes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["debugger_sha256", "production_ipc_probe_sha256", "production_ipc_unit_hook_sha256", "restart_launcher_sha256", "restart_observer_sha256", "volparossa_helper_sha256"],
+      "properties": {
+        "debugger_sha256": {"$ref": "#/$defs/sha256"},
+        "production_ipc_probe_sha256": {"$ref": "#/$defs/sha256"},
+        "production_ipc_unit_hook_sha256": {"$ref": "#/$defs/sha256"},
+        "restart_launcher_sha256": {"$ref": "#/$defs/sha256"},
+        "restart_observer_sha256": {"$ref": "#/$defs/sha256"},
+        "volparossa_helper_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["debian_version", "dpkg_architecture", "kernel_release", "machine", "systemd_version", "virtualization"],
+      "properties": {
+        "debian_version": {"const": "13"}, "dpkg_architecture": {"const": "amd64"},
+        "kernel_release": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$"},
+        "machine": {"const": "x86_64"}, "systemd_version": {"const": 257}, "virtualization": {"const": "vm"}
+      }
+    },
+    "started_at": {"$ref": "#/$defs/timestamp"},
+    "finished_at": {"$ref": "#/$defs/timestamp"},
+    "generated_at": {"$ref": "#/$defs/timestamp"},
+    "invocation_ids": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/invocation"}},
+    "restart": {
+      "type": "object", "additionalProperties": false, "required": ["crash", "initial", "resumed"],
+      "properties": {
+        "initial": {
+          "type": "object", "additionalProperties": false,
+          "required": ["argumentless", "cleanup_confirmed_at", "fdstore_before_crash", "fdstore_exact_identity_bound", "journal_phase_before_crash", "target_count", "target_role", "worker_kernel_cleanup_confirmed"],
+          "properties": {
+            "argumentless": {"const": true}, "cleanup_confirmed_at": {"$ref": "#/$defs/timestamp"},
+            "fdstore_before_crash": {"const": 2}, "fdstore_exact_identity_bound": {"const": true},
+            "journal_phase_before_crash": {"const": "CleanupConfirmed"},
+            "target_count": {"const": 1}, "target_role": {"const": "Client"},
+            "worker_kernel_cleanup_confirmed": {"const": true}
+          }
+        },
+        "crash": {
+          "type": "object", "additionalProperties": false,
+          "required": ["crashed_at", "exec_main_code", "exec_main_status", "failed_unit_retained", "fdstore_after_crash", "fdstore_exact_identity_preserved", "signal", "unit_result"],
+          "properties": {
+            "crashed_at": {"$ref": "#/$defs/timestamp"}, "exec_main_code": {"const": "killed"},
+            "exec_main_status": {"const": 9}, "failed_unit_retained": {"const": true},
+            "fdstore_after_crash": {"const": 2}, "fdstore_exact_identity_preserved": {"const": true},
+            "signal": {"const": "SIGKILL"}, "unit_result": {"const": "signal"}
+          }
+        },
+        "resumed": {
+          "type": "object", "additionalProperties": false,
+          "required": ["argumentless", "inherited_descriptor_count", "journal_absent_origin", "journal_phase_after_settlement", "journal_stable_read_count", "journal_temporary_entry_absent", "manager_fdstore_after_removal", "manager_fdstore_before_removal", "new_socket_published_after_settlement", "new_socket_published_before_settlement", "restarted_at", "settled_at", "startup_removal_call", "target_count", "target_disposition", "target_phase", "unit_load_state_after_retirement"],
+          "properties": {
+            "argumentless": {"const": true}, "inherited_descriptor_count": {"const": 2},
+            "journal_absent_origin": {"const": "RecoveredMayOwn"}, "journal_phase_after_settlement": {"const": "Absent"},
+            "journal_stable_read_count": {"const": 2}, "journal_temporary_entry_absent": {"const": true},
+            "manager_fdstore_after_removal": {"const": 0}, "manager_fdstore_before_removal": {"const": 2},
+            "new_socket_published_after_settlement": {"const": true}, "new_socket_published_before_settlement": {"const": false},
+            "restarted_at": {"$ref": "#/$defs/timestamp"}, "settled_at": {"$ref": "#/$defs/timestamp"},
+            "target_count": {"const": 1}, "target_disposition": {"const": "ExactPresent"},
+            "startup_removal_call": {"const": "systemd_fdstore::remove_restart_custody"},
+            "target_phase": {"const": "CleanupConfirmed"}, "unit_load_state_after_retirement": {"const": "not-found"}
+          }
+        }
+      }
+    },
+    "retirement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["journal_settled_absent", "lock_released", "socket_absent"],
+      "properties": {"journal_settled_absent": {"const": true}, "lock_released": {"const": true}, "socket_absent": {"const": true}}
+    },
+    "enumerated_host_state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["after_sha256", "before_sha256", "equal_at_fences", "records"],
+      "properties": {
+        "after_sha256": {"$ref": "#/$defs/sha256"}, "before_sha256": {"$ref": "#/$defs/sha256"},
+        "equal_at_fences": {"const": true},
+        "records": {"const": ["production_runtime_path", "accounts", "namespaces", "mounts", "resolver", "sysctls", "links", "addresses", "routes", "rules", "nexthops", "qdiscs", "nftables", "wireguard", "legacy_ipv4_firewall", "legacy_ipv6_firewall"]}
+      }
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["acceptance_a01_a15", "cleanup_confirmed_exact_present_singleton", "cleanup_confirmed_mixed_restart", "cleanup_owned", "datapath", "forced_helper_crash", "helper_boundary_only", "installed_package", "may_own_recovery", "restart_recovery"],
+      "properties": {
+        "acceptance_a01_a15": {"const": false}, "cleanup_confirmed_exact_present_singleton": {"const": true},
+        "cleanup_confirmed_mixed_restart": {"const": false}, "cleanup_owned": {"const": false},
+        "datapath": {"const": false}, "forced_helper_crash": {"const": true},
+        "helper_boundary_only": {"const": true}, "installed_package": {"const": false},
+        "may_own_recovery": {"const": false}, "restart_recovery": {"const": false}
+      }
+    },
+    "checks": {"type": "array", "minItems": 20, "maxItems": 20, "items": {"$ref": "#/$defs/passCheck"}},
+    "overall": {"const": "PASS"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}},
+    "revision": {"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"},
+    "invocation": {"type": "string", "pattern": "^[0-9a-f]{32}$", "not": {"const": "00000000000000000000000000000000"}},
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "passCheck": {"type": "object", "additionalProperties": false, "required": ["id", "result"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 96}, "result": {"const": "PASS"}}}
+  }
+}

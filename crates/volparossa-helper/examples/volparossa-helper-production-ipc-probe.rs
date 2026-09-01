@@ -47,7 +47,7 @@ use zeroize::Zeroizing;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const FUNCTIONAL_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
-const MAX_MODE_ARGUMENT_BYTES: usize = "expect-unauthorised-peer".len();
+const MAX_MODE_ARGUMENT_BYTES: usize = "prove-restart-cleanup-confirmed".len();
 const MAX_DECIMAL_U32_BYTES: usize = 10;
 const ROOT_UID: u32 = 0;
 const HELPER_RUNTIME_DIAGNOSTIC: &str = "HELPER_RUNTIME";
@@ -127,6 +127,8 @@ enum Mode {
     BindRuntime,
     FunctionalClientLease,
     ProveSettledJournal,
+    ProveRestartCleanupConfirmed,
+    ProveRestartSettled,
     RejectFrameBounds,
     RejectWireShapes,
     ExpectUnauthorisedPeer,
@@ -150,6 +152,12 @@ impl Mode {
             Self::BindRuntime => "VOLPAROSSA_HELPER_V3_IPC_BIND_RUNTIME_V1=pass",
             Self::FunctionalClientLease => "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass",
             Self::ProveSettledJournal => "VOLPAROSSA_HELPER_V3_FUNCTIONAL_JOURNAL_SETTLED_V1=pass",
+            Self::ProveRestartCleanupConfirmed => {
+                "VOLPAROSSA_HELPER_V3_RESTART_CLEANUP_CONFIRMED_V1=pass"
+            }
+            Self::ProveRestartSettled => {
+                "VOLPAROSSA_HELPER_V3_RESTART_EXACT_PRESENT_SETTLED_V1=pass"
+            }
             Self::RejectFrameBounds => "VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass",
             Self::RejectWireShapes => "VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass",
             Self::ExpectUnauthorisedPeer => "VOLPAROSSA_HELPER_V3_IPC_UNAUTHORISED_PEER_V1=pass",
@@ -752,6 +760,8 @@ fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Pro
         "bind-runtime" => Mode::BindRuntime,
         "functional-client-lease" => Mode::FunctionalClientLease,
         "prove-settled-journal" => Mode::ProveSettledJournal,
+        "prove-restart-cleanup-confirmed" => Mode::ProveRestartCleanupConfirmed,
+        "prove-restart-settled" => Mode::ProveRestartSettled,
         "reject-frame-bounds" => Mode::RejectFrameBounds,
         "reject-wire-shapes" => Mode::RejectWireShapes,
         "expect-unauthorised-peer" => Mode::ExpectUnauthorisedPeer,
@@ -794,6 +804,13 @@ async fn run_mode(invocation: ProbeInvocation) -> Result<(), ProbeFailure> {
         Mode::ProveSettledJournal => {
             prove_settled_journal(invocation.expected_peer).map_err(|_| ProbeFailure::Generic)
         }
+        Mode::ProveRestartCleanupConfirmed => {
+            prove_restart_cleanup_confirmed(invocation.expected_peer)
+                .map_err(|_| ProbeFailure::Generic)
+        }
+        Mode::ProveRestartSettled => {
+            prove_restart_settled(invocation.expected_peer).map_err(|_| ProbeFailure::Generic)
+        }
         Mode::RejectFrameBounds => run_reject_frame_bounds(invocation.expected_peer)
             .await
             .map_err(|_| ProbeFailure::Generic),
@@ -811,6 +828,28 @@ fn prove_settled_journal(expected_peer: ExpectedPeer) -> Result<(), ProbeError> 
         || getegid().as_raw() != expected_peer.gid
         || expected_peer.pid <= 0
         || !volparossa_helper::production_functional_journal_is_exactly_settled()
+    {
+        return Err(ProbeError::UntrustedServer);
+    }
+    Ok(())
+}
+
+fn prove_restart_cleanup_confirmed(expected_peer: ExpectedPeer) -> Result<(), ProbeError> {
+    if geteuid().as_raw() != ROOT_UID
+        || getegid().as_raw() != expected_peer.gid
+        || expected_peer.pid <= 0
+        || !volparossa_helper::production_functional_journal_is_exactly_restart_cleanup_confirmed()
+    {
+        return Err(ProbeError::UntrustedServer);
+    }
+    Ok(())
+}
+
+fn prove_restart_settled(expected_peer: ExpectedPeer) -> Result<(), ProbeError> {
+    if geteuid().as_raw() != ROOT_UID
+        || getegid().as_raw() != expected_peer.gid
+        || expected_peer.pid <= 0
+        || !volparossa_helper::production_functional_journal_is_exactly_restart_settled()
     {
         return Err(ProbeError::UntrustedServer);
     }
@@ -2628,6 +2667,11 @@ mod tests {
             ("bind-runtime", Mode::BindRuntime),
             ("functional-client-lease", Mode::FunctionalClientLease),
             ("prove-settled-journal", Mode::ProveSettledJournal),
+            (
+                "prove-restart-cleanup-confirmed",
+                Mode::ProveRestartCleanupConfirmed,
+            ),
+            ("prove-restart-settled", Mode::ProveRestartSettled),
             ("reject-frame-bounds", Mode::RejectFrameBounds),
             ("reject-wire-shapes", Mode::RejectWireShapes),
             ("expect-unauthorised-peer", Mode::ExpectUnauthorisedPeer),

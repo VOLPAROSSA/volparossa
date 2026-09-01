@@ -19,6 +19,7 @@ proof_directory=/run/volparossa-helper-production-proof
 host_network_identity_record=/run/volparossa-helper-production-host-network.identity
 probe=/run/volparossa-helper-production-ipc-probe
 production_helper=/run/volparossa-helper-production
+restart_launcher=/run/volparossa-helper-restart-launcher
 functional_underlay=vpfu0
 functional_underlay_alias=volparossa-proof-underlay-v1
 functional_underlay_address=192.31.195.254
@@ -51,6 +52,15 @@ functional_fdstore_proof_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_FDSTORE_CYCLES_V
 functional_relay_pair_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_EXTERNAL_CLEANUP_V1=pass
 functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
 functional_failure_record=$proof_directory/functional-client-lease.failure
+restart_precrash_record=$proof_directory/restart.precrash
+restart_debugger_armed_record=$proof_directory/restart.debugger-armed
+restart_initial_release_authorized_record=$proof_directory/restart.initial-release-authorized
+restart_crash_record=$proof_directory/restart.crash
+restart_recovery_boundary_record=$proof_directory/restart.recovery-boundary
+restart_resumed_record=$proof_directory/restart.resumed
+restart_readiness_failure_record=$proof_directory/restart.readiness-failure
+restart_journal_settled_state_record=$proof_directory/restart.journal.settled.state
+restart_exact_present_mode=no
 functional_peer_public_key=$functional_relay_public_key
 functional_peer_endpoint=$functional_underlay_address:$functional_relay_listen_port
 functional_exit_peer_public_key=$functional_exit_relay_public_key
@@ -59,9 +69,15 @@ functional_peer_keepalive=25
 functional_release_byte=G
 helper_bootstrap_capability_mask=00000000002031e0
 start_failure_record=$proof_directory/start.failure
+restart_initial_handshake_failure_record=$proof_directory/restart.initial-start.failure-stage
+restart_initial_handshake_terminal_record=$proof_directory/restart.initial-start.terminal
 start_failure_stage=
 start_failure_armed=no
 start_failure_published=no
+start_failure_exit_publication=yes
+restart_initial_handshake_armed=no
+restart_initial_handshake_failure_stage=
+restart_initial_handshake_terminal_ready=no
 functional_relay_state=absent
 functional_relay_ifindex=
 functional_relay_client_address=
@@ -115,6 +131,15 @@ number_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
         ''|0|0*|*[!0-9]*) return 1 ;;
+        *) [ "${#1}" -le 10 ] && [ "$1" -le 4294967294 ] ;;
+    esac
+}
+
+main_pid_property_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        0) return 0 ;;
+        ''|0*|*[!0-9]*) return 1 ;;
         *) [ "${#1}" -le 10 ] && [ "$1" -le 4294967294 ] ;;
     esac
 }
@@ -266,6 +291,36 @@ start_failure_stage_is_safe() {
     esac
 }
 
+restart_start_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        restart-recovery-wait|\
+        restart-lineage|\
+        restart-descriptor-settlement|\
+        restart-journal-settlement|\
+        restart-socket-validation|\
+        restart-publication)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+advance_restart_start_failure_stage() {
+    [ "$#" -eq 1 ] || return 1
+    case "$start_failure_stage:$1" in
+        preflight-runtime:restart-recovery-wait|\
+        restart-recovery-wait:restart-lineage|\
+        restart-lineage:restart-descriptor-settlement|\
+        restart-descriptor-settlement:restart-journal-settlement|\
+        restart-journal-settlement:restart-socket-validation|\
+        restart-socket-validation:restart-publication)
+            start_failure_stage=$1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 advance_start_failure_stage() {
     [ "$#" -eq 1 ] || return 1
     case "$start_failure_stage:$1" in
@@ -336,42 +391,355 @@ advance_start_failure_stage() {
 publish_start_failure() {
     [ "$start_failure_armed" = yes ] || return 1
     [ "$start_failure_published" = no ] || return 1
-    start_failure_stage_is_safe "$start_failure_stage" || return 1
+    if ! start_failure_stage_is_safe "$start_failure_stage" \
+        && ! restart_start_failure_stage_is_safe "$start_failure_stage"; then
+        return 1
+    fi
     write_private_file "$start_failure_record" \
         "VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=$start_failure_stage" \
         || return 1
     start_failure_published=yes
 }
 
+publish_restart_initial_release_authorized() {
+    [ "$restart_exact_present_mode" = yes ] || return 1
+    [ "$start_failure_stage" = functional-client-release ] || return 1
+    [ "$start_failure_armed" = yes ] || return 1
+    [ "$start_failure_published" = no ] || return 1
+    [ "$start_failure_exit_publication" = no ] || return 1
+    [ "$restart_initial_handshake_armed" = yes ] || return 1
+    [ "$restart_initial_handshake_failure_stage" = preflight ] || return 1
+    write_private_file "$restart_initial_release_authorized_record" \
+        'VOLPAROSSA_HELPER_V3_RESTART_INITIAL_RELEASE_AUTHORIZED_V1=pass'
+}
+
+restart_initial_release_authorized_record_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    private_file_is_safe "$1" || return 1
+    [ ! -e "$1.next" ] && [ ! -L "$1.next" ] || return 1
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_RESTART_INITIAL_RELEASE_AUTHORIZED_V1=pass' \
+        | cmp -s - "$1"
+}
+
+restart_initial_handshake_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight|\
+        publication|\
+        ack-path|\
+        ack-payload|\
+        ack-lineage|\
+        ack-pins|\
+        ack-timeout|\
+        post-lineage|\
+        post-pins|\
+        cleanup|\
+        terminal-publication|\
+        terminal-ack-path|\
+        terminal-ack-payload|\
+        terminal-ack-lineage|\
+        terminal-ack-pins|\
+        terminal-ack-timeout|\
+        terminal-post-lineage|\
+        terminal-post-pins)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+set_restart_initial_handshake_failure_stage() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$restart_initial_handshake_armed" = yes ] || return 1
+    restart_initial_handshake_failure_stage_is_safe "$1" || return 1
+    restart_initial_handshake_failure_stage=$1
+}
+
+publish_restart_initial_handshake_failure() {
+    [ "$restart_initial_handshake_armed" = yes ] || return 1
+    restart_initial_handshake_failure_stage_is_safe \
+        "$restart_initial_handshake_failure_stage" || return 1
+    write_private_file "$restart_initial_handshake_failure_record" \
+        "VOLPAROSSA_HELPER_V3_RESTART_INITIAL_HANDSHAKE_FAILURE_V1=$restart_initial_handshake_failure_stage"
+}
+
+publish_restart_initial_handshake_terminal() {
+    [ "$restart_initial_handshake_armed" = yes ] || return 1
+    write_private_file "$restart_initial_handshake_terminal_record" \
+        'VOLPAROSSA_HELPER_V3_RESTART_INITIAL_HANDSHAKE_TERMINAL_V1=success'
+}
+
+publish_and_wait_for_restart_initial_terminal_ack() {
+    [ "$restart_initial_handshake_armed" = yes ] || return 1
+    [ "$restart_initial_handshake_terminal_ready" = yes ] || return 1
+    [ "$restart_initial_handshake_failure_stage" = terminal-publication ] \
+        || return 1
+    [ ! -e "$restart_initial_handshake_failure_record" ] \
+        && [ ! -L "$restart_initial_handshake_failure_record" ] \
+        && [ ! -e "$restart_initial_handshake_failure_record.next" ] \
+        && [ ! -L "$restart_initial_handshake_failure_record.next" ] || return 1
+    publish_restart_initial_handshake_terminal || return 1
+    hook_restart_terminal_wait=0
+    while :; do
+        set_restart_initial_handshake_failure_stage terminal-ack-path || return 1
+        [ ! -e "$restart_initial_handshake_failure_record" ] \
+            && [ ! -L "$restart_initial_handshake_failure_record" ] \
+            && [ ! -e "$restart_initial_handshake_failure_record.next" ] \
+            && [ ! -L "$restart_initial_handshake_failure_record.next" ] || return 1
+        if [ ! -e "$restart_initial_handshake_terminal_record" ] \
+            && [ ! -L "$restart_initial_handshake_terminal_record" ]; then
+            [ ! -e "$restart_initial_handshake_terminal_record.next" ] \
+                && [ ! -L "$restart_initial_handshake_terminal_record.next" ] \
+                || return 1
+            break
+        fi
+        if ! private_file_is_safe "$restart_initial_handshake_terminal_record"; then
+            if [ ! -e "$restart_initial_handshake_terminal_record" ] \
+                && [ ! -L "$restart_initial_handshake_terminal_record" ] \
+                && [ ! -e "$restart_initial_handshake_terminal_record.next" ] \
+                && [ ! -L "$restart_initial_handshake_terminal_record.next" ]; then
+                break
+            fi
+            return 1
+        fi
+        [ ! -e "$restart_initial_handshake_terminal_record.next" ] \
+            && [ ! -L "$restart_initial_handshake_terminal_record.next" ] \
+            || return 1
+        set_restart_initial_handshake_failure_stage terminal-ack-payload \
+            || return 1
+        if ! printf '%s\n' \
+            'VOLPAROSSA_HELPER_V3_RESTART_INITIAL_HANDSHAKE_TERMINAL_V1=success' \
+            | cmp -s - "$restart_initial_handshake_terminal_record"; then
+            if [ ! -e "$restart_initial_handshake_terminal_record" ] \
+                && [ ! -L "$restart_initial_handshake_terminal_record" ] \
+                && [ ! -e "$restart_initial_handshake_terminal_record.next" ] \
+                && [ ! -L "$restart_initial_handshake_terminal_record.next" ]; then
+                break
+            fi
+            return 1
+        fi
+        set_restart_initial_handshake_failure_stage terminal-ack-lineage \
+            || return 1
+        [ "$(unit_main_pid "$hook_restart_failure_unit")" = 0 ] || return 1
+        [ "$(unit_u32_property "$hook_restart_failure_unit" \
+            org.freedesktop.systemd1.Service NRestarts)" = 0 ] || return 1
+        [ "$(unit_u32_property "$hook_restart_failure_unit" \
+            org.freedesktop.systemd1.Service ControlPID)" = "$$" ] || return 1
+        [ "$(unit_invocation_id "$hook_restart_failure_unit")" = \
+            "$hook_restart_failure_invocation" ] || return 1
+        set_restart_initial_handshake_failure_stage terminal-ack-pins || return 1
+        [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+            "$hook_restart_failure_process" ] || return 1
+        [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+            "$hook_restart_failure_namespace" ] || return 1
+        hook_restart_terminal_wait=$((hook_restart_terminal_wait + 1))
+        if [ "$hook_restart_terminal_wait" -ge 600 ]; then
+            set_restart_initial_handshake_failure_stage terminal-ack-timeout \
+                || return 1
+            return 1
+        fi
+        sleep 0.05
+    done
+    set_restart_initial_handshake_failure_stage terminal-post-lineage || return 1
+    [ "$(unit_main_pid "$hook_restart_failure_unit")" = 0 ] || return 1
+    [ "$(unit_u32_property "$hook_restart_failure_unit" \
+        org.freedesktop.systemd1.Service NRestarts)" = 0 ] || return 1
+    [ "$(unit_u32_property "$hook_restart_failure_unit" \
+        org.freedesktop.systemd1.Service ControlPID)" = "$$" ] || return 1
+    [ "$(unit_invocation_id "$hook_restart_failure_unit")" = \
+        "$hook_restart_failure_invocation" ] || return 1
+    set_restart_initial_handshake_failure_stage terminal-post-pins || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+        "$hook_restart_failure_process" ] || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+        "$hook_restart_failure_namespace" ] || return 1
+    [ ! -e "$restart_initial_handshake_terminal_record" ] \
+        && [ ! -L "$restart_initial_handshake_terminal_record" ] \
+        && [ ! -e "$restart_initial_handshake_terminal_record.next" ] \
+        && [ ! -L "$restart_initial_handshake_terminal_record.next" ] \
+        && [ ! -e "$restart_initial_handshake_failure_record" ] \
+        && [ ! -L "$restart_initial_handshake_failure_record" ] \
+        && [ ! -e "$restart_initial_handshake_failure_record.next" ] \
+        && [ ! -L "$restart_initial_handshake_failure_record.next" ] \
+        && [ ! -e "$restart_initial_release_authorized_record" ] \
+        && [ ! -L "$restart_initial_release_authorized_record" ] \
+        && [ ! -e "$restart_initial_release_authorized_record.next" ] \
+        && [ ! -L "$restart_initial_release_authorized_record.next" ] \
+        && [ ! -e "$functional_failure_record" ] \
+        && [ ! -L "$functional_failure_record" ] \
+        && [ ! -e "$functional_failure_record.next" ] \
+        && [ ! -L "$functional_failure_record.next" ] \
+        && [ ! -e "$start_failure_record" ] \
+        && [ ! -L "$start_failure_record" ] \
+        && [ ! -e "$start_failure_record.next" ] \
+        && [ ! -L "$start_failure_record.next" ] || return 1
+    restart_initial_handshake_terminal_ready=no
+    restart_initial_handshake_armed=no
+    restart_initial_handshake_failure_stage=
+}
+
 start_failure_exit() {
     start_failure_status=$?
     trap - EXIT
+    restart_initial_cleanup_succeeded=yes
     case $functional_fixture_shape in
         pair)
             if ! remove_functional_relay_pair_fixtures; then
                 start_failure_status=1
+                restart_initial_cleanup_succeeded=no
             fi
             ;;
         single)
             if [ "$functional_exit_relay_state" != absent ]; then
                 if ! remove_functional_exit_relay_fixture; then
                     start_failure_status=1
+                    restart_initial_cleanup_succeeded=no
                 fi
             fi
             if [ "$functional_relay_state" != absent ]; then
                 if ! remove_functional_relay_fixture; then
                     start_failure_status=1
+                    restart_initial_cleanup_succeeded=no
                 fi
             fi
             ;;
-        *) start_failure_status=1 ;;
+        *)
+            start_failure_status=1
+            restart_initial_cleanup_succeeded=no
+            ;;
     esac
     if [ "$start_failure_status" -ne 0 ] \
+        && [ "${restart_initial_handshake_armed:-no}" = yes ]; then
+        if [ "$restart_initial_cleanup_succeeded" != yes ]; then
+            set_restart_initial_handshake_failure_stage cleanup || :
+            publish_restart_initial_handshake_failure || :
+        elif [ "${restart_initial_handshake_terminal_ready:-no}" = yes ]; then
+            set_restart_initial_handshake_failure_stage terminal-publication || :
+            if ! publish_and_wait_for_restart_initial_terminal_ack; then
+                publish_restart_initial_handshake_failure || :
+            fi
+        else
+            publish_restart_initial_handshake_failure || :
+        fi
+    fi
+    if [ "$start_failure_status" -ne 0 ] \
         && [ "$start_failure_armed" = yes ] \
+        && [ "${start_failure_exit_publication:-yes}" = yes ] \
         && [ "$start_failure_published" = no ]; then
         publish_start_failure || :
     fi
     exit "$start_failure_status"
+}
+
+publish_and_wait_for_restart_initial_failure_ack() {
+    [ "$#" -eq 4 ] || return 1
+    hook_restart_failure_unit=$1
+    hook_restart_failure_invocation=$2
+    hook_restart_failure_process=$3
+    hook_restart_failure_namespace=$4
+    [ "$restart_initial_handshake_armed" = yes ] || return 1
+    [ "$restart_initial_handshake_failure_stage" = preflight ] || return 1
+    [ ! -e "$restart_initial_handshake_failure_record" ] \
+        && [ ! -L "$restart_initial_handshake_failure_record" ] \
+        && [ ! -e "$restart_initial_handshake_failure_record.next" ] \
+        && [ ! -L "$restart_initial_handshake_failure_record.next" ] || return 1
+    [ ! -e "$restart_initial_handshake_terminal_record" ] \
+        && [ ! -L "$restart_initial_handshake_terminal_record" ] \
+        && [ ! -e "$restart_initial_handshake_terminal_record.next" ] \
+        && [ ! -L "$restart_initial_handshake_terminal_record.next" ] || return 1
+    unit_name_is_safe "$hook_restart_failure_unit" || return 1
+    invocation_id_is_safe "$hook_restart_failure_invocation" || return 1
+    kernel_object_identity_is_safe "$hook_restart_failure_process" || return 1
+    kernel_object_identity_is_safe "$hook_restart_failure_namespace" || return 1
+    [ "$start_failure_stage" = functional-client-release ] || return 1
+    [ "$start_failure_armed" = yes ] || return 1
+    [ "$start_failure_published" = no ] || return 1
+    [ "$(unit_main_pid "$hook_restart_failure_unit")" = 0 ] || return 1
+    [ "$(unit_u32_property "$hook_restart_failure_unit" \
+        org.freedesktop.systemd1.Service NRestarts)" = 0 ] || return 1
+    [ "$(unit_u32_property "$hook_restart_failure_unit" \
+        org.freedesktop.systemd1.Service ControlPID)" = "$$" ] || return 1
+    [ "$(unit_invocation_id "$hook_restart_failure_unit")" = \
+        "$hook_restart_failure_invocation" ] || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+        "$hook_restart_failure_process" ] || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+        "$hook_restart_failure_namespace" ] || return 1
+    set_restart_initial_handshake_failure_stage publication || return 1
+    publish_start_failure || return 1
+    hook_restart_failure_wait=0
+    while :; do
+        set_restart_initial_handshake_failure_stage ack-path || return 1
+        if [ ! -e "$start_failure_record" ] \
+            && [ ! -L "$start_failure_record" ]; then
+            [ ! -e "$start_failure_record.next" ] \
+                && [ ! -L "$start_failure_record.next" ] || return 1
+            break
+        fi
+        if ! private_file_is_safe "$start_failure_record"; then
+            if [ ! -e "$start_failure_record" ] \
+                && [ ! -L "$start_failure_record" ] \
+                && [ ! -e "$start_failure_record.next" ] \
+                && [ ! -L "$start_failure_record.next" ]; then
+                break
+            fi
+            return 1
+        fi
+        [ ! -e "$start_failure_record.next" ] \
+            && [ ! -L "$start_failure_record.next" ] || return 1
+        set_restart_initial_handshake_failure_stage ack-payload || return 1
+        if ! printf '%s\n' \
+            'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=functional-client-release' \
+            | cmp -s - "$start_failure_record"; then
+            if [ ! -e "$start_failure_record" ] \
+                && [ ! -L "$start_failure_record" ] \
+                && [ ! -e "$start_failure_record.next" ] \
+                && [ ! -L "$start_failure_record.next" ]; then
+                break
+            fi
+            return 1
+        fi
+        set_restart_initial_handshake_failure_stage ack-lineage || return 1
+        [ "$(unit_main_pid "$hook_restart_failure_unit")" = 0 ] || return 1
+        [ "$(unit_u32_property "$hook_restart_failure_unit" \
+            org.freedesktop.systemd1.Service NRestarts)" = 0 ] || return 1
+        [ "$(unit_u32_property "$hook_restart_failure_unit" \
+            org.freedesktop.systemd1.Service ControlPID)" = "$$" ] || return 1
+        [ "$(unit_invocation_id "$hook_restart_failure_unit")" = \
+            "$hook_restart_failure_invocation" ] || return 1
+        set_restart_initial_handshake_failure_stage ack-pins || return 1
+        [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+            "$hook_restart_failure_process" ] || return 1
+        [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+            "$hook_restart_failure_namespace" ] || return 1
+        hook_restart_failure_wait=$((hook_restart_failure_wait + 1))
+        if [ "$hook_restart_failure_wait" -ge 600 ]; then
+            set_restart_initial_handshake_failure_stage ack-timeout || return 1
+            return 1
+        fi
+        sleep 0.05
+    done
+    set_restart_initial_handshake_failure_stage post-lineage || return 1
+    [ "$(unit_main_pid "$hook_restart_failure_unit")" = 0 ] || return 1
+    [ "$(unit_u32_property "$hook_restart_failure_unit" \
+        org.freedesktop.systemd1.Service NRestarts)" = 0 ] || return 1
+    [ "$(unit_u32_property "$hook_restart_failure_unit" \
+        org.freedesktop.systemd1.Service ControlPID)" = "$$" ] || return 1
+    [ "$(unit_invocation_id "$hook_restart_failure_unit")" = \
+        "$hook_restart_failure_invocation" ] || return 1
+    set_restart_initial_handshake_failure_stage post-pins || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+        "$hook_restart_failure_process" ] || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+        "$hook_restart_failure_namespace" ] || return 1
+    [ ! -e "$start_failure_record" ] \
+        && [ ! -L "$start_failure_record" ] \
+        && [ ! -e "$start_failure_record.next" ] \
+        && [ ! -L "$start_failure_record.next" ] || return 1
+    [ "$start_failure_published" = yes ] || return 1
+    set_restart_initial_handshake_failure_stage cleanup || return 1
+    restart_initial_handshake_terminal_ready=yes
 }
 
 checksum_file() {
@@ -516,7 +884,7 @@ unit_u32_property() {
     hook_property_object=$(unit_object_path "$1") || return 1
     [ "$2" = org.freedesktop.systemd1.Service ] || return 1
     case $3 in
-        MainPID|NFileDescriptorStore) ;;
+        ControlPID|MainPID|NFileDescriptorStore|NRestarts) ;;
         *) return 1 ;;
     esac
     hook_property_json=$(/usr/bin/busctl \
@@ -551,21 +919,26 @@ unit_main_pid() {
     [ "$#" -eq 1 ] || return 1
     hook_main_pid=$(unit_u32_property \
         "$1" org.freedesktop.systemd1.Service MainPID) || return 1
-    number_is_safe "$hook_main_pid" || return 1
+    main_pid_property_is_safe "$hook_main_pid" || return 1
     printf '%s\n' "$hook_main_pid"
 }
 
 systemd_exec_record_from_json() {
-    [ "$#" -eq 5 ] || return 1
+    [ "$#" -eq 6 ] || return 1
     hook_exec_json=$1
     hook_exec_kind=$2
     hook_exec_pid=$3
     hook_exec_gid=$4
     hook_exec_expected_type=$5
+    hook_exec_expected_entrypoint=$6
     number_is_safe "$hook_exec_pid" || return 1
     number_is_safe "$hook_exec_gid" || return 1
     case $hook_exec_kind:$hook_exec_expected_type in
         basic:'a(sasbttttuii)'|extended:'a(sasasttttuii)') ;;
+        *) return 1 ;;
+    esac
+    case $hook_exec_expected_entrypoint in
+        "$production_helper"|"$restart_launcher") ;;
         *) return 1 ;;
     esac
     printf '%s' "$hook_exec_json" | /usr/bin/jq -ers \
@@ -574,7 +947,7 @@ systemd_exec_record_from_json() {
         --arg expected_path /usr/bin/setpriv \
         --arg expected_regid "--regid=$hook_exec_gid" \
         --arg expected_groups "--groups=$hook_exec_gid" \
-        --arg expected_helper "$production_helper" \
+        --arg expected_entrypoint "$hook_exec_expected_entrypoint" \
         --arg expected_gid "$hook_exec_gid" \
         --argjson expected_pid "$hook_exec_pid" '
         def exact_u53:
@@ -595,7 +968,7 @@ systemd_exec_record_from_json() {
                 $expected_regid,
                 $expected_groups,
                 "--",
-                $expected_helper
+                $expected_entrypoint
             ]
             and (if $expected_kind == "basic"
                 then .[0].data[0][2] == false
@@ -623,6 +996,11 @@ capture_systemd_launch_contract() {
     unit_name_is_safe "$hook_launch_unit" || return 1
     number_is_safe "$hook_launch_pid" || return 1
     number_is_safe "$hook_launch_gid" || return 1
+    case $restart_exact_present_mode in
+        no) hook_launch_entrypoint=$production_helper ;;
+        yes) hook_launch_entrypoint=$restart_launcher ;;
+        *) return 1 ;;
+    esac
     hook_launch_object=$(unit_object_path "$hook_launch_unit") || return 1
     hook_exec_start_json=$(/usr/bin/busctl \
         --address="$system_bus_address" \
@@ -644,10 +1022,10 @@ capture_systemd_launch_contract() {
     [ "${#hook_exec_start_ex_json}" -le 2048 ] || return 1
     hook_exec_start_record=$(systemd_exec_record_from_json \
         "$hook_exec_start_json" basic "$hook_launch_pid" "$hook_launch_gid" \
-        'a(sasbttttuii)') || return 1
+        'a(sasbttttuii)' "$hook_launch_entrypoint") || return 1
     hook_exec_start_ex_record=$(systemd_exec_record_from_json \
         "$hook_exec_start_ex_json" extended "$hook_launch_pid" "$hook_launch_gid" \
-        'a(sasasttttuii)') || return 1
+        'a(sasasttttuii)' "$hook_launch_entrypoint") || return 1
     [ "$hook_exec_start_record" = "$hook_exec_start_ex_record" ] || return 1
     printf '%s\n' "$hook_exec_start_record"
 }
@@ -687,13 +1065,21 @@ capture_lock_identity() {
 }
 
 process_starttime_from_stat() {
-    [ "$#" -eq 2 ] || return 1
+    case $# in
+        2) hook_starttime_state=active ;;
+        3)
+            [ "$3" = traced ] || return 1
+            hook_starttime_state=traced
+            ;;
+        *) return 1 ;;
+    esac
     hook_starttime_line=$1
     hook_starttime_pid=$2
     number_is_safe "$hook_starttime_pid" || return 1
     [ "${#hook_starttime_line}" -le 4096 ] || return 1
     printf '%s\n' "$hook_starttime_line" | /usr/bin/awk \
-        -v expected_pid="$hook_starttime_pid" '
+        -v expected_pid="$hook_starttime_pid" \
+        -v expected_state="$hook_starttime_state" '
         NR != 1 { invalid = 1; next }
         {
             prefix = expected_pid " ("
@@ -722,7 +1108,10 @@ process_starttime_from_stat() {
             }
             fields = split(remainder, value, " ")
             starttime = value[20]
-            if (fields < 20 || value[1] !~ /^(R|S|D)$/ \
+            state_is_expected = (expected_state == "active" \
+                && value[1] ~ /^(R|S|D)$/) \
+                || (expected_state == "traced" && value[1] == "t")
+            if (fields < 20 || !state_is_expected \
                 || starttime !~ /^[1-9][0-9]*$/ \
                 || length(starttime) > 20) {
                 invalid = 1
@@ -745,6 +1134,21 @@ capture_process_starttime() {
     [ -f "$hook_starttime_path" ] && [ ! -L "$hook_starttime_path" ] || return 1
     hook_starttime_line=$(cat "$hook_starttime_path") || return 1
     process_starttime_from_stat "$hook_starttime_line" "$hook_starttime_pid"
+}
+
+# The recovery observer runs synchronously from a GDB breakpoint command while
+# the inferior is in Linux's lowercase `t` ptrace stop. Keep that exceptional
+# state out of ordinary live-process validation and accept it only here.
+capture_traced_process_starttime() {
+    [ "$#" -eq 1 ] || return 1
+    hook_traced_starttime_pid=$1
+    number_is_safe "$hook_traced_starttime_pid" || return 1
+    hook_traced_starttime_path=/proc/$hook_traced_starttime_pid/stat
+    [ -f "$hook_traced_starttime_path" ] \
+        && [ ! -L "$hook_traced_starttime_path" ] || return 1
+    hook_traced_starttime_line=$(cat "$hook_traced_starttime_path") || return 1
+    process_starttime_from_stat \
+        "$hook_traced_starttime_line" "$hook_traced_starttime_pid" traced
 }
 
 capture_helper_process_contract() {
@@ -3709,6 +4113,240 @@ unit_fdstore_is_empty() {
     [ "$hook_fdstore_count_after" = 0 ]
 }
 
+wait_for_restart_fdstore_settlement() {
+    [ "$#" -eq 3 ] || return 1
+    hook_restart_settlement_unit=$1
+    hook_restart_settlement_pid=$2
+    hook_restart_settlement_invocation=$3
+    unit_name_is_safe "$hook_restart_settlement_unit" || return 1
+    number_is_safe "$hook_restart_settlement_pid" || return 1
+    invocation_id_is_safe "$hook_restart_settlement_invocation" || return 1
+    hook_restart_settlement_wait=0
+    while :; do
+        [ "$(unit_main_pid "$hook_restart_settlement_unit")" = \
+            "$hook_restart_settlement_pid" ] || return 1
+        [ "$(unit_invocation_id "$hook_restart_settlement_unit")" = \
+            "$hook_restart_settlement_invocation" ] || return 1
+        hook_restart_settlement_count=$(unit_u32_property \
+            "$hook_restart_settlement_unit" \
+            org.freedesktop.systemd1.Service \
+            NFileDescriptorStore) || return 1
+        case $hook_restart_settlement_count in
+            0)
+                # The recovery observer runs at the function entry. Only after
+                # GDB detaches can the helper remove both inherited descriptors.
+                # Once PID 1 reports zero, require the full stable-empty dump;
+                # an invalid dump or any reappearance fails closed immediately.
+                unit_fdstore_is_empty "$hook_restart_settlement_unit" || return 1
+                [ "$(unit_main_pid "$hook_restart_settlement_unit")" = \
+                    "$hook_restart_settlement_pid" ] || return 1
+                [ "$(unit_invocation_id "$hook_restart_settlement_unit")" = \
+                    "$hook_restart_settlement_invocation" ] || return 1
+                return 0
+                ;;
+            2) ;;
+            *) return 1 ;;
+        esac
+        hook_restart_settlement_wait=$((hook_restart_settlement_wait + 1))
+        [ "$hook_restart_settlement_wait" -lt 900 ] || return 1
+        sleep 0.05
+    done
+}
+
+run_restart_bind_probe() {
+    [ "$#" -eq 4 ] || return 1
+    hook_restart_bind_pid=$1
+    hook_restart_bind_uid=$2
+    hook_restart_bind_gid=$3
+    hook_restart_bind_groups=$4
+    number_is_safe "$hook_restart_bind_pid" || return 1
+    number_is_safe "$hook_restart_bind_uid" || return 1
+    number_is_safe "$hook_restart_bind_gid" || return 1
+    number_is_safe "$hook_restart_bind_groups" || return 1
+    /usr/bin/setpriv \
+        --reuid="$hook_restart_bind_uid" \
+        --regid="$hook_restart_bind_gid" \
+        --groups="$hook_restart_bind_groups" \
+        --inh-caps=-all \
+        --ambient-caps=-all \
+        --bounding-set=-all \
+        --no-new-privs \
+        "$probe" bind-runtime "$hook_restart_bind_pid" \
+            "$hook_restart_bind_gid" 2>/dev/null
+}
+
+restart_uptime_seconds() {
+    [ "$#" -eq 1 ] || return 1
+    hook_restart_uptime=$1
+    case $hook_restart_uptime in
+        ''|*[!0-9.]*|*.*.*|.*|*.) return 1 ;;
+    esac
+    hook_restart_uptime_seconds=${hook_restart_uptime%.*}
+    hook_restart_uptime_fraction=${hook_restart_uptime#*.}
+    case $hook_restart_uptime_fraction in
+        [0-9][0-9]) ;;
+        *) return 1 ;;
+    esac
+    case $hook_restart_uptime_seconds in
+        0) ;;
+        ''|0*|*[!0-9]*) return 1 ;;
+        *) [ "${#hook_restart_uptime_seconds}" -le 10 ] \
+            && [ "$hook_restart_uptime_seconds" -le 4294967254 ] || return 1 ;;
+    esac
+    printf '%s\n' "$hook_restart_uptime_seconds"
+}
+
+restart_monotonic_seconds() {
+    IFS=' ' read -r hook_restart_uptime hook_restart_idle hook_restart_extra \
+        </proc/uptime || return 1
+    [ -n "$hook_restart_idle" ] && [ -z "$hook_restart_extra" ] || return 1
+    restart_uptime_seconds "$hook_restart_uptime"
+}
+
+wait_for_restart_readiness() {
+    hook_restart_readiness_failure_stage=preflight
+    [ "$#" -eq 6 ] || return 1
+    hook_restart_ready_unit=$1
+    hook_restart_ready_pid=$2
+    hook_restart_ready_invocation=$3
+    hook_restart_ready_uid=$4
+    hook_restart_ready_gid=$5
+    hook_restart_ready_groups=$6
+    unit_name_is_safe "$hook_restart_ready_unit" || return 1
+    number_is_safe "$hook_restart_ready_pid" || return 1
+    invocation_id_is_safe "$hook_restart_ready_invocation" || return 1
+    number_is_safe "$hook_restart_ready_uid" || return 1
+    number_is_safe "$hook_restart_ready_gid" || return 1
+    number_is_safe "$hook_restart_ready_groups" || return 1
+    hook_restart_readiness_failure_stage=clock-read
+    hook_restart_ready_started=$(restart_monotonic_seconds) || return 1
+    hook_restart_ready_last_clock=$hook_restart_ready_started
+    hook_restart_ready_deadline=$((hook_restart_ready_started + 40))
+    hook_restart_ready_journal=no
+    hook_restart_ready_wait=0
+    while :; do
+        hook_restart_readiness_failure_stage=clock-read
+        hook_restart_ready_now=$(restart_monotonic_seconds) || return 1
+        hook_restart_readiness_failure_stage=clock-backwards
+        [ "$hook_restart_ready_now" -ge "$hook_restart_ready_last_clock" ] \
+            || return 1
+        hook_restart_ready_last_clock=$hook_restart_ready_now
+        if [ "$hook_restart_ready_now" -ge "$hook_restart_ready_deadline" ]; then
+            hook_restart_readiness_failure_stage=timeout
+            return 1
+        fi
+        hook_restart_readiness_failure_stage=lineage-pid
+        [ "$(unit_main_pid "$hook_restart_ready_unit")" = \
+            "$hook_restart_ready_pid" ] || return 1
+        hook_restart_readiness_failure_stage=lineage-invocation
+        [ "$(unit_invocation_id "$hook_restart_ready_unit")" = \
+            "$hook_restart_ready_invocation" ] || return 1
+        hook_restart_ready_socket=
+        if [ -e "$helper_socket" ] || [ -L "$helper_socket" ]; then
+            hook_restart_readiness_failure_stage=socket-capture
+            if ! hook_restart_ready_socket=$(capture_socket_identity \
+                "$hook_restart_ready_gid"); then
+                if [ ! -e "$helper_socket" ] && [ ! -L "$helper_socket" ]; then
+                    hook_restart_ready_socket=
+                else
+                    return 1
+                fi
+            fi
+        fi
+        if [ "$hook_restart_ready_journal" = no ]; then
+            if hook_restart_ready_journal_proof=$(
+                "$probe" prove-restart-settled \
+                    "$hook_restart_ready_pid" "$hook_restart_ready_gid" \
+                    2>/dev/null
+            ); then
+                hook_restart_readiness_failure_stage=initial-journal-value
+                [ "$hook_restart_ready_journal_proof" = \
+                    'VOLPAROSSA_HELPER_V3_RESTART_EXACT_PRESENT_SETTLED_V1=pass' ] \
+                    || return 1
+                hook_restart_ready_journal=yes
+                hook_restart_readiness_failure_stage=stage-transition
+                advance_restart_start_failure_stage restart-socket-validation \
+                    || return 1
+            fi
+        fi
+        if [ "$hook_restart_ready_journal" = yes ] \
+            && [ -n "$hook_restart_ready_socket" ]; then
+            hook_restart_readiness_failure_stage=clock-read
+            hook_restart_ready_now=$(restart_monotonic_seconds) || return 1
+            hook_restart_readiness_failure_stage=clock-backwards
+            [ "$hook_restart_ready_now" -ge "$hook_restart_ready_last_clock" ] \
+                || return 1
+            hook_restart_ready_last_clock=$hook_restart_ready_now
+            if [ "$hook_restart_ready_now" -ge \
+                "$hook_restart_ready_deadline" ]; then
+                hook_restart_readiness_failure_stage=timeout
+                return 1
+            fi
+            hook_restart_readiness_failure_stage=bind-runtime-read
+            if hook_restart_ready_bind=$(run_restart_bind_probe \
+                "$hook_restart_ready_pid" "$hook_restart_ready_uid" \
+                "$hook_restart_ready_gid" "$hook_restart_ready_groups"); then
+                hook_restart_readiness_failure_stage=bind-runtime-value
+                [ "$hook_restart_ready_bind" = \
+                    'VOLPAROSSA_HELPER_V3_IPC_BIND_RUNTIME_V1=pass' ] || return 1
+                hook_restart_readiness_failure_stage='journal-state-before'
+                hook_restart_ready_journal_state_before=$(capture_journal_state \
+                    "$hook_restart_ready_gid") || return 1
+                hook_restart_ready_final_journal=$(
+                    "$probe" prove-restart-settled \
+                        "$hook_restart_ready_pid" "$hook_restart_ready_gid" \
+                        2>/dev/null
+                ) || {
+                    hook_restart_readiness_failure_stage=final-journal-read
+                    return 1
+                }
+                hook_restart_readiness_failure_stage=final-journal-value
+                [ "$hook_restart_ready_final_journal" = \
+                    'VOLPAROSSA_HELPER_V3_RESTART_EXACT_PRESENT_SETTLED_V1=pass' ] \
+                    || return 1
+                hook_restart_readiness_failure_stage='journal-state-after'
+                hook_restart_ready_journal_state=$(capture_journal_state \
+                    "$hook_restart_ready_gid") || return 1
+                hook_restart_readiness_failure_stage='journal-state-change'
+                [ "$hook_restart_ready_journal_state" = \
+                    "$hook_restart_ready_journal_state_before" ] || return 1
+                hook_restart_readiness_failure_stage='journal-next'
+                [ ! -e "$journal_next" ] && [ ! -L "$journal_next" ] \
+                    || return 1
+                hook_restart_readiness_failure_stage=socket-stability
+                [ "$(capture_socket_identity "$hook_restart_ready_gid")" = \
+                    "$hook_restart_ready_socket" ] || return 1
+                hook_restart_readiness_failure_stage=final-lineage-pid
+                [ "$(unit_main_pid "$hook_restart_ready_unit")" = \
+                    "$hook_restart_ready_pid" ] || return 1
+                hook_restart_readiness_failure_stage=final-lineage-invocation
+                [ "$(unit_invocation_id "$hook_restart_ready_unit")" = \
+                    "$hook_restart_ready_invocation" ] || return 1
+                return 0
+            fi
+        fi
+        hook_restart_ready_wait=$((hook_restart_ready_wait + 1))
+        hook_restart_readiness_failure_stage=timeout
+        [ "$hook_restart_ready_wait" -lt 900 ] || return 1
+        sleep 0.05
+    done
+}
+
+restart_readiness_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight|clock-read|clock-backwards|lineage-pid|lineage-invocation|\
+        socket-capture|\
+        initial-journal-value|stage-transition|final-journal-read|\
+        final-journal-value|bind-runtime-read|bind-runtime-value|journal-next|\
+        journal-state-before|journal-state-after|journal-state-change|\
+        socket-stability|final-lineage-pid|final-lineage-invocation|timeout)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 custody_fd_name_is_safe() {
     [ "$#" -eq 1 ] || return 1
     hook_custody_name=$1
@@ -3917,6 +4555,41 @@ worker_process_fd_is_retired() {
         >/dev/null 2>&1; then
         return 1
     fi
+}
+
+held_worker_process_fd_is_retired() {
+    # A process-directory descriptor stays stat-able after the process exits,
+    # but Linux deliberately refuses to reopen that deleted procfs object via
+    # another process's /proc/<pid>/fd entry. Observe the exact descriptor in
+    # place instead: its manager-bound holder, fd number, deleted target and
+    # kernel identity must remain stable across both retirement probes.
+    [ "$#" -eq 4 ] || return 1
+    hook_worker_holder_pid=$1
+    hook_worker_process_fd=$2
+    hook_worker_pid=$3
+    hook_worker_process_identity=$4
+    number_is_safe "$hook_worker_holder_pid" || return 1
+    fd_number_is_safe "$hook_worker_process_fd" || return 1
+    number_is_safe "$hook_worker_pid" || return 1
+    kernel_object_identity_is_safe "$hook_worker_process_identity" || return 1
+    hook_worker_held_path=/proc/$hook_worker_holder_pid/fd/$hook_worker_process_fd
+    hook_worker_deleted_target=/proc/$hook_worker_pid\ \(deleted\)
+    [ "$(readlink "$hook_worker_held_path" 2>/dev/null)" = \
+        "$hook_worker_deleted_target" ] || return 1
+    [ "$(stat -Lc '%d:%i' "$hook_worker_held_path" 2>/dev/null)" = \
+        "$hook_worker_process_identity" ] || return 1
+    if cat "$hook_worker_held_path/stat" >/dev/null 2>&1; then
+        return 1
+    fi
+    if cat "$hook_worker_held_path/status" >/dev/null 2>&1; then
+        return 1
+    fi
+    [ ! -e "/proc/$hook_worker_pid" ] \
+        && [ ! -L "/proc/$hook_worker_pid" ] || return 1
+    [ "$(readlink "$hook_worker_held_path" 2>/dev/null)" = \
+        "$hook_worker_deleted_target" ] || return 1
+    [ "$(stat -Lc '%d:%i' "$hook_worker_held_path" 2>/dev/null)" = \
+        "$hook_worker_process_identity" ]
 }
 
 functional_probe_output_is_exact() {
@@ -4314,8 +4987,133 @@ run_functional_client_lease_probe() {
         "$proof_directory/unit.identity" \
         "$hook_functional_agent_gid" || return 1
 
+    if [ "$restart_exact_present_mode" = yes ]; then
+        hook_restart_identity=$(cat "$proof_directory/unit.identity") || return 1
+        hook_restart_socket=$(cat "$proof_directory/socket.identity") || return 1
+        hook_restart_precrash=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+            "$hook_restart_identity" \
+            "$hook_restart_socket" \
+            "$$" \
+            "$hook_functional_worker_pid" \
+            "$hook_functional_worker_starttime" \
+            "$hook_functional_worker_namespace" \
+            "$hook_functional_process_identity" \
+            "$hook_functional_pidfd_fdstore_identity" \
+            "$hook_functional_namespace_fdstore_identity" \
+            "$hook_functional_custody_name" \
+            "$hook_functional_wireguard" \
+            "$hook_functional_peer_address" \
+            'singleton-client') || return 1
+        write_private_file "$restart_precrash_record" "$hook_restart_precrash" || return 1
+        hook_restart_wait=0
+        while ! private_file_is_safe "$restart_debugger_armed_record"; do
+            hook_restart_wait=$((hook_restart_wait + 1))
+            [ "$hook_restart_wait" -lt 600 ] || return 1
+            sleep 0.05
+        done
+        [ "$(cat "$restart_debugger_armed_record")" = \
+            'VOLPAROSSA_HELPER_V3_RESTART_DEBUGGER_ARMED_V1=pass' ] || return 1
+    elif [ "$restart_exact_present_mode" != no ]; then
+        return 1
+    fi
+
     advance_start_failure_stage functional-client-release || return 1
+    if [ "$restart_exact_present_mode" = yes ]; then
+        # Arm the separate intentional-failure handshake before Destroy can
+        # reach the debugger breakpoint. The generic EXIT record must never
+        # race the root driver on this controlled restart path.
+        start_failure_exit_publication=no
+        restart_initial_handshake_armed=yes
+        set_restart_initial_handshake_failure_stage preflight || return 1
+        # This fixed authorization happens before the release byte. Reaching
+        # the later removal breakpoint therefore proves the release occurred,
+        # without depending on a Destroy response that the stopped helper
+        # cannot send.
+        publish_restart_initial_release_authorized || return 1
+    elif [ "$restart_exact_present_mode" != no ]; then
+        return 1
+    fi
     printf '%s' "$functional_release_byte" >&6 || return 1
+    if [ "$restart_exact_present_mode" = yes ]; then
+        # Destroy cannot publish its settled response while GDB holds the
+        # helper at remove_current_process_custody. The observer independently
+        # proves CleanupConfirmed, retired worker state and absent WireGuard
+        # state at that breakpoint, then publishes this crash record.
+        hook_restart_pin_wait=0
+        while ! private_file_is_safe "$restart_crash_record"; do
+            if [ -e "$restart_crash_record" ] \
+                || [ -L "$restart_crash_record" ]; then
+                return 1
+            fi
+            [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+                "$hook_functional_process_identity" ] || return 1
+            [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+                "$hook_functional_worker_namespace" ] || return 1
+            hook_restart_pin_wait=$((hook_restart_pin_wait + 1))
+            [ "$hook_restart_pin_wait" -lt 400 ] || return 1
+            sleep 0.05
+        done
+        [ ! -e "$restart_crash_record.next" ] \
+            && [ ! -L "$restart_crash_record.next" ] || return 1
+        [ ! -e "$restart_initial_release_authorized_record" ] \
+            && [ ! -L "$restart_initial_release_authorized_record" ] \
+            && [ ! -e "$restart_initial_release_authorized_record.next" ] \
+            && [ ! -L "$restart_initial_release_authorized_record.next" ] \
+            || return 1
+        worker_process_fd_is_retired 8 || return 1
+        [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+            "$hook_functional_process_identity" ] || return 1
+        worker_wireguard_is_absent 7 "$hook_functional_peer_address" || return 1
+        [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+            "$hook_functional_worker_namespace" ] || return 1
+        private_file_is_safe "$proof_directory/unit.identity" || return 1
+        hook_restart_failure_invocation=$(sed -n '1p' \
+            "$proof_directory/unit.identity") || return 1
+        invocation_id_is_safe "$hook_restart_failure_invocation" || return 1
+        [ "$(unit_invocation_id "$hook_functional_unit")" = \
+            "$hook_restart_failure_invocation" ] || return 1
+        # GDB kills the main helper immediately after publishing the crash
+        # record. systemd v257 retains this ExecStartPost process; keep both
+        # pins until MainPID is zero and the root driver acknowledges the
+        # exact stage record.
+        hook_restart_termination_wait=0
+        while :; do
+            hook_restart_termination_main=$(unit_main_pid \
+                "$hook_functional_unit") || return 1
+            if [ "$hook_restart_termination_main" = 0 ]; then
+                observe_functional_probe_failure \
+                    "$hook_functional_probe_pid" \
+                    "$hook_functional_stderr" || return 1
+                probe_output_is_exact \
+                    "$hook_functional_stdout" \
+                    "$functional_ready_record" || return 1
+                printf '%s\n' \
+                    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=destroy,protocol' \
+                    | cmp -s - "$functional_failure_record" || return 1
+                publish_and_wait_for_restart_initial_failure_ack \
+                    "$hook_functional_unit" \
+                    "$hook_restart_failure_invocation" \
+                    "$hook_functional_process_identity" \
+                    "$hook_functional_worker_namespace" || return 1
+                return 1
+            fi
+            [ "$hook_restart_termination_main" = \
+                "$hook_functional_main_pid" ] || return 1
+            [ "$(unit_invocation_id "$hook_functional_unit")" = \
+                "$hook_restart_failure_invocation" ] || return 1
+            [ "$(unit_u32_property "$hook_functional_unit" \
+                org.freedesktop.systemd1.Service NRestarts)" = 0 ] || return 1
+            [ "$(unit_u32_property "$hook_functional_unit" \
+                org.freedesktop.systemd1.Service ControlPID)" = "$$" ] || return 1
+            [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+                "$hook_functional_process_identity" ] || return 1
+            [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+                "$hook_functional_worker_namespace" ] || return 1
+            hook_restart_termination_wait=$((hook_restart_termination_wait + 1))
+            [ "$hook_restart_termination_wait" -lt 600 ] || return 1
+            sleep 0.05
+        done
+    fi
     hook_functional_client_settled_output=$(printf '%s\n%s' \
         "$functional_ready_record" \
         "$functional_client_settled_record") || return 1
@@ -4984,6 +5782,432 @@ run_functional_client_lease_probe() {
     private_network_is_pristine || return 1
 }
 
+restart_record_line() {
+    [ "$#" -eq 2 ] || return 1
+    private_file_is_safe "$1" || return 1
+    sed -n "$2"p "$1"
+}
+
+restart_observe_hook() {
+    [ "$#" -eq 4 ] || fail 'restart observer argument count is invalid'
+    hook_restart_phase=$1
+    hook_restart_unit=$2
+    hook_restart_gid=$3
+    hook_restart_main_pid=$4
+    unit_name_is_safe "$hook_restart_unit" || fail 'restart unit name is unsafe'
+    number_is_safe "$hook_restart_gid" || fail 'restart agent GID is invalid'
+    number_is_safe "$hook_restart_main_pid" || fail 'restart MainPID is invalid'
+    if [ "$hook_restart_phase" = after-crash ]; then
+        [ "$(unit_main_pid "$hook_restart_unit")" = 0 ] \
+            || fail 'killed restart MainPID remains manager-bound'
+    else
+        [ "$(unit_main_pid "$hook_restart_unit")" = "$hook_restart_main_pid" ] \
+            || fail 'restart MainPID is not manager-bound'
+    fi
+    case $hook_restart_phase in
+        armed)
+            if [ -e "$restart_debugger_armed_record" ] \
+                || [ -L "$restart_debugger_armed_record" ]; then
+                fail 'restart debugger marker already exists'
+            fi
+            write_private_file "$restart_debugger_armed_record" \
+                'VOLPAROSSA_HELPER_V3_RESTART_DEBUGGER_ARMED_V1=pass' \
+                || fail 'restart debugger marker could not be published'
+            ;;
+        cleanup-confirmed|after-crash|recovery-boundary)
+            private_file_is_safe "$restart_precrash_record" \
+                || fail 'restart precrash identity is unavailable'
+            hook_restart_initial_invocation=$(restart_record_line "$restart_precrash_record" 1) \
+                || fail 'restart initial invocation is unavailable'
+            hook_restart_initial_pid=$(restart_record_line "$restart_precrash_record" 2) \
+                || fail 'restart initial PID is unavailable'
+            hook_restart_initial_starttime=$(restart_record_line "$restart_precrash_record" 5) \
+                || fail 'restart initial starttime is unavailable'
+            hook_restart_initial_socket=$(restart_record_line "$restart_precrash_record" 7) \
+                || fail 'restart initial socket is unavailable'
+            hook_restart_hook_pid=$(restart_record_line "$restart_precrash_record" 8) \
+                || fail 'restart hook PID is unavailable'
+            hook_restart_worker_pid=$(restart_record_line "$restart_precrash_record" 9) \
+                || fail 'restart worker PID is unavailable'
+            hook_restart_worker_starttime=$(restart_record_line "$restart_precrash_record" 10) \
+                || fail 'restart worker starttime is unavailable'
+            hook_restart_namespace=$(restart_record_line "$restart_precrash_record" 11) \
+                || fail 'restart worker namespace is unavailable'
+            hook_restart_process=$(restart_record_line "$restart_precrash_record" 12) \
+                || fail 'restart worker process identity is unavailable'
+            hook_restart_pidfd_descriptor=$(restart_record_line "$restart_precrash_record" 13) \
+                || fail 'restart pidfd descriptor identity is unavailable'
+            hook_restart_namespace_descriptor=$(restart_record_line "$restart_precrash_record" 14) \
+                || fail 'restart namespace descriptor identity is unavailable'
+            hook_restart_custody=$(restart_record_line "$restart_precrash_record" 15) \
+                || fail 'restart custody name is unavailable'
+            hook_restart_peer=$(restart_record_line "$restart_precrash_record" 17) \
+                || fail 'restart peer fixture is unavailable'
+            invocation_id_is_safe "$hook_restart_initial_invocation" \
+                || fail 'restart initial invocation is invalid'
+            number_is_safe "$hook_restart_initial_pid" \
+                || fail 'restart initial PID is invalid'
+            case $hook_restart_initial_starttime in
+                process-starttime-v1=[1-9][0-9]*) ;;
+                *) fail 'restart initial starttime is invalid' ;;
+            esac
+            custody_fd_name_is_safe "$hook_restart_custody" \
+                || fail 'restart custody name is invalid'
+            unit_fdstore_exact_active_custody \
+                "$hook_restart_unit" "$hook_restart_pidfd_descriptor" \
+                "$hook_restart_namespace_descriptor" >/dev/null \
+                || fail 'restart exact descriptor custody is unavailable'
+            hook_restart_observed_custody=$hook_fdstore_custody_name
+            hook_restart_manager_before_removal=$hook_fdstore_count_before
+            hook_restart_manager_after_removal=$hook_fdstore_count_after
+            if [ "$hook_restart_manager_before_removal" != 2 ] \
+                || [ "$hook_restart_manager_after_removal" != 2 ]; then
+                fail 'restart descriptor count changed during observation'
+            fi
+            [ "$hook_restart_observed_custody" = "$hook_restart_custody" ] \
+                || fail 'restart exact descriptor custody changed'
+            hook_restart_journal=$(
+                "$probe" prove-restart-cleanup-confirmed \
+                    "$hook_restart_main_pid" "$hook_restart_gid" 2>/dev/null
+            ) || fail 'restart CleanupConfirmed journal is unavailable'
+            [ "$hook_restart_journal" = \
+                'VOLPAROSSA_HELPER_V3_RESTART_CLEANUP_CONFIRMED_V1=pass' ] \
+                || fail 'restart CleanupConfirmed journal proof is invalid'
+            case $hook_restart_phase in
+                cleanup-confirmed)
+                    [ "$hook_restart_main_pid" = "$hook_restart_initial_pid" ] \
+                        || fail 'precrash MainPID changed'
+                    [ "$(unit_invocation_id "$hook_restart_unit")" = \
+                        "$hook_restart_initial_invocation" ] \
+                        || fail 'precrash invocation changed'
+                    [ "$(unit_u32_property "$hook_restart_unit" \
+                        org.freedesktop.systemd1.Service ControlPID)" = \
+                        "$hook_restart_hook_pid" ] \
+                        || fail 'precrash hook ControlPID changed'
+                    command exec 7<"/proc/$hook_restart_hook_pid/fd/7" \
+                        || fail 'precrash worker namespace pin is unavailable'
+                    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+                        "$hook_restart_namespace" ] \
+                        || fail 'precrash worker namespace pin changed'
+                    held_worker_process_fd_is_retired \
+                        "$hook_restart_hook_pid" 8 "$hook_restart_worker_pid" \
+                        "$hook_restart_process" \
+                        || fail 'precrash worker process is not retired'
+                    worker_wireguard_is_absent 7 "$hook_restart_peer" \
+                        || fail 'precrash worker WireGuard state remains'
+                    restart_initial_release_authorized_record_is_exact \
+                        "$restart_initial_release_authorized_record" \
+                        || fail 'restart initial release authorization is invalid'
+                    [ "$(unit_main_pid "$hook_restart_unit")" = \
+                        "$hook_restart_initial_pid" ] \
+                        || fail 'precrash MainPID changed at release authorization'
+                    [ "$(unit_invocation_id "$hook_restart_unit")" = \
+                        "$hook_restart_initial_invocation" ] \
+                        || fail 'precrash invocation changed at release authorization'
+                    [ "$(unit_u32_property "$hook_restart_unit" \
+                        org.freedesktop.systemd1.Service ControlPID)" = \
+                        "$hook_restart_hook_pid" ] \
+                        || fail 'precrash hook changed at release authorization'
+                    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+                        "$hook_restart_namespace" ] \
+                        || fail 'precrash worker namespace pin changed at release authorization'
+                    held_worker_process_fd_is_retired \
+                        "$hook_restart_hook_pid" 8 "$hook_restart_worker_pid" \
+                        "$hook_restart_process" \
+                        || fail 'precrash worker process revived at release authorization'
+                    worker_wireguard_is_absent 7 "$hook_restart_peer" \
+                        || fail 'precrash worker WireGuard state returned at release authorization'
+                    hook_restart_release_authorized_identity=$(stat -Lc \
+                        '%d:%i:%f:%u:%g:%a:%h:%s' \
+                        "$restart_initial_release_authorized_record" 2>/dev/null) \
+                        || fail 'restart initial release authorization identity is unavailable'
+                    restart_initial_release_authorized_record_is_exact \
+                        "$restart_initial_release_authorized_record" \
+                        || fail 'restart initial release authorization changed'
+                    [ "$hook_restart_release_authorized_identity" = \
+                        "$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+                            "$restart_initial_release_authorized_record" 2>/dev/null)" ] \
+                        || fail 'restart initial release authorization identity changed'
+                    rm -- "$restart_initial_release_authorized_record" \
+                        || fail 'restart initial release authorization could not be consumed'
+                    if [ -e "$restart_initial_release_authorized_record" ] \
+                        || [ -L "$restart_initial_release_authorized_record" ] \
+                        || [ -e "$restart_initial_release_authorized_record.next" ] \
+                        || [ -L "$restart_initial_release_authorized_record.next" ]; then
+                        fail 'restart initial release authorization survived consumption'
+                    fi
+                    [ "$(unit_main_pid "$hook_restart_unit")" = \
+                        "$hook_restart_initial_pid" ] \
+                        || fail 'precrash MainPID changed after authorization'
+                    [ "$(unit_invocation_id "$hook_restart_unit")" = \
+                        "$hook_restart_initial_invocation" ] \
+                        || fail 'precrash invocation changed after authorization'
+                    [ "$(unit_u32_property "$hook_restart_unit" \
+                        org.freedesktop.systemd1.Service ControlPID)" = \
+                        "$hook_restart_hook_pid" ] \
+                        || fail 'precrash hook changed after authorization'
+                    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+                        "$hook_restart_namespace" ] \
+                        || fail 'precrash namespace pin changed after authorization'
+                    held_worker_process_fd_is_retired \
+                        "$hook_restart_hook_pid" 8 "$hook_restart_worker_pid" \
+                        "$hook_restart_process" \
+                        || fail 'precrash worker process revived after authorization'
+                    worker_wireguard_is_absent 7 "$hook_restart_peer" \
+                        || fail 'precrash WireGuard state returned after authorization'
+                    command exec 7>&-
+                    # This boundary is published before GDB performs its kill;
+                    # the debugger status plus PID 1 and after-crash evidence
+                    # prove the subsequent SIGKILL.
+                    hook_restart_cleanup_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+                        || fail 'cleanup-confirmed time is unavailable'
+                    hook_restart_crash=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+                        "$hook_restart_cleanup_time" \
+                        "$hook_restart_initial_invocation" \
+                        "$hook_restart_initial_pid" \
+                        "$hook_restart_initial_starttime" \
+                        "$hook_restart_initial_socket" \
+                        "$hook_restart_pidfd_descriptor" \
+                        "$hook_restart_namespace_descriptor" \
+                        "$hook_restart_custody" \
+                        "$hook_restart_worker_pid" \
+                        "$hook_restart_worker_starttime") || fail 'crash record is unavailable'
+                    write_private_file "$restart_crash_record" "$hook_restart_crash" \
+                        || fail 'crash record could not be published'
+                    ;;
+                after-crash)
+                    [ -e "/proc/$hook_restart_initial_pid" ] \
+                        && fail 'killed helper still exists'
+                    [ "$(unit_invocation_id "$hook_restart_unit")" = \
+                        "$hook_restart_initial_invocation" ] \
+                        || fail 'after-crash invocation changed'
+                    [ "$(unit_u32_property "$hook_restart_unit" \
+                        org.freedesktop.systemd1.Service ControlPID)" = \
+                        "$hook_restart_hook_pid" ] \
+                        || fail 'after-crash hook ControlPID changed'
+                    [ "$(unit_u32_property "$hook_restart_unit" \
+                        org.freedesktop.systemd1.Service NRestarts)" = 0 ] \
+                        || fail 'restart began before the after-crash fence'
+                    ;;
+                recovery-boundary)
+                    hook_restart_new_invocation=$(unit_invocation_id "$hook_restart_unit") \
+                        || fail 'restart successor invocation is unavailable'
+                    [ "$hook_restart_new_invocation" != "$hook_restart_initial_invocation" ] \
+                        || fail 'restart successor reused the invocation'
+                    [ "$hook_restart_main_pid" != "$hook_restart_initial_pid" ] \
+                        || fail 'restart successor reused the MainPID'
+                    [ "$(unit_u32_property "$hook_restart_unit" \
+                        org.freedesktop.systemd1.Service NRestarts)" = 1 ] \
+                        || fail 'restart count is not exactly one'
+                    [ "$(capture_socket_identity "$hook_restart_gid")" = \
+                        "$hook_restart_initial_socket" ] \
+                        || fail 'a new socket appeared before settlement'
+                    hook_restart_boundary_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+                        || fail 'restart boundary time is unavailable'
+                    hook_restart_new_starttime=$(capture_traced_process_starttime \
+                        "$hook_restart_main_pid") \
+                        || fail 'restart successor starttime is unavailable'
+                    hook_restart_boundary=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+                        "$hook_restart_boundary_time" "$hook_restart_new_invocation" \
+                        "$hook_restart_main_pid" "$hook_restart_new_starttime" \
+                        'startup-removal-call-v1=systemd_fdstore::remove_restart_custody' \
+                        "manager-fdstore-before-removal-v1=$hook_restart_manager_before_removal") \
+                        || fail 'restart boundary record is unavailable'
+                    write_private_file "$restart_recovery_boundary_record" \
+                        "$hook_restart_boundary" \
+                        || fail 'restart boundary record could not be published'
+                    ;;
+            esac
+            ;;
+        *) fail 'restart observer phase is invalid' ;;
+    esac
+}
+
+restart_start_hook() {
+    [ "$#" -eq 6 ] || fail 'restart start hook argument count is invalid'
+    hook_restart_unit=$1
+    hook_restart_uid=$2
+    hook_restart_gid=$3
+    hook_restart_groups=$4
+    if [ ! -e "$restart_crash_record" ] && [ ! -L "$restart_crash_record" ]; then
+        restart_exact_present_mode=yes
+        start_hook "$@"
+        fail 'restart first invocation crossed the forced-crash boundary'
+    fi
+    private_file_is_safe "$restart_crash_record" \
+        || fail 'restart crash record is unavailable'
+    if [ -e "$restart_readiness_failure_record" ] \
+        || [ -L "$restart_readiness_failure_record" ] \
+        || [ -e "$restart_readiness_failure_record.next" ] \
+        || [ -L "$restart_readiness_failure_record.next" ]; then
+        fail 'restart readiness failure record path is unsafe'
+    fi
+    if [ -e "$restart_journal_settled_state_record" ] \
+        || [ -L "$restart_journal_settled_state_record" ] \
+        || [ -e "$restart_journal_settled_state_record.next" ] \
+        || [ -L "$restart_journal_settled_state_record.next" ]; then
+        fail 'restart journal state record path is unsafe'
+    fi
+    unit_name_is_safe "$hook_restart_unit" || fail 'restart unit name is unsafe'
+    number_is_safe "$hook_restart_uid" || fail 'restart UID is unsafe'
+    number_is_safe "$hook_restart_gid" || fail 'restart GID is unsafe'
+    number_is_safe "$hook_restart_groups" || fail 'restart groups are unsafe'
+    advance_restart_start_failure_stage restart-recovery-wait \
+        || fail 'restart start failure stage transition is invalid'
+    hook_restart_wait_pid=$(unit_main_pid "$hook_restart_unit") \
+        || fail 'restart successor MainPID is unavailable before recovery'
+    hook_restart_wait_invocation=$(unit_invocation_id "$hook_restart_unit") \
+        || fail 'restart successor invocation is unavailable before recovery'
+    hook_restart_wait=0
+    while ! private_file_is_safe "$restart_recovery_boundary_record"; do
+        if [ -e "$restart_recovery_boundary_record" ] \
+            || [ -L "$restart_recovery_boundary_record" ]; then
+            if private_file_is_safe "$restart_recovery_boundary_record"; then
+                break
+            fi
+            fail 'restart recovery boundary is unsafe'
+        fi
+        [ "$(unit_main_pid "$hook_restart_unit")" = \
+            "$hook_restart_wait_pid" ] \
+            || fail 'restart successor MainPID changed before recovery'
+        [ "$(unit_invocation_id "$hook_restart_unit")" = \
+            "$hook_restart_wait_invocation" ] \
+            || fail 'restart successor invocation changed before recovery'
+        hook_restart_wait=$((hook_restart_wait + 1))
+        if [ "$hook_restart_wait" -ge 1800 ]; then
+            if private_file_is_safe "$restart_recovery_boundary_record"; then
+                break
+            fi
+            if [ -e "$restart_recovery_boundary_record" ] \
+                || [ -L "$restart_recovery_boundary_record" ]; then
+                if private_file_is_safe "$restart_recovery_boundary_record"; then
+                    break
+                fi
+                fail 'restart recovery boundary is unsafe'
+            fi
+            fail 'restart recovery boundary is unavailable'
+        fi
+        sleep 0.05
+    done
+    advance_restart_start_failure_stage restart-lineage \
+        || fail 'restart start failure stage transition is invalid'
+    hook_restart_current_pid=$(unit_main_pid "$hook_restart_unit") \
+        || fail 'restart successor MainPID is unavailable'
+    hook_restart_current_invocation=$(unit_invocation_id "$hook_restart_unit") \
+        || fail 'restart successor invocation is unavailable'
+    [ "$hook_restart_current_pid" = "$hook_restart_wait_pid" ] \
+        || fail 'restart successor MainPID changed after recovery'
+    [ "$hook_restart_current_invocation" = \
+        "$hook_restart_wait_invocation" ] \
+        || fail 'restart successor invocation changed after recovery'
+    hook_restart_initial_invocation=$(restart_record_line "$restart_crash_record" 2) \
+        || fail 'restart initial invocation is unavailable'
+    hook_restart_initial_pid=$(restart_record_line "$restart_crash_record" 3) \
+        || fail 'restart initial PID is unavailable'
+    hook_restart_initial_starttime=$(restart_record_line "$restart_crash_record" 4) \
+        || fail 'restart initial starttime is unavailable'
+    hook_restart_initial_socket=$(restart_record_line "$restart_crash_record" 5) \
+        || fail 'restart initial socket is unavailable'
+    hook_restart_boundary_starttime=$(restart_record_line \
+        "$restart_recovery_boundary_record" 4) \
+        || fail 'restart boundary starttime is unavailable'
+    case $hook_restart_boundary_starttime in
+        ''|0|0*|*[!0-9]*) fail 'restart boundary starttime is invalid' ;;
+    esac
+    [ "${#hook_restart_boundary_starttime}" -le 20 ] \
+        || fail 'restart boundary starttime is invalid'
+    [ "$hook_restart_current_invocation" != "$hook_restart_initial_invocation" ] \
+        || fail 'restart successor invocation was reused'
+    [ "$hook_restart_current_pid" != "$hook_restart_initial_pid" ] \
+        || fail 'restart successor MainPID was reused'
+    [ "process-starttime-v1=$hook_restart_boundary_starttime" \
+        != "$hook_restart_initial_starttime" ] \
+        || fail 'restart successor starttime was reused'
+    [ "$(unit_u32_property "$hook_restart_unit" \
+        org.freedesktop.systemd1.Service NRestarts)" = 1 ] \
+        || fail 'restart count is not exactly one'
+    advance_restart_start_failure_stage restart-descriptor-settlement \
+        || fail 'restart start failure stage transition is invalid'
+    wait_for_restart_fdstore_settlement \
+        "$hook_restart_unit" "$hook_restart_current_pid" \
+        "$hook_restart_current_invocation" \
+        || fail 'restart descriptor store did not settle exactly'
+    hook_restart_resumed_starttime=$(capture_process_starttime \
+        "$hook_restart_current_pid") \
+        || fail 'restart successor starttime is unavailable after descriptor settlement'
+    [ "$hook_restart_resumed_starttime" = "$hook_restart_boundary_starttime" ] \
+        || fail 'restart successor starttime changed after recovery'
+    hook_restart_manager_after_removal=$hook_fdstore_count_after
+    if [ "$hook_fdstore_count_before" != 0 ] \
+        || [ "$hook_restart_manager_after_removal" != 0 ]; then
+        fail 'restart descriptor count changed during empty observation'
+    fi
+    advance_restart_start_failure_stage restart-journal-settlement \
+        || fail 'restart start failure stage transition is invalid'
+    if ! wait_for_restart_readiness \
+        "$hook_restart_unit" "$hook_restart_current_pid" \
+        "$hook_restart_current_invocation" "$hook_restart_uid" \
+        "$hook_restart_gid" "$hook_restart_groups"; then
+        restart_readiness_failure_stage_is_safe \
+            "$hook_restart_readiness_failure_stage" \
+            || fail 'restart readiness failure category is invalid'
+        hook_restart_readiness_failure_payload=VOLPAROSSA_HELPER_V3_RESTART_READINESS_FAILURE_V1=$hook_restart_readiness_failure_stage
+        write_private_file "$restart_readiness_failure_record" \
+            "$hook_restart_readiness_failure_payload" \
+            || fail 'restart readiness failure record could not be published'
+        fail 'restart successor readiness did not settle exactly'
+    fi
+    hook_restart_restarted_at=$(restart_record_line "$restart_recovery_boundary_record" 1) \
+        || fail 'restart time is unavailable'
+    [ "$(restart_record_line "$restart_recovery_boundary_record" 5)" = \
+        'startup-removal-call-v1=systemd_fdstore::remove_restart_custody' ] \
+        || fail 'restart startup removal call is invalid'
+    [ "$(restart_record_line "$restart_recovery_boundary_record" 6)" = \
+        'manager-fdstore-before-removal-v1=2' ] \
+        || fail 'restart pre-removal descriptor count is invalid'
+    advance_restart_start_failure_stage restart-publication \
+        || fail 'restart start failure stage transition is invalid'
+    hook_restart_state_marker=$(printf '%s\n' \
+        "$hook_restart_ready_journal_state" | sed -n '1p') \
+        || fail 'restart journal state proof is invalid'
+    hook_restart_state_metadata=$(printf '%s\n' \
+        "$hook_restart_ready_journal_state" | sed -n '2p') \
+        || fail 'restart journal state proof is invalid'
+    hook_restart_state_digest=$(printf '%s\n' \
+        "$hook_restart_ready_journal_state" | sed -n '3p') \
+        || fail 'restart journal state proof is invalid'
+    [ "$hook_restart_state_marker" = PRESENT ] \
+        || fail 'restart journal state proof is invalid'
+    [ "${#hook_restart_state_metadata}" -le 256 ] \
+        || fail 'restart journal state proof is invalid'
+    case $hook_restart_state_metadata in
+        *":8180:0:$hook_restart_gid:600:1:"*) ;;
+        *) fail 'restart journal state proof is invalid' ;;
+    esac
+    [ "${#hook_restart_state_digest}" -eq 64 ] \
+        || fail 'restart journal state proof is invalid'
+    case $hook_restart_state_digest in
+        ''|*[!0-9a-f]*) fail 'restart journal state proof is invalid' ;;
+    esac
+    [ "$hook_restart_ready_journal_state" = \
+        "$(printf 'PRESENT\n%s\n%s' "$hook_restart_state_metadata" \
+            "$hook_restart_state_digest")" ] \
+        || fail 'restart journal state proof is invalid'
+    write_private_file "$restart_journal_settled_state_record" \
+        "$hook_restart_ready_journal_state" \
+        || fail 'restart journal state proof could not be published'
+    hook_restart_settled_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+        || fail 'restart settlement time is unavailable'
+    hook_restart_resumed=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+        "$hook_restart_restarted_at" "$hook_restart_settled_at" \
+        "$hook_restart_current_invocation" "$hook_restart_current_pid" \
+        'VOLPAROSSA_HELPER_V3_RESTART_EXACT_PRESENT_V1=pass' \
+        "manager-fdstore-after-removal-v1=$hook_restart_manager_after_removal") \
+        || fail 'restart resumed record is unavailable'
+    write_private_file "$restart_resumed_record" "$hook_restart_resumed" \
+        || fail 'restart resumed record could not be published'
+}
+
 validate_runtime_metadata() {
     [ "$#" -eq 1 ] || return 1
     hook_agent_gid=$1
@@ -5051,6 +6275,24 @@ start_hook() {
         || [ -e "$start_failure_record.next" ] \
         || [ -L "$start_failure_record.next" ]; then
         fail 'start failure record path is unsafe'
+    fi
+    if [ -e "$restart_initial_handshake_failure_record" ] \
+        || [ -L "$restart_initial_handshake_failure_record" ] \
+        || [ -e "$restart_initial_handshake_failure_record.next" ] \
+        || [ -L "$restart_initial_handshake_failure_record.next" ]; then
+        fail 'restart initial handshake failure record path is unsafe'
+    fi
+    if [ -e "$restart_initial_handshake_terminal_record" ] \
+        || [ -L "$restart_initial_handshake_terminal_record" ] \
+        || [ -e "$restart_initial_handshake_terminal_record.next" ] \
+        || [ -L "$restart_initial_handshake_terminal_record.next" ]; then
+        fail 'restart initial handshake terminal record path is unsafe'
+    fi
+    if [ -e "$restart_initial_release_authorized_record" ] \
+        || [ -L "$restart_initial_release_authorized_record" ] \
+        || [ -e "$restart_initial_release_authorized_record.next" ] \
+        || [ -L "$restart_initial_release_authorized_record.next" ]; then
+        fail 'restart initial release authorization path is unsafe'
     fi
 
     hook_wait_attempt=0
@@ -5317,6 +6559,19 @@ case ${1:-} in
     stop)
         shift
         stop_hook "$@"
+        ;;
+    restart-start)
+        shift
+        start_failure_stage=preflight-runtime
+        start_failure_armed=yes
+        trap start_failure_exit EXIT
+        restart_start_hook "$@"
+        start_failure_armed=no
+        trap - EXIT
+        ;;
+    restart-observe)
+        shift
+        restart_observe_hook "$@"
         ;;
     *) fail 'hook mode is invalid' ;;
 esac

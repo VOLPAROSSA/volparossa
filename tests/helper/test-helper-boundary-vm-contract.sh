@@ -21,6 +21,7 @@ workflow=$repository_directory/.github/workflows/helper-boundary-evidence.yml
 supervisor=$script_directory/qemu-pidfd-supervisor.py
 environment_validator=$script_directory/validate-helper-boundary-vm-environment-v1.sh
 environment_test=$script_directory/test-helper-boundary-vm-environment-v1.sh
+evidence_fixture=$script_directory/fixtures/helper-boundary-evidence-v1.pass.json
 temporary_directory=$(mktemp -d /tmp/volparossa-helper-vm-contract.XXXXXX)
 case $temporary_directory in
     /tmp/volparossa-helper-vm-contract.??????) ;;
@@ -43,7 +44,7 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 for required_file in \
     "$runner" "$live_gate" "$manifest" "$workflow" "$supervisor" \
-    "$environment_validator" "$environment_test"
+    "$environment_validator" "$environment_test" "$evidence_fixture"
 do
     if [ ! -f "$required_file" ] || [ -L "$required_file" ]; then
         printf 'required VM contract input is unsafe: %s\n' "$required_file" >&2
@@ -63,7 +64,7 @@ sh -n "$runner"
 sh -n "$live_gate"
 jq -e . "$manifest" >/dev/null
 
-if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 2 ] \
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 3 ] \
     || grep -F -- '--property=RestrictSUIDSGID=yes' "$live_gate" >/dev/null \
     || [ "$(grep -Fc -- \
         "capture_unit_property RestrictSUIDSGID \\" "$live_gate")" -ne 2 ]; then
@@ -73,10 +74,10 @@ if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 2 ] \
 fi
 if [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$live_gate")" -ne 1 ] \
     || [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=' "$live_gate")" -ne 1 ] \
-    || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|final-verification)$' \
-        "$live_gate")" -ne 8 ] \
-    || [ "$(grep -Ec '^[[:space:]]*final_checkpoint=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|publication-fence|stage-retirement)$' \
+    || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|final-verification)$' \
         "$live_gate")" -ne 11 ] \
+    || [ "$(grep -Ec '^[[:space:]]*final_checkpoint=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|restart-report-validation|publication-fence|stage-retirement)$' \
+        "$live_gate")" -ne 12 ] \
     || [ "$(grep -Fc 'structured_failure_reported=yes' "$live_gate")" -ne 1 ] \
     || [ "$(grep -Fc 'report_unexpected_driver_phase "${driver_phase:-}" || :' \
         "$live_gate")" -ne 1 ] \
@@ -94,7 +95,7 @@ if [ "$(grep -Fxc '    identity_launch=' "$live_gate")" -ne 1 ] \
         'the VM payload does not preserve status-2-safe production observation and lock probing' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 2 ] \
+if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 3 ] \
     || [ "$(grep -Fc -- \
         'capture_unit_property ControlGroup "$temporary_stage/unit-control-group"' \
         "$live_gate")" -ne 1 ] \
@@ -718,15 +719,273 @@ cmp -s "$console_log" "$published_console_log"
 test "$(find "$publication_output" -mindepth 1 -maxdepth 1 -type f -printf '%f\n')" \
     = vm-console.log
 
+# The in-guest validator classifier may publish only one fixed stage. Exercise
+# the reviewed functions against every stage and adversarial private captures.
+boundary_validator_functions=$temporary_directory/boundary-validator-functions.sh
+{
+    sed -n '/^boundary_validator_failure_stage_is_safe() {$/,/^}$/p' "$live_gate"
+    sed -n '/^report_boundary_validator_failure_diagnostic() {$/,/^}$/p' "$live_gate"
+} >"$boundary_validator_functions"
+test "$(grep -c '^[_a-z].*() {$' "$boundary_validator_functions")" -eq 2
+sh -n "$boundary_validator_functions"
+# shellcheck disable=SC1090
+. "$boundary_validator_functions"
+
+vp_capture_file_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$1" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ]
+}
+
+boundary_validator_report=$temporary_directory/boundary-validator-report.json
+boundary_validator_stdout=$temporary_directory/boundary-validator.stdout
+boundary_validator_stderr=$temporary_directory/boundary-validator.stderr
+boundary_validator_privacy_sentinel='private-validator-payload-must-not-escape'
+reset_boundary_validator_inputs() {
+    install -m 0600 -- "$evidence_fixture" "$boundary_validator_report"
+    install -m 0600 /dev/null "$boundary_validator_stdout"
+    printf '%s\n' "$boundary_validator_privacy_sentinel" \
+        >"$boundary_validator_stderr"
+    chmod 0600 "$boundary_validator_stderr"
+}
+expect_boundary_validator_stage() {
+    expected_boundary_validator_stage=$1
+    boundary_validator_test_status=$2
+    expect_status 0 report_boundary_validator_failure_diagnostic \
+        "$boundary_validator_report" "$boundary_validator_test_status" \
+        "$boundary_validator_stdout" "$boundary_validator_stderr"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=$expected_boundary_validator_stage"
+    if grep -F "$boundary_validator_privacy_sentinel" \
+        "$last_stdout" "$last_stderr" >/dev/null; then
+        printf '%s\n' 'validator classifier exposed a private payload' >&2
+        exit 1
+    fi
+}
+
+for boundary_validator_allowed_stage in \
+    capture-unsafe status-invalid stdout-nonempty status-zero stderr-empty \
+    input-size json-value canonical-encoding source-artifacts environment \
+    clock-format clock-order invocations lifecycle host-state fixed-contract
+do
+    expect_status 0 boundary_validator_failure_stage_is_safe \
+        "$boundary_validator_allowed_stage"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+expect_status 1 boundary_validator_failure_stage_is_safe private-runtime-detail
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+reset_boundary_validator_inputs
+chmod 0644 "$boundary_validator_report"
+expect_boundary_validator_stage capture-unsafe 1
+reset_boundary_validator_inputs
+expect_boundary_validator_stage status-invalid 01
+reset_boundary_validator_inputs
+printf '%s\n' unexpected-validator-output >"$boundary_validator_stdout"
+expect_boundary_validator_stage stdout-nonempty 1
+reset_boundary_validator_inputs
+expect_boundary_validator_stage status-zero 0
+reset_boundary_validator_inputs
+: >"$boundary_validator_stderr"
+expect_boundary_validator_stage stderr-empty 1
+reset_boundary_validator_inputs
+dd if=/dev/zero of="$boundary_validator_report" bs=32769 count=1 \
+    >/dev/null 2>&1
+chmod 0600 "$boundary_validator_report"
+expect_boundary_validator_stage input-size 1
+reset_boundary_validator_inputs
+printf '%s\n' not-json >"$boundary_validator_report"
+expect_boundary_validator_stage json-value 1
+reset_boundary_validator_inputs
+jq . "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage canonical-encoding 1
+
+# A failing canonicalization tool must not add its raw stderr to the one fixed
+# diagnostic record. The first JSON-value probe still uses the real jq binary;
+# only the following canonical-encoding probe emits the private sentinel.
+boundary_validator_jq=$(command -v jq)
+boundary_validator_jq_privacy_sentinel='private-canonical-jq-stderr-must-not-escape'
+exercise_boundary_validator_jq_stderr() (
+    boundary_validator_jq_binary=$1
+    # Invoked indirectly by the extracted classifier under test.
+    # shellcheck disable=SC2317
+    jq() {
+        if [ "$#" -ge 3 ] \
+            && [ "$1" = -S ] && [ "$2" = -c ] && [ "$3" = . ]; then
+            printf '%s\n' "$boundary_validator_jq_privacy_sentinel" >&2
+            return 1
+        fi
+        "$boundary_validator_jq_binary" "$@"
+    }
+    report_boundary_validator_failure_diagnostic \
+        "$boundary_validator_report" 1 \
+        "$boundary_validator_stdout" "$boundary_validator_stderr"
+)
+reset_boundary_validator_inputs
+expect_status 0 exercise_boundary_validator_jq_stderr "$boundary_validator_jq"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=canonical-encoding'
+if grep -F "$boundary_validator_jq_privacy_sentinel" \
+    "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'canonical jq stderr escaped the validator classifier' >&2
+    exit 1
+fi
+
+reset_boundary_validator_inputs
+jq -S -c '.observed_source.commit_sha = "0"' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage source-artifacts 1
+reset_boundary_validator_inputs
+jq -S -c '.observed_artifact_hashes.volparossa_helper_sha256 = ("0" * 64)' \
+    "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage source-artifacts 1
+reset_boundary_validator_inputs
+jq -S -c '.environment.virtualization = "container"' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage environment 1
+reset_boundary_validator_inputs
+jq -S -c '.started_at = "invalid"' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage clock-format 1
+reset_boundary_validator_inputs
+jq -S -c '.finished_at = "2026-08-27T11:59:59Z"' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage clock-order 1
+reset_boundary_validator_inputs
+jq -S -c '.invocation_ids[1] = .invocation_ids[0]' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage invocations 1
+reset_boundary_validator_inputs
+jq -S -c '.production.fdstore_idle_observation = 1' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage lifecycle 1
+reset_boundary_validator_inputs
+jq -S -c '.worker.fdstore_before_retirement = 1' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage lifecycle 1
+reset_boundary_validator_inputs
+jq -S -c '.retirement.socket_absent = false' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage lifecycle 1
+reset_boundary_validator_inputs
+jq -S -c '.enumerated_host_state.equal_at_fences = false' \
+    "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage host-state 1
+reset_boundary_validator_inputs
+jq -S -c '.overall = "FAIL"' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage fixed-contract 1
+reset_boundary_validator_inputs
+jq -S -c '.scope.helper_boundary_only = false' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage fixed-contract 1
+reset_boundary_validator_inputs
+jq -S -c '.checks[0].result = "FAIL"' "$evidence_fixture" \
+    >"$boundary_validator_report"
+expect_boundary_validator_stage fixed-contract 1
+
+# Multiple faults must retain the first validator-ordered, value-free stage.
+reset_boundary_validator_inputs
+chmod 0644 "$boundary_validator_report"
+printf '%s\n' unexpected-validator-output >"$boundary_validator_stdout"
+expect_boundary_validator_stage capture-unsafe 01
+reset_boundary_validator_inputs
+printf '%s\n' unexpected-validator-output >"$boundary_validator_stdout"
+expect_boundary_validator_stage status-invalid 01
+reset_boundary_validator_inputs
+jq -S -c '
+    .schema_version = 2
+    | .observed_source.commit_sha = "0"
+' "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage fixed-contract 1
+reset_boundary_validator_inputs
+jq -S -c '
+    .observed_source.commit_sha = "0"
+    | .environment.virtualization = "container"
+' "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage source-artifacts 1
+reset_boundary_validator_inputs
+jq -S -c '
+    .environment.virtualization = "container"
+    | .started_at = "invalid"
+' "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage environment 1
+reset_boundary_validator_inputs
+jq -S -c '
+    .finished_at = "2026-08-27T11:59:59Z"
+    | .invocation_ids[1] = .invocation_ids[0]
+' "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage clock-order 1
+reset_boundary_validator_inputs
+jq -S -c '
+    .invocation_ids[1] = .invocation_ids[0]
+    | .production.fdstore_idle_observation = 1
+' "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage invocations 1
+reset_boundary_validator_inputs
+jq -S -c '
+    .production.fdstore_idle_observation = 1
+    | .enumerated_host_state.equal_at_fences = false
+' "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage lifecycle 1
+reset_boundary_validator_inputs
+jq -S -c '
+    .enumerated_host_state.equal_at_fences = false
+    | .overall = "FAIL"
+' "$evidence_fixture" >"$boundary_validator_report"
+expect_boundary_validator_stage host-state 1
+
+if ! awk '
+    /^    report_boundary_validator_failure_diagnostic \\$/ {
+        diagnostic_call = NR; diagnostic_call_count++
+    }
+    /^        "\$validator_stderr" \|\| :$/ {
+        diagnostic_fallback = NR; diagnostic_fallback_count++
+    }
+    /^    failed '\''the helper-boundary report failed strict validation'\''$/ {
+        strict_failure = NR; strict_failure_count++
+    }
+    END {
+        valid = diagnostic_call_count == 1 && diagnostic_fallback_count == 1
+        valid = valid && strict_failure_count == 1
+        valid = valid && diagnostic_call < diagnostic_fallback
+        valid = valid && diagnostic_fallback < strict_failure
+        if (!valid) exit 1
+    }
+' "$live_gate"; then
+    printf '%s\n' 'validator failure is not classified before fail-closed exit' >&2
+    exit 1
+fi
+
 # A failed non-retained proof may publish only enumerated privacy-safe category
 # and progress records. Exercise the reviewed parsers rather than test-only copies.
 branch_failure_functions=$temporary_directory/branch-failure-functions.sh
 {
     sed -n '/^non_retained_proof_failure_reason_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_blocked_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_blocked_status_is_exact() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_driver_phase_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_final_checkpoint_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_blocked_category() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_boundary_validator_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_boundary_validator_failure_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_successor_debugger_category_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_retirement_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_readiness_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_readiness_failure_detail_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_retirement_failure_detail_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_launch_failure_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_initial_hook_failure_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_initial_driver_failure_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_restart_initial_failure_detail_category() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_restart_launch_failure_category() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_restart_launch_diagnostic() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_restart_crash_record_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_driver_phase() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_final_checkpoint() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_launch_diagnostic() {$/,/^}$/p' "$runner"
@@ -735,15 +994,605 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 12
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 29
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
 
+expect_status 0 non_retained_blocked_status_is_exact 77
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+for non_blocked_status in 0 1 64 76 78 125 255; do
+    expect_status 1 non_retained_blocked_status_is_exact "$non_blocked_status"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+
+branch_failure_diagnostic=$temporary_directory/branch-failure-diagnostic
+branch_failure_privacy_sentinel='private-runtime-payload-must-not-escape'
+for boundary_validator_public_stage in \
+    capture-unsafe status-invalid stdout-nonempty status-zero stderr-empty \
+    input-size json-value canonical-encoding source-artifacts environment \
+    clock-format clock-order invocations lifecycle host-state fixed-contract
+do
+    printf '%s\n%s\n%s=%s\n' \
+        "$branch_failure_privacy_sentinel" \
+        'live worker-identity proof failed: the helper-boundary report failed strict validation' \
+        'VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1' \
+        "$boundary_validator_public_stage" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_boundary_validator_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke report-validation category: $boundary_validator_public_stage"
+    if grep -F "$branch_failure_privacy_sentinel" \
+        "$last_stdout" "$last_stderr" >/dev/null; then
+        printf '%s\n' 'outer validator category exposed a private payload' >&2
+        exit 1
+    fi
+done
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: the helper-boundary report failed strict validation' \
+    'VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=private-runtime-detail' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_boundary_validator_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: the helper-boundary report failed strict validation' \
+    'VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=clock-order' \
+    'VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=clock-order' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_boundary_validator_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+printf '%s\n' \
+    'live worker-identity proof failed: the helper-boundary report failed strict validation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_boundary_validator_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: the helper-boundary report failed strict validation' \
+    'live worker-identity proof failed: private runtime detail' \
+    'VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=clock-order' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_boundary_validator_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+chmod 0644 "$branch_failure_diagnostic"
+expect_status 1 report_non_retained_boundary_validator_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+chmod 0600 "$branch_failure_diagnostic"
+
+printf '%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'BLOCKED: the fixed root-owned debugger is unavailable' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_blocked_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke blocked category: debugger'
+if grep -F "$branch_failure_privacy_sentinel" \
+    "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'blocked category exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n' 'BLOCKED: required Debian tool is unavailable: gdb' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_blocked_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke blocked category: tool-gdb'
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: initial forced-crash debugger did not complete' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=restart-launch' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart-launch category: debugger-execution'
+
+while IFS='|' read -r initial_identity_reason initial_identity_category; do
+    printf 'live worker-identity proof failed: %s\n' \
+        "$initial_identity_reason" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_restart_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke restart-launch category: $initial_identity_category"
+done <<'EOF'
+singleton restart initial MainPID is unavailable|initial-mainpid-read
+singleton restart initial MainPID is invalid|initial-mainpid-shape
+singleton restart initial invocation is not hook-bound|initial-invocation-binding
+singleton restart initial MainPID is not hook-bound|initial-mainpid-binding
+singleton restart initial hook PID is unavailable|initial-hook-pid-read
+singleton restart initial hook PID is invalid|initial-hook-pid-shape
+singleton restart initial ControlPID is not hook-bound|initial-controlpid-binding
+singleton restart initial hook starttime is unavailable|initial-hook-starttime
+EOF
+
+while IFS='|' read -r sigkill_reason sigkill_category; do
+    printf 'live worker-identity proof failed: %s\n' \
+        "$sigkill_reason" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_restart_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke restart-launch category: $sigkill_category"
+done <<'EOF'
+post-crash forced-helper MainPID is not zero|sigkill-mainpid
+post-crash forced-helper restart count is not zero|sigkill-restart-count
+post-crash forced-helper result is not signal|sigkill-result
+post-crash forced-helper code is not CLD_KILLED|sigkill-code
+post-crash forced-helper status is not SIGKILL|sigkill-status
+initial forced-crash start failure record was not consumed exactly|initial-diagnostic-absent
+EOF
+
+for restart_initial_hook_stage in \
+    preflight publication ack-path ack-payload ack-lineage ack-pins \
+    ack-timeout post-lineage post-pins cleanup terminal-publication \
+    terminal-ack-path terminal-ack-payload terminal-ack-lineage \
+    terminal-ack-pins terminal-ack-timeout terminal-post-lineage \
+    terminal-post-pins
+do
+    printf '%s\n%s=%s\n' \
+        'live worker-identity proof failed: initial forced-crash start failure record was not consumed exactly' \
+        'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_HOOK_V1' \
+        "$restart_initial_hook_stage" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_restart_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke restart-launch category: initial-hook-$restart_initial_hook_stage"
+done
+for restart_initial_driver_stage in \
+    appearance unsafe-pending-path main-pid restart-count invocation marker \
+    start-payload hook-payload terminal-payload stable-inode unlink absence \
+    control-pid hook-identity hook-quiescence
+do
+    printf '%s\n%s=%s\n' \
+        'live worker-identity proof failed: initial forced-crash start failure record was not consumed exactly' \
+        'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_DRIVER_V1' \
+        "$restart_initial_driver_stage" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_restart_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke restart-launch category: initial-driver-$restart_initial_driver_stage"
+done
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: initial forced-crash start failure record was not consumed exactly' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_START_V1=publication' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_DRIVER_V1=start-payload' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart-launch category: initial-driver-start-payload-publication'
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: initial forced-crash start failure record was not consumed exactly' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_START_V1=private-runtime-payload' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_DRIVER_V1=start-payload' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart-launch category: initial-diagnostic-invalid'
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: initial forced-crash start failure record was not consumed exactly' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_HOOK_V1=private-runtime-payload' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart-launch category: initial-diagnostic-invalid'
+if grep -F 'private-runtime-payload' "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'initial restart category exposed private diagnostic payload' >&2
+    exit 1
+fi
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: initial forced-crash start failure record was not consumed exactly' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_HOOK_V1=preflight' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_DRIVER_V1=appearance' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart-launch category: initial-diagnostic-invalid'
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: initial forced-crash terminal handshake was not released exactly' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_HOOK_V1=terminal-post-pins' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart-launch category: initial-hook-terminal-post-pins'
+
+while IFS='|' read -r successor_reason successor_category; do
+    printf 'live worker-identity proof failed: %s\n' \
+        "$successor_reason" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_restart_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke restart-launch category: $successor_category"
+done <<'EOF'
+restart successor did not become manager-bound|successor-mainpid
+restart successor changed before its pre-exec barrier|successor-mainpid
+restart successor pre-exec barrier did not appear|successor-barrier
+restart successor pre-exec barrier is oversized|successor-barrier
+restart successor barrier invocation is unavailable|successor-barrier
+restart successor barrier PID is unavailable|successor-barrier
+restart successor barrier expectation could not be created|successor-barrier
+restart successor barrier expectation is unavailable|successor-barrier
+restart successor pre-exec barrier is not manager-bound|successor-barrier
+restart successor starttime is unavailable|successor-identity
+restart successor count is unavailable|successor-identity
+restart successor count is not exactly one|successor-identity
+restart successor lost the ownership marker|successor-identity
+restart successor lineage could not be adopted|successor-identity
+restart successor invocation is invalid|successor-identity
+restart successor lineage changed after adoption|successor-identity
+successor debugger commands could not be written|successor-debugger-command
+successor debugger starttime is unavailable|successor-debugger-start
+successor debugger exited before arming|successor-debugger-start
+successor debugger did not arm|successor-debugger-start
+successor debugger readiness record is unsafe|successor-debugger-start
+successor debugger readiness record is oversized|successor-debugger-start
+successor debugger readiness record is invalid|successor-debugger-start
+restart successor release FIFO changed before release|successor-release
+restart successor pre-exec barrier could not be released|successor-release
+restart successor release FIFO changed after release|successor-release
+successor recovery-boundary debugger did not complete|successor-debugger-execution
+successor recovery boundary is not exact|successor-debugger-execution
+successor debugger failure classification is invalid|successor-debugger-classification
+successor recovery-boundary debugger failed: exec-not-caught|successor-debugger-exec-not-caught
+successor recovery-boundary debugger failed: breakpoint-not-installed|successor-debugger-breakpoint-not-installed
+successor recovery-boundary debugger failed: breakpoint-not-reached|successor-debugger-breakpoint-not-reached
+successor recovery-boundary debugger failed: marker-invalid|successor-debugger-marker-invalid
+successor recovery-boundary debugger failed: observer-manager-binding|successor-debugger-observer-manager-binding
+successor recovery-boundary debugger failed: observer-precrash-record|successor-debugger-observer-precrash-record
+successor recovery-boundary debugger failed: observer-fdstore-read|successor-debugger-observer-fdstore-read
+successor recovery-boundary debugger failed: observer-fdstore-count|successor-debugger-observer-fdstore-count
+successor recovery-boundary debugger failed: observer-fdstore-name|successor-debugger-observer-fdstore-name
+successor recovery-boundary debugger failed: observer-journal-read|successor-debugger-observer-journal-read
+successor recovery-boundary debugger failed: observer-journal-value|successor-debugger-observer-journal-value
+successor recovery-boundary debugger failed: observer-invocation-read|successor-debugger-observer-invocation-read
+successor recovery-boundary debugger failed: observer-invocation-reuse|successor-debugger-observer-invocation-reuse
+successor recovery-boundary debugger failed: observer-mainpid-reuse|successor-debugger-observer-mainpid-reuse
+successor recovery-boundary debugger failed: observer-restart-count|successor-debugger-observer-restart-count
+successor recovery-boundary debugger failed: observer-socket-change|successor-debugger-observer-socket-change
+successor recovery-boundary debugger failed: observer-time|successor-debugger-observer-time
+successor recovery-boundary debugger failed: observer-starttime|successor-debugger-observer-starttime
+successor recovery-boundary debugger failed: observer-record-build|successor-debugger-observer-record-build
+successor recovery-boundary debugger failed: observer-record-publication|successor-debugger-observer-record-publication
+successor recovery-boundary debugger failed: observer-timeout|successor-debugger-observer-timeout
+successor recovery-boundary debugger failed: observer-other|successor-debugger-observer-other
+successor recovery-boundary debugger failed: post-observer|successor-debugger-post-observer
+successor debugger log is unsafe|successor-debugger-log
+successor debugger log exceeds 1 MiB|successor-debugger-log
+restart ExactPresent settlement did not complete|successor-settlement
+restart successor start failure record is invalid|successor-start-record
+restart successor pending start failure record is unsafe|successor-start-record
+restart successor start failure category is invalid|successor-start-record
+restart successor start hook failed during preflight|successor-start-preflight
+restart successor start hook failed during recovery wait|successor-start-recovery
+restart successor start hook failed during lineage validation|successor-start-lineage
+restart successor start hook failed during descriptor settlement|successor-start-descriptor
+restart successor readiness diagnostic is invalid|successor-start-readiness-classification
+restart successor start hook failed during publication|successor-start-publication
+restart successor invocation record is unavailable|successor-settlement-binding
+restart successor invocation record is invalid|successor-settlement-binding
+restart settlement changed the adopted successor invocation|successor-settlement-binding
+restart boundary starttime is unavailable|successor-starttime-boundary-read
+restart boundary starttime is invalid|successor-starttime-boundary-shape
+restart successor starttime is unavailable after descriptor settlement|successor-starttime-post-detach-read
+restart successor starttime changed after recovery|successor-starttime-post-detach-change
+restart successor retirement failure category is invalid|successor-retirement-classification
+restart successor retirement diagnostic could not be reported|successor-retirement-classification
+restart unit was not collected|successor-collection
+restart journal lock remained held|successor-lock-held
+restart journal lock could not be opened after retirement|successor-lock-open
+restart runtime did not retire cleanly|successor-runtime-retirement
+restart final journal could not be revalidated|successor-final-journal-read
+restart final journal proof is invalid|successor-final-journal-value
+internal production proof failure state is inconsistent|successor-proof-state
+EOF
+
+for restart_readiness_reason in \
+    'restart successor start hook failed during journal settlement' \
+    'restart successor start hook failed during socket validation'
+do
+    for restart_readiness_stage in \
+        preflight clock-read clock-backwards lineage-pid lineage-invocation \
+        socket-capture \
+        initial-journal-value stage-transition bind-runtime-read \
+        bind-runtime-value final-journal-read final-journal-value journal-next \
+        journal-state-before journal-state-after journal-state-change \
+        socket-stability final-lineage-pid final-lineage-invocation timeout
+    do
+        printf 'live worker-identity proof failed: %s\n%s=%s\n' \
+            "$restart_readiness_reason" \
+            'VOLPAROSSA_HELPER_LIVE_RESTART_READINESS_DIAGNOSTIC_V1' \
+            "$restart_readiness_stage" >"$branch_failure_diagnostic"
+        expect_status 0 report_non_retained_restart_launch_failure_category \
+            "$branch_failure_diagnostic"
+        test ! -s "$last_stdout"
+        test "$(cat "$last_stderr")" = \
+            "non-retained helper-boundary PR smoke restart-launch category: successor-start-readiness-$restart_readiness_stage"
+    done
+done
+
+printf '%s\n' \
+    'live worker-identity proof failed: restart successor start hook failed during journal settlement' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart-launch category: successor-start-journal'
+printf '%s\n' \
+    'live worker-identity proof failed: restart successor start hook failed during socket validation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: restart successor start hook failed during socket validation' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_READINESS_DIAGNOSTIC_V1=private-runtime-detail' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'live worker-identity proof failed: restart successor start hook failed during socket validation' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_READINESS_DIAGNOSTIC_V1=timeout' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_READINESS_DIAGNOSTIC_V1=timeout' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'live worker-identity proof failed: successor recovery-boundary debugger failed: private-runtime-detail' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+while IFS='|' read -r retirement_stage retirement_category; do
+    printf '%s\n%s\n' \
+        'live worker-identity proof failed: restart successor could not be retired' \
+        "VOLPAROSSA_HELPER_LIVE_RESTART_RETIREMENT_DIAGNOSTIC_V1=$retirement_stage" \
+        >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_restart_launch_failure_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke restart-launch category: $retirement_category"
+done <<'EOF'
+adoption|successor-retirement-adoption
+identity|successor-retirement-identity
+initial-snapshot|successor-retirement-initial-snapshot
+stop-request|successor-retirement-stop-request
+stop-wait|successor-retirement-stop-wait
+reset-failed|successor-retirement-reset-failed
+reset-wait|successor-retirement-reset-wait
+fdstore-clean|successor-retirement-fdstore-clean
+post-clean|successor-retirement-post-clean
+final-reset|successor-retirement-final-reset
+collection|successor-retirement-collection
+EOF
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: restart successor could not be retired' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_RETIREMENT_DIAGNOSTIC_V1=private-runtime-detail' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_LAUNCH_DIAGNOSTIC_V1=captures-yes,json-no,fresh-no,stdout-empty,stderr-empty,manager-no' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart launch diagnostic: captures-yes,json-no,fresh-no,stdout-empty,stderr-empty,manager-no'
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_LAUNCH_DIAGNOSTIC_V1=captures-yes,json-no,fresh-no,stdout-unit-only,stderr-empty,manager-no' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart launch diagnostic: captures-yes,json-no,fresh-no,stdout-unit-only,stderr-empty,manager-no'
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: forced-crash boundary record is unavailable' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=record-absent,observer-fdstore-read' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_crash_record_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart crash-record diagnostic: record-absent,observer-fdstore-read'
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: forced-crash boundary record is unavailable' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=record-absent,observer-control-binding' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_crash_record_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart crash-record diagnostic: record-absent,observer-control-binding'
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=record-absent,observer-fdstore-read' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=malformed' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_crash_record_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=record-absent,observer-private-runtime-detail' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_crash_record_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_RESTART_LAUNCH_DIAGNOSTIC_V1=captures-yes,json-no,fresh-no,stdout-empty,stderr-empty,manager-yes' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'live worker-identity proof failed: singleton restart manager binding is invalid' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke restart-launch category: manager-binding'
+
+printf '%s\n' \
+    'live worker-identity proof failed: private restart detail' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+if ! awk '
+    /^if \[ "\$guest_status" -ne 0 \]; then$/ { guest_failure = NR }
+    /^        elif report_non_retained_boundary_validator_failure_category \\$/ {
+        validator_call = NR; validator_call_count++
+    }
+    /^        elif report_non_retained_restart_launch_failure_category \\$/ {
+        parser_call = NR; parser_call_count++
+    }
+    /^                report_non_retained_restart_crash_record_diagnostic \\$/ {
+        crash_call = NR; crash_call_count++
+    }
+    /non-retained helper-boundary PR smoke failure category: unclassified/ {
+        unclassified = NR
+    }
+    END {
+        valid = validator_call_count == 1 && parser_call_count == 1
+        valid = valid && guest_failure < validator_call
+        valid = valid && validator_call < parser_call
+        valid = valid && crash_call_count == 1
+        valid = valid && parser_call < crash_call && crash_call < unclassified
+        if (!valid) exit 1
+    }
+' "$runner"; then
+    printf '%s\n' 'restart diagnostics are not confined to guest proof failure' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n' \
+    'live worker-identity proof failed: initial forced-crash debugger did not complete' \
+    'live worker-identity proof failed: initial debugger log is unsafe' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_restart_launch_failure_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+while IFS='|' read -r blocked_category blocked_reason; do
+    printf 'BLOCKED: %s\n' "$blocked_reason" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_blocked_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke blocked category: $blocked_category"
+done <<'EOF'
+environment|execution requires exact systemd v257
+service-identity|the systemd-resolved service GID is non-canonical
+service-runtime|the canonical root-owned systemd notify socket is unavailable
+workspace-owner|the repository must be owned by one canonical unprivileged identity
+workspace-helper-missing|build target/debug/volparossa-helper as an unprivileged workspace user first
+workspace-helper-metadata|the helper source must be one bounded workspace-owned 0755 regular file
+workspace-probe-missing|build the production IPC probe as an unprivileged workspace user first
+workspace-probe-metadata|the production IPC probe must be one bounded workspace-owned 0755 regular file
+workspace-hook-missing|the production IPC unit hook must be one executable regular file with one hard link
+workspace-hook-metadata|the production IPC unit hook has unsafe workspace metadata
+workspace-observer-missing|the restart observer must be one executable regular file with one hard link
+workspace-observer-metadata|the restart observer has unsafe workspace metadata
+staging-parent|/var/tmp is not the canonical root-owned sticky staging parent
+identity-range|no collision-free synthetic service identity range is available
+EOF
+
+for blocked_mutant in \
+    'BLOCKED: required Debian tool is unavailable: secret-tool' \
+    'BLOCKED: private runtime detail'; do
+    printf '%s\n' "$blocked_mutant" >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_blocked_category \
+        "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+printf '%s\n%s\n' \
+    'BLOCKED: the fixed root-owned debugger is unavailable' \
+    'BLOCKED: the fixed debugger could not be hashed' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_blocked_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+printf '%s\n%s\n' \
+    '-----BEGIN PRIVATE KEY-----' \
+    'BLOCKED: the fixed root-owned debugger is unavailable' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_blocked_category \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'the bounded diagnostic contains private-key material'
+if grep -F -- '-----BEGIN PRIVATE KEY-----' "$last_stderr" >/dev/null \
+    || grep -F 'blocked category:' "$last_stderr" >/dev/null; then
+    printf '%s\n' 'blocked category parser exposed private material' >&2
+    exit 1
+fi
+
+for non_retained_driver_phase in \
+    staging worker-launch worker-terminal-observation worker-retirement \
+    production-launch production-observation production-retirement \
+    restart-launch restart-observation restart-retirement final-verification; do
+    non_retained_driver_phase_is_safe "$non_retained_driver_phase" || {
+        printf 'non-retained parser rejected fixed driver phase: %s\n' \
+            "$non_retained_driver_phase" >&2
+        exit 1
+    }
+done
+for non_retained_driver_mutant in \
+    '' restart restart-secret-observation restart-observation-extra; do
+    if non_retained_driver_phase_is_safe "$non_retained_driver_mutant"; then
+        printf 'non-retained parser accepted driver-phase mutant: %s\n' \
+            "$non_retained_driver_mutant" >&2
+        exit 1
+    fi
+done
+
 for non_retained_final_checkpoint in \
     host-state structured-reporting cleanup-summary lifecycle-summary \
     artifact-integrity source-integrity report-times report-generation \
-    report-validation publication-fence stage-retirement; do
+    report-validation restart-report-validation publication-fence stage-retirement; do
     non_retained_final_checkpoint_is_safe "$non_retained_final_checkpoint" || {
         printf 'non-retained parser rejected fixed final checkpoint: %s\n' \
             "$non_retained_final_checkpoint" >&2
@@ -1053,6 +1902,32 @@ if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/de
     printf '%s\n' 'driver phase exposed a non-allowlisted payload' >&2
     exit 1
 fi
+
+for restart_driver_phase in \
+    restart-launch restart-observation restart-retirement; do
+    printf '%s\n%s\n' \
+        "$branch_failure_privacy_sentinel" \
+        "VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=$restart_driver_phase" \
+        >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_driver_phase "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    grep -Fx \
+        "non-retained helper-boundary PR smoke driver phase: $restart_driver_phase" \
+        "$last_stderr" >/dev/null
+    test "$(wc -l <"$last_stderr")" -eq 1
+    if grep -F "$branch_failure_privacy_sentinel" \
+        "$last_stdout" "$last_stderr" >/dev/null; then
+        printf 'restart driver phase exposed a non-allowlisted payload: %s\n' \
+            "$restart_driver_phase" >&2
+        exit 1
+    fi
+done
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=restart-secret-observation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
 printf '%s\n' "$branch_failure_privacy_sentinel" >"$branch_failure_diagnostic"
 expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
@@ -1560,29 +2435,39 @@ verify_kvm_state_line=$(grep -n -m 1 -F \
 pass_upload_line=$(grep -n -m 1 -F 'name: Upload bounded helper-boundary evidence' "$workflow" | cut -d: -f1)
 failure_upload_line=$(grep -n -m 1 -F 'name: Upload bounded failure diagnostics' \
     "$workflow" | cut -d: -f1)
+restart_upload_line=$(grep -n -m 1 -F \
+    'name: Upload bounded singleton restart evidence' \
+    "$workflow" | cut -d: -f1)
 retained_gate_line=$(grep -n -m 1 -F 'name: Require a retained PASS' \
     "$workflow" | cut -d: -f1)
 smoke_gate_line=$(grep -n -m 1 -F 'name: Require a non-retained PR smoke PASS' \
     "$workflow" | cut -d: -f1)
 if [ -z "$verify_kvm_state_line" ] || [ -z "$pass_upload_line" ] \
     || [ -z "$failure_upload_line" ] || [ -z "$retained_gate_line" ] \
+    || [ -z "$restart_upload_line" ] \
     || [ -z "$smoke_gate_line" ] \
     || [ "$verify_kvm_state_line" -ge "$pass_upload_line" ] \
     || [ "$pass_upload_line" -ge "$failure_upload_line" ] \
-    || [ "$failure_upload_line" -ge "$retained_gate_line" ] \
+    || [ "$failure_upload_line" -ge "$restart_upload_line" ] \
+    || [ "$restart_upload_line" -ge "$retained_gate_line" ] \
     || [ "$retained_gate_line" -ge "$smoke_gate_line" ]; then
     printf '%s\n' 'the PASS artifact can be uploaded before exact KVM state comparison' >&2
     exit 1
 fi
 pass_upload_fixture=$temporary_directory/pass-upload-step.yml
 failure_upload_fixture=$temporary_directory/failure-upload-step.yml
+restart_upload_fixture=$temporary_directory/restart-upload-step.yml
 smoke_gate_fixture=$temporary_directory/non-retained-smoke-step.yml
 sed -n "${pass_upload_line},$((failure_upload_line - 1))p" "$workflow" \
     >"$pass_upload_fixture"
-sed -n "${failure_upload_line},$((retained_gate_line - 1))p" "$workflow" \
+sed -n "${failure_upload_line},$((restart_upload_line - 1))p" "$workflow" \
     >"$failure_upload_fixture"
+sed -n "${restart_upload_line},$((retained_gate_line - 1))p" "$workflow" \
+    >"$restart_upload_fixture"
 sed -n "${smoke_gate_line},\$p" "$workflow" >"$smoke_gate_fixture"
-for retained_upload_fixture in "$pass_upload_fixture" "$failure_upload_fixture"; do
+for retained_upload_fixture in \
+    "$pass_upload_fixture" "$failure_upload_fixture" "$restart_upload_fixture"
+do
     grep -F "steps.source_selection.outputs.proof_mode == 'retained-main'" \
         "$retained_upload_fixture" >/dev/null
     if grep -F 'non-retained-pr-smoke' "$retained_upload_fixture" >/dev/null; then
@@ -1615,8 +2500,8 @@ if grep -Eq 'pull_request_target:|pull_request:|push:|schedule:|secrets\.' "$wor
     exit 1
 fi
 uses_count=$(grep -c '^[[:space:]]*uses:' "$workflow")
-if [ "$uses_count" -ne 3 ]; then
-    printf 'expected exactly three pinned action uses, got %s\n' "$uses_count" >&2
+if [ "$uses_count" -ne 4 ]; then
+    printf 'expected exactly four pinned action uses, got %s\n' "$uses_count" >&2
     exit 1
 fi
 

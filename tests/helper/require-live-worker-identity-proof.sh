@@ -25,7 +25,8 @@ print_plan() {
     printf '%s\n' \
         'VOLPAROSSA live worker-identity proof plan:' \
         '  require a disposable Debian 13 amd64 VM, root, and the exact systemd v257 manager;' \
-        '  bookend one unchanged clean Git revision and three exact staged artifact hashes;' \
+        '  bookend one unchanged clean Git revision and exact helper, probe, hook,' \
+        '    restart observer/launcher, and debugger artifact hashes;' \
         '  copy the already-built real helper into one validated root-only temporary stage;' \
         '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
         '  bind account files plus the system bus socket read-only in two sequential invocations;' \
@@ -55,6 +56,7 @@ print_plan() {
         '  stop, clean only its fdstore, and collect that exact first invocation;' \
         '  only after the unit is not-found, reuse its random name with a new exact marker and ID;' \
         '  run the argumentless production helper and fixed IPC probe inside the confined unit;' \
+        '  use one fixed no-argument launcher only to hold the restart successor before helper exec;' \
         '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
         '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
         '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
@@ -129,6 +131,325 @@ blocked() {
 failed() {
     printf 'live worker-identity proof failed: %s\n' "$1" >&2
     exit 1
+}
+
+boundary_validator_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        capture-unsafe|\
+        status-invalid|\
+        stdout-nonempty|\
+        status-zero|\
+        stderr-empty|\
+        input-size|\
+        json-value|\
+        canonical-encoding|\
+        source-artifacts|\
+        environment|\
+        clock-format|\
+        clock-order|\
+        invocations|\
+        lifecycle|\
+        host-state|\
+        fixed-contract)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_boundary_validator_failure_diagnostic() {
+    [ "$#" -eq 4 ] || return 1
+    boundary_validator_report=$1
+    boundary_validator_status=$2
+    boundary_validator_stdout=$3
+    boundary_validator_stderr=$4
+    boundary_validator_stage=
+
+    if ! vp_capture_file_is_safe "$boundary_validator_report" \
+        || ! vp_capture_file_is_safe "$boundary_validator_stdout" \
+        || ! vp_capture_file_is_safe "$boundary_validator_stderr"; then
+        boundary_validator_stage=capture-unsafe
+    else
+        case $boundary_validator_status in
+            0|[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]) ;;
+            *) boundary_validator_stage='status-invalid' ;;
+        esac
+        if [ -z "$boundary_validator_stage" ] \
+            && [ -s "$boundary_validator_stdout" ]; then
+            boundary_validator_stage=stdout-nonempty
+        elif [ -z "$boundary_validator_stage" ] \
+            && [ "$boundary_validator_status" -eq 0 ]; then
+            boundary_validator_stage='status-zero'
+        elif [ -z "$boundary_validator_stage" ] \
+            && [ ! -s "$boundary_validator_stderr" ]; then
+            boundary_validator_stage=stderr-empty
+        fi
+    fi
+
+    if [ -z "$boundary_validator_stage" ]; then
+        boundary_validator_report_size=$(stat -Lc '%s' \
+            "$boundary_validator_report" 2>/dev/null || true)
+        case $boundary_validator_report_size in
+            ''|*[!0-9]*) boundary_validator_stage=input-size ;;
+            *)
+                if [ "$boundary_validator_report_size" -eq 0 ] \
+                    || [ "$boundary_validator_report_size" -gt 32768 ]; then
+                    boundary_validator_stage=input-size
+                fi
+                ;;
+        esac
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e -s 'length == 1' "$boundary_validator_report" \
+            >/dev/null 2>&1; then
+        boundary_validator_stage=json-value
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -S -c . "$boundary_validator_report" 2>/dev/null \
+            | cmp -s - "$boundary_validator_report"; then
+        boundary_validator_stage=canonical-encoding
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            type == "object"
+            and keys == ([
+                "checks", "enumerated_host_state", "environment",
+                "finished_at", "generated_at", "invocation_ids",
+                "observed_artifact_hashes", "observed_source", "overall",
+                "production", "report_kind", "retirement", "schema_version",
+                "scope", "started_at", "worker"
+            ] | sort)
+            and .schema_version == 1
+            and .report_kind == "volparossa-helper-boundary-evidence"
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=fixed-contract
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            def exact_keys($expected):
+                type == "object" and keys == ($expected | sort);
+            def valid_sha256:
+                type == "string"
+                and test("^[0-9a-f]{64}$")
+                and (test("^0+$") | not);
+            def valid_source_revision:
+                type == "string"
+                and test("^([0-9a-f]{40}|[0-9a-f]{64})$")
+                and (test("^0+$") | not);
+            .observed_source
+                | exact_keys(["commit_sha", "worktree_clean"])
+                and (.commit_sha | valid_source_revision)
+                and .worktree_clean == true
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=source-artifacts
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            def exact_keys($expected):
+                type == "object" and keys == ($expected | sort);
+            def valid_sha256:
+                type == "string"
+                and test("^[0-9a-f]{64}$")
+                and (test("^0+$") | not);
+            .observed_artifact_hashes
+                | exact_keys([
+                    "production_ipc_probe_sha256",
+                    "production_ipc_unit_hook_sha256",
+                    "volparossa_helper_sha256"
+                  ])
+                and all(.[]; valid_sha256)
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=source-artifacts
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            def exact_keys($expected):
+                type == "object" and keys == ($expected | sort);
+            def valid_kernel_release:
+                type == "string"
+                and length >= 1
+                and length <= 128
+                and test("^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$");
+            .environment
+                | exact_keys([
+                    "debian_version", "dpkg_architecture", "kernel_release",
+                    "machine", "systemd_version", "virtualization"
+                  ])
+                and .debian_version == "13"
+                and .dpkg_architecture == "amd64"
+                and (.kernel_release | valid_kernel_release)
+                and .machine == "x86_64"
+                and .systemd_version == 257
+                and .virtualization == "vm"
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=environment
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            def utc_epoch:
+                if type == "string"
+                    and test("^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$")
+                then . as $timestamp
+                    | try (fromdateiso8601 as $epoch
+                        | if ($epoch | todateiso8601) == $timestamp
+                          then $epoch
+                          else null
+                          end)
+                      catch null
+                else null
+                end;
+            (.started_at | utc_epoch) != null
+            and (.finished_at | utc_epoch) != null
+            and (.generated_at | utc_epoch) != null
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=clock-format
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            def utc_epoch:
+                . as $timestamp
+                | fromdateiso8601 as $epoch
+                | if ($epoch | todateiso8601) == $timestamp
+                  then $epoch
+                  else null
+                  end;
+            (.started_at | utc_epoch) as $started
+            | (.finished_at | utc_epoch) as $finished
+            | (.generated_at | utc_epoch) as $generated
+            | $started <= $finished and $finished <= $generated
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=clock-order
+    fi
+    if [ -z "$boundary_validator_stage" ]; then
+        if ! jq -e '
+            def valid_invocation_id:
+                type == "string"
+                and test("^[0-9a-f]{32}$")
+                and (test("^0+$") | not);
+            .invocation_ids
+                | type == "array"
+                and length == 2
+                and all(.[]; valid_invocation_id)
+                and .[0] != .[1]
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+            boundary_validator_stage=invocations
+        fi
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            def exact_keys($expected):
+                type == "object" and keys == ($expected | sort);
+            (.worker
+                | exact_keys([
+                    "fdstore_before_retirement",
+                    "unit_load_state_after_retirement"
+                  ])
+                and .fdstore_before_retirement == 2
+                and .unit_load_state_after_retirement == "not-found")
+            and (.production
+                | exact_keys([
+                    "argumentless", "fdstore_active_cycle_counts",
+                    "fdstore_exact_identity_bound", "fdstore_idle_observation",
+                    "fdstore_settled_cycle_counts",
+                    "unit_load_state_after_retirement"
+                  ])
+                and .argumentless == true
+                and .fdstore_active_cycle_counts == [2, 2, 2]
+                and .fdstore_exact_identity_bound == true
+                and .fdstore_idle_observation == 0
+                and .fdstore_settled_cycle_counts == [0, 0, 0]
+                and .unit_load_state_after_retirement == "not-found")
+            and (.retirement
+                | exact_keys([
+                    "journal_settled_absent", "lock_released", "socket_absent"
+                  ])
+                and .journal_settled_absent == true
+                and .lock_released == true
+                and .socket_absent == true)
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=lifecycle
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            def exact_keys($expected):
+                type == "object" and keys == ($expected | sort);
+            def valid_sha256:
+                type == "string"
+                and test("^[0-9a-f]{64}$")
+                and (test("^0+$") | not);
+            def expected_host_state_records:
+                [
+                  "production_runtime_path", "accounts", "namespaces",
+                  "mounts", "resolver", "sysctls", "links", "addresses",
+                  "routes", "rules", "nexthops", "qdiscs", "nftables",
+                  "wireguard", "legacy_ipv4_firewall",
+                  "legacy_ipv6_firewall"
+                ];
+            .enumerated_host_state
+                | exact_keys([
+                    "after_sha256", "before_sha256", "equal_at_fences",
+                    "records"
+                  ])
+                and (.after_sha256 | valid_sha256)
+                and (.before_sha256 | valid_sha256)
+                and .after_sha256 == .before_sha256
+                and .equal_at_fences == true
+                and .records == expected_host_state_records
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=host-state
+    fi
+    if [ -z "$boundary_validator_stage" ] \
+        && ! jq -e '
+            def exact_keys($expected):
+                type == "object" and keys == ($expected | sort);
+            def expected_check_ids:
+                [
+                  "OBSERVED_SOURCE_TREE_CLEAN", "OBSERVED_ARTIFACT_HASHES",
+                  "DEBIAN_13_AMD64_X86_64_SYSTEMD_257_VM",
+                  "WORKER_INVOCATION_BOUND", "WORKER_LIVE_IDENTITY",
+                  "WORKER_FDSTORE_TWO_BEFORE_RETIREMENT",
+                  "WORKER_RETIRED_UNIT_NOT_FOUND",
+                  "PRODUCTION_DISTINCT_INVOCATION_BOUND",
+                  "PRODUCTION_ARGUMENTLESS", "PRODUCTION_IPC_BOUNDARY",
+                  "PRODUCTION_FDSTORE_ZERO_AT_IDLE_OBSERVATION",
+                  "PRODUCTION_FDSTORE_EXACT_CUSTODY_DURING_ACTIVE_CYCLES",
+                  "PRODUCTION_FDSTORE_ZERO_AFTER_SETTLED_CYCLES",
+                  "PRODUCTION_RETIRED_UNIT_NOT_FOUND",
+                  "RETIREMENT_JOURNAL_SETTLED_ABSENT",
+                  "RETIREMENT_LOCK_RELEASED", "RETIREMENT_SOCKET_ABSENT",
+                  "ENUMERATED_HOST_STATE_EQUAL_AT_FENCES"
+                ];
+            (.scope
+                | exact_keys([
+                    "acceptance_a01_a15", "cleanup_owned", "datapath",
+                    "helper_boundary_only", "installed_package",
+                    "restart_recovery"
+                  ])
+                and .acceptance_a01_a15 == false
+                and .cleanup_owned == false
+                and .datapath == false
+                and .helper_boundary_only == true
+                and .installed_package == false
+                and .restart_recovery == false)
+            and (.checks
+                | type == "array"
+                and length == 18
+                and [.[].id] == expected_check_ids
+                and all(.[];
+                    exact_keys(["id", "result"])
+                    and .result == "PASS"))
+            and .overall == "PASS"
+        ' "$boundary_validator_report" >/dev/null 2>&1; then
+        boundary_validator_stage=fixed-contract
+    fi
+    if [ -z "$boundary_validator_stage" ]; then
+        boundary_validator_stage=fixed-contract
+    fi
+    boundary_validator_failure_stage_is_safe "$boundary_validator_stage" \
+        || return 1
+    printf 'VOLPAROSSA_HELPER_LIVE_BOUNDARY_VALIDATOR_DIAGNOSTIC_V1=%s\n' \
+        "$boundary_validator_stage" >&2
 }
 
 proof_failure_reason_is_safe() {
@@ -376,6 +697,241 @@ report_worker_confinement_diagnostic() {
         "$worker_confinement_failure" >&2
 }
 
+report_restart_crash_record_diagnostic() {
+    [ "$#" -eq 2 ] || return 1
+    restart_crash_diagnostic_record=$1
+    restart_crash_diagnostic_stderr=$2
+    if [ ! -e "$restart_crash_diagnostic_record" ] \
+        && [ ! -L "$restart_crash_diagnostic_record" ]; then
+        restart_crash_diagnostic_record_state=absent
+    elif vp_capture_file_is_safe "$restart_crash_diagnostic_record"; then
+        return 1
+    else
+        restart_crash_diagnostic_record_state=unsafe
+    fi
+
+    if ! vp_capture_file_is_safe "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=stderr-unsafe
+    elif grep -Fqx \
+        'production IPC unit hook failed: restart exact descriptor custody is unavailable' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=fdstore-read
+    elif grep -Fqx \
+        'production IPC unit hook failed: restart descriptor count changed during observation' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=fdstore-count
+    elif grep -Fqx \
+        'production IPC unit hook failed: restart exact descriptor custody changed' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=fdstore-name
+    elif grep -Fqx \
+        'production IPC unit hook failed: restart CleanupConfirmed journal is unavailable' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=journal-read
+    elif grep -Fqx \
+        'production IPC unit hook failed: restart CleanupConfirmed journal proof is invalid' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=journal-value
+    elif grep -Fqx \
+        'production IPC unit hook failed: precrash hook ControlPID changed' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=control-binding
+    elif grep -Eq \
+        '^production IPC unit hook failed: precrash worker (namespace|process) pin is unavailable$' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=pin-open
+    elif grep -Eq \
+        '^production IPC unit hook failed: precrash worker (namespace|process) pin changed$' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=pin-change
+    elif grep -Fqx \
+        'production IPC unit hook failed: precrash worker process is not retired' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=process-live
+    elif grep -Fqx \
+        'production IPC unit hook failed: precrash worker WireGuard state remains' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=wireguard-live
+    elif grep -Eq \
+        '^production IPC unit hook failed: (cleanup-confirmed time is unavailable|crash record is unavailable|crash record could not be published)$' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=publication
+    elif grep -Fqx \
+        'production IPC unit hook failed: restart MainPID is not manager-bound' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=manager-binding
+    elif grep -Eq \
+        '^production IPC unit hook failed: restart (precrash identity|initial [A-Za-z ]+|worker [A-Za-z ]+|pidfd descriptor identity|namespace descriptor identity|custody name|peer fixture) is (unavailable|invalid)$' \
+        "$restart_crash_diagnostic_stderr"; then
+        restart_crash_diagnostic_observer=precrash
+    elif [ ! -s "$restart_crash_diagnostic_stderr" ]; then
+        restart_crash_diagnostic_observer=stderr-empty
+    else
+        restart_crash_diagnostic_observer=stderr-other
+    fi
+    printf 'VOLPAROSSA_HELPER_LIVE_RESTART_CRASH_RECORD_DIAGNOSTIC_V1=record-%s,observer-%s\n' \
+        "$restart_crash_diagnostic_record_state" \
+        "$restart_crash_diagnostic_observer" >&2
+}
+
+restart_successor_debugger_failure_category_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        exec-not-caught|\
+        breakpoint-not-installed|\
+        breakpoint-not-reached|\
+        marker-invalid|\
+        observer-manager-binding|\
+        observer-precrash-record|\
+        observer-fdstore-read|\
+        observer-fdstore-count|\
+        observer-fdstore-name|\
+        observer-journal-read|\
+        observer-journal-value|\
+        observer-invocation-read|\
+        observer-invocation-reuse|\
+        observer-mainpid-reuse|\
+        observer-restart-count|\
+        observer-socket-change|\
+        observer-time|\
+        observer-starttime|\
+        observer-record-build|\
+        observer-record-publication|\
+        observer-timeout|\
+        observer-other|\
+        post-observer)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+restart_successor_debugger_failure_category() {
+    [ "$#" -eq 3 ] || return 1
+    restart_successor_debugger_status=$1
+    restart_successor_debugger_stdout=$2
+    restart_successor_debugger_stderr=$3
+    case $restart_successor_debugger_status in
+        ''|0|*[!0-9]*) return 1 ;;
+    esac
+    for restart_successor_debugger_log in \
+        "$restart_successor_debugger_stdout" \
+        "$restart_successor_debugger_stderr"; do
+        vp_capture_file_is_safe "$restart_successor_debugger_log" || return 1
+        [ "$(stat -Lc '%s' "$restart_successor_debugger_log")" -le 1048576 ] \
+            || return 1
+    done
+    restart_successor_exec_marker=VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=exec-caught
+    restart_successor_breakpoint_marker=VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=breakpoint-installed
+    restart_successor_hit_marker=VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=breakpoint-hit
+    restart_successor_observer_ok_marker=VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=observer-ok
+    restart_successor_observer_failed_marker=VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=observer-failed
+    restart_successor_marker_prefix=VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=
+    restart_successor_marker_sequence=$(grep -F \
+        "$restart_successor_marker_prefix" \
+        "$restart_successor_debugger_stdout" || true)
+    restart_successor_exec_breakpoint=$(printf '%s\n%s' \
+        "$restart_successor_exec_marker" \
+        "$restart_successor_breakpoint_marker") || return 1
+    restart_successor_through_hit=$(printf '%s\n%s' \
+        "$restart_successor_exec_breakpoint" \
+        "$restart_successor_hit_marker") || return 1
+    restart_successor_through_observer_ok=$(printf '%s\n%s' \
+        "$restart_successor_through_hit" \
+        "$restart_successor_observer_ok_marker") || return 1
+    restart_successor_through_observer_failed=$(printf '%s\n%s' \
+        "$restart_successor_through_hit" \
+        "$restart_successor_observer_failed_marker") || return 1
+    restart_successor_debugger_category=
+    restart_successor_observer_failed=no
+    case $restart_successor_marker_sequence in
+        '') restart_successor_debugger_category=exec-not-caught ;;
+        "$restart_successor_exec_marker")
+            restart_successor_debugger_category=breakpoint-not-installed ;;
+        "$restart_successor_exec_breakpoint")
+            restart_successor_debugger_category=breakpoint-not-reached ;;
+        "$restart_successor_through_hit")
+            case $restart_successor_debugger_status in
+                137|143) restart_successor_debugger_category=observer-timeout ;;
+                *) restart_successor_debugger_category=observer-other ;;
+            esac
+            ;;
+        "$restart_successor_through_observer_ok")
+            restart_successor_debugger_category=post-observer ;;
+        "$restart_successor_through_observer_failed")
+            restart_successor_observer_failed=yes ;;
+        *) restart_successor_debugger_category=marker-invalid ;;
+    esac
+    if [ "$restart_successor_observer_failed" = yes ]; then
+        restart_successor_hook_prefix='production IPC unit hook failed: '
+        restart_successor_hook_count=$(grep -c \
+            "^$restart_successor_hook_prefix" \
+            "$restart_successor_debugger_stderr" || true)
+        if [ "$restart_successor_hook_count" != 1 ]; then
+            restart_successor_debugger_category=observer-other
+        else
+            restart_successor_hook_line=$(grep \
+                "^$restart_successor_hook_prefix" \
+                "$restart_successor_debugger_stderr") || return 1
+            case $restart_successor_hook_line in
+                'production IPC unit hook failed: restart MainPID is not manager-bound')
+                    restart_successor_debugger_category=observer-manager-binding ;;
+                'production IPC unit hook failed: restart precrash identity is unavailable'|\
+                'production IPC unit hook failed: restart initial invocation is unavailable'|\
+                'production IPC unit hook failed: restart initial invocation is invalid'|\
+                'production IPC unit hook failed: restart initial PID is unavailable'|\
+                'production IPC unit hook failed: restart initial PID is invalid'|\
+                'production IPC unit hook failed: restart initial starttime is unavailable'|\
+                'production IPC unit hook failed: restart initial starttime is invalid'|\
+                'production IPC unit hook failed: restart initial socket is unavailable'|\
+                'production IPC unit hook failed: restart hook PID is unavailable'|\
+                'production IPC unit hook failed: restart worker PID is unavailable'|\
+                'production IPC unit hook failed: restart worker starttime is unavailable'|\
+                'production IPC unit hook failed: restart worker namespace is unavailable'|\
+                'production IPC unit hook failed: restart worker process identity is unavailable'|\
+                'production IPC unit hook failed: restart pidfd descriptor identity is unavailable'|\
+                'production IPC unit hook failed: restart namespace descriptor identity is unavailable'|\
+                'production IPC unit hook failed: restart custody name is unavailable'|\
+                'production IPC unit hook failed: restart custody name is invalid'|\
+                'production IPC unit hook failed: restart peer fixture is unavailable')
+                    restart_successor_debugger_category=observer-precrash-record ;;
+                'production IPC unit hook failed: restart exact descriptor custody is unavailable')
+                    restart_successor_debugger_category=observer-fdstore-read ;;
+                'production IPC unit hook failed: restart descriptor count changed during observation')
+                    restart_successor_debugger_category=observer-fdstore-count ;;
+                'production IPC unit hook failed: restart exact descriptor custody changed')
+                    restart_successor_debugger_category=observer-fdstore-name ;;
+                'production IPC unit hook failed: restart CleanupConfirmed journal is unavailable')
+                    restart_successor_debugger_category=observer-journal-read ;;
+                'production IPC unit hook failed: restart CleanupConfirmed journal proof is invalid')
+                    restart_successor_debugger_category=observer-journal-value ;;
+                'production IPC unit hook failed: restart successor invocation is unavailable')
+                    restart_successor_debugger_category=observer-invocation-read ;;
+                'production IPC unit hook failed: restart successor reused the invocation')
+                    restart_successor_debugger_category=observer-invocation-reuse ;;
+                'production IPC unit hook failed: restart successor reused the MainPID')
+                    restart_successor_debugger_category=observer-mainpid-reuse ;;
+                'production IPC unit hook failed: restart count is not exactly one')
+                    restart_successor_debugger_category=observer-restart-count ;;
+                'production IPC unit hook failed: a new socket appeared before settlement')
+                    restart_successor_debugger_category=observer-socket-change ;;
+                'production IPC unit hook failed: restart boundary time is unavailable')
+                    restart_successor_debugger_category=observer-time ;;
+                'production IPC unit hook failed: restart successor starttime is unavailable')
+                    restart_successor_debugger_category=observer-starttime ;;
+                'production IPC unit hook failed: restart boundary record is unavailable')
+                    restart_successor_debugger_category=observer-record-build ;;
+                'production IPC unit hook failed: restart boundary record could not be published')
+                    restart_successor_debugger_category=observer-record-publication ;;
+                *) restart_successor_debugger_category=observer-other ;;
+            esac
+        fi
+    fi
+    restart_successor_debugger_failure_category_is_safe \
+        "$restart_successor_debugger_category" || return 1
+    printf '%s\n' "$restart_successor_debugger_category"
+}
+
 production_start_failure_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -442,6 +998,773 @@ production_start_failure_stage_is_safe() {
             ;;
         *) return 1 ;;
     esac
+}
+
+restart_successor_start_failure_category() {
+    [ "$#" -eq 1 ] || return 1
+    restart_start_failure_file=$1
+    vp_capture_file_is_safe "$restart_start_failure_file" || return 1
+    [ ! -e "$restart_start_failure_file.next" ] \
+        && [ ! -L "$restart_start_failure_file.next" ] || return 1
+    restart_start_failure_size=$(stat -Lc '%s' \
+        "$restart_start_failure_file" 2>/dev/null) || return 1
+    [ "$restart_start_failure_size" -ge 1 ] \
+        && [ "$restart_start_failure_size" -le 128 ] || return 1
+    restart_start_failure_record=$(cat "$restart_start_failure_file") \
+        || return 1
+    restart_start_failure_prefix=VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=
+    case $restart_start_failure_record in
+        "$restart_start_failure_prefix"*)
+            restart_start_failure_stage=${restart_start_failure_record#"$restart_start_failure_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    printf '%s%s\n' "$restart_start_failure_prefix" \
+        "$restart_start_failure_stage" \
+        | cmp -s - "$restart_start_failure_file" || return 1
+    case $restart_start_failure_stage in
+        preflight-runtime) printf '%s\n' preflight ;;
+        restart-recovery-wait) printf '%s\n' recovery-wait ;;
+        restart-lineage) printf '%s\n' lineage ;;
+        restart-descriptor-settlement) printf '%s\n' descriptor-settlement ;;
+        restart-journal-settlement) printf '%s\n' journal-settlement ;;
+        restart-socket-validation) printf '%s\n' socket-validation ;;
+        restart-publication) printf '%s\n' publication ;;
+        *) return 1 ;;
+    esac
+}
+
+restart_readiness_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight|clock-read|clock-backwards|lineage-pid|lineage-invocation|\
+        socket-capture|\
+        initial-journal-value|stage-transition|final-journal-read|\
+        final-journal-value|bind-runtime-read|bind-runtime-value|journal-next|\
+        journal-state-before|journal-state-after|journal-state-change|\
+        socket-stability|final-lineage-pid|final-lineage-invocation|timeout)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_restart_readiness_failure_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    restart_readiness_diagnostic_file=$1
+    vp_capture_file_is_safe "$restart_readiness_diagnostic_file" || return 1
+    [ ! -e "$restart_readiness_diagnostic_file.next" ] \
+        && [ ! -L "$restart_readiness_diagnostic_file.next" ] || return 1
+    restart_readiness_diagnostic_size=$(stat -Lc '%s' \
+        "$restart_readiness_diagnostic_file" 2>/dev/null) || return 1
+    [ "$restart_readiness_diagnostic_size" -ge 1 ] \
+        && [ "$restart_readiness_diagnostic_size" -le 128 ] || return 1
+    restart_readiness_diagnostic_record=$(cat \
+        "$restart_readiness_diagnostic_file") || return 1
+    restart_readiness_diagnostic_prefix=VOLPAROSSA_HELPER_V3_RESTART_READINESS_FAILURE_V1=
+    case $restart_readiness_diagnostic_record in
+        "$restart_readiness_diagnostic_prefix"*)
+            restart_readiness_diagnostic_stage=${restart_readiness_diagnostic_record#"$restart_readiness_diagnostic_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    restart_readiness_failure_stage_is_safe \
+        "$restart_readiness_diagnostic_stage" || return 1
+    printf '%s%s\n' "$restart_readiness_diagnostic_prefix" \
+        "$restart_readiness_diagnostic_stage" \
+        | cmp -s - "$restart_readiness_diagnostic_file" || return 1
+    printf 'VOLPAROSSA_HELPER_LIVE_RESTART_READINESS_DIAGNOSTIC_V1=%s\n' \
+        "$restart_readiness_diagnostic_stage" >&2
+}
+
+restart_initial_driver_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        appearance|\
+        unsafe-pending-path|\
+        main-pid|\
+        restart-count|\
+        invocation|\
+        marker|\
+        start-payload|\
+        hook-payload|\
+        terminal-payload|\
+        stable-inode|\
+        unlink|\
+        absence|\
+        control-pid|\
+        hook-identity|\
+        hook-quiescence)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+set_restart_initial_driver_failure_stage() {
+    [ "$#" -eq 1 ] || return 1
+    restart_initial_driver_failure_stage_is_safe "$1" || return 1
+    restart_initial_driver_failure_stage=$1
+}
+
+restart_initial_hook_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight|\
+        publication|\
+        ack-path|\
+        ack-payload|\
+        ack-lineage|\
+        ack-pins|\
+        ack-timeout|\
+        post-lineage|\
+        post-pins|\
+        cleanup|\
+        terminal-publication|\
+        terminal-ack-path|\
+        terminal-ack-payload|\
+        terminal-ack-lineage|\
+        terminal-ack-pins|\
+        terminal-ack-timeout|\
+        terminal-post-lineage|\
+        terminal-post-pins)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+read_restart_initial_hook_failure_stage() {
+    [ "$#" -eq 1 ] || return 1
+    restart_initial_hook_failure_file=$1
+    vp_capture_file_is_safe "$restart_initial_hook_failure_file" || return 1
+    [ ! -e "$restart_initial_hook_failure_file.next" ] \
+        && [ ! -L "$restart_initial_hook_failure_file.next" ] || return 1
+    restart_initial_hook_failure_size=$(stat -Lc '%s' \
+        "$restart_initial_hook_failure_file" 2>/dev/null) || return 1
+    [ "$restart_initial_hook_failure_size" -ge 1 ] \
+        && [ "$restart_initial_hook_failure_size" -le 128 ] || return 1
+    restart_initial_hook_failure_record=$(cat \
+        "$restart_initial_hook_failure_file") || return 1
+    restart_initial_hook_failure_prefix=VOLPAROSSA_HELPER_V3_RESTART_INITIAL_HANDSHAKE_FAILURE_V1=
+    case $restart_initial_hook_failure_record in
+        "$restart_initial_hook_failure_prefix"*)
+            restart_initial_hook_failure_stage=${restart_initial_hook_failure_record#"$restart_initial_hook_failure_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    restart_initial_hook_failure_stage_is_safe \
+        "$restart_initial_hook_failure_stage" || return 1
+    printf '%s%s\n' "$restart_initial_hook_failure_prefix" \
+        "$restart_initial_hook_failure_stage" \
+        | cmp -s - "$restart_initial_hook_failure_file" || return 1
+    printf '%s\n' "$restart_initial_hook_failure_stage"
+}
+
+inspect_restart_initial_hook_failure_record() {
+    [ "$#" -eq 1 ] || return 1
+    restart_initial_hook_failure_file=$1
+    restart_initial_hook_failure_state=absent
+    restart_initial_hook_failure_stage=
+    if [ -e "$restart_initial_hook_failure_file" ] \
+        || [ -L "$restart_initial_hook_failure_file" ]; then
+        if [ -e "$restart_initial_hook_failure_file.next" ] \
+            || [ -L "$restart_initial_hook_failure_file.next" ]; then
+            restart_initial_hook_failure_state=unsafe
+            return 0
+        fi
+        if ! vp_capture_file_is_safe "$restart_initial_hook_failure_file"; then
+            restart_initial_hook_failure_state=unsafe
+            return 0
+        fi
+        if restart_initial_hook_failure_stage=$( \
+            read_restart_initial_hook_failure_stage \
+                "$restart_initial_hook_failure_file"
+        ); then
+            restart_initial_hook_failure_state=present
+        else
+            restart_initial_hook_failure_state=invalid
+        fi
+        return 0
+    fi
+    if [ -e "$restart_initial_hook_failure_file.next" ] \
+        || [ -L "$restart_initial_hook_failure_file.next" ]; then
+        if vp_capture_file_is_safe \
+            "$restart_initial_hook_failure_file.next"; then
+            restart_initial_hook_failure_state=pending
+        else
+            restart_initial_hook_failure_state=unsafe
+        fi
+    fi
+}
+
+restart_initial_terminal_record_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    restart_initial_terminal_file=$1
+    vp_capture_file_is_safe "$restart_initial_terminal_file" || return 1
+    [ ! -e "$restart_initial_terminal_file.next" ] \
+        && [ ! -L "$restart_initial_terminal_file.next" ] || return 1
+    restart_initial_terminal_size=$(stat -Lc '%s' \
+        "$restart_initial_terminal_file" 2>/dev/null) || return 1
+    [ "$restart_initial_terminal_size" -ge 1 ] \
+        && [ "$restart_initial_terminal_size" -le 128 ] || return 1
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_RESTART_INITIAL_HANDSHAKE_TERMINAL_V1=success' \
+        | cmp -s - "$restart_initial_terminal_file"
+}
+
+inspect_restart_initial_terminal_record() {
+    [ "$#" -eq 1 ] || return 1
+    restart_initial_terminal_file=$1
+    restart_initial_terminal_state=absent
+    if [ -e "$restart_initial_terminal_file" ] \
+        || [ -L "$restart_initial_terminal_file" ]; then
+        if [ -e "$restart_initial_terminal_file.next" ] \
+            || [ -L "$restart_initial_terminal_file.next" ]; then
+            restart_initial_terminal_state=unsafe
+        elif ! vp_capture_file_is_safe "$restart_initial_terminal_file"; then
+            restart_initial_terminal_state=unsafe
+        elif restart_initial_terminal_record_is_exact \
+            "$restart_initial_terminal_file"; then
+            restart_initial_terminal_state=present
+        else
+            restart_initial_terminal_state=invalid
+        fi
+        return 0
+    fi
+    if [ -e "$restart_initial_terminal_file.next" ] \
+        || [ -L "$restart_initial_terminal_file.next" ]; then
+        if vp_capture_file_is_safe "$restart_initial_terminal_file.next"; then
+            restart_initial_terminal_state=pending
+        else
+            restart_initial_terminal_state=unsafe
+        fi
+    fi
+}
+
+classify_restart_initial_hook_failure_record() {
+    [ "$#" -eq 1 ] || return 1
+    inspect_restart_initial_hook_failure_record "$1" || return 1
+    case $restart_initial_hook_failure_state in
+        absent) return 1 ;;
+        pending) return 2 ;;
+        present)
+            restart_initial_hook_failure_stage_is_safe \
+                "$restart_initial_hook_failure_stage" || return 1
+            return 0
+            ;;
+        unsafe)
+            set_restart_initial_driver_failure_stage unsafe-pending-path \
+                || return 1
+            return 3
+            ;;
+        invalid)
+            set_restart_initial_driver_failure_stage hook-payload \
+                || return 1
+            return 3
+            ;;
+        *) return 3 ;;
+    esac
+}
+
+consume_expected_restart_initial_start_failure() {
+    [ "$#" -eq 1 ] || return 1
+    restart_initial_start_failure_file=$1
+    restart_initial_hook_failure_file=$temporary_stage/restart-output/restart.initial-start.failure-stage
+    restart_initial_driver_failure_stage=
+    restart_initial_hook_failure_stage=
+    restart_initial_terminal_identity=
+    restart_initial_after_crash_observed=no
+    set_restart_initial_driver_failure_stage appearance || return 1
+    restart_initial_start_failure_wait=0
+    while :; do
+        inspect_restart_initial_hook_failure_record \
+            "$restart_initial_hook_failure_file" || return 1
+        case $restart_initial_hook_failure_state in
+            present) return 1 ;;
+            invalid)
+                set_restart_initial_driver_failure_stage hook-payload \
+                    || return 1
+                return 1
+                ;;
+            unsafe)
+                set_restart_initial_driver_failure_stage unsafe-pending-path \
+                    || return 1
+                return 1
+                ;;
+            absent)
+                if vp_capture_file_is_safe \
+                    "$restart_initial_start_failure_file"; then
+                    break
+                fi
+                ;;
+            pending) ;;
+            *) return 1 ;;
+        esac
+        if ! vp_capture_file_is_safe "$restart_initial_start_failure_file" \
+            && { [ -e "$restart_initial_start_failure_file" ] \
+                || [ -L "$restart_initial_start_failure_file" ]; }; then
+            set_restart_initial_driver_failure_stage unsafe-pending-path \
+                || return 1
+            return 1
+        fi
+        if [ -e "$restart_initial_start_failure_file.next" ] \
+            || [ -L "$restart_initial_start_failure_file.next" ]; then
+            vp_capture_file_is_safe "$restart_initial_start_failure_file.next" \
+                || {
+                    set_restart_initial_driver_failure_stage unsafe-pending-path \
+                        || return 1
+                    return 1
+                }
+        fi
+        set_restart_initial_driver_failure_stage main-pid || return 1
+        [ "$(systemctl show --property=MainPID --value "$unit_name")" = 0 ] \
+            || return 1
+        set_restart_initial_driver_failure_stage restart-count || return 1
+        [ "$(systemctl show --property=NRestarts --value "$unit_name")" = 0 ] \
+            || return 1
+        set_restart_initial_driver_failure_stage control-pid || return 1
+        [ "$(systemctl show --property=ControlPID --value "$unit_name")" = \
+            "$restart_initial_hook_pid" ] || return 1
+        set_restart_initial_driver_failure_stage invocation || return 1
+        [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+            "$restart_initial_invocation_id" ] || return 1
+        set_restart_initial_driver_failure_stage marker || return 1
+        unit_description_matches_marker || return 1
+        set_restart_initial_driver_failure_stage appearance || return 1
+        restart_initial_start_failure_wait=$((
+            restart_initial_start_failure_wait + 1
+        ))
+        [ "$restart_initial_start_failure_wait" -lt 150 ] || return 1
+        sleep 0.05
+    done
+    inspect_restart_initial_hook_failure_record \
+        "$restart_initial_hook_failure_file" || return 1
+    case $restart_initial_hook_failure_state in
+        present) return 1 ;;
+        invalid)
+            set_restart_initial_driver_failure_stage hook-payload || return 1
+            return 1
+            ;;
+        pending|unsafe)
+            set_restart_initial_driver_failure_stage unsafe-pending-path || return 1
+            return 1
+            ;;
+        absent) ;;
+        *) return 1 ;;
+    esac
+    set_restart_initial_driver_failure_stage unsafe-pending-path || return 1
+    [ ! -e "$restart_initial_start_failure_file.next" ] \
+        && [ ! -L "$restart_initial_start_failure_file.next" ] || return 1
+    set_restart_initial_driver_failure_stage start-payload || return 1
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=functional-client-release' \
+        | cmp -s - "$restart_initial_start_failure_file" || return 1
+    restart_initial_functional_stdout_file=$temporary_stage/restart-output/functional-client-lease.stdout
+    restart_initial_functional_stderr_file=$temporary_stage/restart-output/functional-client-lease.stderr
+    restart_initial_functional_failure_file=$temporary_stage/restart-output/functional-client-lease.failure
+    vp_capture_file_is_safe "$restart_initial_functional_failure_file" || return 1
+    [ ! -e "$restart_initial_functional_failure_file.next" ] \
+        && [ ! -L "$restart_initial_functional_failure_file.next" ] || return 1
+    vp_capture_file_is_safe "$restart_initial_functional_stdout_file" || return 1
+    vp_capture_file_is_safe "$restart_initial_functional_stderr_file" || return 1
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+        | cmp -s - "$restart_initial_functional_stdout_file" || return 1
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=destroy,protocol' \
+        | cmp -s - "$restart_initial_functional_failure_file" || return 1
+    cmp -s "$restart_initial_functional_failure_file" \
+        "$restart_initial_functional_stderr_file" || return 1
+    restart_initial_functional_failure_identity=$(stat -Lc \
+        '%d:%i:%f:%u:%g:%a:%h:%s' \
+        "$restart_initial_functional_failure_file" 2>/dev/null) || return 1
+    set_restart_initial_driver_failure_stage main-pid || return 1
+    [ "$(systemctl show --property=MainPID --value "$unit_name")" = 0 ] \
+        || return 1
+    set_restart_initial_driver_failure_stage restart-count || return 1
+    [ "$(systemctl show --property=NRestarts --value "$unit_name")" = 0 ] \
+        || return 1
+    set_restart_initial_driver_failure_stage control-pid || return 1
+    [ "$(systemctl show --property=ControlPID --value "$unit_name")" = \
+        "$restart_initial_hook_pid" ] || return 1
+    set_restart_initial_driver_failure_stage invocation || return 1
+    [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+        "$restart_initial_invocation_id" ] || return 1
+    set_restart_initial_driver_failure_stage marker || return 1
+    unit_description_matches_marker || return 1
+    set_restart_initial_driver_failure_stage stable-inode || return 1
+    [ "$restart_initial_functional_failure_identity" = \
+        "$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+            "$restart_initial_functional_failure_file" 2>/dev/null)" ] || return 1
+    rm -- "$restart_initial_functional_failure_file" || return 1
+    [ ! -e "$restart_initial_functional_failure_file" ] \
+        && [ ! -L "$restart_initial_functional_failure_file" ] \
+        && [ ! -e "$restart_initial_functional_failure_file.next" ] \
+        && [ ! -L "$restart_initial_functional_failure_file.next" ] || return 1
+    restart_initial_start_failure_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+        "$restart_initial_start_failure_file" 2>/dev/null) || return 1
+    [ "$restart_initial_start_failure_identity" = \
+        "$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+            "$restart_initial_start_failure_file" 2>/dev/null)" ] || return 1
+    # Every old-invocation fence is complete before this unlink. The still-live
+    # ExecStartPost treats absence as the acknowledgement and only then returns
+    # its intentional failure, so no racy manager read belongs after unlink.
+    set_restart_initial_driver_failure_stage unlink || return 1
+    rm -- "$restart_initial_start_failure_file" || return 1
+    set_restart_initial_driver_failure_stage absence || return 1
+    [ ! -e "$restart_initial_start_failure_file" ] \
+        && [ ! -L "$restart_initial_start_failure_file" ] \
+        && [ ! -e "$restart_initial_start_failure_file.next" ] \
+        && [ ! -L "$restart_initial_start_failure_file.next" ] || return 1
+    # The unlink is only the hook's input ACK. Do not accept the handshake
+    # until that same hook has completed its post-lineage and post-pin fences
+    # and published the separate canonical terminal-success record. No old
+    # systemd InvocationID read is valid or needed after the unlink.
+    restart_initial_terminal_file=$temporary_stage/restart-output/restart.initial-start.terminal
+    set_restart_initial_driver_failure_stage appearance || return 1
+    restart_initial_terminal_wait=0
+    while :; do
+        inspect_restart_initial_hook_failure_record \
+            "$restart_initial_hook_failure_file" || return 1
+        case $restart_initial_hook_failure_state in
+            present) return 1 ;;
+            invalid)
+                set_restart_initial_driver_failure_stage hook-payload \
+                    || return 1
+                return 1
+                ;;
+            unsafe)
+                set_restart_initial_driver_failure_stage unsafe-pending-path \
+                    || return 1
+                return 1
+                ;;
+            absent|pending) ;;
+            *) return 1 ;;
+        esac
+        inspect_restart_initial_terminal_record \
+            "$restart_initial_terminal_file" || return 1
+        case $restart_initial_terminal_state in
+            present)
+                if [ "$restart_initial_hook_failure_state" = pending ]; then
+                    set_restart_initial_driver_failure_stage unsafe-pending-path \
+                        || return 1
+                    return 1
+                fi
+                break
+                ;;
+            invalid)
+                set_restart_initial_driver_failure_stage terminal-payload \
+                    || return 1
+                return 1
+                ;;
+            unsafe)
+                set_restart_initial_driver_failure_stage unsafe-pending-path \
+                    || return 1
+                return 1
+                ;;
+            absent|pending) ;;
+            *) return 1 ;;
+        esac
+        set_restart_initial_driver_failure_stage absence || return 1
+        [ ! -e "$restart_initial_start_failure_file" ] \
+            && [ ! -L "$restart_initial_start_failure_file" ] \
+            && [ ! -e "$restart_initial_start_failure_file.next" ] \
+            && [ ! -L "$restart_initial_start_failure_file.next" ] || return 1
+        set_restart_initial_driver_failure_stage appearance || return 1
+        restart_initial_terminal_wait=$((restart_initial_terminal_wait + 1))
+        [ "$restart_initial_terminal_wait" -lt 300 ] || return 1
+        sleep 0.05
+    done
+    inspect_restart_initial_hook_failure_record \
+        "$restart_initial_hook_failure_file" || return 1
+    case $restart_initial_hook_failure_state in
+        absent) ;;
+        present) return 1 ;;
+        invalid)
+            set_restart_initial_driver_failure_stage hook-payload || return 1
+            return 1
+            ;;
+        pending|unsafe)
+            set_restart_initial_driver_failure_stage unsafe-pending-path || return 1
+            return 1
+            ;;
+        *) return 1 ;;
+    esac
+    set_restart_initial_driver_failure_stage terminal-payload || return 1
+    restart_initial_terminal_record_is_exact \
+        "$restart_initial_terminal_file" || return 1
+    set_restart_initial_driver_failure_stage stable-inode || return 1
+    restart_initial_terminal_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+        "$restart_initial_terminal_file" 2>/dev/null) || return 1
+    [ "$restart_initial_terminal_identity" = \
+        "$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+            "$restart_initial_terminal_file" 2>/dev/null)" ] || return 1
+    inspect_restart_initial_hook_failure_record \
+        "$restart_initial_hook_failure_file" || return 1
+    [ "$restart_initial_hook_failure_state" = absent ] || {
+        case $restart_initial_hook_failure_state in
+            invalid)
+                set_restart_initial_driver_failure_stage hook-payload \
+                    || return 1
+                ;;
+            *)
+                set_restart_initial_driver_failure_stage unsafe-pending-path \
+                    || return 1
+                ;;
+        esac
+        return 1
+    }
+    set_restart_initial_driver_failure_stage absence || return 1
+    [ -e "$restart_initial_terminal_file" ] \
+        && [ ! -L "$restart_initial_terminal_file" ] || return 1
+    [ ! -e "$restart_initial_terminal_file.next" ] \
+        && [ ! -L "$restart_initial_terminal_file.next" ] \
+        && [ ! -e "$restart_initial_hook_failure_file" ] \
+        && [ ! -L "$restart_initial_hook_failure_file" ] \
+        && [ ! -e "$restart_initial_hook_failure_file.next" ] \
+        && [ ! -L "$restart_initial_hook_failure_file.next" ] || return 1
+    # Terminal success proves post-cleanup readiness, but it is intentionally
+    # retained. The root driver must observe after-crash custody while this old
+    # ExecStartPost is still ControlPID, then release this exact inode once.
+    restart_initial_driver_failure_stage=
+    return 0
+}
+
+release_expected_restart_initial_terminal() {
+    [ "$#" -eq 2 ] || return 1
+    restart_initial_release_terminal_file=$1
+    restart_initial_release_failure_file=$2
+    [ "$restart_initial_release_terminal_file" = \
+        "$temporary_stage/restart-output/restart.initial-start.terminal" ] \
+        || return 1
+    [ "$restart_initial_release_failure_file" = \
+        "$temporary_stage/restart-output/restart.initial-start.failure-stage" ] \
+        || return 1
+    set_restart_initial_driver_failure_stage hook-identity || return 1
+    [ "$restart_initial_after_crash_observed" = yes ] || return 1
+    case $restart_initial_hook_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    if [ "${#restart_initial_hook_pid}" -gt 10 ] \
+        || [ "$restart_initial_hook_pid" -gt 4294967294 ]; then
+        return 1
+    fi
+    case $restart_initial_hook_starttime in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#restart_initial_hook_starttime}" -le 20 ] || return 1
+    inspect_restart_initial_hook_failure_record \
+        "$restart_initial_release_failure_file" || return 1
+    case $restart_initial_hook_failure_state in
+        absent) ;;
+        present) return 1 ;;
+        invalid)
+            set_restart_initial_driver_failure_stage hook-payload || return 1
+            return 1
+            ;;
+        pending|unsafe)
+            set_restart_initial_driver_failure_stage unsafe-pending-path || return 1
+            return 1
+            ;;
+        *) return 1 ;;
+    esac
+    inspect_restart_initial_terminal_record \
+        "$restart_initial_release_terminal_file" || return 1
+    case $restart_initial_terminal_state in
+        present) ;;
+        absent|pending)
+            set_restart_initial_driver_failure_stage appearance || return 1
+            return 1
+            ;;
+        invalid)
+            set_restart_initial_driver_failure_stage terminal-payload || return 1
+            return 1
+            ;;
+        unsafe)
+            set_restart_initial_driver_failure_stage unsafe-pending-path || return 1
+            return 1
+            ;;
+        *) return 1 ;;
+    esac
+    set_restart_initial_driver_failure_stage main-pid || return 1
+    [ "$(systemctl show --property=MainPID --value "$unit_name")" = 0 ] \
+        || return 1
+    set_restart_initial_driver_failure_stage restart-count || return 1
+    [ "$(systemctl show --property=NRestarts --value "$unit_name")" = 0 ] \
+        || return 1
+    set_restart_initial_driver_failure_stage invocation || return 1
+    [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+        "$restart_initial_invocation_id" ] || return 1
+    set_restart_initial_driver_failure_stage marker || return 1
+    unit_description_matches_marker || return 1
+    set_restart_initial_driver_failure_stage control-pid || return 1
+    [ "$(systemctl show --property=ControlPID --value "$unit_name")" = \
+        "$restart_initial_hook_pid" ] || return 1
+    set_restart_initial_driver_failure_stage hook-identity || return 1
+    [ "$(capture_process_starttime "$restart_initial_hook_pid" \
+        2>/dev/null || true)" = "$restart_initial_hook_starttime" ] || return 1
+    set_restart_initial_driver_failure_stage terminal-payload || return 1
+    restart_initial_terminal_record_is_exact \
+        "$restart_initial_release_terminal_file" || return 1
+    set_restart_initial_driver_failure_stage stable-inode || return 1
+    restart_initial_release_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+        "$restart_initial_release_terminal_file" 2>/dev/null) || return 1
+    [ "$restart_initial_release_identity" = \
+        "$restart_initial_terminal_identity" ] || return 1
+    [ "$restart_initial_release_identity" = \
+        "$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+            "$restart_initial_release_terminal_file" 2>/dev/null)" ] || return 1
+    inspect_restart_initial_hook_failure_record \
+        "$restart_initial_release_failure_file" || return 1
+    [ "$restart_initial_hook_failure_state" = absent ] || {
+        case $restart_initial_hook_failure_state in
+            invalid)
+                set_restart_initial_driver_failure_stage hook-payload \
+                    || return 1
+                ;;
+            *)
+                set_restart_initial_driver_failure_stage unsafe-pending-path \
+                    || return 1
+                ;;
+        esac
+        return 1
+    }
+    set_restart_initial_driver_failure_stage main-pid || return 1
+    [ "$(systemctl show --property=MainPID --value "$unit_name")" = 0 ] \
+        || return 1
+    set_restart_initial_driver_failure_stage restart-count || return 1
+    [ "$(systemctl show --property=NRestarts --value "$unit_name")" = 0 ] \
+        || return 1
+    set_restart_initial_driver_failure_stage invocation || return 1
+    [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+        "$restart_initial_invocation_id" ] || return 1
+    set_restart_initial_driver_failure_stage marker || return 1
+    unit_description_matches_marker || return 1
+    set_restart_initial_driver_failure_stage control-pid || return 1
+    [ "$(systemctl show --property=ControlPID --value "$unit_name")" = \
+        "$restart_initial_hook_pid" ] || return 1
+    set_restart_initial_driver_failure_stage hook-identity || return 1
+    [ "$(capture_process_starttime "$restart_initial_hook_pid" \
+        2>/dev/null || true)" = "$restart_initial_hook_starttime" ] || return 1
+    set_restart_initial_driver_failure_stage stable-inode || return 1
+    [ "$(stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s' \
+        "$restart_initial_release_terminal_file" 2>/dev/null)" = \
+        "$restart_initial_release_identity" ] || return 1
+    set_restart_initial_driver_failure_stage unlink || return 1
+    rm -- "$restart_initial_release_terminal_file" || return 1
+    set_restart_initial_driver_failure_stage absence || return 1
+    [ ! -e "$restart_initial_release_terminal_file" ] \
+        && [ ! -L "$restart_initial_release_terminal_file" ] \
+        && [ ! -e "$restart_initial_release_terminal_file.next" ] \
+        && [ ! -L "$restart_initial_release_terminal_file.next" ] || return 1
+    set_restart_initial_driver_failure_stage hook-quiescence || return 1
+    restart_initial_hook_quiescence_wait=0
+    while [ "$(capture_process_starttime "$restart_initial_hook_pid" \
+        2>/dev/null || true)" = "$restart_initial_hook_starttime" ]; do
+        inspect_restart_initial_hook_failure_record \
+            "$restart_initial_release_failure_file" || return 1
+        case $restart_initial_hook_failure_state in
+            absent|pending) ;;
+            present) return 1 ;;
+            invalid)
+                set_restart_initial_driver_failure_stage hook-payload \
+                    || return 1
+                return 1
+                ;;
+            unsafe)
+                set_restart_initial_driver_failure_stage unsafe-pending-path \
+                    || return 1
+                return 1
+                ;;
+            *) return 1 ;;
+        esac
+        [ ! -e "$restart_initial_release_terminal_file" ] \
+            && [ ! -L "$restart_initial_release_terminal_file" ] \
+            && [ ! -e "$restart_initial_release_terminal_file.next" ] \
+            && [ ! -L "$restart_initial_release_terminal_file.next" ] || return 1
+        restart_initial_hook_quiescence_wait=$((
+            restart_initial_hook_quiescence_wait + 1
+        ))
+        [ "$restart_initial_hook_quiescence_wait" -lt 300 ] || return 1
+        sleep 0.05
+    done
+    inspect_restart_initial_hook_failure_record \
+        "$restart_initial_release_failure_file" || return 1
+    case $restart_initial_hook_failure_state in
+        absent) ;;
+        present) return 1 ;;
+        invalid)
+            set_restart_initial_driver_failure_stage hook-payload || return 1
+            return 1
+            ;;
+        pending|unsafe)
+            set_restart_initial_driver_failure_stage unsafe-pending-path || return 1
+            return 1
+            ;;
+        *) return 1 ;;
+    esac
+    set_restart_initial_driver_failure_stage absence || return 1
+    [ ! -e "$restart_initial_release_terminal_file" ] \
+        && [ ! -L "$restart_initial_release_terminal_file" ] \
+        && [ ! -e "$restart_initial_release_terminal_file.next" ] \
+        && [ ! -L "$restart_initial_release_terminal_file.next" ] || return 1
+    restart_initial_after_crash_observed=no
+    restart_initial_driver_failure_stage=
+    return 0
+}
+
+report_restart_initial_start_failure_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    restart_initial_hook_failure_file=$1
+    inspect_restart_initial_hook_failure_record \
+        "$restart_initial_hook_failure_file" || return 1
+    case $restart_initial_hook_failure_state in
+        present)
+            restart_initial_hook_failure_stage_is_safe \
+                "$restart_initial_hook_failure_stage" || return 1
+            printf 'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_HOOK_V1=%s\n' \
+                "$restart_initial_hook_failure_stage" >&2
+            return 0
+            ;;
+        invalid)
+            set_restart_initial_driver_failure_stage hook-payload || return 1
+            ;;
+        pending|unsafe)
+            set_restart_initial_driver_failure_stage unsafe-pending-path || return 1
+            ;;
+        absent) ;;
+        *) return 1 ;;
+    esac
+    restart_initial_driver_failure_stage_is_safe \
+        "$restart_initial_driver_failure_stage" || return 1
+    if [ "$restart_initial_driver_failure_stage" = start-payload ]; then
+        restart_initial_start_diagnostic_file=$temporary_stage/restart-output/start.failure
+        if vp_capture_file_is_safe "$restart_initial_start_diagnostic_file" \
+            && [ ! -e "$restart_initial_start_diagnostic_file.next" ] \
+            && [ ! -L "$restart_initial_start_diagnostic_file.next" ]; then
+            restart_initial_start_diagnostic_record=$(cat \
+                "$restart_initial_start_diagnostic_file") || return 1
+            restart_initial_start_diagnostic_prefix=VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=
+            case $restart_initial_start_diagnostic_record in
+                "$restart_initial_start_diagnostic_prefix"*)
+                    restart_initial_start_diagnostic_stage=${restart_initial_start_diagnostic_record#"$restart_initial_start_diagnostic_prefix"}
+                    ;;
+                *) restart_initial_start_diagnostic_stage= ;;
+            esac
+            if production_start_failure_stage_is_safe \
+                "$restart_initial_start_diagnostic_stage" \
+                && printf '%s%s\n' \
+                    "$restart_initial_start_diagnostic_prefix" \
+                    "$restart_initial_start_diagnostic_stage" \
+                    | cmp -s - "$restart_initial_start_diagnostic_file"; then
+                printf 'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_START_V1=%s\n' \
+                    "$restart_initial_start_diagnostic_stage" >&2
+            fi
+        fi
+    fi
+    printf 'VOLPAROSSA_HELPER_LIVE_RESTART_INITIAL_FAILURE_DRIVER_V1=%s\n' \
+        "$restart_initial_driver_failure_stage" >&2
 }
 
 production_functional_probe_failure_value_is_safe() {
@@ -548,6 +1871,9 @@ driver_phase_is_safe() {
         production-launch|\
         production-observation|\
         production-retirement|\
+        restart-launch|\
+        restart-observation|\
+        restart-retirement|\
         final-verification)
             return 0
             ;;
@@ -573,6 +1899,7 @@ final_checkpoint_is_safe() {
         report-times|\
         report-generation|\
         report-validation|\
+        restart-report-validation|\
         publication-fence|\
         stage-retirement)
             return 0
@@ -616,9 +1943,9 @@ if ! systemd-detect-virt --vm --quiet; then
 fi
 
 for command_name in \
-    awk base64 busctl cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
+    awk base64 busctl cat chmod chown cmp cp date dd dpkg find flock gdb getent git id install ip jq mkfifo mktemp mv nft nm \
     nsenter paste ping prlimit readlink rm sed setpriv sha256sum sleep sort stat systemctl \
-    systemd-detect-virt systemd-run tc tr uname wc wg
+    systemd-detect-virt systemd-run tc timeout tr uname wc wg
 do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         blocked "required Debian tool is unavailable: $command_name"
@@ -687,6 +2014,22 @@ if [ ! -f "$evidence_validator" ] || [ ! -x "$evidence_validator" ] \
     || [ "$(stat -Lc '%F:%h' "$evidence_validator" 2>/dev/null || true)" != 'regular file:1' ]; then
     blocked 'the helper-boundary evidence validator is not one executable regular file'
 fi
+restart_evidence_validator=$script_directory/validate-helper-restart-exact-present-evidence-v1.sh
+if [ ! -f "$restart_evidence_validator" ] || [ ! -x "$restart_evidence_validator" ] \
+    || [ -L "$restart_evidence_validator" ] \
+    || [ "$(stat -Lc '%F:%h' "$restart_evidence_validator" 2>/dev/null || true)" \
+        != 'regular file:1' ]; then
+    blocked 'the restart evidence validator is not one executable regular file'
+fi
+debugger_path=/usr/bin/gdb
+if [ "$(command -v gdb)" != "$debugger_path" ] \
+    || [ ! -f "$debugger_path" ] || [ ! -x "$debugger_path" ] \
+    || [ -L "$debugger_path" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$debugger_path" 2>/dev/null || true)" \
+        != 'regular file:0:0:755:1' ]; then
+    blocked 'the fixed root-owned debugger is unavailable'
+fi
+debugger_digest=
 repository_root=$(git -c safe.directory="$repository_directory" -C "$repository_directory" \
     rev-parse --show-toplevel 2>/dev/null) \
     || blocked 'the repository root cannot be established'
@@ -732,6 +2075,8 @@ VP_CAPTURE_RESOLVER_DIAGNOSTICS=yes
 export VP_CAPTURE_OWNER_UID VP_CAPTURE_OWNER_GID VP_CAPTURE_RESOLVER_DIAGNOSTICS
 # shellcheck source=tests/helper/lib/live-worker-proof-capture.sh
 . "$script_directory/lib/live-worker-proof-capture.sh"
+debugger_digest=$(vp_capture_sha256_file "$debugger_path") \
+    || blocked 'the fixed debugger could not be hashed'
 
 resolver_authority_record() {
     [ "$#" -eq 0 ] || return 1
@@ -1408,6 +2753,8 @@ capture_stable_legacy_firewall_state() (
 helper_source=$repository_directory/target/debug/volparossa-helper
 ipc_probe_source=$repository_directory/target/debug/examples/volparossa-helper-production-ipc-probe
 ipc_hook_source=$script_directory/lib/production-ipc-unit-hook.sh
+restart_observer_source=$script_directory/lib/restart-exact-present-observer.sh
+restart_launcher_source=$script_directory/lib/restart-exact-present-launcher.sh
 staged_executable_max_bytes=134217728
 proof_file_max_bytes=1048576
 repository_owner_uid=$(stat -Lc '%u' "$repository_directory" 2>/dev/null) \
@@ -1493,6 +2840,34 @@ if ! source_snapshot_is_exact "$ipc_hook_initial_snapshot" 700 "$proof_file_max_
         "$ipc_hook_initial_snapshot" 755 "$proof_file_max_bytes"; then
     blocked 'the production IPC unit hook has unsafe workspace metadata'
 fi
+if [ ! -f "$restart_observer_source" ] || [ ! -x "$restart_observer_source" ] \
+    || [ -L "$restart_observer_source" ]; then
+    blocked 'the restart observer must be one executable regular file with one hard link'
+fi
+restart_observer_initial_snapshot=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$restart_observer_source" 2>/dev/null || true)
+if ! source_snapshot_is_exact \
+    "$restart_observer_initial_snapshot" 700 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact \
+        "$restart_observer_initial_snapshot" 750 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact \
+        "$restart_observer_initial_snapshot" 755 "$proof_file_max_bytes"; then
+    blocked 'the restart observer has unsafe workspace metadata'
+fi
+if [ ! -f "$restart_launcher_source" ] || [ ! -x "$restart_launcher_source" ] \
+    || [ -L "$restart_launcher_source" ]; then
+    blocked 'the restart launcher must be one executable regular file with one hard link'
+fi
+restart_launcher_initial_snapshot=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$restart_launcher_source" 2>/dev/null || true)
+if ! source_snapshot_is_exact \
+    "$restart_launcher_initial_snapshot" 700 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact \
+        "$restart_launcher_initial_snapshot" 750 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact \
+        "$restart_launcher_initial_snapshot" 755 "$proof_file_max_bytes"; then
+    blocked 'the restart launcher has unsafe workspace metadata'
+fi
 
 if [ "$(stat -c '%F:%u:%g:%a' /var/tmp)" != 'directory:0:0:1777' ]; then
     blocked '/var/tmp is not the canonical root-owned sticky staging parent'
@@ -1514,6 +2889,20 @@ production_fdstore_settled_counts=
 production_fdstore_identity_bound=
 production_journal_settled_absent=
 production_retired_load_state=
+restart_initial_invocation_id=
+restart_initial_driver_failure_stage=
+restart_initial_hook_failure_stage=
+restart_initial_terminal_identity=
+restart_initial_after_crash_observed=no
+restart_initial_hook_pid=
+restart_initial_hook_starttime=
+restart_successor_invocation_id=
+restart_retired_load_state=
+restart_evidence_validated=false
+restart_mount_keeper_pid=
+restart_mount_keeper_starttime=
+restart_successor_debugger_pid=
+restart_successor_debugger_starttime=
 driver_phase=staging
 structured_failure_reported=no
 final_checkpoint=
@@ -1580,11 +2969,151 @@ unit_invocation_is_current() {
 }
 
 forget_unit_ownership() {
-    unit_owned=no
-    unit_may_own=no
-    unit_invocation_id=
-    unit_ownership_marker=
-    unit_name=
+    unit_owned=no unit_may_own=no unit_invocation_id='' \
+        unit_ownership_marker='' unit_name=''
+}
+
+prepare_restart_unit_identity() {
+    [ "$production_retirement_confirmed" = yes ] || return 1
+    [ -z "$unit_name" ] || return 1
+    [ "$unit_owned" = no ] || return 1
+    [ "$unit_may_own" = no ] || return 1
+    [ -z "$unit_invocation_id" ] || return 1
+    [ -z "$unit_ownership_marker" ] || return 1
+    case $stage_suffix in
+        [A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;;
+        *) return 1 ;;
+    esac
+    case $production_unit_name in
+        volparossa-helper-live-proof-[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9].service) ;;
+        *) return 1 ;;
+    esac
+    case $stage_suffix in
+        A*) restart_identity_suffix=B${stage_suffix#?} ;;
+        *) restart_identity_suffix=A${stage_suffix#?} ;;
+    esac
+    restart_identity_name=volparossa-helper-live-proof-$restart_identity_suffix.service
+    [ "$restart_identity_name" != "$production_unit_name" ] || return 1
+    unit_name=$restart_identity_name
+}
+
+restart_journal_metadata_is_exact() {
+    [ "$#" -eq 2 ] || return 1
+    restart_journal_metadata=$1
+    restart_journal_metadata_gid=$2
+    case $restart_journal_metadata_gid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#restart_journal_metadata_gid}" -le 10 ] \
+        && [ "$restart_journal_metadata_gid" -le 4294967294 ] || return 1
+    [ "${#restart_journal_metadata}" -le 256 ] || return 1
+    printf '%s\n' "$restart_journal_metadata" | /usr/bin/awk \
+        -F: -v expected_gid="$restart_journal_metadata_gid" '
+        function canonical_u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            if (length(value) < 20) return 1
+            return ("x" value) <= "x18446744073709551615"
+        }
+        function canonical_positive(value) {
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            if (length(value) < 20) return 1
+            return ("x" value) <= "x18446744073709551615"
+        }
+        function canonical_size(value) {
+            return (value == "0" || value ~ /^[1-9][0-9]*$/) \
+                && length(value) <= 7 && value <= 1048576
+        }
+        function date_hour(value) {
+            return value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]$/
+        }
+        function seconds_zone(value) {
+            return value ~ /^[0-9][0-9]\.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] [+-][0-9][0-9][0-9][0-9]$/
+        }
+        NR != 1 { invalid = 1; next }
+        {
+            if (NF != 14 || !canonical_u64($1) \
+                || !canonical_positive($2) || $3 != "8180" \
+                || $4 != "0" || $5 != expected_gid || $6 != "600" \
+                || $7 != "1" || !canonical_size($8) \
+                || !date_hour($9) || $10 !~ /^[0-9][0-9]$/ \
+                || !seconds_zone($11) || !date_hour($12) \
+                || $13 !~ /^[0-9][0-9]$/ || !seconds_zone($14)) {
+                invalid = 1
+            }
+        }
+        END { if (invalid || NR != 1) exit 1 }
+    '
+}
+
+restart_journal_digest_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "${#1}" -eq 64 ] || return 1
+    case $1 in
+        ''|*[!0-9a-f]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+capture_restart_journal_state() {
+    [ "$#" -eq 2 ] || return 1
+    restart_journal_path=$1
+    restart_journal_gid=$2
+    [ "$restart_journal_path" = \
+        "$temporary_stage/production-runtime/helper.ownership-v3" ] || return 1
+    case $restart_journal_gid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ -f "$restart_journal_path" ] && [ ! -L "$restart_journal_path" ] \
+        || return 1
+    restart_journal_state_before=$(stat -c '%d:%i:%f:%u:%g:%a:%h:%s:%y:%z' \
+        "$restart_journal_path" 2>/dev/null) || return 1
+    restart_journal_metadata_is_exact \
+        "$restart_journal_state_before" "$restart_journal_gid" || return 1
+    restart_journal_digest=$(vp_capture_sha256_file \
+        "$restart_journal_path") || return 1
+    restart_journal_digest_is_exact "$restart_journal_digest" || return 1
+    restart_journal_state_after=$(stat -c '%d:%i:%f:%u:%g:%a:%h:%s:%y:%z' \
+        "$restart_journal_path" 2>/dev/null) || return 1
+    [ "$restart_journal_state_after" = "$restart_journal_state_before" ] \
+        || return 1
+    printf 'PRESENT\n%s\n%s\n' \
+        "$restart_journal_state_before" "$restart_journal_digest"
+}
+
+capture_restart_journal_state_record() {
+    [ "$#" -eq 2 ] || return 1
+    restart_journal_record_path=$1
+    restart_journal_record_gid=$2
+    [ "$restart_journal_record_path" = \
+        "$temporary_stage/restart-output/restart.journal.settled.state" ] \
+        || return 1
+    vp_capture_file_is_safe "$restart_journal_record_path" || return 1
+    [ ! -e "$restart_journal_record_path.next" ] \
+        && [ ! -L "$restart_journal_record_path.next" ] || return 1
+    restart_journal_record_size=$(stat -Lc '%s' \
+        "$restart_journal_record_path" 2>/dev/null) || return 1
+    case $restart_journal_record_size in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#restart_journal_record_size}" -le 3 ] \
+        && [ "$restart_journal_record_size" -le 512 ] || return 1
+    restart_journal_record_marker=$(sed -n '1p' \
+        "$restart_journal_record_path") || return 1
+    restart_journal_record_metadata=$(sed -n '2p' \
+        "$restart_journal_record_path") || return 1
+    restart_journal_record_digest=$(sed -n '3p' \
+        "$restart_journal_record_path") || return 1
+    [ "$restart_journal_record_marker" = PRESENT ] || return 1
+    restart_journal_metadata_is_exact \
+        "$restart_journal_record_metadata" "$restart_journal_record_gid" \
+        || return 1
+    restart_journal_digest_is_exact "$restart_journal_record_digest" || return 1
+    printf 'PRESENT\n%s\n%s\n' \
+        "$restart_journal_record_metadata" "$restart_journal_record_digest" \
+        | cmp -s - "$restart_journal_record_path" || return 1
+    printf 'PRESENT\n%s\n%s\n' \
+        "$restart_journal_record_metadata" "$restart_journal_record_digest"
 }
 
 unit_load_state() {
@@ -1897,6 +3426,12 @@ retired_runtime_is_absent() {
 }
 
 adopt_tentative_unit() {
+    [ "$#" -le 1 ] || return 1
+    adopt_not_found_disposition=${1:-forget}
+    case $adopt_not_found_disposition in
+        forget|retain) ;;
+        *) return 1 ;;
+    esac
     [ "$unit_owned" = no ] || return 1
     [ "$unit_may_own" = yes ] || return 1
     unit_name_is_safe || return 1
@@ -1906,7 +3441,9 @@ adopt_tentative_unit() {
     while :; do
         adopt_load_state=$(unit_load_state) || return 1
         if [ "$adopt_load_state" = not-found ]; then
-            forget_unit_ownership
+            if [ "$adopt_not_found_disposition" = forget ]; then
+                forget_unit_ownership
+            fi
             return 0
         fi
         unit_description_matches_marker || return 1
@@ -1914,9 +3451,8 @@ adopt_tentative_unit() {
             || adopted_invocation_id=
         if unit_invocation_id_is_safe "$adopted_invocation_id"; then
             unit_description_matches_marker || return 1
-            unit_invocation_id=$adopted_invocation_id
-            unit_owned=yes
-            unit_may_own=no
+            unit_invocation_id=$adopted_invocation_id unit_owned=yes \
+                unit_may_own=no
             return 0
         fi
         adopt_active_state=$(unit_active_state) || return 1
@@ -1926,6 +3462,33 @@ adopt_tentative_unit() {
         esac
         adopt_attempt=$((adopt_attempt + 1))
         [ "$adopt_attempt" -lt 1000 ] || return 1
+        sleep 0.05
+    done
+}
+
+adopt_launched_tentative_unit() {
+    [ "$unit_owned" = no ] || return 1
+    [ "$unit_may_own" = yes ] || return 1
+    unit_name_is_safe || return 1
+    unit_ownership_marker_is_safe "$unit_ownership_marker" || return 1
+    launched_unit_name=$unit_name
+    launched_ownership_marker=$unit_ownership_marker
+    launched_adopt_attempt=0
+    while :; do
+        if ! adopt_tentative_unit retain; then
+            return 1
+        fi
+        if [ "$unit_owned" = yes ] && [ "$unit_may_own" = no ]; then
+            return 0
+        fi
+        [ "$unit_name" = "$launched_unit_name" ] && [ "$unit_owned" = no ] \
+            && [ "$unit_may_own" = yes ] && [ -z "$unit_invocation_id" ] \
+            && [ "$unit_ownership_marker" = "$launched_ownership_marker" ] \
+            || return 1
+        launched_adopt_attempt=$((launched_adopt_attempt + 1))
+        if [ "$launched_adopt_attempt" -ge 1000 ]; then
+            return 1
+        fi
         sleep 0.05
     done
 }
@@ -1947,10 +3510,69 @@ recover_failed_worker_manager_binding() {
     worker_manager_binding_ok=yes
 }
 
-retire_unit() {
-    if [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ]; then
-        adopt_tentative_unit || return 1
+recover_successful_restart_manager_binding() {
+    [ "$restart_run_status" -eq 0 ] || return 1
+    [ "$restart_launch_captures_ok" = yes ] || return 1
+    [ "$restart_launch_json_ok" = no ] || return 1
+    [ "$restart_launch_fresh" = no ] || return 1
+    [ "$restart_launch_stderr" = empty ] || return 1
+    vp_capture_file_is_safe "$temporary_stage/systemd-run-restart.stdout" || return 1
+    vp_capture_file_is_safe "$temporary_stage/systemd-run-restart.stderr" || return 1
+    [ "$(stat -Lc '%s' "$temporary_stage/systemd-run-restart.stderr")" = 0 ] \
+        || return 1
+    case $restart_launch_stdout in
+        empty)
+            [ "$(stat -Lc '%s' \
+                "$temporary_stage/systemd-run-restart.stdout")" = 0 ] \
+                || return 1
+            ;;
+        unit-only)
+            jq -ers -e --arg expected_unit "$unit_name" '
+                length == 1
+                    and (.[0] | type) == "object"
+                    and (.[0] | keys) == ["unit"]
+                    and .[0].unit == $expected_unit
+            ' "$temporary_stage/systemd-run-restart.stdout" \
+                >/dev/null 2>&1 || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    [ "$unit_owned" = no ] || return 1
+    [ "$unit_may_own" = yes ] || return 1
+    adopt_launched_tentative_unit || return 1
+    [ "$unit_owned" = yes ] || return 1
+    [ "$unit_may_own" = no ] || return 1
+    if ! unit_invocation_id_is_safe "$unit_invocation_id" \
+        || ! unit_invocation_is_current \
+        || ! unit_description_matches_marker \
+        || [ "$unit_invocation_id" = "$production_invocation_id" ]; then
+        unit_may_own=yes unit_owned=no unit_invocation_id=
+        return 1
     fi
+    restart_initial_invocation_id=$unit_invocation_id
+}
+
+retire_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        adoption|identity|initial-snapshot|stop-request|stop-wait|reset-failed|\
+        reset-wait|fdstore-clean|post-clean|final-reset|collection)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+retire_unit() {
+    retire_failure_stage=adoption
+    if [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ]; then
+        # A successful or interrupted transient-unit request may still be
+        # queued while PID 1 briefly reports not-found. Keep the exact random
+        # name and marker in affine cleanup custody until bounded adoption;
+        # ambiguity must preserve the stage for disposable-VM teardown.
+        adopt_launched_tentative_unit || return 1
+    fi
+    retire_failure_stage=identity
     case $unit_owned in
         no) return 0 ;;
         yes) ;;
@@ -1958,12 +3580,14 @@ retire_unit() {
     esac
     unit_name_is_safe || return 1
     unit_invocation_id_is_safe "$unit_invocation_id" || return 1
+    retire_failure_stage=initial-snapshot
     observe_unit_retirement_snapshot || return 1
     if [ "$retire_load_state" = not-found ]; then
         forget_unit_ownership
         return 0
     fi
     [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
+    retire_failure_stage=stop-request
     if ! systemctl stop --no-block "$unit_name" >/dev/null 2>&1; then
         observe_unit_retirement_snapshot || return 1
         if [ "$retire_load_state" = not-found ]; then
@@ -1974,6 +3598,7 @@ retire_unit() {
         return 1
     fi
 
+    retire_failure_stage=stop-wait
     retire_attempt=0
     while :; do
         observe_unit_retirement_snapshot || return 1
@@ -1997,6 +3622,7 @@ retire_unit() {
     done
 
     if [ "$retire_active_state" = failed ]; then
+        retire_failure_stage=reset-failed
         if ! systemctl reset-failed "$unit_name" >/dev/null 2>&1; then
             observe_unit_retirement_snapshot || return 1
             if [ "$retire_load_state" = not-found ]; then
@@ -2007,6 +3633,7 @@ retire_unit() {
             return 1
         fi
 
+        retire_failure_stage=reset-wait
         retire_attempt=0
         while :; do
             observe_unit_retirement_snapshot || return 1
@@ -2032,6 +3659,7 @@ retire_unit() {
     [ "$retire_active_state" = inactive ] || return 1
     [ "$retire_job_state" = absent ] || return 1
     [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
+    retire_failure_stage=fdstore-clean
     if ! systemctl clean --what=fdstore "$unit_name" >/dev/null 2>&1; then
         observe_unit_retirement_snapshot || return 1
         if [ "$retire_load_state" = not-found ]; then
@@ -2041,6 +3669,7 @@ retire_unit() {
         [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
         return 1
     fi
+    retire_failure_stage=post-clean
     observe_unit_retirement_snapshot || return 1
     if [ "$retire_load_state" = not-found ]; then
         forget_unit_ownership
@@ -2049,6 +3678,7 @@ retire_unit() {
     [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
     [ "$retire_fdstore_count" -eq 0 ] || return 1
 
+    retire_failure_stage=final-reset
     if ! systemctl reset-failed "$unit_name" >/dev/null 2>&1; then
         observe_unit_retirement_snapshot || return 1
         if [ "$retire_load_state" = not-found ]; then
@@ -2059,6 +3689,7 @@ retire_unit() {
         return 1
     fi
 
+    retire_failure_stage=collection
     retire_attempt=0
     while :; do
         observe_unit_retirement_snapshot || return 1
@@ -2107,11 +3738,34 @@ remove_temporary_stage() {
 cleanup() {
     saved_status=$?
     trap - EXIT HUP INT TERM
-    if ! retire_unit; then
+    if [ -n "${restart_successor_debugger_pid:-}" ]; then
+        if [ "$(capture_process_starttime "$restart_successor_debugger_pid" \
+            2>/dev/null || true)" = "${restart_successor_debugger_starttime:-}" ]; then
+            kill "$restart_successor_debugger_pid" 2>/dev/null || :
+        fi
+        wait "$restart_successor_debugger_pid" 2>/dev/null || :
+        restart_successor_debugger_pid=
+        restart_successor_debugger_starttime=
+    fi
+    if [ -n "${restart_mount_keeper_pid:-}" ]; then
+        if [ "$(capture_process_starttime "$restart_mount_keeper_pid" \
+            2>/dev/null || true)" = "${restart_mount_keeper_starttime:-}" ]; then
+            kill "$restart_mount_keeper_pid" 2>/dev/null || :
+        fi
+        wait "$restart_mount_keeper_pid" 2>/dev/null || :
+        restart_mount_keeper_pid=
+        restart_mount_keeper_starttime=
+    fi
+    retirement_complete=no
+    if retire_unit; then
+        retirement_complete=yes
+    else
         cleanup_error=yes
     fi
-    if ! remove_temporary_stage; then
-        cleanup_error=yes
+    if [ "$retirement_complete" = yes ]; then
+        if ! remove_temporary_stage; then
+            cleanup_error=yes
+        fi
     fi
     if [ "$cleanup_error" = yes ] && [ "$saved_status" -eq 0 ]; then
         saved_status=1
@@ -2272,6 +3926,52 @@ if [ "$ipc_hook_before" != "$ipc_hook_after" ] \
     failed 'the production IPC hook changed while copied or its staged image is unsafe'
 fi
 
+restart_observer_before=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$restart_observer_source")
+[ "$restart_observer_before" = "$restart_observer_initial_snapshot" ] \
+    || failed 'the restart observer identity changed before staging'
+restart_observer_digest_before=$(vp_capture_sha256_file "$restart_observer_source") \
+    || failed 'the restart observer could not be hashed'
+install -o root -g root -m 0500 "$restart_observer_source" \
+    "$temporary_stage/restart-observer"
+restart_observer_after=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$restart_observer_source")
+restart_observer_digest_after=$(vp_capture_sha256_file "$restart_observer_source") \
+    || failed 'the restart observer could not be re-hashed'
+staged_restart_observer_digest=$(vp_capture_sha256_file \
+    "$temporary_stage/restart-observer") \
+    || failed 'the staged restart observer could not be hashed'
+if [ "$restart_observer_before" != "$restart_observer_after" ] \
+    || [ "$restart_observer_digest_before" != "$restart_observer_digest_after" ] \
+    || [ "$restart_observer_digest_before" != "$staged_restart_observer_digest" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$temporary_stage/restart-observer")" \
+        != 'regular file:0:0:500:1' ]; then
+    failed 'the restart observer changed while copied or its staged image is unsafe'
+fi
+
+restart_launcher_before=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$restart_launcher_source")
+[ "$restart_launcher_before" = "$restart_launcher_initial_snapshot" ] \
+    || failed 'the restart launcher identity changed before staging'
+restart_launcher_digest_before=$(vp_capture_sha256_file "$restart_launcher_source") \
+    || failed 'the restart launcher could not be hashed'
+install -o root -g root -m 0500 "$restart_launcher_source" \
+    "$temporary_stage/restart-launcher"
+restart_launcher_after=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$restart_launcher_source")
+restart_launcher_digest_after=$(vp_capture_sha256_file "$restart_launcher_source") \
+    || failed 'the restart launcher could not be re-hashed'
+staged_restart_launcher_digest=$(vp_capture_sha256_file \
+    "$temporary_stage/restart-launcher") \
+    || failed 'the staged restart launcher could not be hashed'
+if [ "$restart_launcher_before" != "$restart_launcher_after" ] \
+    || [ "$restart_launcher_digest_before" != "$restart_launcher_digest_after" ] \
+    || [ "$restart_launcher_digest_before" != "$staged_restart_launcher_digest" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$temporary_stage/restart-launcher")" \
+        != 'regular file:0:0:500:1' ]; then
+    failed 'the restart launcher changed while copied or its staged image is unsafe'
+fi
+
 printf '%s\n' \
     'root:x:0:0:root:/root:/bin/sh' \
     "volparossa:x:$agent_uid:$agent_gid:VOLPAROSSA staged agent:/var/lib/volparossa:/usr/sbin/nologin" \
@@ -2315,6 +4015,14 @@ install -o root -g root -m 0600 /dev/null "$temporary_stage/proof.stdout"
 install -o root -g root -m 0600 /dev/null "$temporary_stage/proof.stderr"
 install -d -o root -g "$agent_gid" -m 0750 "$temporary_stage/production-runtime"
 install -d -o root -g root -m 2700 "$temporary_stage/production-output"
+install -d -o root -g root -m 2700 "$temporary_stage/restart-output"
+restart_successor_release_fifo=$temporary_stage/restart-output/restart.successor-release
+mkfifo -m 0600 "$restart_successor_release_fifo" \
+    || failed 'the restart successor release FIFO could not be created'
+[ "$(stat -Lc '%F:%u:%g:%a:%h' \
+    "$restart_successor_release_fifo" 2>/dev/null || true)" \
+    = 'fifo:0:0:600:1' ] \
+    || failed 'the restart successor release FIFO is unsafe'
 
 state_records='production_runtime_path accounts namespaces mounts resolver sysctls links addresses routes rules nexthops qdiscs nftables wireguard legacy_ipv4_firewall legacy_ipv6_firewall'
 
@@ -2679,9 +4387,8 @@ if vp_capture_file_is_safe "$temporary_stage/systemd-run.stdout" \
             || observed_unit_invocation_id=
         if unit_description_matches_marker \
             && [ "$observed_unit_invocation_id" = "$parsed_invocation_id" ]; then
-            unit_invocation_id=$parsed_invocation_id
-            unit_owned=yes
-            unit_may_own=no
+            unit_invocation_id=$parsed_invocation_id unit_owned=yes \
+                unit_may_own=no
             worker_manager_binding_ok=yes
         fi
     fi
@@ -3147,9 +4854,8 @@ if [ "$proof_ok" = yes ]; then
                 || [ "$observed_unit_invocation_id" != "$production_invocation_id" ]; then
                 record_proof_failure 'production-manager-binding'
             else
-                unit_invocation_id=$production_invocation_id
-                unit_owned=yes
-                unit_may_own=no
+                unit_invocation_id=$production_invocation_id unit_owned=yes \
+                    unit_may_own=no
             fi
         fi
     fi
@@ -3593,25 +5299,31 @@ if [ "$proof_ok" = yes ]; then
         record_proof_failure 'production-process-stability'
     fi
 
+    production_retirement_confirmed=no
     production_unit_name=$unit_name
     driver_phase=production-retirement
     if ! retire_unit; then
         cleanup_error=yes
         record_proof_failure 'production-retirement'
+        failed 'production unit retirement did not settle'
     fi
-    if [ -n "$unit_name" ] || [ "$unit_owned" != no ] || [ "$unit_may_own" != no ]; then
+    if [ -n "$unit_name" ] || [ "$unit_owned" != no ] \
+        || [ "$unit_may_own" != no ] || [ -n "$unit_invocation_id" ] \
+        || [ -n "$unit_ownership_marker" ]; then
         record_proof_failure 'production-retirement'
-    else
-        unit_name=$production_unit_name
-        production_retired_load_state=$(unit_load_state) || production_retired_load_state=
-        if [ "$production_retired_load_state" != not-found ] \
-            || ! retired_runtime_is_absent "$production_unit_name" \
-                "$production_control_group" "$production_main_pid" \
-                "$identity_starttime_value"; then
-            record_proof_failure 'production-retirement'
-        fi
-        forget_unit_ownership
+        failed 'production unit retirement retained affine ownership state'
     fi
+    unit_name=$production_unit_name
+    production_retired_load_state=$(unit_load_state) || production_retired_load_state=
+    if [ "$production_retired_load_state" != not-found ] \
+        || ! retired_runtime_is_absent "$production_unit_name" \
+            "$production_control_group" "$production_main_pid" \
+            "$identity_starttime_value"; then
+        record_proof_failure 'production-retirement'
+        failed 'production unit retirement fence did not settle'
+    fi
+    forget_unit_ownership
+    production_retirement_confirmed=yes
     production_lock_path=$temporary_stage/production-runtime/helper.ownership-v3.lock
     production_lock_identity_file=$temporary_stage/production-output/lock.identity
     if vp_capture_file_is_safe "$production_lock_identity_file"; then
@@ -3684,6 +5396,734 @@ if [ "$proof_ok" = yes ]; then
     else
         record_proof_failure 'production-stop-records'
     fi
+
+    # `retire_unit`/`forget_unit_ownership` deliberately clears every affine
+    # unit field. Derive a second six-character name which is provably distinct
+    # from the collected production name, while retaining the same closed unit
+    # grammar and private run binding. This avoids manager/client ambiguity from
+    # immediately re-creating one just-collected transient unit object.
+    prepare_restart_unit_identity \
+        || failed 'production unit retirement was not confirmed before restart'
+    driver_phase=restart-launch
+    unit_name_is_safe || failed 'singleton restart unit name is unsafe'
+    [ "$unit_name" != "$production_unit_name" ] \
+        || failed 'singleton restart unit name is not distinct'
+    restart_initial_load_state=$(unit_load_state) \
+        || failed 'singleton restart unit state could not be determined'
+    [ "$restart_initial_load_state" = not-found ] \
+        || failed 'singleton restart unit name is already loaded'
+    restart_symbol_counts=$(nm -C "$temporary_stage/volparossa-helper" \
+        | awk '
+          $3 == "volparossa_helper::systemd_fdstore::remove_current_process_custody" {
+            current_all++
+            if ($2 ~ /^[Tt]$/) current_text++
+          }
+          $3 == "volparossa_helper::systemd_fdstore::remove_restart_custody" {
+            restart_all++
+            if ($2 ~ /^[Tt]$/) restart_text++
+          }
+          END {
+            print current_all + 0 ":" current_text + 0 ":" \
+                  restart_all + 0 ":" restart_text + 0
+          }
+        ') || failed 'restart debugger symbols could not be inspected'
+    [ "$restart_symbol_counts" = '1:1:1:1' ] \
+        || failed 'restart debugger symbols are not exact and unique'
+    restart_marker_line=$(printf '%s\n%s\n%s\n' \
+        'VOLPAROSSA helper singleton ExactPresent restart marker v1' \
+        "$unit_name" "$temporary_stage_identity" | sha256sum) \
+        || failed 'restart ownership marker could not be derived'
+    restart_marker_digest=$(vp_capture_checksum_from_line "$restart_marker_line") \
+        || failed 'restart ownership marker is non-canonical'
+    unit_ownership_marker=volparossa-helper-live-proof-owner-v1-$restart_marker_digest
+    unit_ownership_marker_is_safe "$unit_ownership_marker" \
+        || failed 'restart ownership marker is unsafe'
+    restart_observer_bind="$temporary_stage/restart-observer:/run/volparossa-helper-restart-observer:norbind"
+    restart_launcher_bind="$temporary_stage/restart-launcher:/run/volparossa-helper-restart-launcher:norbind"
+    restart_output_bind="$temporary_stage/restart-output:/run/volparossa-helper-production-proof:norbind"
+    restart_debugger_initial_commands=$temporary_stage/restart-debugger-initial.gdb
+    restart_debugger_successor_commands=$temporary_stage/restart-debugger-successor.gdb
+    restart_debugger_initial_stdout=$temporary_stage/restart-debugger-initial.stdout
+    restart_debugger_initial_stderr=$temporary_stage/restart-debugger-initial.stderr
+    restart_debugger_successor_stdout=$temporary_stage/restart-debugger-successor.stdout
+    restart_debugger_successor_stderr=$temporary_stage/restart-debugger-successor.stderr
+    for restart_absent_path in \
+        "$restart_debugger_initial_commands" "$restart_debugger_successor_commands" \
+        "$restart_debugger_initial_stdout" "$restart_debugger_initial_stderr" \
+        "$restart_debugger_successor_stdout" "$restart_debugger_successor_stderr"; do
+        if [ -e "$restart_absent_path" ] || [ -L "$restart_absent_path" ]; then
+            failed 'restart debugger path was not initially absent'
+        fi
+    done
+
+    unit_may_own=yes
+    set +e
+    systemd-run \
+        --no-block \
+        --json=short \
+        --unit="$unit_name" \
+        --slice=system.slice \
+        --description="$unit_ownership_marker" \
+        --service-type=exec \
+        --property=CollectMode=inactive \
+        --property=Restart=on-failure \
+        --property=RestartSec=10s \
+        --property=StartLimitBurst=2 \
+        --property=RuntimeMaxSec=240s \
+        --property=NotifyAccess=main \
+        --property=FileDescriptorStoreMax=128 \
+        --property=FileDescriptorStorePreserve=yes \
+        --property=User=0 \
+        --property=Group=0 \
+        --property=SupplementaryGroups= \
+        --property=UMask=0077 \
+        --property=LimitCORE=0 \
+        --property=LimitFSIZE=1048576 \
+        --property=NoNewPrivileges=yes \
+        --property="CapabilityBoundingSet=$capabilities" \
+        --property="AmbientCapabilities=$capabilities" \
+        --property=PrivateNetwork=yes \
+        --property=PrivateMounts=yes \
+        --property=PrivateTmp=yes \
+        --property=PrivateDevices=no \
+        --property=DevicePolicy=closed \
+        --property='DeviceAllow=/dev/net/tun rw' \
+        --property=ProtectSystem=strict \
+        --property=ProtectHome=yes \
+        --property=ProtectControlGroupsEx=strict \
+        --property=Delegate=no \
+        --property=PrivatePIDs=no \
+        --property=ProtectKernelModules=yes \
+        --property=ProtectKernelLogs=yes \
+        --property=ProtectClock=yes \
+        --property=ProtectHostname=yes \
+        --property=LockPersonality=yes \
+        --property=MemoryDenyWriteExecute=yes \
+        --property=RestrictRealtime=yes \
+        --property=RestrictSUIDSGID=no \
+        --property=RestrictNamespaces=net \
+        --property=SystemCallArchitectures=native \
+        --property='SystemCallFilter=@system-service @network-io seccomp' \
+        --property='SystemCallFilter=~@mount' \
+        --property=SystemCallErrorNumber=EPERM \
+        --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+        --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
+        --property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $restart_observer_bind $restart_launcher_bind $production_host_network_identity_bind $account_binds $system_bus_bind $notify_socket_bind" \
+        --property="BindPaths=$production_runtime_bind $restart_output_bind" \
+        --property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin' \
+        --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+        --property="ExecStartPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook restart-start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid" \
+        --property=KillSignal=SIGTERM \
+        --property=KillMode=control-group \
+        --property=SendSIGKILL=yes \
+        --property=TimeoutStartSec=180s \
+        --property=TimeoutStopSec=45s \
+        --property=TasksMax=64 \
+        --property=SetLoginEnvironment=no \
+        --property=StandardOutput=null \
+        --property=StandardError=null \
+        /usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-restart-launcher \
+        >"$temporary_stage/systemd-run-restart.stdout" \
+        2>"$temporary_stage/systemd-run-restart.stderr"
+    restart_run_status=$?
+    set -e
+    [ "$restart_run_status" -eq 0 ] \
+        || failed 'singleton restart unit could not be launched'
+    restart_launch_captures_ok=no
+    restart_launch_json_ok=no
+    restart_launch_fresh=no
+    restart_launch_stdout=unsafe
+    restart_launch_stderr=unsafe
+    restart_launch_binding_ok=no
+    restart_launch_manager_binding_ok=no
+    restart_initial_invocation_id=
+    if vp_capture_file_is_safe "$temporary_stage/systemd-run-restart.stdout" \
+        && vp_capture_file_is_safe "$temporary_stage/systemd-run-restart.stderr"; then
+        restart_launch_captures_ok=yes
+        if [ ! -s "$temporary_stage/systemd-run-restart.stdout" ]; then
+            restart_launch_stdout=empty
+        elif jq -ers -e --arg expected_unit "$unit_name" '
+            length == 1
+                and (.[0] | type) == "object"
+                and (.[0] | keys) == ["unit"]
+                and .[0].unit == $expected_unit
+        ' "$temporary_stage/systemd-run-restart.stdout" \
+            >/dev/null 2>&1; then
+            # With --no-block, systemd v257 may print the exact JSON unit
+            # identity before PID 1 has assigned a nonzero InvocationID.
+            # Bind that pending launch only through the separately verified
+            # Description marker and current manager InvocationID below.
+            restart_launch_stdout=unit-only
+        else
+            restart_launch_stdout=nonempty
+        fi
+        if [ -s "$temporary_stage/systemd-run-restart.stderr" ]; then
+            restart_launch_stderr=nonempty
+        else
+            restart_launch_stderr=empty
+        fi
+        restart_initial_invocation_id=$(jq -ers --arg expected_unit "$unit_name" '
+            if length == 1
+               and (.[0] | type) == "object"
+               and (.[0] | keys) == ["invocation_id","unit"]
+               and .[0].unit == $expected_unit
+               and (.[0].invocation_id | type) == "string"
+            then .[0].invocation_id else empty end
+        ' "$temporary_stage/systemd-run-restart.stdout" 2>/dev/null) \
+            || restart_initial_invocation_id=
+        if unit_invocation_id_is_safe "$restart_initial_invocation_id"; then
+            restart_launch_json_ok=yes
+            if [ "$restart_initial_invocation_id" != "$production_invocation_id" ]; then
+                restart_launch_fresh=yes
+            fi
+        fi
+    fi
+    if [ "$restart_launch_captures_ok" = yes ] \
+        && [ "$restart_launch_json_ok" = yes ] \
+        && [ "$restart_launch_fresh" = yes ] \
+        && [ "$restart_launch_stderr" = empty ]; then
+        restart_observed_invocation_id=$(unit_current_invocation_id 2>/dev/null) \
+            || restart_observed_invocation_id=
+        if [ "$restart_observed_invocation_id" = \
+            "$restart_initial_invocation_id" ] \
+            && unit_description_matches_marker; then
+            unit_invocation_id=$restart_initial_invocation_id unit_owned=yes \
+                unit_may_own=no
+            if unit_invocation_is_current && unit_description_matches_marker; then
+                restart_launch_binding_ok=yes
+            else
+                unit_may_own=yes unit_owned=no unit_invocation_id=
+            fi
+        fi
+        [ "$restart_launch_binding_ok" = yes ] \
+            || failed 'singleton restart manager binding is invalid'
+    elif recover_successful_restart_manager_binding; then
+        restart_launch_manager_binding_ok=yes
+        restart_launch_binding_ok=yes
+    fi
+    if [ "$restart_launch_binding_ok" != yes ]; then
+        printf 'VOLPAROSSA_HELPER_LIVE_RESTART_LAUNCH_DIAGNOSTIC_V1=captures-%s,json-%s,fresh-%s,stdout-%s,stderr-%s,manager-%s\n' \
+            "$restart_launch_captures_ok" "$restart_launch_json_ok" \
+            "$restart_launch_fresh" "$restart_launch_stdout" \
+            "$restart_launch_stderr" \
+            "$restart_launch_manager_binding_ok" >&2
+        failed 'singleton restart launch envelope is invalid'
+    fi
+
+    restart_wait=0
+    while ! vp_capture_file_is_safe \
+        "$temporary_stage/restart-output/restart.precrash"; do
+        restart_wait=$((restart_wait + 1))
+        [ "$restart_wait" -lt 1800 ] \
+            || failed 'singleton restart precrash identity did not appear'
+        sleep 0.05
+    done
+    restart_initial_pid=$(systemctl show --property=MainPID --value "$unit_name") \
+        || failed 'singleton restart initial MainPID is unavailable'
+    case $restart_initial_pid in ''|0|0*|*[!0-9]*) failed 'singleton restart initial MainPID is invalid' ;; esac
+    [ "$(sed -n '1p' "$temporary_stage/restart-output/restart.precrash")" = \
+        "$restart_initial_invocation_id" ] \
+        || failed 'singleton restart initial invocation is not hook-bound'
+    [ "$(sed -n '2p' "$temporary_stage/restart-output/restart.precrash")" = \
+        "$restart_initial_pid" ] \
+        || failed 'singleton restart initial MainPID is not hook-bound'
+    restart_initial_hook_pid=$(sed -n '8p' \
+        "$temporary_stage/restart-output/restart.precrash") \
+        || failed 'singleton restart initial hook PID is unavailable'
+    case $restart_initial_hook_pid in
+        ''|0|0*|*[!0-9]*) failed 'singleton restart initial hook PID is invalid' ;;
+    esac
+    if [ "${#restart_initial_hook_pid}" -gt 10 ] \
+        || [ "$restart_initial_hook_pid" -gt 4294967294 ]; then
+        failed 'singleton restart initial hook PID is invalid'
+    fi
+    [ "$(systemctl show --property=ControlPID --value "$unit_name")" = \
+        "$restart_initial_hook_pid" ] \
+        || failed 'singleton restart initial ControlPID is not hook-bound'
+    restart_initial_hook_starttime=$(capture_process_starttime \
+        "$restart_initial_hook_pid") \
+        || failed 'singleton restart initial hook starttime is unavailable'
+
+    /usr/bin/nsenter --mount="/proc/$restart_initial_pid/ns/mnt" -- \
+        /usr/bin/sleep 120 &
+    restart_mount_keeper_pid=$!
+    case $restart_mount_keeper_pid in ''|0|0*|*[!0-9]*) failed 'restart mount keeper PID is invalid' ;; esac
+    restart_mount_keeper_starttime=$(capture_process_starttime \
+        "$restart_mount_keeper_pid") \
+        || failed 'restart mount keeper starttime is unavailable'
+    sleep 0.05
+    kill -0 "$restart_mount_keeper_pid" 2>/dev/null \
+        || failed 'restart mount namespace keeper did not survive'
+
+    # GDB convenience variables must remain literal in the generated file.
+    # shellcheck disable=SC2016
+    printf '%s\n' \
+        'set pagination off' \
+        'set confirm off' \
+        'set breakpoint pending off' \
+        'break volparossa_helper::systemd_fdstore::remove_current_process_custody' \
+        'commands' \
+        'silent' \
+        "shell /usr/bin/nsenter --mount=/proc/$restart_initial_pid/ns/mnt -- /run/volparossa-helper-restart-observer cleanup-confirmed $unit_name $agent_gid $restart_initial_pid" \
+        'if !$_isvoid($_shell_exitcode) && $_shell_exitcode == 0' \
+        'kill' \
+        'quit 0' \
+        'else' \
+        'detach' \
+        'quit 1' \
+        'end' \
+        'end' \
+        "shell /usr/bin/nsenter --mount=/proc/$restart_initial_pid/ns/mnt -- /run/volparossa-helper-restart-observer armed $unit_name $agent_gid $restart_initial_pid" \
+        'if !$_isvoid($_shell_exitcode) && $_shell_exitcode == 0' \
+        'continue' \
+        'else' \
+        'detach' \
+        'quit 1' \
+        'end' >"$restart_debugger_initial_commands" \
+        || failed 'initial restart debugger commands could not be written'
+    chmod 0600 "$restart_debugger_initial_commands"
+    set +e
+    timeout --preserve-status --signal=TERM --kill-after=5s 30s \
+        prlimit --core=0:0 --fsize=1048576:1048576 -- \
+        "$debugger_path" --batch --quiet --nx \
+            --pid="$restart_initial_pid" \
+            --command="$restart_debugger_initial_commands" \
+        >"$restart_debugger_initial_stdout" \
+        2>"$restart_debugger_initial_stderr"
+    restart_initial_debugger_status=$?
+    set -e
+    restart_postcrash_main_pid=$(systemctl show --property=MainPID --value "$unit_name") \
+        || failed 'post-crash restart MainPID is unavailable'
+    restart_postcrash_count=$(systemctl show --property=NRestarts --value "$unit_name") \
+        || failed 'post-crash restart count is unavailable'
+    restart_unit_result=$(systemctl show --property=Result --value "$unit_name") \
+        || failed 'restart unit result is unavailable'
+    restart_exec_main_code=$(systemctl show --property=ExecMainCode --value "$unit_name") \
+        || failed 'restart ExecMainCode is unavailable'
+    restart_exec_main_status=$(systemctl show --property=ExecMainStatus --value "$unit_name") \
+        || failed 'restart ExecMainStatus is unavailable'
+    [ "$restart_postcrash_main_pid" = 0 ] \
+        || failed 'post-crash forced-helper MainPID is not zero'
+    [ "$restart_postcrash_count" = 0 ] \
+        || failed 'post-crash forced-helper restart count is not zero'
+    [ "$restart_unit_result" = signal ] \
+        || failed 'post-crash forced-helper result is not signal'
+    # `systemctl show` renders the signed ExecMainCode D-Bus property as its
+    # numeric siginfo value; Linux CLD_KILLED is exactly 2.
+    [ "$restart_exec_main_code" = 2 ] \
+        || failed 'post-crash forced-helper code is not CLD_KILLED'
+    [ "$restart_exec_main_status" = 9 ] \
+        || failed 'post-crash forced-helper status is not SIGKILL'
+    if [ "$(unit_load_state)" != loaded ] \
+        || ! unit_description_matches_marker \
+        || [ "$unit_invocation_id" != "$restart_initial_invocation_id" ] \
+        || ! unit_invocation_is_current; then
+        failed 'post-crash failed invocation lost its exact ownership fence'
+    fi
+    unit_may_own=yes unit_owned=no unit_invocation_id=
+    if ! vp_capture_file_is_safe \
+        "$temporary_stage/restart-output/restart.crash"; then
+        report_restart_crash_record_diagnostic \
+            "$temporary_stage/restart-output/restart.crash" \
+            "$restart_debugger_initial_stderr" || true
+        failed 'forced-crash boundary record is unavailable'
+    fi
+    for restart_debugger_log in \
+        "$restart_debugger_initial_stdout" "$restart_debugger_initial_stderr"; do
+        vp_capture_file_is_safe "$restart_debugger_log" \
+            || failed 'initial debugger log is unsafe'
+        [ "$(stat -Lc '%s' "$restart_debugger_log")" -le 1048576 ] \
+            || failed 'initial debugger log exceeds 1 MiB'
+    done
+    # The breakpoint command terminates GDB explicitly with `quit 0` after its
+    # own `kill`. Accept only that exact terminal status, and only after PID 1,
+    # the ownership marker, the boundary observer, and both bounded debugger
+    # logs independently prove the exact forced crash.
+    case $restart_initial_debugger_status in
+        0) ;;
+        *) failed 'initial forced-crash debugger did not complete' ;;
+    esac
+    if ! consume_expected_restart_initial_start_failure \
+        "$temporary_stage/restart-output/start.failure"; then
+        report_restart_initial_start_failure_diagnostic \
+            "$temporary_stage/restart-output/restart.initial-start.failure-stage" \
+            || true
+        failed 'initial forced-crash start failure record was not consumed exactly'
+    fi
+    restart_crashed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+        || failed 'forced-crash time is unavailable'
+    /usr/bin/nsenter --mount="/proc/$restart_mount_keeper_pid/ns/mnt" -- \
+        /run/volparossa-helper-restart-observer after-crash \
+            "$unit_name" "$agent_gid" "$restart_initial_pid" \
+        || failed 'post-crash exact custody was not preserved'
+    restart_initial_after_crash_observed=yes
+    if ! release_expected_restart_initial_terminal \
+        "$temporary_stage/restart-output/restart.initial-start.terminal" \
+        "$temporary_stage/restart-output/restart.initial-start.failure-stage"; then
+        report_restart_initial_start_failure_diagnostic \
+            "$temporary_stage/restart-output/restart.initial-start.failure-stage" \
+            || true
+        failed 'initial forced-crash terminal handshake was not released exactly'
+    fi
+
+    driver_phase=restart-observation
+    restart_wait=0
+    restart_successor_pid=
+    while :; do
+        restart_successor_pid=$(systemctl show --property=MainPID --value \
+            "$unit_name" 2>/dev/null || true)
+        case $restart_successor_pid in
+            ''|0|0*|*[!0-9]*) ;;
+            *)
+                if [ "$restart_successor_pid" != "$restart_initial_pid" ]; then
+                    break
+                fi
+                ;;
+        esac
+        restart_wait=$((restart_wait + 1))
+        [ "$restart_wait" -lt 600 ] \
+            || failed 'restart successor did not become manager-bound'
+        sleep 0.05
+    done
+    restart_successor_barrier=$temporary_stage/restart-output/restart.successor-barrier
+    restart_wait=0
+    while ! vp_capture_file_is_safe "$restart_successor_barrier"; do
+        if [ "$(systemctl show --property=MainPID --value "$unit_name" \
+            2>/dev/null || true)" != "$restart_successor_pid" ]; then
+            failed 'restart successor changed before its pre-exec barrier'
+        fi
+        restart_wait=$((restart_wait + 1))
+        [ "$restart_wait" -lt 600 ] \
+            || failed 'restart successor pre-exec barrier did not appear'
+        sleep 0.05
+    done
+    [ "$(stat -Lc '%s' "$restart_successor_barrier")" -le 256 ] \
+        || failed 'restart successor pre-exec barrier is oversized'
+    restart_successor_barrier_invocation=$(sed -n '2p' \
+        "$restart_successor_barrier") \
+        || failed 'restart successor barrier invocation is unavailable'
+    restart_successor_barrier_pid=$(sed -n '3p' "$restart_successor_barrier") \
+        || failed 'restart successor barrier PID is unavailable'
+    restart_expected_barrier=$temporary_stage/restart-successor-barrier.expected
+    install -o root -g root -m 0600 /dev/null "$restart_expected_barrier" \
+        || failed 'restart successor barrier expectation could not be created'
+    printf '%s\n%s\n%s\n' \
+        'VOLPAROSSA_HELPER_RESTART_SUCCESSOR_BARRIER_V1=ready' \
+        "$restart_successor_barrier_invocation" \
+        "$restart_successor_barrier_pid" >"$restart_expected_barrier" \
+        || failed 'restart successor barrier expectation is unavailable'
+    if ! vp_capture_file_is_safe "$restart_expected_barrier" \
+        || ! cmp -s "$restart_expected_barrier" \
+            "$restart_successor_barrier" \
+        || ! unit_invocation_id_is_safe \
+            "$restart_successor_barrier_invocation" \
+        || [ "$restart_successor_barrier_invocation" = \
+            "$restart_initial_invocation_id" ] \
+        || [ "$restart_successor_barrier_pid" != "$restart_successor_pid" ] \
+        || [ "$(unit_current_invocation_id 2>/dev/null || true)" != \
+            "$restart_successor_barrier_invocation" ]; then
+        failed 'restart successor pre-exec barrier is not manager-bound'
+    fi
+    restart_successor_starttime=$(capture_process_starttime \
+        "$restart_successor_pid") \
+        || failed 'restart successor starttime is unavailable'
+    restart_successor_restart_count=$(systemctl show \
+        --property=NRestarts --value "$unit_name") \
+        || failed 'restart successor count is unavailable'
+    [ "$restart_successor_restart_count" = 1 ] \
+        || failed 'restart successor count is not exactly one'
+    unit_description_matches_marker \
+        || failed 'restart successor lost the ownership marker'
+    adopt_tentative_unit \
+        || failed 'restart successor lineage could not be adopted'
+    restart_successor_invocation_id=$unit_invocation_id
+    if ! unit_invocation_id_is_safe "$restart_successor_invocation_id" \
+        || [ "$restart_successor_invocation_id" = \
+            "$restart_initial_invocation_id" ]; then
+        failed 'restart successor invocation is invalid'
+    fi
+    if [ "$(systemctl show --property=MainPID --value "$unit_name")" != \
+        "$restart_successor_pid" ] \
+        || [ "$(capture_process_starttime "$restart_successor_pid")" != \
+            "$restart_successor_starttime" ] \
+        || [ "$(systemctl show --property=NRestarts --value "$unit_name")" != 1 ] \
+        || ! unit_invocation_is_current \
+        || ! unit_description_matches_marker; then
+        failed 'restart successor lineage changed after adoption'
+    fi
+    restart_successor_tracer_ready=$temporary_stage/restart-successor-tracer.ready
+    # GDB convenience variables must remain literal in the generated file.
+    # shellcheck disable=SC2016
+    printf '%s\n' \
+        'set pagination off' \
+        'set confirm off' \
+        'set breakpoint pending off' \
+        'tcatch exec' \
+        "shell printf '%s\\n' ready >$restart_successor_tracer_ready" \
+        'continue' \
+        'echo VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=exec-caught\n' \
+        'break volparossa_helper::systemd_fdstore::remove_restart_custody' \
+        'echo VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=breakpoint-installed\n' \
+        'commands' \
+        'silent' \
+        'echo VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=breakpoint-hit\n' \
+        "shell /usr/bin/nsenter --mount=/proc/$restart_successor_pid/ns/mnt -- /run/volparossa-helper-restart-observer recovery-boundary $unit_name $agent_gid $restart_successor_pid" \
+        'if !$_isvoid($_shell_exitcode) && $_shell_exitcode == 0' \
+        'echo VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=observer-ok\n' \
+        'detach' \
+        'quit 0' \
+        'else' \
+        'echo VOLPAROSSA_HELPER_RESTART_SUCCESSOR_GDB_V1=observer-failed\n' \
+        'detach' \
+        'quit 1' \
+        'end' \
+        'end' \
+        'continue' >"$restart_debugger_successor_commands" \
+        || failed 'successor debugger commands could not be written'
+    chmod 0600 "$restart_debugger_successor_commands"
+    timeout --preserve-status --signal=TERM --kill-after=5s 45s \
+        prlimit --core=0:0 --fsize=1048576:1048576 -- \
+        "$debugger_path" --batch --quiet --nx \
+            --pid="$restart_successor_pid" \
+            --command="$restart_debugger_successor_commands" \
+        >"$restart_debugger_successor_stdout" \
+        2>"$restart_debugger_successor_stderr" &
+    restart_successor_debugger_pid=$!
+    restart_successor_debugger_starttime=$(capture_process_starttime \
+        "$restart_successor_debugger_pid") \
+        || failed 'successor debugger starttime is unavailable'
+    restart_wait=0
+    while [ ! -f "$restart_successor_tracer_ready" ]; do
+        kill -0 "$restart_successor_debugger_pid" 2>/dev/null \
+            || failed 'successor debugger exited before arming'
+        restart_wait=$((restart_wait + 1))
+        [ "$restart_wait" -lt 600 ] \
+            || failed 'successor debugger did not arm'
+        sleep 0.05
+    done
+    vp_capture_file_is_safe "$restart_successor_tracer_ready" \
+        || failed 'successor debugger readiness record is unsafe'
+    [ "$(stat -Lc '%s' "$restart_successor_tracer_ready")" -le 16 ] \
+        || failed 'successor debugger readiness record is oversized'
+    [ "$(cat "$restart_successor_tracer_ready")" = ready ] \
+        || failed 'successor debugger readiness record is invalid'
+    [ "$(stat -Lc '%F:%u:%g:%a:%h' "$restart_successor_release_fifo" \
+        2>/dev/null || true)" = 'fifo:0:0:600:1' ] \
+        || failed 'restart successor release FIFO changed before release'
+    # The inner shell receives the already validated FIFO as positional `$1`.
+    # shellcheck disable=SC2016
+    timeout --preserve-status --signal=TERM --kill-after=1s 5s \
+        /bin/sh -c 'printf %s G >"$1"' sh \
+        "$restart_successor_release_fifo" \
+        || failed 'restart successor pre-exec barrier could not be released'
+    [ "$(stat -Lc '%F:%u:%g:%a:%h' "$restart_successor_release_fifo" \
+        2>/dev/null || true)" = 'fifo:0:0:600:1' ] \
+        || failed 'restart successor release FIFO changed after release'
+    set +e
+    wait "$restart_successor_debugger_pid"
+    restart_successor_debugger_status=$?
+    set -e
+    restart_successor_debugger_pid=
+    restart_successor_debugger_starttime=
+    for restart_debugger_log in \
+        "$restart_debugger_successor_stdout" "$restart_debugger_successor_stderr"; do
+        vp_capture_file_is_safe "$restart_debugger_log" \
+            || failed 'successor debugger log is unsafe'
+        [ "$(stat -Lc '%s' "$restart_debugger_log")" -le 1048576 ] \
+            || failed 'successor debugger log exceeds 1 MiB'
+    done
+    if [ "$restart_successor_debugger_status" -ne 0 ]; then
+        restart_successor_debugger_failure=$(
+            restart_successor_debugger_failure_category \
+                "$restart_successor_debugger_status" \
+                "$restart_debugger_successor_stdout" \
+                "$restart_debugger_successor_stderr"
+        ) || failed 'successor debugger failure classification is invalid'
+        restart_successor_debugger_failure_category_is_safe \
+            "$restart_successor_debugger_failure" \
+            || failed 'successor debugger failure classification is invalid'
+        failed "successor recovery-boundary debugger failed: $restart_successor_debugger_failure"
+    fi
+    restart_successor_boundary=$temporary_stage/restart-output/restart.recovery-boundary
+    if ! vp_capture_file_is_safe "$restart_successor_boundary" \
+        || [ -e "$restart_successor_boundary.next" ] \
+        || [ -L "$restart_successor_boundary.next" ] \
+        || [ "$(stat -Lc '%s' "$restart_successor_boundary")" -gt 512 ] \
+        || [ "$(wc -l <"$restart_successor_boundary")" -ne 6 ]; then
+        failed 'successor recovery boundary is not exact'
+    fi
+    restart_successor_boundary_time=$(sed -n '1p' \
+        "$restart_successor_boundary") \
+        || failed 'successor recovery boundary is not exact'
+    case $restart_successor_boundary_time in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+        *) failed 'successor recovery boundary is not exact' ;;
+    esac
+    restart_successor_boundary_time_canonical=$(date -u -d \
+        "$restart_successor_boundary_time" '+%Y-%m-%dT%H:%M:%SZ' \
+        2>/dev/null) \
+        || failed 'successor recovery boundary is not exact'
+    if [ "$restart_successor_boundary_time_canonical" != \
+        "$restart_successor_boundary_time" ] \
+        || [ "$(sed -n '2p' "$restart_successor_boundary")" != \
+            "$restart_successor_invocation_id" ] \
+        || [ "$(sed -n '3p' "$restart_successor_boundary")" != \
+            "$restart_successor_pid" ] \
+        || [ "$(sed -n '4p' "$restart_successor_boundary")" != \
+            "$restart_successor_starttime" ] \
+        || [ "$(sed -n '5p' "$restart_successor_boundary")" != \
+            'startup-removal-call-v1=systemd_fdstore::remove_restart_custody' ] \
+        || [ "$(sed -n '6p' "$restart_successor_boundary")" != \
+            'manager-fdstore-before-removal-v1=2' ]; then
+        failed 'successor recovery boundary is not exact'
+    fi
+    kill "$restart_mount_keeper_pid" 2>/dev/null || true
+    wait "$restart_mount_keeper_pid" 2>/dev/null || true
+    restart_mount_keeper_pid=
+    restart_mount_keeper_starttime=
+
+    restart_wait=0
+    while ! vp_capture_file_is_safe \
+        "$temporary_stage/restart-output/restart.resumed"; do
+        restart_successor_start_failure_file=$temporary_stage/restart-output/start.failure
+        if [ -e "$restart_successor_start_failure_file" ] \
+            || [ -L "$restart_successor_start_failure_file" ]; then
+            restart_successor_start_failure=$(
+                restart_successor_start_failure_category \
+                    "$restart_successor_start_failure_file"
+            ) || failed 'restart successor start failure record is invalid'
+            restart_readiness_failure_file=$temporary_stage/restart-output/restart.readiness-failure
+            case $restart_successor_start_failure in
+                preflight)
+                    failed 'restart successor start hook failed during preflight' ;;
+                recovery-wait)
+                    failed 'restart successor start hook failed during recovery wait' ;;
+                lineage)
+                    failed 'restart successor start hook failed during lineage validation' ;;
+                descriptor-settlement)
+                    failed 'restart successor start hook failed during descriptor settlement' ;;
+                journal-settlement)
+                    if [ -e "$restart_readiness_failure_file" ] \
+                        || [ -L "$restart_readiness_failure_file" ] \
+                        || [ -e "$restart_readiness_failure_file.next" ] \
+                        || [ -L "$restart_readiness_failure_file.next" ]; then
+                        report_restart_readiness_failure_diagnostic \
+                            "$restart_readiness_failure_file" \
+                            || failed 'restart successor readiness diagnostic is invalid'
+                    fi
+                    failed 'restart successor start hook failed during journal settlement' ;;
+                socket-validation)
+                    report_restart_readiness_failure_diagnostic \
+                        "$restart_readiness_failure_file" \
+                        || failed 'restart successor readiness diagnostic is invalid'
+                    failed 'restart successor start hook failed during socket validation' ;;
+                publication)
+                    failed 'restart successor start hook failed during publication' ;;
+                *) failed 'restart successor start failure category is invalid' ;;
+            esac
+        fi
+        if [ -e "$restart_successor_start_failure_file.next" ] \
+            || [ -L "$restart_successor_start_failure_file.next" ]; then
+            vp_capture_file_is_safe "$restart_successor_start_failure_file.next" \
+                || failed 'restart successor pending start failure record is unsafe'
+        fi
+        restart_wait=$((restart_wait + 1))
+        [ "$restart_wait" -lt 2400 ] \
+            || failed 'restart ExactPresent settlement did not complete'
+        sleep 0.05
+    done
+    restart_resumed_invocation_id=$(sed -n '3p' \
+        "$temporary_stage/restart-output/restart.resumed") \
+        || failed 'restart successor invocation record is unavailable'
+    unit_invocation_id_is_safe "$restart_resumed_invocation_id" \
+        || failed 'restart successor invocation record is invalid'
+    [ "$restart_resumed_invocation_id" = "$restart_successor_invocation_id" ] \
+        || failed 'restart settlement changed the adopted successor invocation'
+    unit_invocation_id=$restart_resumed_invocation_id
+    driver_phase=restart-retirement
+    restart_unit_name=$unit_name
+    if ! retire_unit; then
+        cleanup_error=yes
+        retire_failure_stage_is_safe "$retire_failure_stage" \
+            || failed 'restart successor retirement failure category is invalid'
+        printf 'VOLPAROSSA_HELPER_LIVE_RESTART_RETIREMENT_DIAGNOSTIC_V1=%s\n' \
+            "$retire_failure_stage" >&2 \
+            || failed 'restart successor retirement diagnostic could not be reported'
+        failed 'restart successor could not be retired'
+    fi
+    unit_name=$restart_unit_name
+    restart_retired_load_state=$(unit_load_state) || restart_retired_load_state=
+    [ "$restart_retired_load_state" = not-found ] \
+        || failed 'restart unit was not collected'
+    forget_unit_ownership
+    restart_journal_state_record=$temporary_stage/restart-output/restart.journal.settled.state
+    restart_expected_journal_state=$(capture_restart_journal_state_record \
+        "$restart_journal_state_record" "$agent_gid") \
+        || failed 'restart final journal could not be revalidated'
+    restart_lock_path=$temporary_stage/production-runtime/helper.ownership-v3.lock
+    case $expected_production_lock_identity in
+        *":8180:0:$agent_gid:600:1") ;;
+        *) failed 'restart journal lock could not be opened after retirement' ;;
+    esac
+    restart_lock_path_before=$(stat -c '%d:%i:%f:%u:%g:%a:%h' \
+        "$restart_lock_path" 2>/dev/null) || restart_lock_path_before=
+    [ "$restart_lock_path_before" = "$expected_production_lock_identity" ] \
+        || failed 'restart journal lock could not be opened after retirement'
+    if command exec 9<"$restart_lock_path"; then
+        restart_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' \
+            /proc/self/fd/9 2>/dev/null) || restart_lock_fd_identity=
+        [ "$restart_lock_fd_identity" = "$expected_production_lock_identity" ] \
+            || failed 'restart journal lock could not be opened after retirement'
+        /usr/bin/flock -n 9 || failed 'restart journal lock remained held'
+        restart_lock_path_after_flock=$(stat -c '%d:%i:%f:%u:%g:%a:%h' \
+            "$restart_lock_path" 2>/dev/null) || restart_lock_path_after_flock=
+        [ "$restart_lock_path_after_flock" = \
+            "$expected_production_lock_identity" ] \
+            || failed 'restart journal lock could not be opened after retirement'
+        if [ -e "$temporary_stage/production-runtime/helper.sock" ] \
+            || [ -L "$temporary_stage/production-runtime/helper.sock" ] \
+            || [ -e "$temporary_stage/production-runtime/helper.ownership-v3.next" ] \
+            || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
+            failed 'restart runtime did not retire cleanly'
+        fi
+        restart_final_journal_state=$(capture_restart_journal_state \
+            "$temporary_stage/production-runtime/helper.ownership-v3" \
+            "$agent_gid") \
+            || failed 'restart final journal could not be revalidated'
+        if [ -e "$temporary_stage/production-runtime/helper.sock" ] \
+            || [ -L "$temporary_stage/production-runtime/helper.sock" ] \
+            || [ -e "$temporary_stage/production-runtime/helper.ownership-v3.next" ] \
+            || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
+            failed 'restart runtime did not retire cleanly'
+        fi
+        [ "$restart_final_journal_state" = \
+            "$restart_expected_journal_state" ] \
+            || failed 'restart final journal proof is invalid'
+        restart_revalidated_expected_journal_state=$( \
+            capture_restart_journal_state_record \
+                "$restart_journal_state_record" "$agent_gid" \
+        ) || failed 'restart final journal could not be revalidated'
+        [ "$restart_revalidated_expected_journal_state" = \
+            "$restart_expected_journal_state" ] \
+            || failed 'restart final journal could not be revalidated'
+        printf '%s\n' "$restart_expected_journal_state" \
+            | cmp -s - "$restart_journal_state_record" \
+            || failed 'restart final journal could not be revalidated'
+        restart_lock_path_final=$(stat -c '%d:%i:%f:%u:%g:%a:%h' \
+            "$restart_lock_path" 2>/dev/null) || restart_lock_path_final=
+        [ "$restart_lock_path_final" = "$expected_production_lock_identity" ] \
+            || failed 'restart journal lock could not be opened after retirement'
+        unit_name=$restart_unit_name
+        restart_final_load_state=$(unit_load_state) || restart_final_load_state=
+        [ "$restart_final_load_state" = not-found ] \
+            || failed 'restart unit was not collected'
+        forget_unit_ownership
+        command exec 9>&- \
+            || failed 'restart journal lock could not be opened after retirement'
+    else
+        failed 'restart journal lock could not be opened after retirement'
+    fi
+    restart_evidence_validated=true
     if [ "$production_ok" != "$proof_ok" ]; then
         failed 'internal production proof failure state is inconsistent'
     fi
@@ -3727,7 +6167,9 @@ if [ "$worker_fdstore_before_retirement" != 2 ] \
     || [ "$production_fdstore_settled_counts" != '0 0 0' ] \
     || [ "$production_fdstore_identity_bound" != true ] \
     || [ "$production_journal_settled_absent" != true ] \
-    || [ "$production_retired_load_state" != not-found ]; then
+    || [ "$production_retired_load_state" != not-found ] \
+    || [ "$restart_evidence_validated" != true ] \
+    || [ "$restart_retired_load_state" != not-found ]; then
     failed 'the retained fdstore or exact-unit retirement observations are incomplete'
 fi
 
@@ -3752,6 +6194,26 @@ ipc_hook_digest_final=$(vp_capture_sha256_file "$ipc_hook_source") \
 staged_ipc_hook_digest_final=$(vp_capture_sha256_file \
     "$temporary_stage/production-ipc-hook") \
     || failed 'the staged production IPC hook could not be revalidated'
+restart_observer_final=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$restart_observer_source") \
+    || failed 'the restart observer metadata could not be revalidated'
+restart_observer_digest_final=$(vp_capture_sha256_file "$restart_observer_source") \
+    || failed 'the restart observer source could not be revalidated'
+staged_restart_observer_digest_final=$(vp_capture_sha256_file \
+    "$temporary_stage/restart-observer") \
+    || failed 'the staged restart observer could not be revalidated'
+restart_launcher_final=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$restart_launcher_source") \
+    || failed 'the restart launcher metadata could not be revalidated'
+restart_launcher_digest_final=$(vp_capture_sha256_file "$restart_launcher_source") \
+    || failed 'the restart launcher source could not be revalidated'
+staged_restart_launcher_digest_final=$(vp_capture_sha256_file \
+    "$temporary_stage/restart-launcher") \
+    || failed 'the staged restart launcher could not be revalidated'
+staged_restart_launcher_final=$(stat -Lc '%F:%u:%g:%a:%h' \
+    "$temporary_stage/restart-launcher" 2>/dev/null || true)
+debugger_digest_final=$(vp_capture_sha256_file "$debugger_path") \
+    || failed 'the debugger could not be revalidated'
 if [ "$source_before" != "$source_final" ] \
     || [ "$source_digest_before" != "$source_digest_final" ] \
     || [ "$staged_digest" != "$staged_digest_final" ] \
@@ -3760,7 +6222,18 @@ if [ "$source_before" != "$source_final" ] \
     || [ "$staged_ipc_probe_digest" != "$staged_ipc_probe_digest_final" ] \
     || [ "$ipc_hook_before" != "$ipc_hook_final" ] \
     || [ "$ipc_hook_digest_before" != "$ipc_hook_digest_final" ] \
-    || [ "$staged_ipc_hook_digest" != "$staged_ipc_hook_digest_final" ]; then
+    || [ "$staged_ipc_hook_digest" != "$staged_ipc_hook_digest_final" ] \
+    || [ "$restart_observer_before" != "$restart_observer_final" ] \
+    || [ "$restart_observer_digest_before" != "$restart_observer_digest_final" ] \
+    || [ "$staged_restart_observer_digest" != \
+        "$staged_restart_observer_digest_final" ] \
+    || [ "$restart_launcher_before" != "$restart_launcher_final" ] \
+    || [ "$restart_launcher_digest_before" != \
+        "$restart_launcher_digest_final" ] \
+    || [ "$staged_restart_launcher_digest" != \
+        "$staged_restart_launcher_digest_final" ] \
+    || [ "$staged_restart_launcher_final" != 'regular file:0:0:500:1' ] \
+    || [ "$debugger_digest" != "$debugger_digest_final" ]; then
     failed 'a source or staged proof artifact changed during live execution'
 fi
 final_checkpoint=source-integrity
@@ -3904,12 +6377,209 @@ if ! vp_capture_file_is_safe "$validator_stdout" \
     || [ "$validator_status" -ne 0 ] \
     || [ -s "$validator_stdout" ] \
     || [ -s "$validator_stderr" ]; then
+    report_boundary_validator_failure_diagnostic \
+        "$report_path" "$validator_status" \
+        "$validator_stdout" \
+        "$validator_stderr" || :
     failed 'the helper-boundary report failed strict validation'
 fi
 validated_report=$(cat "$report_path") \
     || failed 'the validated helper-boundary report could not be retained for publication'
 if [ -z "$validated_report" ] || [ "${#validated_report}" -gt 65535 ]; then
     failed 'the validated helper-boundary report has an invalid publication size'
+fi
+restart_cleanup_confirmed_at=$(sed -n '1p' \
+    "$temporary_stage/restart-output/restart.crash") \
+    || failed 'restart CleanupConfirmed timestamp is unavailable'
+restart_restarted_at=$(sed -n '1p' \
+    "$temporary_stage/restart-output/restart.resumed") \
+    || failed 'restart successor timestamp is unavailable'
+restart_settled_at=$(sed -n '2p' \
+    "$temporary_stage/restart-output/restart.resumed") \
+    || failed 'restart settlement timestamp is unavailable'
+restart_startup_call_record=$(sed -n '5p' \
+    "$temporary_stage/restart-output/restart.recovery-boundary") \
+    || failed 'restart startup removal call is unavailable'
+restart_manager_before_record=$(sed -n '6p' \
+    "$temporary_stage/restart-output/restart.recovery-boundary") \
+    || failed 'restart pre-removal descriptor count is unavailable'
+restart_manager_after_record=$(sed -n '6p' \
+    "$temporary_stage/restart-output/restart.resumed") \
+    || failed 'restart post-removal descriptor count is unavailable'
+if [ "$restart_startup_call_record" != \
+    'startup-removal-call-v1=systemd_fdstore::remove_restart_custody' ] \
+    || [ "$restart_manager_before_record" != \
+        'manager-fdstore-before-removal-v1=2' ] \
+    || [ "$restart_manager_after_record" != \
+        'manager-fdstore-after-removal-v1=0' ]; then
+    failed 'restart live observation records are not exact'
+fi
+restart_startup_call=${restart_startup_call_record#startup-removal-call-v1=}
+restart_manager_before=${restart_manager_before_record#manager-fdstore-before-removal-v1=}
+restart_manager_after=${restart_manager_after_record#manager-fdstore-after-removal-v1=}
+restart_report_path=$temporary_stage/helper-restart-exact-present-evidence-v1.json
+jq -n -S -c \
+    --arg source_commit "$source_commit" \
+    --arg helper_digest "$staged_digest" \
+    --arg probe_digest "$staged_ipc_probe_digest" \
+    --arg hook_digest "$staged_ipc_hook_digest" \
+    --arg observer_digest "$staged_restart_observer_digest" \
+    --arg launcher_digest "$staged_restart_launcher_digest" \
+    --arg debugger_digest "$debugger_digest" \
+    --arg kernel_release "$kernel_release" \
+    --arg started_at "$started_at" \
+    --arg cleanup_confirmed_at "$restart_cleanup_confirmed_at" \
+    --arg crashed_at "$restart_crashed_at" \
+    --arg restarted_at "$restart_restarted_at" \
+    --arg settled_at "$restart_settled_at" \
+    --arg finished_at "$finished_at" \
+    --arg generated_at "$generated_at" \
+    --arg initial_invocation "$restart_initial_invocation_id" \
+    --arg successor_invocation "$restart_successor_invocation_id" \
+    --arg before_digest "$before_digest" \
+    --arg after_digest "$after_digest" \
+    --arg startup_call "$restart_startup_call" \
+    --arg manager_before "$restart_manager_before" \
+    --arg manager_after "$restart_manager_after" \
+    --arg state_records "$state_records" '
+    {
+      schema_version: 1,
+      report_kind: "volparossa-helper-restart-exact-present-evidence",
+      observed_source: {commit_sha: $source_commit, worktree_clean: true},
+      observed_artifact_hashes: {
+        debugger_sha256: $debugger_digest,
+        production_ipc_probe_sha256: $probe_digest,
+        production_ipc_unit_hook_sha256: $hook_digest,
+        restart_launcher_sha256: $launcher_digest,
+        restart_observer_sha256: $observer_digest,
+        volparossa_helper_sha256: $helper_digest
+      },
+      environment: {
+        debian_version: "13", dpkg_architecture: "amd64",
+        machine: "x86_64", kernel_release: $kernel_release,
+        systemd_version: 257, virtualization: "vm"
+      },
+      started_at: $started_at,
+      finished_at: $finished_at,
+      generated_at: $generated_at,
+      invocation_ids: [$initial_invocation, $successor_invocation],
+      restart: {
+        initial: {
+          argumentless: true,
+          target_count: 1,
+          target_role: "Client",
+          worker_kernel_cleanup_confirmed: true,
+          journal_phase_before_crash: "CleanupConfirmed",
+          fdstore_before_crash: 2,
+          fdstore_exact_identity_bound: true,
+          cleanup_confirmed_at: $cleanup_confirmed_at
+        },
+        crash: {
+          signal: "SIGKILL",
+          unit_result: "signal",
+          exec_main_code: "killed",
+          exec_main_status: 9,
+          failed_unit_retained: true,
+          fdstore_after_crash: 2,
+          fdstore_exact_identity_preserved: true,
+          crashed_at: $crashed_at
+        },
+        resumed: {
+          argumentless: true,
+          restarted_at: $restarted_at,
+          inherited_descriptor_count: ($manager_before | tonumber),
+          target_count: 1,
+          target_phase: "CleanupConfirmed",
+          target_disposition: "ExactPresent",
+          manager_fdstore_before_removal: ($manager_before | tonumber),
+          new_socket_published_before_settlement: false,
+          startup_removal_call: $startup_call,
+          manager_fdstore_after_removal: ($manager_after | tonumber),
+          settled_at: $settled_at,
+          journal_phase_after_settlement: "Absent",
+          journal_absent_origin: "RecoveredMayOwn",
+          journal_stable_read_count: 2,
+          journal_temporary_entry_absent: true,
+          new_socket_published_after_settlement: true,
+          unit_load_state_after_retirement: "not-found"
+        }
+      },
+      retirement: {
+        journal_settled_absent: true,
+        lock_released: true,
+        socket_absent: true
+      },
+      enumerated_host_state: {
+        before_sha256: $before_digest,
+        after_sha256: $after_digest,
+        equal_at_fences: true,
+        records: ($state_records | split(" "))
+      },
+      scope: {
+        helper_boundary_only: true,
+        cleanup_confirmed_exact_present_singleton: true,
+        cleanup_confirmed_mixed_restart: false,
+        forced_helper_crash: true,
+        restart_recovery: false,
+        may_own_recovery: false,
+        cleanup_owned: false,
+        installed_package: false,
+        datapath: false,
+        acceptance_a01_a15: false
+      },
+      checks: [
+        "OBSERVED_SOURCE_TREE_CLEAN",
+        "OBSERVED_ARTIFACT_HASHES",
+        "DEBIAN_13_AMD64_X86_64_SYSTEMD_257_VM",
+        "INITIAL_INVOCATION_BOUND",
+        "INITIAL_ARGUMENTLESS_PRODUCTION_BOUNDARY",
+        "SINGLETON_WORKER_KERNEL_CLEANUP_CONFIRMED",
+        "SINGLETON_CLEANUP_CONFIRMED_EXACT_CUSTODY",
+        "FORCED_HELPER_SIGKILL_OBSERVED",
+        "SYSTEMD_FDSTORE_EXACT_CUSTODY_PRESERVED_AFTER_CRASH",
+        "RESTART_DISTINCT_ARGUMENTLESS_INVOCATION_BOUND",
+        "RESTART_INHERITED_SINGLETON_EXACT_PRESENT",
+        "RESTART_SOCKET_UNPUBLISHED_BEFORE_SETTLEMENT",
+        "RESTART_STARTUP_REMOVAL_CALL_OBSERVED",
+        "RESTART_FDSTORE_ZERO_AFTER_STABLE_EMPTY_OBSERVATION",
+        "RESTART_JOURNAL_ABSENT_RECOVERED_MAY_OWN",
+        "RESTART_SOCKET_PUBLISHED_AFTER_SETTLEMENT",
+        "RESTART_RETIRED_UNIT_NOT_FOUND",
+        "RETIREMENT_LOCK_RELEASED",
+        "RETIREMENT_SOCKET_ABSENT",
+        "ENUMERATED_HOST_STATE_EQUAL_AT_FENCES"
+      ] | map({id: ., result: "PASS"}),
+      overall: "PASS"
+    }
+' >"$restart_report_path" \
+    || failed 'the canonical restart evidence report could not be generated'
+chmod 0600 "$restart_report_path" \
+    || failed 'the restart evidence report mode could not be fixed'
+vp_capture_file_is_safe "$restart_report_path" \
+    || failed 'the restart evidence report is not one validated private file'
+final_checkpoint=restart-report-validation
+restart_validator_stdout=$temporary_stage/restart-validator.stdout
+restart_validator_stderr=$temporary_stage/restart-validator.stderr
+install -o root -g root -m 0600 /dev/null "$restart_validator_stdout" \
+    || failed 'private restart validator stdout could not be created'
+install -o root -g root -m 0600 /dev/null "$restart_validator_stderr" \
+    || failed 'private restart validator stderr could not be created'
+set +e
+"$restart_evidence_validator" "$restart_report_path" \
+    >"$restart_validator_stdout" 2>"$restart_validator_stderr"
+restart_validator_status=$?
+set -e
+if ! vp_capture_file_is_safe "$restart_validator_stdout" \
+    || ! vp_capture_file_is_safe "$restart_validator_stderr" \
+    || [ "$restart_validator_status" -ne 0 ] \
+    || [ -s "$restart_validator_stdout" ] || [ -s "$restart_validator_stderr" ]; then
+    failed 'the restart evidence report failed strict validation'
+fi
+validated_restart_report=$(cat "$restart_report_path") \
+    || failed 'the validated restart report could not be retained'
+if [ -z "$validated_restart_report" ] \
+    || [ "${#validated_restart_report}" -gt 32768 ]; then
+    failed 'the validated restart report has an invalid publication size'
 fi
 final_checkpoint=publication-fence
 publication_source_commit=$(git -c safe.directory="$repository_directory" \
@@ -3930,6 +6600,7 @@ if ! remove_temporary_stage; then
 fi
 
 printf '%s\n' \
-    'PASS: staged helper identity, exact two-FD custody, production IPC, sequential Client and Exit leases plus one simultaneous RelayClient/RelayExit pair with exact Commit retries, clean stop, confinement, and pin release were proved.' \
-    'SCOPE: helper boundary only; the pair proves two live local WireGuard legs, not relay forwarding, CleanupOwned, a production datapath, or an A01-A15 result.' >&2
+    'PASS: staged helper identity, production IPC, and one forced singleton CleanupConfirmed ExactPresent restart were proved.' \
+    'SCOPE: helper boundary only; no mixed, MayOwn, CleanupOwned, general restart-recovery, datapath, or A01-A15 claim.' >&2
 printf '%s\n' "$validated_report"
+printf '%s\n' "$validated_restart_report"
