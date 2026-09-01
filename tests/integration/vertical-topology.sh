@@ -188,6 +188,21 @@ for node in relay1 relay2; do
 done
 grep -Fx 'relay: false' "$WORK/roles-exit.txt" >/dev/null
 grep -Fx 'exit: true' "$WORK/roles-exit.txt" >/dev/null
+
+attempt=0; control_ready=no
+while [ "$attempt" -lt 200 ]; do
+    control_ready=yes
+    for node in client relay1 relay2 exit; do
+        "$BIN/volparossa" --control-socket "$CONTROL/$node-agent.sock" status \
+            >"$WORK/status-$node.txt" || control_ready=no
+        peers=$(awk '/^active peers: / {print $3}' "$WORK/status-$node.txt")
+        [ -n "$peers" ] && [ "$peers" -ge 2 ] || control_ready=no
+    done
+    [ "$control_ready" = yes ] && break
+    sleep 0.1; attempt=$((attempt + 1))
+done
+[ "$control_ready" = yes ] || exit 73
+
 set +e
 "$BIN/volparossa" --control-socket "$CONTROL/client-agent.sock" connect \
     >"$WORK/connect-client.txt" 2>"$WORK/connect-client.err"
