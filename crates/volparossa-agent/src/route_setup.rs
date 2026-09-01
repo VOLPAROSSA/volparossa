@@ -4693,6 +4693,7 @@ mod tests {
                 }
                 DatapathRelayOperation::NativeProbeReady
                 | DatapathRelayOperation::NativeProbeStart
+                | DatapathRelayOperation::NativeProbeAuthorize
                 | DatapathRelayOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -5007,6 +5008,7 @@ mod tests {
                 }
                 DatapathRelayOperation::NativeProbeReady
                 | DatapathRelayOperation::NativeProbeStart
+                | DatapathRelayOperation::NativeProbeAuthorize
                 | DatapathRelayOperation::Unspecified => return Err(RealTransportError),
             };
             DatapathRelayResponse::granted(

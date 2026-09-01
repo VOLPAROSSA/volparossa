@@ -1595,6 +1595,7 @@ fn assert_native_probe_readiness_schema(rust: &str, schema: &str) {
                 ("ready_at_ms", 5),
                 ("expires_at_ms", 6),
                 ("nonce", 7),
+                ("exit_boot_id", 8),
             ],
         ),
         (
@@ -1619,6 +1620,16 @@ fn assert_native_probe_readiness_schema(rust: &str, schema: &str) {
                 ("started_at_ms", 5),
                 ("expires_at_ms", 6),
                 ("nonce", 7),
+            ],
+        ),
+        (
+            "NativeProbeAuthorizationChain",
+            &[
+                ("signed_permit_request", 1),
+                ("signed_permit", 2),
+                ("signed_exit_ready", 3),
+                ("signed_relay_ready", 4),
+                ("signed_start", 5),
             ],
         ),
     ];

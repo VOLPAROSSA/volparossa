@@ -25,6 +25,7 @@ use crate::{
     helper::RuntimeBoundPreparedLeaseBatch,
 };
 use rand_core::{OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{sync::watch, time::Instant};
 use volparossa_core::{
@@ -891,29 +892,18 @@ pub(crate) struct PreparedClientNativeProbe {
     hard_expires_at_unix: u64,
 }
 
-struct PreparedClientNativeBindings {
-    helper_runtime_id: [u8; 32],
-    route_context_id: [u8; 16],
-    context_handle: Vec<u8>,
-    lease_handle: Vec<u8>,
-    prepared_lease_commitment: [u8; 32],
-    endpoint_binding: NativeProbeEndpointBinding,
-    relay_endpoint: WireguardEndpoint,
-}
-
 /// Helper-prepared Client context with exact standard Relay activation authority attached.
 #[must_use = "an authorized native Client context must be activated or destroyed"]
 pub(crate) struct AuthorizedPreparedClientNativeProbe {
     owner: native_preselection::NativePreselectionAttemptOwner,
     replay: volparossa_protocol::ReplayCache,
-    armed: native_preselection::ArmedNativeProbe,
+    awaiting: native_preselection::AwaitingNativeResult,
     prepared_owner: RuntimeBoundPreparedLeaseBatch,
     helper_runtime_id: [u8; 32],
     route_context_id: [u8; 16],
     context_handle: Vec<u8>,
     lease_handle: Vec<u8>,
     prepared_lease_commitment: [u8; 32],
-    endpoint_binding: NativeProbeEndpointBinding,
     activation: ActivateLeaseBatch,
 }
 
@@ -955,7 +945,7 @@ pub(crate) enum ClientNativeProbeError {
 #[must_use = "a failed post-Prepare bind still owns one helper context cleanup"]
 pub(crate) struct ClientNativePreparedBindFailure {
     error: ClientNativeProbeError,
-    prepared_owner: Box<RuntimeBoundPreparedLeaseBatch>,
+    cleanup: DestroyContext,
 }
 
 impl ClientNativePreparedBindFailure {
@@ -964,9 +954,9 @@ impl ClientNativePreparedBindFailure {
         &self.error
     }
 
-    /// Consume the failure into its exact same-runtime helper cleanup owner.
-    pub(crate) fn into_cleanup(self) -> RuntimeBoundPreparedLeaseBatch {
-        *self.prepared_owner
+    /// Consume the failure into its exact helper cleanup request.
+    pub(crate) fn into_cleanup(self) -> DestroyContext {
+        self.cleanup
     }
 }
 
@@ -1044,36 +1034,16 @@ impl ClientNativeRelayReady {
         request: &PrepareLeaseBatch,
         prepared: RuntimeBoundPreparedLeaseBatch,
     ) -> Result<PreparedClientNativeProbe, ClientNativePreparedBindFailure> {
-        let bindings = match self.bind_prepared_endpoint_inner(request, &prepared) {
-            Ok(bindings) => bindings,
-            Err(error) => {
-                return Err(ClientNativePreparedBindFailure {
-                    error,
-                    prepared_owner: Box::new(prepared),
-                });
-            }
-        };
-        Ok(PreparedClientNativeProbe {
-            owner: self.owner,
-            replay: self.replay,
-            armed: self.armed,
-            prepared_owner: prepared,
-            helper_runtime_id: bindings.helper_runtime_id,
-            route_context_id: bindings.route_context_id,
-            context_handle: bindings.context_handle,
-            lease_handle: bindings.lease_handle,
-            prepared_lease_commitment: bindings.prepared_lease_commitment,
-            endpoint_binding: bindings.endpoint_binding,
-            relay_endpoint: bindings.relay_endpoint,
-            hard_expires_at_unix: request.hard_expires_at_unix,
-        })
+        let cleanup = prepared.destroy_request();
+        self.bind_prepared_endpoint_inner(request, prepared)
+            .map_err(|error| ClientNativePreparedBindFailure { error, cleanup })
     }
 
     fn bind_prepared_endpoint_inner(
-        &self,
+        self,
         request: &PrepareLeaseBatch,
-        prepared: &RuntimeBoundPreparedLeaseBatch,
-    ) -> Result<PreparedClientNativeBindings, ClientNativeProbeError> {
+        prepared: RuntimeBoundPreparedLeaseBatch,
+    ) -> Result<PreparedClientNativeProbe, ClientNativeProbeError> {
         let (route_context_id, relay_binding, _expires_at_ms) = self.armed.helper_scope()?;
         if request.route_context_id != route_context_id {
             return Err(ClientNativeProbeError::HelperCorrelation);
@@ -1103,7 +1073,11 @@ impl ClientNativeRelayReady {
             .as_ref()
             .ok_or(ClientNativeProbeError::HelperCorrelation)?
             .clone();
-        Ok(PreparedClientNativeBindings {
+        Ok(PreparedClientNativeProbe {
+            owner: self.owner,
+            replay: self.replay,
+            armed: self.armed,
+            prepared_owner: prepared,
             helper_runtime_id,
             route_context_id,
             context_handle: endpoints.context_handle().as_bytes().to_vec(),
@@ -1111,6 +1085,7 @@ impl ClientNativeRelayReady {
             prepared_lease_commitment: commitment,
             endpoint_binding,
             relay_endpoint: remote,
+            hard_expires_at_unix: request.hard_expires_at_unix,
         })
     }
 }
@@ -1126,71 +1101,84 @@ impl PreparedClientNativeProbe {
         self.prepared_owner.destroy_request()
     }
 
-    /// Attach one exact standard Relay reservation before helper activation is possible.
-    pub(crate) fn bind_activation_authority(
-        mut self,
-        signed_relay_reservation: Vec<u8>,
-        now_ms: u64,
+    /// Sign Start, obtain one exact standard nested reservation, and bind it before activation.
+    pub(crate) async fn request_activation_authority(
+        self,
+        discovery: &DiscoveryControlHandle,
     ) -> Result<AuthorizedPreparedClientNativeProbe, ClientNativePreparedBindFailure> {
-        let activation =
-            match self.bind_activation_authority_inner(signed_relay_reservation, now_ms) {
-                Ok(activation) => activation,
-                Err(error) => {
-                    return Err(ClientNativePreparedBindFailure {
-                        error,
-                        prepared_owner: Box::new(self.prepared_owner),
-                    });
-                }
-            };
-        Ok(AuthorizedPreparedClientNativeProbe {
-            owner: self.owner,
-            replay: self.replay,
-            armed: self.armed,
-            prepared_owner: self.prepared_owner,
-            helper_runtime_id: self.helper_runtime_id,
-            route_context_id: self.route_context_id,
-            context_handle: self.context_handle,
-            lease_handle: self.lease_handle,
-            prepared_lease_commitment: self.prepared_lease_commitment,
-            endpoint_binding: self.endpoint_binding,
-            activation,
-        })
+        let cleanup = self.destroy_request();
+        Box::pin(self.request_activation_authority_inner(discovery))
+            .await
+            .map_err(|error| ClientNativePreparedBindFailure { error, cleanup })
     }
 
-    fn bind_activation_authority_inner(
-        &mut self,
-        signed_relay_reservation: Vec<u8>,
-        now_ms: u64,
-    ) -> Result<ActivateLeaseBatch, ClientNativeProbeError> {
+    async fn request_activation_authority_inner(
+        self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<AuthorizedPreparedClientNativeProbe, ClientNativeProbeError> {
+        let Self {
+            owner,
+            mut replay,
+            armed,
+            prepared_owner,
+            helper_runtime_id,
+            route_context_id,
+            context_handle,
+            lease_handle,
+            prepared_lease_commitment,
+            endpoint_binding,
+            relay_endpoint,
+            hard_expires_at_unix,
+        } = self;
+        let scope = armed.path_scope().clone();
+        let awaiting = armed.start(endpoint_binding.clone())?;
+        let (awaiting, signed_relay_reservation) = awaiting
+            .into_relay_authorization_dispatch()?
+            .execute(discovery)
+            .await?;
+        let now_ms = crate::unix_millis();
         verify_native_client_activation_authority(
-            self.armed.path_scope(),
-            self.endpoint_binding
+            &scope,
+            endpoint_binding
                 .endpoint
                 .as_ref()
                 .ok_or(ClientNativeProbeError::HelperCorrelation)?,
-            &self.relay_endpoint,
-            self.hard_expires_at_unix,
+            &relay_endpoint,
+            hard_expires_at_unix,
+            awaiting.encoded_start(),
             &signed_relay_reservation,
             now_ms,
-            &mut self.replay,
+            &mut replay,
         )?;
-        Ok(ActivateLeaseBatch {
-            route_context_id: self.route_context_id.to_vec(),
-            context_handle: self.context_handle.clone(),
+        let activation = ActivateLeaseBatch {
+            route_context_id: route_context_id.to_vec(),
+            context_handle: context_handle.clone(),
             leases: vec![LeaseActivation {
-                lease_handle: self.lease_handle.clone(),
+                lease_handle: lease_handle.clone(),
                 path_id: 1,
                 role: WireguardRole::Client as i32,
-                peer_public_key: self.relay_endpoint.public_key.clone(),
+                peer_public_key: relay_endpoint.public_key.clone(),
                 peer_endpoint: Some(PublicUdpEndpoint {
-                    address: self.relay_endpoint.underlay_ip.clone(),
-                    port: self.relay_endpoint.listen_port,
+                    address: relay_endpoint.underlay_ip.clone(),
+                    port: relay_endpoint.listen_port,
                 }),
                 maximum_up_mbps: 0,
                 maximum_down_mbps: 0,
                 signed_relay_reservation,
                 signed_client_relay_request: Vec::new(),
             }],
+        };
+        Ok(AuthorizedPreparedClientNativeProbe {
+            owner,
+            replay,
+            awaiting,
+            prepared_owner,
+            helper_runtime_id,
+            route_context_id,
+            context_handle,
+            lease_handle,
+            prepared_lease_commitment,
+            activation,
         })
     }
 }
@@ -1204,6 +1192,7 @@ fn verify_native_client_activation_authority(
     local_endpoint: &WireguardEndpoint,
     relay_endpoint: &WireguardEndpoint,
     hard_expires_at_unix: u64,
+    signed_start: &[u8],
     signed_relay_reservation: &[u8],
     now_ms: u64,
     replay_cache: &mut volparossa_protocol::ReplayCache,
@@ -1228,6 +1217,7 @@ fn verify_native_client_activation_authority(
         .as_ref()
         .ok_or(ClientNativeProbeError::HelperCorrelation)?;
     let relay_message = relay.message();
+    let signed_start_sha256: [u8; 32] = Sha256::digest(signed_start).into();
     let hard_expires_at_ms = hard_expires_at_unix
         .checked_mul(1_000)
         .ok_or(ClientNativeProbeError::HelperCorrelation)?;
@@ -1247,6 +1237,7 @@ fn verify_native_client_activation_authority(
         || relay_message.policy_hash != scope.policy_hash
         || relay_message.client_wireguard_public_key != local_endpoint.public_key
         || relay_message.relay_client_wireguard_endpoint.as_ref() != Some(relay_endpoint)
+        || relay_message.signed_client_relay_request_sha256 != signed_start_sha256
         || relay.expires_at_ms() < hard_expires_at_ms
         || relay.expires_at_ms() > scope.attempt_expires_at_ms
     {
@@ -1271,7 +1262,7 @@ impl AuthorizedPreparedClientNativeProbe {
         self.prepared_owner.destroy_request()
     }
 
-    /// Correlate helper activation, then sign and dispatch Start to the same data Relay.
+    /// Correlate helper activation, then dispatch the already-authorized Start for its Result.
     pub(crate) async fn accept_activation_and_dispatch_start(
         self,
         activated: &ActivatedLeaseBatch,
@@ -1282,8 +1273,8 @@ impl AuthorizedPreparedClientNativeProbe {
         {
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
-        let awaiting = self.armed.start(self.endpoint_binding)?;
-        let (awaiting, signed_relay_result) = awaiting
+        let (awaiting, signed_relay_result) = self
+            .awaiting
             .into_relay_start_dispatch()?
             .execute(discovery)
             .await?;
@@ -4044,9 +4035,9 @@ mod tests {
 
     use super::super::{
         ActivateLeaseBatch, ActivatedLeaseBatch, CleanupStatus, CommitLeaseBatch,
-        CommittedLeaseBatch, DestroyedContext, ExitForwardRequest, ExitForwardResponse,
-        LocalPrepareFailure, PrepareLeaseBatch, PrepareReconciliationAuthority,
-        ReconciledExpiredPrepare, RuntimeBoundPreparedLeaseBatch,
+        CommittedLeaseBatch, DestroyContext, DestroyedContext, ExitForwardRequest,
+        ExitForwardResponse, LocalPrepareFailure, PrepareLeaseBatch,
+        PrepareReconciliationAuthority, PreparedLeaseBatch, ReconciledExpiredPrepare,
     };
     use super::*;
 
@@ -6079,14 +6070,13 @@ mod tests {
         async fn prepare(
             &mut self,
             _request: &PrepareLeaseBatch,
-        ) -> Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
+        ) -> Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(LocalPrepareFailure::Definitive(NoopHandoffLocalError))
         }
 
         async fn activate(
             &mut self,
-            _owner: &mut RuntimeBoundPreparedLeaseBatch,
             _request: &ActivateLeaseBatch,
         ) -> Result<ActivatedLeaseBatch, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -6095,7 +6085,6 @@ mod tests {
 
         async fn commit(
             &mut self,
-            _owner: &mut RuntimeBoundPreparedLeaseBatch,
             _request: &CommitLeaseBatch,
         ) -> Result<CommittedLeaseBatch, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -6104,7 +6093,7 @@ mod tests {
 
         async fn destroy(
             &mut self,
-            _owner: &RuntimeBoundPreparedLeaseBatch,
+            _request: &DestroyContext,
         ) -> Result<DestroyedContext, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(NoopHandoffLocalError)
@@ -7242,7 +7231,7 @@ mod tests {
     }
 
     #[test]
-    fn preprobe_continuation_is_affine_and_exposes_only_the_orchestrator_handoff() {
+    fn preprobe_continuation_source_has_no_clone_debug_serde_decomposition_or_caller() {
         let source = include_str!("selection_bridge.rs");
         for type_name in ["PreProbeContinuation", "PendingPreProbeResolve"] {
             let declaration = source
@@ -7255,11 +7244,10 @@ mod tests {
                 .map(|offset| declaration + offset)
                 .expect("affine handoff body");
             assert!(!source[declaration..body_end].contains("\n    pub "));
+            for visibility in ["pub ", "pub(crate) ", "pub(super) "] {
+                assert!(!source.contains(&format!("{visibility}struct {type_name}")));
+            }
             assert!(!source.contains(&format!(" for {type_name}")));
-        }
-        assert!(source.contains("pub(crate) struct PreProbeContinuation"));
-        for visibility in ["pub ", "pub(crate) ", "pub(super) "] {
-            assert!(!source.contains(&format!("{visibility}struct PendingPreProbeResolve")));
         }
         for forbidden in [
             ["fn into_", "parts"].concat(),

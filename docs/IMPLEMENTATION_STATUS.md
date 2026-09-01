@@ -1092,15 +1092,25 @@ single clean-build A01--A15 run; the score is not a release claim.
   wrapper identity, operation, status and signed `NativeProbeRelayReady`, and retains the remaining
   candidates and replay state with that readiness. The next typed seam binds a same-connection
   helper runtime and one exact prepared Client lease into the native endpoint commitment and
-  retains exact Destroy authority. It permits Activate only after separately verifying the standard
-  nested Exit/Relay-signed `RelayReservation` against the selected actors, route context, policy,
-  prepared Client key, Relay endpoint and helper hard expiry. The later affine states build exact
-  Activate/Commit requests, sign `NativeProbeStart` only after exact helper activation, and verify
-  the correlated `NativeProbeRelayResult` together with non-zero helper commit facts.
+  retains exact Destroy authority. It signs `NativeProbeStart` while the lease is still prepared,
+  sends it only to that data Relay over the distinct `NativeProbeAuthorize` operation, and permits
+  Activate only after verifying the returned standard nested Exit/Relay-signed
+  `RelayReservation` against the exact Start hash, selected actors, route context, policy, prepared
+  Client key, Relay endpoint and helper hard expiry. The production Exit service independently
+  verifies a bounded canonical five-signature Permit-to-Start chain, current Exit boot and
+  authenticated data-Relay before atomically reserving probe capacity and signing the standard
+  `RelayAuthorization`; the production Relay service independently verifies it, exact-matches its
+  already-prepared endpoint pair, reserves capacity, signs the nested `RelayReservation`, and
+  retains the affine Start owner. A real service-composition smoke verifies that complete signed
+  chain and byte-identical Exit retry. The later affine states build exact Activate/Commit requests,
+  dispatch that already-authorized Start only after exact helper activation, and verify the
+  correlated `NativeProbeRelayResult` together with non-zero helper commit facts.
   Connect still returns `Unavailable` before helper Prepare; disconnect therefore drops only this
-  pre-helper owner before global helper cleanup. The Relay-side native Ready/Start provider, the
-  post-Prepare standard Relay-reservation exchange, and the client dataplane challenge injector are
-  not implemented, so no native result, route admission or usable dataplane proof exists yet.
+  pre-helper owner before global helper cleanup. The discovery actor still lacks the Relay-side
+  native Ready/Authorize/Start provider and Relay-to-Exit transport wiring, and the helper Relay
+  activation verifier still accepts only a standard `RelayReservationRequest` rather than this
+  exact signed native Start. The client dataplane challenge injector is also absent, so no native
+  result, route admission or usable dataplane proof exists yet.
   The swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to

@@ -42,6 +42,8 @@ const RELAY_READY_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-relay-ready/v4\
 const START_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-start/v4\0";
 const EXIT_RESULT_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-exit-result/v4\0";
 const PREPARED_LEASE_COMMITMENT_DOMAIN: &[u8] = b"volparossa/native-probe-prepared-lease/v4\0";
+/// Largest canonical bundle accepted by the Exit authorization provider.
+pub const MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE: usize = 32 * 1024;
 
 /// Exact endpoint-free candidate set consumed from one A1 prepared-evidence handoff.
 #[allow(missing_docs)]
@@ -175,6 +177,9 @@ pub struct NativeProbeExitReady {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "7")]
     pub nonce: Vec<u8>,
+    /// Per-process Exit incarnation that signed and owns this prepared endpoint.
+    #[prost(bytes = "vec", tag = "8")]
+    pub exit_boot_id: Vec<u8>,
 }
 
 /// Relay-signed client-facing readiness carrying only the `RelayClient` endpoint.
@@ -215,6 +220,25 @@ pub struct NativeProbeStart {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "7")]
     pub nonce: Vec<u8>,
+}
+
+/// Canonical signed phase chain forwarded by the exact data Relay to the selected Exit.
+///
+/// The bundle adds no authority of its own. The Exit independently verifies every nested
+/// signature and exact phase hash before issuing a standard [`crate::RelayAuthorization`].
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeProbeAuthorizationChain {
+    #[prost(bytes = "vec", tag = "1")]
+    pub signed_permit_request: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signed_permit: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub signed_exit_ready: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub signed_relay_ready: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub signed_start: Vec<u8>,
 }
 
 /// Endpoint-free helper commit facts for one exact prepared lease.
@@ -319,9 +343,9 @@ pub struct NativeProbeRelayResult {
 
 /// Exact request plus Exit permit after both signatures and cross-bindings passed.
 pub struct VerifiedNativeProbePermit {
-    _signed_request: Vec<u8>,
+    signed_request: Vec<u8>,
     signed_permit: Vec<u8>,
-    _request: VerifiedControlMessage<NativeProbePermitRequest>,
+    request: VerifiedControlMessage<NativeProbePermitRequest>,
     permit: VerifiedControlMessage<NativeProbePermit>,
 }
 
@@ -345,6 +369,16 @@ pub struct VerifiedNativeProbeStartForRelay {
     relay_ready: IssuedNativeProbeRelayReady,
     signed_start: Vec<u8>,
     start: VerifiedControlMessage<NativeProbeStart>,
+}
+
+/// Independently verified native phase chain accepted by the selected Exit.
+pub struct VerifiedNativeProbeAuthorizationChain {
+    _permit_request: VerifiedControlMessage<NativeProbePermitRequest>,
+    _permit: VerifiedControlMessage<NativeProbePermit>,
+    exit_ready: VerifiedControlMessage<NativeProbeExitReady>,
+    relay_ready: VerifiedControlMessage<NativeProbeRelayReady>,
+    start: VerifiedControlMessage<NativeProbeStart>,
+    signed_start: Vec<u8>,
 }
 
 /// Exit result verified after start by the exact endpoint-owning data Relay.
@@ -438,6 +472,215 @@ impl VerifiedNativeProbeRelayReady {
 
 impl IssuedNativeProbeStart {
     /// Borrow the exact client-signed start for delivery only to the selected data Relay.
+    #[must_use]
+    pub fn encoded_start(&self) -> &[u8] {
+        &self.signed_start
+    }
+}
+
+impl VerifiedNativeProbeStartForRelay {
+    /// Encode the complete signed chain for independent verification by the selected Exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the canonical bounded bundle cannot be encoded.
+    pub fn authorization_chain(&self) -> Result<Vec<u8>, ProtocolError> {
+        encode_canonical(
+            &NativeProbeAuthorizationChain {
+                signed_permit_request: self.relay_ready.exit_ready.permit.signed_request.clone(),
+                signed_permit: self.relay_ready.exit_ready.permit.signed_permit.clone(),
+                signed_exit_ready: self.relay_ready.exit_ready.signed_exit_ready.clone(),
+                signed_relay_ready: self.relay_ready.signed_relay_ready.clone(),
+                signed_start: self.signed_start.clone(),
+            },
+            MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+        )
+    }
+
+    /// Borrow the exact client-signed Start accepted by this data Relay.
+    #[must_use]
+    pub fn encoded_start(&self) -> &[u8] {
+        &self.signed_start
+    }
+
+    /// Borrow the exact verified native path scope.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internally verified Start is corrupted after construction.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.start
+            .message()
+            .scope
+            .as_ref()
+            .expect("verified native Start always carries a scope")
+    }
+
+    /// Borrow the helper-prepared Client endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internally verified Start is corrupted after construction.
+    #[must_use]
+    pub fn client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.start
+            .message()
+            .client_endpoint
+            .as_ref()
+            .expect("verified native Start always carries a Client endpoint")
+    }
+
+    /// Borrow the helper-prepared `RelayClient` endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally issued Relay readiness is corrupted after construction.
+    #[must_use]
+    pub fn relay_client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.relay_ready
+            .relay_ready
+            .relay_client_endpoint
+            .as_ref()
+            .expect("issued native Relay readiness always carries a RelayClient endpoint")
+    }
+
+    /// Borrow the helper-prepared `RelayExit` endpoint.
+    #[must_use]
+    pub fn relay_exit_endpoint(&self) -> &NativeProbeEndpointBinding {
+        &self.relay_ready.relay_exit_endpoint
+    }
+
+    /// Borrow the helper-prepared Exit endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally verified Exit readiness is corrupted after construction.
+    #[must_use]
+    pub fn exit_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.relay_ready
+            .exit_ready
+            .exit_ready
+            .message()
+            .exit_endpoint
+            .as_ref()
+            .expect("verified native Exit readiness always carries an Exit endpoint")
+    }
+
+    /// Return the exact signed Start creation time.
+    #[must_use]
+    pub fn started_at_ms(&self) -> u64 {
+        self.start.message().started_at_ms
+    }
+
+    /// Return the exclusive signed Start expiry.
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.start.message().expires_at_ms
+    }
+
+    /// Borrow the process-local Exit incarnation bound by signed readiness.
+    #[must_use]
+    pub fn exit_boot_id(&self) -> &[u8] {
+        &self
+            .relay_ready
+            .exit_ready
+            .exit_ready
+            .message()
+            .exit_boot_id
+    }
+}
+
+impl VerifiedNativeProbeAuthorizationChain {
+    /// Borrow the exact native path scope shared by every verified phase.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internally verified Start is corrupted after construction.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.start
+            .message()
+            .scope
+            .as_ref()
+            .expect("verified native authorization always carries a scope")
+    }
+
+    /// Borrow the helper-prepared Client endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internally verified Start is corrupted after construction.
+    #[must_use]
+    pub fn client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.start
+            .message()
+            .client_endpoint
+            .as_ref()
+            .expect("verified native authorization always carries a Client endpoint")
+    }
+
+    /// Borrow the helper-prepared `RelayClient` endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally verified Relay readiness is corrupted after construction.
+    #[must_use]
+    pub fn relay_client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.relay_ready
+            .message()
+            .relay_client_endpoint
+            .as_ref()
+            .expect("verified native authorization always carries a RelayClient endpoint")
+    }
+
+    /// Borrow the helper-prepared `RelayExit` endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally verified Exit readiness is corrupted after construction.
+    #[must_use]
+    pub fn relay_exit_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.exit_ready
+            .message()
+            .relay_exit_endpoint
+            .as_ref()
+            .expect("verified native authorization always carries a RelayExit endpoint")
+    }
+
+    /// Borrow the helper-prepared Exit endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally verified Exit readiness is corrupted after construction.
+    #[must_use]
+    pub fn exit_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.exit_ready
+            .message()
+            .exit_endpoint
+            .as_ref()
+            .expect("verified native authorization always carries an Exit endpoint")
+    }
+
+    /// Borrow the process-local Exit incarnation bound by signed readiness.
+    #[must_use]
+    pub fn exit_boot_id(&self) -> &[u8] {
+        &self.exit_ready.message().exit_boot_id
+    }
+
+    /// Return the exact signed Start creation time.
+    #[must_use]
+    pub fn started_at_ms(&self) -> u64 {
+        self.start.message().started_at_ms
+    }
+
+    /// Return the exclusive signed Start expiry.
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.start.message().expires_at_ms
+    }
+
+    /// Borrow the exact client-signed Start accepted by both authorities.
     #[must_use]
     pub fn encoded_start(&self) -> &[u8] {
         &self.signed_start
@@ -688,6 +931,7 @@ impl ControlPayload for NativeProbeExitReady {
         {
             return Err(ProtocolError::InvalidField("native exit ready endpoints"));
         }
+        require_nonzero::<ID_LENGTH>(&self.exit_boot_id, "native Exit-ready boot ID")?;
         validate_phase_lifetime(self.ready_at_ms, self.expires_at_ms, scope)?;
         require_nonzero::<NONCE_LENGTH>(&self.nonce, "native exit ready nonce")?;
         Ok(())
@@ -704,6 +948,103 @@ impl ControlPayload for NativeProbeExitReady {
             "native exit ready envelope",
         )
     }
+}
+
+/// Decode and independently verify the complete native authorization chain at the selected Exit.
+///
+/// The verifier uses a private bounded replay cache because the entire bundle is one transaction;
+/// the stateful Exit service separately provides exact-request idempotency. This avoids consuming
+/// valid nested nonces when a later phase in a substituted bundle fails.
+///
+/// # Errors
+///
+/// Returns an error for an oversized/non-canonical bundle, any invalid signature or lifetime,
+/// wrong phase hash, endpoint topology mismatch, or inconsistent scope.
+pub fn verify_native_probe_authorization_chain(
+    encoded: &[u8],
+    now_ms: u64,
+) -> Result<VerifiedNativeProbeAuthorizationChain, ProtocolError> {
+    let chain: NativeProbeAuthorizationChain =
+        decode_canonical(encoded, MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE)?;
+    let mut replay = ReplayCache::new(5)?;
+    let permit = verify_native_probe_permit(
+        chain.signed_permit_request,
+        chain.signed_permit,
+        now_ms,
+        &mut replay,
+    )?;
+    let exit_ready =
+        verify_native_probe_exit_ready(permit, chain.signed_exit_ready, now_ms, &mut replay)?;
+    let expected_permit = native_probe_permit_hash(&exit_ready.permit.signed_permit)?;
+    let expected_exit_ready = native_probe_exit_ready_hash(&exit_ready.signed_exit_ready)?;
+    let relay_ready = verify_control_message::<NativeProbeRelayReady>(
+        &chain.signed_relay_ready,
+        now_ms,
+        native_time_policy(),
+        &mut replay,
+    )?;
+    let relay_client = relay_ready
+        .message()
+        .relay_client_endpoint
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField("native RelayClient endpoint"))?;
+    let relay_exit = exit_ready
+        .exit_ready
+        .message()
+        .relay_exit_endpoint
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField("native RelayExit endpoint"))?;
+    let exit_endpoint = exit_ready
+        .exit_ready
+        .message()
+        .exit_endpoint
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField("native Exit endpoint"))?;
+    if relay_ready.message().scope != exit_ready.exit_ready.message().scope
+        || relay_ready.message().permit_hash != expected_permit
+        || relay_ready.message().exit_ready_hash != expected_exit_ready
+        || relay_ready.message().expires_at_ms > exit_ready.exit_ready.message().expires_at_ms
+        || !bindings_form_relay_exit_topology(relay_client, relay_exit, exit_endpoint)
+    {
+        return Err(ProtocolError::InvalidField(
+            "native authorization Relay-ready binding",
+        ));
+    }
+    let expected_relay_ready = native_probe_relay_ready_hash(&chain.signed_relay_ready)?;
+    let start = verify_control_message::<NativeProbeStart>(
+        &chain.signed_start,
+        now_ms,
+        native_time_policy(),
+        &mut replay,
+    )?;
+    let client_endpoint = start
+        .message()
+        .client_endpoint
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField("native Client endpoint"))?;
+    if start.message().scope != relay_ready.message().scope
+        || start.message().permit_hash != expected_permit
+        || start.message().relay_ready_hash != expected_relay_ready
+        || start.message().expires_at_ms > relay_ready.message().expires_at_ms
+        || !bindings_form_four_role_topology(
+            client_endpoint,
+            relay_client,
+            relay_exit,
+            exit_endpoint,
+        )
+    {
+        return Err(ProtocolError::InvalidField(
+            "native authorization Start binding",
+        ));
+    }
+    Ok(VerifiedNativeProbeAuthorizationChain {
+        _permit_request: exit_ready.permit.request,
+        _permit: exit_ready.permit.permit,
+        exit_ready: exit_ready.exit_ready,
+        relay_ready,
+        start,
+        signed_start: chain.signed_start,
+    })
 }
 
 impl ControlPayload for NativeProbeRelayReady {
@@ -1029,9 +1370,9 @@ pub fn verify_native_probe_permit(
         return Err(ProtocolError::InvalidField("native permit request binding"));
     }
     Ok(VerifiedNativeProbePermit {
-        _signed_request: signed_request,
+        signed_request,
         signed_permit,
-        _request: request,
+        request,
         permit,
     })
 }
@@ -1977,6 +2318,7 @@ mod tests {
                 ready_at_ms: NOW + 2,
                 expires_at_ms: EXPIRY,
                 nonce: vec![12; 32],
+                exit_boot_id: vec![0xb0; 16],
             };
             sign(&ready, &self.exit, NOW + 2, EXPIRY, [12; 32])
         }
@@ -2455,6 +2797,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one complete signed native chain smoke keeps every phase transition visible"
+    )]
     fn exact_relay_and_client_chains_verify_once_with_endpoint_bound_helper_proofs() {
         let fixture = Fixture::new();
         let request = fixture.signed_request();
@@ -2517,6 +2863,27 @@ mod tests {
             &mut relay_replay,
         )
         .expect("Relay binds Client endpoint to its local RelayClient endpoint");
+        let authorization_chain = verified_start
+            .authorization_chain()
+            .expect("canonical authorization chain");
+        let verified_authorization =
+            verify_native_probe_authorization_chain(&authorization_chain, NOW + 4)
+                .expect("Exit independently verifies all five signed phases");
+        assert_eq!(verified_authorization.scope(), &fixture.scope);
+        assert_eq!(
+            verified_authorization.encoded_start(),
+            start.encoded_start()
+        );
+        assert_eq!(verified_authorization.exit_boot_id(), &[0xb0; ID_LENGTH]);
+        let mut substituted: NativeProbeAuthorizationChain = decode_canonical(
+            &authorization_chain,
+            MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+        )
+        .expect("authorization bundle");
+        substituted.signed_start = permit_bytes.clone();
+        let substituted = encode_canonical(&substituted, MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE)
+            .expect("substituted bundle");
+        assert!(verify_native_probe_authorization_chain(&substituted, NOW + 4).is_err());
         let verified_exit_result = verify_native_probe_exit_result_for_relay(
             verified_start,
             signed_exit_result,

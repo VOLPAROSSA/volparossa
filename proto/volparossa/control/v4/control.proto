@@ -265,6 +265,7 @@ message NativeProbeExitReady {
   uint64 ready_at_ms = 5;
   uint64 expires_at_ms = 6;
   bytes nonce = 7;
+  bytes exit_boot_id = 8;
 }
 
 // Client-visible readiness contains only the RelayClient endpoint and a
@@ -289,6 +290,16 @@ message NativeProbeStart {
   uint64 started_at_ms = 5;
   uint64 expires_at_ms = 6;
   bytes nonce = 7;
+}
+
+// Canonical signed phase chain forwarded by the exact data Relay to the
+// selected Exit. The bundle adds no authority of its own.
+message NativeProbeAuthorizationChain {
+  bytes signed_permit_request = 1;
+  bytes signed_permit = 2;
+  bytes signed_exit_ready = 3;
+  bytes signed_relay_ready = 4;
+  bytes signed_start = 5;
 }
 
 // route_context_id must exactly equal NativeProbePathScope.probe_id.

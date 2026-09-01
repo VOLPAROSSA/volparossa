@@ -49,6 +49,8 @@ pub enum DatapathRelayOperation {
     NativeProbeReady = 3,
     /// Deliver one client endpoint-bearing native start only to that same data Relay.
     NativeProbeStart = 4,
+    /// Obtain the standard nested reservation for an exact native Start before activation.
+    NativeProbeAuthorize = 5,
 }
 
 /// Canonical direct datapath-relay request.
@@ -147,7 +149,8 @@ impl DatapathRelayRequest {
                     ControlMessageType::NativeProbePermit,
                 )
             }
-            DatapathRelayOperation::NativeProbeStart => {
+            DatapathRelayOperation::NativeProbeStart
+            | DatapathRelayOperation::NativeProbeAuthorize => {
                 if !self.exit_signed_authorization.is_empty() {
                     return Err(DatapathRelayRpcError::InvalidFrame);
                 }
@@ -343,6 +346,9 @@ impl DatapathRelayResponse {
                     }
                     DatapathRelayOperation::NativeProbeStart => {
                         ControlMessageType::NativeProbeRelayResult
+                    }
+                    DatapathRelayOperation::NativeProbeAuthorize => {
+                        ControlMessageType::RelayReservation
                     }
                     DatapathRelayOperation::Unspecified => {
                         return Err(DatapathRelayRpcError::InvalidOperation(self.operation));

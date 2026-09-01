@@ -43,6 +43,14 @@ use crate::discovery::{DiscoveryControlHandle, OutboundReservationError};
 
 const ID_BYTES: usize = 16;
 const KEY_BYTES: usize = 32;
+
+fn authorization_request_id(mut start_request_id: [u8; ID_BYTES]) -> [u8; ID_BYTES] {
+    start_request_id[0] ^= 0x80;
+    if start_request_id.iter().all(|byte| *byte == 0) {
+        start_request_id[ID_BYTES - 1] = 1;
+    }
+    start_request_id
+}
 const ENTROPY_ATTEMPTS: usize = 8;
 
 /// Failure to consume A1 evidence or advance one cryptographic native-probe phase.
@@ -160,6 +168,14 @@ pub(super) struct AwaitingNativeResult {
 /// Affine Start dispatch addressed only to the data Relay that minted readiness.
 #[must_use = "a native Relay Start dispatch must be executed or dropped"]
 pub(super) struct NativeRelayStartDispatch {
+    awaiting: AwaitingNativeResult,
+    relay_peer: Libp2pPeerId,
+    request: DatapathRelayRequest,
+}
+
+/// Pre-activation authorization dispatch addressed only to the readiness-signing data Relay.
+#[must_use = "a native Relay authorization dispatch must be executed or dropped"]
+pub(super) struct NativeRelayAuthorizationDispatch {
     awaiting: AwaitingNativeResult,
     relay_peer: Libp2pPeerId,
     request: DatapathRelayRequest,
@@ -831,6 +847,30 @@ impl AwaitingNativeResult {
         })
     }
 
+    /// Consume the signed Start into the pre-activation standard-reservation exchange.
+    pub(super) fn into_relay_authorization_dispatch(
+        self,
+    ) -> Result<NativeRelayAuthorizationDispatch, NativePreselectionError> {
+        let relay_peer = Libp2pPeerId::from_bytes(&self.candidate.data_relay.peer_id)
+            .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        let authorization_request_id = authorization_request_id(self.candidate.start_request_id);
+        let request = DatapathRelayRequest::new(
+            authorization_request_id.to_vec(),
+            self.candidate.data_relay.node_id.clone(),
+            self.candidate.data_relay.peer_id.clone(),
+            self.response_deadline_ms,
+            DatapathRelayOperation::NativeProbeAuthorize,
+            self.issued_start.encoded_start().to_vec(),
+            Vec::new(),
+        )
+        .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        Ok(NativeRelayAuthorizationDispatch {
+            awaiting: self,
+            relay_peer,
+            request,
+        })
+    }
+
     /// Consume the in-flight authority after exact local and signed remote proof verification.
     pub(super) fn accept_result(
         self,
@@ -874,6 +914,49 @@ impl NativeRelayStartDispatch {
             .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
         if response.request_id() != awaiting.candidate.start_request_id
             || response.validated_operation().ok() != Some(DatapathRelayOperation::NativeProbeStart)
+            || response.relay_node_id() != awaiting.candidate.data_relay.node_id
+            || response.relay_peer_id() != awaiting.candidate.data_relay.peer_id
+        {
+            return Err(NativePreselectionError::InvalidRelayDispatch);
+        }
+        match response
+            .validated_status()
+            .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?
+        {
+            ForwardStatus::Granted => Ok((awaiting, response.signed_response().to_vec())),
+            ForwardStatus::Rejected => Err(NativePreselectionError::RelayRejected),
+            ForwardStatus::Unavailable => Err(NativePreselectionError::RelayUnavailable),
+            ForwardStatus::Unspecified => Err(NativePreselectionError::InvalidRelayDispatch),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn request_for_test(&self) -> (&Libp2pPeerId, &DatapathRelayRequest) {
+        (&self.relay_peer, &self.request)
+    }
+}
+
+impl NativeRelayAuthorizationDispatch {
+    /// Dispatch the signed Start once and retain both it and the standard nested reservation.
+    pub(super) async fn execute(
+        self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<(AwaitingNativeResult, Vec<u8>), NativePreselectionError> {
+        let Self {
+            awaiting,
+            relay_peer,
+            request,
+        } = self;
+        let response = discovery
+            .request_datapath_relay(relay_peer, request)
+            .await
+            .map_err(map_relay_transport)?;
+        response
+            .validate()
+            .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;
+        if response.request_id() != authorization_request_id(awaiting.candidate.start_request_id)
+            || response.validated_operation().ok()
+                != Some(DatapathRelayOperation::NativeProbeAuthorize)
             || response.relay_node_id() != awaiting.candidate.data_relay.node_id
             || response.relay_peer_id() != awaiting.candidate.data_relay.peer_id
         {
@@ -1150,6 +1233,7 @@ where
 #[cfg(test)]
 mod dispatch_tests {
     use libp2p::identity;
+    use sha2::{Digest, Sha256};
     use volparossa_protocol::{
         NativeProbePermit, NativeProbeRelayReady, ObservationAddressFamily, RelayAuthorization,
         RelayReservation, SignedEnvelope, Transport, WireguardEndpoint, native_probe_permit_hash,
@@ -1333,8 +1417,15 @@ mod dispatch_tests {
             underlay_ip: vec![8, 8, 8, 8],
             listen_port: 41_001,
         };
+        let signed_start = vec![52; KEY_BYTES];
         let signed = signed_relay_activation_authority(
-            &scope, &relay_key, &exit_key, &local, &remote, now_ms,
+            &scope,
+            &relay_key,
+            &exit_key,
+            &local,
+            &remote,
+            &signed_start,
+            now_ms,
         );
         let mut replay_cache = ReplayCache::new(4).expect("replay");
         super::super::verify_native_client_activation_authority(
@@ -1342,6 +1433,7 @@ mod dispatch_tests {
             &local,
             &remote,
             scope.attempt_expires_at_ms / 1_000,
+            &signed_start,
             &signed,
             now_ms,
             &mut replay_cache,
@@ -1357,6 +1449,7 @@ mod dispatch_tests {
                 &wrong_local,
                 &remote,
                 scope.attempt_expires_at_ms / 1_000,
+                &signed_start,
                 &signed,
                 now_ms,
                 &mut replay_cache,
@@ -1475,6 +1568,7 @@ mod dispatch_tests {
         exit_key: &SigningKey,
         local: &WireguardEndpoint,
         remote: &WireguardEndpoint,
+        signed_start: &[u8],
         now_ms: u64,
     ) -> Vec<u8> {
         let relay = scope.data_relay.as_ref().expect("data Relay");
@@ -1553,7 +1647,7 @@ mod dispatch_tests {
             control_relay_node_id: authorization.control_relay_node_id.clone(),
             control_relay_peer_id: authorization.control_relay_peer_id.clone(),
             exit_peer_id: authorization.exit_peer_id.clone(),
-            signed_client_relay_request_sha256: vec![52; KEY_BYTES],
+            signed_client_relay_request_sha256: Sha256::digest(signed_start).to_vec(),
         };
         sign_control_message(
             &reservation,
@@ -1628,6 +1722,7 @@ mod source_contract_tests {
             "pub(super) struct ArmedNativeProbe {",
             "pub(super) struct AwaitingNativeResult {",
             "pub(super) struct NativeRelayStartDispatch {",
+            "pub(super) struct NativeRelayAuthorizationDispatch {",
             "pub(super) struct BoundNativePathProof {",
         ] {
             let before = product

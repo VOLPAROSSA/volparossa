@@ -19,6 +19,7 @@
 mod native_preselection;
 mod reservation_v4;
 
+pub use native_preselection::AcceptedNativeProbeRelayAuthorization;
 pub use reservation_v4::{
     AcceptedExitCapacityHold, AcceptedExitConfirmation, AcceptedRelayProbePermit, ProbeEvidence,
     ProbeEvidenceError, ProbeEvidenceVerifier,
@@ -507,6 +508,8 @@ pub struct ExitService {
     permit_response_cache:
         HashMap<[u8; NODE_ID_BYTES], CachedControlResponse<AcceptedRelayProbePermit>>,
     native_probe_permit_ledger: native_preselection::NativeProbePermitLedger,
+    native_probe_authorization_cache:
+        HashMap<[u8; NODE_ID_BYTES], native_preselection::CachedNativeProbeRelayAuthorization>,
     finalize_response_cache:
         HashMap<[u8; NODE_ID_BYTES], CachedControlResponse<AcceptedExitReservationBundle>>,
     confirmation_response_cache:
@@ -603,6 +606,7 @@ impl ExitService {
             native_probe_permit_ledger: native_preselection::NativeProbePermitLedger::new(
                 response_cache_capacity,
             ),
+            native_probe_authorization_cache: HashMap::with_capacity(response_cache_capacity),
             finalize_response_cache: HashMap::with_capacity(response_cache_capacity),
             confirmation_response_cache: HashMap::with_capacity(response_cache_capacity),
             response_cache_capacity,
@@ -988,6 +992,8 @@ impl ExitService {
         self.confirmation_response_cache.retain(|_, cached| {
             cached.response.confirmed_path().reservation_id() != reservation_id
         });
+        self.native_probe_authorization_cache
+            .retain(|_, cached| cached.response.reservation_id() != reservation_id);
         Ok(())
     }
 
@@ -1043,6 +1049,10 @@ impl ExitService {
                 && !removed_ids.contains(
                     hex::encode(cached.response.confirmed_path().reservation_id()).as_str(),
                 )
+        });
+        self.native_probe_authorization_cache.retain(|_, cached| {
+            cached.expires_at_ms > now_ms
+                && !removed_ids.contains(hex::encode(cached.response.reservation_id()).as_str())
         });
         self.native_probe_permit_ledger.purge_expired(now_ms);
         self.sync_metrics();

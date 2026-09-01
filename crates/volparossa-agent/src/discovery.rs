@@ -6250,7 +6250,7 @@ fn datapath_request_scope_matches(
         DatapathRelayOperation::NativeProbeReady => {
             native_probe_ready_scope_matches(request, now_ms, &mut replay)
         }
-        DatapathRelayOperation::NativeProbeStart => {
+        DatapathRelayOperation::NativeProbeStart | DatapathRelayOperation::NativeProbeAuthorize => {
             native_probe_start_scope_matches(request, now_ms, &mut replay)
         }
         DatapathRelayOperation::Unspecified => false,

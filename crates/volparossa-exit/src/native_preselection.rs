@@ -14,21 +14,84 @@ use std::collections::{HashMap, hash_map::Entry};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use volparossa_core::{
+    Bandwidth, ClientEphemeralId, NodeId, ReservationId, RouteContextId, ServiceRole,
+    Transport as CoreTransport,
+};
 use volparossa_protocol::{
     MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding, NativeProbeExitReady,
     NativeProbeExitResult, NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermit,
-    NativeProbePermitRequest, ObservationNetworkPrefix, PreselectionActorBinding, TimePolicy,
-    generate_nonce, native_probe_challenge_hash, native_probe_exit_ready_hash,
-    native_probe_permit_hash, native_probe_permit_request_hash,
-    native_probe_prepared_lease_commitment, node_id_from_public_key, sign_control_message_with,
-    verify_control_message,
+    NativeProbePermitRequest, ObservationNetworkPrefix, PreselectionActorBinding,
+    RelayAuthorization, TimePolicy, Transport, generate_nonce, native_probe_challenge_hash,
+    native_probe_exit_ready_hash, native_probe_permit_hash, native_probe_permit_request_hash,
+    native_probe_prepared_lease_commitment, native_probe_start_hash, node_id_from_public_key,
+    sign_control_message_with, verify_control_message, verify_native_probe_authorization_chain,
 };
+use volparossa_reservation::AuthorizedReservation;
 use volparossa_wireguard::ExitEndpointLease;
 
 use super::{AcceptedNativeProbePermit, ExitError, ExitService, NODE_ID_BYTES, wire_endpoint};
 
 const ID_BYTES: usize = 16;
 const NONCE_BYTES: usize = 32;
+const NATIVE_PROBE_BANDWIDTH_MBPS: u32 = 1;
+
+/// Exit-signed standard path authorization produced from one exact native Start chain.
+#[derive(Clone)]
+pub struct AcceptedNativeProbeRelayAuthorization {
+    encoded: Vec<u8>,
+    request: Vec<u8>,
+    request_sha256: [u8; NODE_ID_BYTES],
+    reservation_id: [u8; ID_BYTES],
+    expires_at_ms: u64,
+}
+
+impl AcceptedNativeProbeRelayAuthorization {
+    /// Return the canonical Exit-signed [`RelayAuthorization`] envelope.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+
+    /// Return the canonical native phase bundle independently accepted by this Exit.
+    #[must_use]
+    pub fn authorization_chain(&self) -> &[u8] {
+        &self.request
+    }
+
+    /// Return SHA-256 of the exact accepted native phase bundle.
+    #[must_use]
+    pub const fn authorization_chain_sha256(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.request_sha256
+    }
+
+    /// Return the probe-scoped reservation identifier.
+    #[must_use]
+    pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
+        &self.reservation_id
+    }
+
+    /// Return the exclusive signed expiry in Unix milliseconds.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+}
+
+impl std::fmt::Debug for AcceptedNativeProbeRelayAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AcceptedNativeProbeRelayAuthorization")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("wireguard_keys", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+pub(super) struct CachedNativeProbeRelayAuthorization {
+    pub(super) response: AcceptedNativeProbeRelayAuthorization,
+    pub(super) expires_at_ms: u64,
+}
 
 /// Exact endpoint-free request and Exit permit, consumed by readiness once.
 #[must_use = "an issued native-probe permit must be consumed or expire"]
@@ -381,6 +444,183 @@ impl ExitService {
             .ok_or(ExitError::LeaseInvariant)
     }
 
+    /// Independently verify one data-Relay-forwarded native Start chain and issue the standard
+    /// Exit half of its probe-only `WireGuard` reservation.
+    ///
+    /// The canonical chain includes all five signed phases from the client Permit request through
+    /// Start. The authenticated forwarding identity must be the exact selected data Relay, the
+    /// signed Exit readiness must carry this process boot incarnation, and its prepared Exit
+    /// endpoint plus the prepared Client key become immutable fields of the standard
+    /// [`RelayAuthorization`]. Capacity is atomically consumed before bytes are returned. Exact
+    /// retries receive the original signature without consuming replay or capacity twice.
+    ///
+    /// # Errors
+    ///
+    /// Rejects disabled mode, inactive policy, wrong local/forwarding identity, stale or
+    /// substituted phase chains, wrong boot incarnation, exhausted capacity, cache exhaustion or
+    /// signing failure.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "authenticated channel, local identity and signing authority remain explicit"
+    )]
+    pub fn issue_native_probe_relay_authorization_with<F>(
+        &mut self,
+        encoded_chain: &[u8],
+        authenticated_data_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_data_relay_peer_id: &[u8],
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        signer: F,
+    ) -> Result<AcceptedNativeProbeRelayAuthorization, ExitError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        self.require_enabled()?;
+        self.policy.ensure_active_at(now_ms)?;
+        self.ensure_native_probe_local_identity(local_public_key)?;
+        self.purge_expired(now_ms);
+        let request_hash: [u8; NODE_ID_BYTES] = Sha256::digest(encoded_chain).into();
+        if let Some(cached) = self.native_probe_authorization_cache.get(&request_hash) {
+            if cached.response.authorization_chain() != encoded_chain
+                || cached.response.authorization_chain_sha256() != &request_hash
+            {
+                return Err(ExitError::InvalidGrant(
+                    "native authorization request hash collision",
+                ));
+            }
+            return Ok(cached.response.clone());
+        }
+        if self.native_probe_authorization_cache.len() >= self.response_cache_capacity {
+            return Err(ExitError::IdempotencyCapacity);
+        }
+
+        let chain = verify_native_probe_authorization_chain(encoded_chain, now_ms)?;
+        let scope = chain.scope();
+        self.validate_live_native_probe_scope(scope, now_ms, local_public_key)?;
+        require_authenticated_actor(
+            scope.data_relay.as_ref(),
+            authenticated_data_relay_node_id,
+            authenticated_data_relay_peer_id,
+            "native probe data Relay",
+        )?;
+        if chain.exit_boot_id() != self.exit_boot_id {
+            return Err(ExitError::ExitBootMismatch);
+        }
+
+        let data_relay = exact_actor(scope.data_relay.as_ref(), now_ms, "native probe data Relay")?;
+        let control = exact_actor(scope.control.as_ref(), now_ms, "native probe control Relay")?;
+        let exit = exact_actor(scope.exit.as_ref(), now_ms, "native probe Exit actor")?;
+        let reservation_id: [u8; ID_BYTES] = scope
+            .probe_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native probe ID"))?;
+        let capability_id: [u8; ID_BYTES] = scope
+            .attempt_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native attempt ID"))?;
+        let start_hash = native_probe_start_hash(chain.encoded_start())?;
+        let finalize_id: [u8; ID_BYTES] = start_hash[..ID_BYTES]
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native Start hash"))?;
+        if finalize_id == [0; ID_BYTES] {
+            return Err(ExitError::InvalidGrant("native Start hash"));
+        }
+        let client_endpoint = chain
+            .client_endpoint()
+            .endpoint
+            .as_ref()
+            .ok_or(ExitError::InvalidGrant("native Client endpoint"))?;
+        let exit_endpoint = chain
+            .exit_endpoint()
+            .endpoint
+            .as_ref()
+            .ok_or(ExitError::InvalidGrant("native Exit endpoint"))?;
+        let transport = native_core_transport(scope.transport)?;
+        let authorization = RelayAuthorization {
+            reservation_id: reservation_id.to_vec(),
+            route_context_id: reservation_id.to_vec(),
+            path_id: 1,
+            relay_node_id: data_relay.node_id.to_vec(),
+            exit_node_id: exit.node_id.to_vec(),
+            client_session_id: scope.client_session_id.clone(),
+            allowed_transports: vec![scope.transport],
+            maximum_up_mbps: u64::from(NATIVE_PROBE_BANDWIDTH_MBPS),
+            maximum_down_mbps: u64::from(NATIVE_PROBE_BANDWIDTH_MBPS),
+            client_wireguard_public_key: client_endpoint.public_key.clone(),
+            exit_wireguard_endpoint: Some(exit_endpoint.clone()),
+            policy_hash: scope.policy_hash.clone(),
+            created_at_ms: chain.started_at_ms(),
+            expires_at_ms: chain.expires_at_ms(),
+            nonce: generate_nonce().to_vec(),
+            relay_peer_id: data_relay.peer_id,
+            capability_id: capability_id.to_vec(),
+            client_session_public_key: scope.client_session_public_key.clone(),
+            exit_boot_id: self.exit_boot_id.to_vec(),
+            hold_id: reservation_id.to_vec(),
+            finalize_id: finalize_id.to_vec(),
+            control_relay_node_id: control.node_id.to_vec(),
+            control_relay_peer_id: control.peer_id,
+            exit_peer_id: exit.peer_id,
+        };
+        let allocation = AuthorizedReservation {
+            reservation_id: super::text_id::<ReservationId>(&reservation_id)?,
+            route_context_id: super::text_id::<RouteContextId>(&reservation_id)?,
+            service_node_id: super::text_id::<NodeId>(&self.config.node_id)?,
+            client_ephemeral_id: super::text_id::<ClientEphemeralId>(&scope.client_session_id)?,
+            role: ServiceRole::Exit,
+            allowed_transports: vec![transport],
+            bandwidth: Bandwidth::new(NATIVE_PROBE_BANDWIDTH_MBPS, NATIVE_PROBE_BANDWIDTH_MBPS)
+                .map_err(|_| ExitError::InvalidGrant("native probe bandwidth"))?,
+            maximum_paths: 1,
+            created_at: super::unix_seconds(authorization.created_at_ms),
+            expires_at: super::unix_seconds(authorization.expires_at_ms),
+        };
+        let reservation_key = allocation.reservation_id.clone();
+        self.ledger_mut()?
+            .reserve(allocation, super::unix_seconds(now_ms))?;
+        let nonce: [u8; NONCE_BYTES] = authorization
+            .nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native authorization nonce"))?;
+        let encoded = match sign_control_message_with(
+            &authorization,
+            local_public_key,
+            authorization.created_at_ms,
+            authorization.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+            signer,
+        ) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                if self.ledger_mut()?.release(&reservation_key).is_err() {
+                    return Err(ExitError::LedgerInvariant);
+                }
+                return Err(error.into());
+            }
+        };
+        let response = AcceptedNativeProbeRelayAuthorization {
+            encoded,
+            request: encoded_chain.to_vec(),
+            request_sha256: request_hash,
+            reservation_id,
+            expires_at_ms: authorization.expires_at_ms,
+        };
+        self.native_probe_authorization_cache.insert(
+            request_hash,
+            CachedNativeProbeRelayAuthorization {
+                response: response.clone(),
+                expires_at_ms: authorization.expires_at_ms,
+            },
+        );
+        self.sync_metrics();
+        Ok(response)
+    }
+
     /// Verify one exact client request and mint one affine endpoint-free Exit permit.
     ///
     /// The caller-supplied authenticated channel identity must match the signed control Relay.
@@ -520,6 +760,7 @@ impl ExitService {
             ready_at_ms: now_ms,
             expires_at_ms,
             nonce: nonce.to_vec(),
+            exit_boot_id: self.exit_boot_id.to_vec(),
         };
         let signed_ready = sign_control_message_with(
             &ready,
@@ -664,6 +905,15 @@ impl ExitService {
     }
 }
 
+fn native_core_transport(value: i32) -> Result<CoreTransport, ExitError> {
+    match Transport::try_from(value) {
+        Ok(Transport::TcpMptcp) => Ok(CoreTransport::TcpMptcp),
+        Ok(Transport::UdpSinglePath) => Ok(CoreTransport::UdpSinglePath),
+        Ok(Transport::MultipathQuic) => Ok(CoreTransport::MultipathQuic),
+        Ok(Transport::Unspecified) | Err(_) => Err(ExitError::InvalidGrant("native transport")),
+    }
+}
+
 struct ExactActor {
     node_id: [u8; NODE_ID_BYTES],
     public_key: [u8; NODE_ID_BYTES],
@@ -754,11 +1004,13 @@ mod tests {
         sign_native_probe_start, verify_control_message, verify_native_probe_exit_ready,
         verify_native_probe_exit_result_for_relay, verify_native_probe_permit,
         verify_native_probe_relay_ready, verify_native_probe_start_for_relay,
+        verify_relay_reservation,
     };
+    use volparossa_relay::{RelayService, RelayServiceConfig};
     use volparossa_test_support::verified_development_manifest;
     use volparossa_wireguard::{
         EndpointRole, HelperContextHandle, HelperLeaseHandle, PublicWireGuardEndpoint,
-        WireGuardPublicKey,
+        RelayEndpointLease, WireGuardPublicKey,
     };
 
     use super::*;
@@ -1045,6 +1297,31 @@ mod tests {
         )
     }
 
+    fn relay_endpoint_lease() -> RelayEndpointLease {
+        RelayEndpointLease::new(
+            PROBE_ID,
+            HelperContextHandle::from_bytes([0xd0; NODE_ID_BYTES]).expect("Relay context"),
+            HelperLeaseHandle::from_bytes([0xd4; NODE_ID_BYTES]).expect("RelayClient lease"),
+            HelperLeaseHandle::from_bytes([0xd3; NODE_ID_BYTES]).expect("RelayExit lease"),
+            1,
+            EndpointRole::RelayClient,
+            EndpointRole::RelayExit,
+            PublicWireGuardEndpoint::new(
+                WireGuardPublicKey::from_bytes([0xd5; NODE_ID_BYTES]),
+                IpAddr::V4(Ipv4Addr::new(83, 1, 1, 2)),
+                20_003,
+            )
+            .expect("RelayClient endpoint"),
+            PublicWireGuardEndpoint::new(
+                WireGuardPublicKey::from_bytes([0xd2; NODE_ID_BYTES]),
+                IpAddr::V4(Ipv4Addr::new(83, 1, 1, 1)),
+                20_002,
+            )
+            .expect("RelayExit endpoint"),
+        )
+        .expect("Relay endpoint lease")
+    }
+
     fn client_binding(scope: &NativeProbePathScope) -> NativeProbeEndpointBinding {
         binding_with_material(
             scope,
@@ -1219,6 +1496,167 @@ mod tests {
             &mut relay_replay,
         )
         .expect("Relay verifies result against the hidden Exit lease");
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real Exit-to-Relay signed reservation smoke keeps every authority visible"
+    )]
+    fn production_start_chain_returns_standard_nested_reservation() {
+        let mut fixture = Fixture::new();
+        let permit = fixture.issue_permit();
+        let signed_request = permit.signed_request().to_vec();
+        let signed_permit = permit.signed_permit().to_vec();
+        let relay_node_id = fixture.relay_node_id();
+        let relay_peer_id = fixture.relay_peer_id();
+        let relay_exit = relay_exit_binding(&fixture.scope);
+        let exit_public_key = fixture.exit_public_key();
+        let exit_key = &fixture.exit_key;
+        let exit_ready = fixture
+            .service
+            .issue_native_probe_ready_with(
+                permit,
+                &relay_node_id,
+                &relay_peer_id,
+                relay_exit.clone(),
+                prepared_exit_lease(PROBE_ID),
+                NOW_MS + 2,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            )
+            .expect("Exit readiness");
+        let signed_exit_ready = exit_ready.signed_ready().to_vec();
+        let mut relay_replay = ReplayCache::new(16).expect("Relay replay");
+        let relay_permit = verify_native_probe_permit(
+            signed_request.clone(),
+            signed_permit.clone(),
+            NOW_MS + 3,
+            &mut relay_replay,
+        )
+        .expect("Relay Permit");
+        let verified_exit_ready = verify_native_probe_exit_ready(
+            relay_permit,
+            signed_exit_ready,
+            NOW_MS + 3,
+            &mut relay_replay,
+        )
+        .expect("Relay Exit readiness");
+        let relay_ready = sign_native_probe_relay_ready(
+            verified_exit_ready,
+            relay_client_binding(&fixture.scope),
+            relay_exit,
+            &fixture.relay_key,
+            NOW_MS + 3,
+            [21; NONCE_BYTES],
+        )
+        .expect("Relay readiness");
+        let signed_relay_ready = relay_ready.encoded_relay_ready().to_vec();
+        let mut client_replay = ReplayCache::new(16).expect("client replay");
+        let client_permit = verify_native_probe_permit(
+            signed_request,
+            signed_permit,
+            NOW_MS + 3,
+            &mut client_replay,
+        )
+        .expect("client Permit");
+        let client_ready = verify_native_probe_relay_ready(
+            client_permit,
+            signed_relay_ready,
+            NOW_MS + 3,
+            &mut client_replay,
+        )
+        .expect("client Relay readiness");
+        let issued_start = sign_native_probe_start(
+            client_ready,
+            client_binding(&fixture.scope),
+            &fixture.client_key,
+            NOW_MS + 4,
+            [22; NONCE_BYTES],
+        )
+        .expect("client Start");
+        let signed_start = issued_start.encoded_start().to_vec();
+        let verified_start = verify_native_probe_start_for_relay(
+            relay_ready,
+            signed_start.clone(),
+            NOW_MS + 4,
+            &mut relay_replay,
+        )
+        .expect("Relay Start");
+        let chain = verified_start
+            .authorization_chain()
+            .expect("authorization chain");
+        let exit_key = &fixture.exit_key;
+        let exit_authorization = fixture
+            .service
+            .issue_native_probe_relay_authorization_with(
+                &chain,
+                &relay_node_id,
+                &relay_peer_id,
+                NOW_MS + 4,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            )
+            .expect("Exit authorization");
+        let retry = fixture
+            .service
+            .issue_native_probe_relay_authorization_with(
+                &chain,
+                &relay_node_id,
+                &relay_peer_id,
+                NOW_MS + 5,
+                exit_public_key,
+                |_message| panic!("exact Exit retry must use cached signature"),
+            )
+            .expect("idempotent Exit authorization");
+        assert_eq!(retry.encoded(), exit_authorization.encoded());
+
+        let relay_public_key = fixture.relay_key.verifying_key().to_bytes();
+        let mut relay_service = RelayService::new(
+            RelayServiceConfig::enabled(
+                relay_node_id,
+                Bandwidth::new(100, 100).expect("Relay bandwidth"),
+                8,
+                900,
+                30,
+                64,
+            ),
+            None,
+        )
+        .expect("Relay service");
+        let relay_key = &fixture.relay_key;
+        let accepted = relay_service
+            .accept_native_probe_start_with(
+                verified_start,
+                exit_authorization.encoded(),
+                NOW_MS + 5,
+                relay_public_key,
+                |_| Some(relay_endpoint_lease()),
+                |message| Some(relay_key.sign(message).to_bytes()),
+            )
+            .expect("standard nested Relay reservation");
+        assert_eq!(accepted.signed_client_relay_request(), signed_start);
+        let signed_start_sha256: [u8; NODE_ID_BYTES] = Sha256::digest(&signed_start).into();
+        assert_eq!(
+            accepted.signed_client_relay_request_sha256(),
+            &signed_start_sha256
+        );
+        let mut client_grant_replay = ReplayCache::new(4).expect("grant replay");
+        let (relay_grant, exit_grant) = verify_relay_reservation(
+            accepted.encoded(),
+            NOW_MS + 5,
+            TimePolicy::default(),
+            &mut client_grant_replay,
+        )
+        .expect("nested standard reservation");
+        assert_eq!(relay_grant.message().route_context_id, PROBE_ID);
+        assert_eq!(relay_grant.message().path_id, 1);
+        assert_eq!(
+            relay_grant.message().exit_authorization,
+            exit_authorization.encoded()
+        );
+        assert_eq!(exit_grant.message().client_wireguard_public_key, [0xc3; 32]);
+        assert!(relay_service.take_native_probe_start(&PROBE_ID).is_some());
     }
 
     #[test]

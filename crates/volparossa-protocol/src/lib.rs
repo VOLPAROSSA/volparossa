@@ -29,11 +29,13 @@ pub use messages::{
 };
 pub use native_preselection_probe::{
     IssuedNativeProbeRelayReady, IssuedNativeProbeRelayResult, IssuedNativeProbeStart,
-    MAX_NATIVE_PROBE_CANDIDATES, MAX_NATIVE_PROBE_LIFETIME_MS, MIN_NATIVE_PROBE_CANDIDATES,
+    MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE, MAX_NATIVE_PROBE_CANDIDATES,
+    MAX_NATIVE_PROBE_LIFETIME_MS, MIN_NATIVE_PROBE_CANDIDATES, NativeProbeAuthorizationChain,
     NativeProbeCandidateSet, NativeProbeEndpointBinding, NativeProbeExitReady,
     NativeProbeExitResult, NativeProbeForwardingProof, NativeProbeLeaseProof, NativeProbePathScope,
     NativeProbePermit, NativeProbePermitRequest, NativeProbeRelayLocalProofs,
-    NativeProbeRelayReady, NativeProbeRelayResult, NativeProbeStart, VerifiedNativeProbeExitReady,
+    NativeProbeRelayReady, NativeProbeRelayResult, NativeProbeStart,
+    VerifiedNativeProbeAuthorizationChain, VerifiedNativeProbeExitReady,
     VerifiedNativeProbeExitResult, VerifiedNativeProbePermit, VerifiedNativeProbeRelayReady,
     VerifiedNativeProbeResult, VerifiedNativeProbeStartForRelay, native_probe_candidate_set_hash,
     native_probe_challenge_hash, native_probe_exit_ready_hash, native_probe_exit_result_hash,
@@ -41,8 +43,9 @@ pub use native_preselection_probe::{
     native_probe_prepared_lease_commitment, native_probe_relay_ready_hash, native_probe_start_hash,
     sign_native_probe_relay_ready, sign_native_probe_relay_ready_with,
     sign_native_probe_relay_result, sign_native_probe_relay_result_with, sign_native_probe_start,
-    verify_native_probe_exit_ready, verify_native_probe_exit_result_for_relay,
-    verify_native_probe_permit, verify_native_probe_relay_ready, verify_native_probe_result,
+    verify_native_probe_authorization_chain, verify_native_probe_exit_ready,
+    verify_native_probe_exit_result_for_relay, verify_native_probe_permit,
+    verify_native_probe_relay_ready, verify_native_probe_result,
     verify_native_probe_start_for_relay,
 };
 pub use native_route::{
