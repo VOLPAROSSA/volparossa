@@ -74,6 +74,7 @@ for script_path in \
     tests/helper/validate-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
     tests/integration/run.sh \
+    tests/integration/vertical-topology.sh \
     tests/integration/validate-report.sh \
     tests/netns/run-topology.sh \
     tests/netns/run-benchmarks.sh \
@@ -147,8 +148,17 @@ mpquic_report=$LAST_OUTPUT
 assert_selected_ids "$mpquic_report" 'A06,A07,A14,A15'
 
 expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute --only all
-expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute --only all --yes
-jq -e '.overall == "BLOCKED" and .execution.requested_mode == "EXECUTE"' "$LAST_OUTPUT" >/dev/null
+
+# Execution is deliberately not faked through a command override: the real fixed worker verifies
+# anonymous user/mount/PID/network isolation before it accepts any mutation authority.
+grep -F 'unshare --user --map-root-user --mount --net --pid --fork --mount-proc' \
+    "$REPOSITORY_DIRECTORY/tests/integration/run.sh" >/dev/null
+grep -F '[ "$(readlink /proc/self/ns/net)" != "$HOST_NET" ] || exit 70' \
+    "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
+grep -F 'direct_client_exit_adjacency:false' \
+    "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
+grep -F 'remaining_owned_objects:$remaining' \
+    "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
 
 expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/run-benchmarks.sh" --preview
 jq -e '

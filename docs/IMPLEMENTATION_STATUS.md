@@ -1831,7 +1831,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   and `MUTATION_ROLLBACK_COMPLETE` is an
   internal containment checkpoint rather than cleanup or acceptance evidence.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
-- [ ] Machine-readable acceptance report is emitted.
+- [x] Machine-readable acceptance report is emitted.
+  `tests/integration/run.sh --execute --suite all` now builds unchanged product binaries and enters
+  anonymous user, mount, PID, and network namespaces before making any network change. It creates
+  a Client, two non-adjacent Relays, an Exit, and a destination topology, launches four real
+  `volparossa-agent` processes plus TCP and UDP destination endpoints, and uses a short-lived empty
+  three-signature development policy so policy provisioning does not hide the next product gap.
+  The real client `connect` request currently fails closed at `DATAPLANE_UNAVAILABLE`; this is the
+  first observed product blocker, and no datapath case is claimed. Normal teardown stops every
+  process and reports zero remaining owned namespace objects. On the exercised Debian 13 host,
+  links, addresses, routes, rules, DNS and IPv4 forwarding matched before and after. Because that
+  host has no `nft` observer, full firewall-state evidence and therefore A15 remain explicitly
+  skipped. The fixed alpha score remains **11/100 (11%)**.
 
 ### Required acceptance tests
 
