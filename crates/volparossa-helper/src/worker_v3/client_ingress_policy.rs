@@ -1025,18 +1025,18 @@ mod tests {
     use super::*;
     use crate::{
         internal_protocol::{
-            AcquireClientIngressSocket, ClientIngressDestroyed, DestroyClientIngress,
-            INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, IngressSocketReady,
-            InternalIngressAddressFamily, InternalIngressSocketKind, InternalSocketAddress,
-            InternalWorkerRequest, InternalWorkerResult, internal_worker_request,
-            internal_worker_response,
+            AcquireClientIngressReplySocket, AcquireClientIngressSocket, ClientIngressDestroyed,
+            DestroyClientIngress, INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION,
+            IngressReplySocketReady, IngressSocketReady, InternalIngressAddressFamily,
+            InternalIngressSocketKind, InternalSocketAddress, InternalWorkerRequest,
+            InternalWorkerResult, internal_worker_request, internal_worker_response,
         },
         kernel::{BirthNamespaceKernel, NamespaceKernel},
         worker_transport::{
-            ExpectedUnixCredentials, create_client_ingress_socket,
-            private_credential_worker_channel, receive_credential_worker_request,
-            receive_credential_worker_response, send_credential_worker_request,
-            send_credential_worker_response,
+            ExpectedUnixCredentials, create_client_ingress_reply_socket,
+            create_client_ingress_socket, private_credential_worker_channel,
+            receive_credential_worker_request, receive_credential_worker_response,
+            send_credential_worker_request, send_credential_worker_response,
         },
     };
 
@@ -1045,6 +1045,7 @@ mod tests {
     const SMOKE_WORKER: &str = "VOLPAROSSA_TEST_INGRESS_WORKER_NETNS";
     const SMOKE_TEST: &str = "worker_v3::client_ingress_policy::tests::parent_output_steering_delivers_udp_over_real_veth";
     const SMOKE_PAYLOAD: &[u8] = b"volparossa-real-ingress-udp";
+    const SMOKE_REPLY: &[u8] = b"volparossa-real-ingress-reply";
 
     #[test]
     fn ipv4_policy_is_one_atomic_bounded_batch() {
@@ -1129,6 +1130,7 @@ mod tests {
         run_parent_smoke();
     }
 
+    #[allow(clippy::too_many_lines)] // One disposable topology proves forward and exact reply delivery.
     fn run_parent_smoke() {
         prepare_dummy_underlay();
         let (parent_channel, worker_channel) =
@@ -1198,8 +1200,9 @@ mod tests {
         .expect("install parent output steering");
 
         let app = UdpSocket::bind("192.0.2.2:0").expect("bind app underlay address");
-        app.send_to(SMOKE_PAYLOAD, "198.18.0.42:4242")
-            .expect("send app packet");
+        let application = app.local_addr().expect("application tuple");
+        let remote = "198.18.0.42:4242".parse().expect("remote tuple");
+        app.send_to(SMOKE_PAYLOAD, remote).expect("send app packet");
         let receiver = UdpSocket::from(transparent_udp);
         receiver
             .set_nonblocking(false)
@@ -1212,6 +1215,42 @@ mod tests {
             .recv_from(&mut datagram)
             .expect("packet reached transferred transparent socket");
         assert_eq!(&datagram[..length], SMOKE_PAYLOAD);
+
+        let reply_request = ingress_request(
+            [0xa3; 16],
+            internal_worker_request::Operation::AcquireClientIngressReplySocket(
+                AcquireClientIngressReplySocket {
+                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                    remote: Some(internal_socket_address(remote)),
+                    application: Some(internal_socket_address(application)),
+                },
+            ),
+        );
+        send_credential_worker_request(&parent_channel, &reply_request)
+            .expect("request exact reply descriptor");
+        let mut reply_execution =
+            receive_credential_worker_response(&parent_channel, &reply_request, expected_worker)
+                .expect("credentialed reply descriptor");
+        assert_eq!(
+            reply_execution.response.result,
+            InternalWorkerResult::Ok as i32
+        );
+        let reply = UdpSocket::from(
+            reply_execution
+                .descriptor
+                .take()
+                .expect("connected reply descriptor"),
+        );
+        app.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bounded application receive");
+        reply
+            .send(SMOKE_REPLY)
+            .expect("send exact transparent reply");
+        let (length, source) = app
+            .recv_from(&mut datagram)
+            .expect("application received transparent reply");
+        assert_eq!(source, remote);
+        assert_eq!(&datagram[..length], SMOKE_REPLY);
 
         remove_parent(&parent_policy, deadline).expect("remove exact parent nft table");
         parent_kernel
@@ -1337,6 +1376,31 @@ mod tests {
         send_credential_worker_response(&channel, &acquire, &response, Some(udp))
             .expect("transfer transparent UDP descriptor");
 
+        let reply_request = receive_credential_worker_request(&channel, expected_parent)
+            .expect("receive reply Acquire")
+            .request;
+        let Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(reply)) =
+            reply_request.operation.as_ref()
+        else {
+            panic!("reply Acquire operation");
+        };
+        assert_eq!(reply.client_runtime_id.as_slice(), SMOKE_RUNTIME);
+        let descriptor = create_client_ingress_reply_socket(reply).expect("create exact reply");
+        let response = super::super::correlated_response(
+            &reply_request,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                    remote: reply.remote.clone(),
+                    application: reply.application.clone(),
+                },
+            )),
+        )
+        .expect("correlated reply Acquire response");
+        send_credential_worker_response(&channel, &reply_request, &response, Some(descriptor))
+            .expect("transfer connected reply descriptor");
+
         let destroy = receive_credential_worker_request(&channel, expected_parent)
             .expect("receive Destroy")
             .request;
@@ -1372,6 +1436,16 @@ mod tests {
             magic: INTERNAL_WORKER_MAGIC.to_vec(),
             request_id: request_id.to_vec(),
             operation: Some(operation),
+        }
+    }
+
+    fn internal_socket_address(value: std::net::SocketAddr) -> InternalSocketAddress {
+        match value {
+            std::net::SocketAddr::V4(value) => InternalSocketAddress {
+                address: value.ip().octets().to_vec(),
+                port: u32::from(value.port()),
+            },
+            std::net::SocketAddr::V6(_) => panic!("IPv4 smoke tuple"),
         }
     }
 

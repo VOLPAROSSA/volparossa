@@ -38,7 +38,7 @@ use std::{
     fmt,
     io::{self, IoSlice, IoSliceMut},
     mem,
-    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     num::NonZeroU64,
     os::{
         fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
@@ -1213,6 +1213,55 @@ pub fn validate_ingress_socket<F: AsFd>(
     }
     let snapshot = inspect_ingress_socket(socket)?;
     validate_ingress_snapshot(snapshot, kind, family, expected_local_port)
+}
+
+/// Revalidate one connected transparent IPv4 UDP reply descriptor.
+///
+/// The helper must have bound the descriptor to the exact original remote tuple and connected it
+/// to the exact intercepted application tuple before handoff. TTL one confines delivery to the
+/// immediately adjacent client namespace even if a caller substitutes a routable peer.
+///
+/// # Errors
+///
+/// Returns an error unless all immutable kernel socket properties and both tuples match exactly.
+pub fn validate_ingress_udp_reply_socket<F: AsFd>(
+    socket: &F,
+    remote: SocketAddrV4,
+    application: SocketAddrV4,
+) -> io::Result<()> {
+    if remote == application
+        || remote.ip().is_unspecified()
+        || remote.ip().is_multicast()
+        || *remote.ip() == Ipv4Addr::BROADCAST
+        || application.ip().is_unspecified()
+        || application.ip().is_multicast()
+        || *application.ip() == Ipv4Addr::BROADCAST
+        || remote.port() == 0
+        || application.port() == 0
+    {
+        return Err(invalid_data("invalid ingress UDP reply tuple"));
+    }
+    let reference = SockRef::from(socket);
+    let descriptor_flags =
+        FdFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFD).map_err(errno_io)?);
+    let status_flags =
+        OFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFL).map_err(errno_io)?);
+    if reference.domain()? != Domain::IPV4
+        || reference.r#type()? != Type::DGRAM
+        || reference.protocol()? != Some(Protocol::UDP)
+        || reference.local_addr()?.as_socket() != Some(SocketAddr::V4(remote))
+        || reference.peer_addr()?.as_socket() != Some(SocketAddr::V4(application))
+        || !getsockopt(socket, sockopt::IpTransparent).map_err(errno_io)?
+        || reference.ttl_v4()? != 1
+        || reference.is_listener()?
+        || !descriptor_flags.contains(FdFlag::FD_CLOEXEC)
+        || !status_flags.contains(OFlag::O_NONBLOCK)
+    {
+        return Err(invalid_data(
+            "ingress UDP reply socket properties do not match",
+        ));
+    }
+    Ok(())
 }
 
 fn inspect_ingress_socket<F: AsFd>(socket: &F) -> io::Result<KernelIngressSnapshot> {

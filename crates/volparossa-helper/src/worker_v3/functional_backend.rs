@@ -19,12 +19,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4},
     os::fd::{AsRawFd as _, OwnedFd},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use nix::ifaddrs::getifaddrs;
 use rustix::time::{ClockId, clock_gettime};
 use sha2::{Digest as _, Sha256};
 use volparossa_protocol::{
@@ -35,13 +36,13 @@ use volparossa_protocol::{
     relay_reservation_request_sha256, verify_control_message, verify_relay_reservation,
 };
 use volparossa_routing::{
-    AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeaseBatch,
-    AddMptcpEndpoint, ClosedPreparePlan, ContextRole, DestroyClientIngress, HELPER_HANDLE_BYTES,
-    IngressAddressFamily, IngressSocketAddress, IngressSocketKind, LeasePlan as RoutingLeasePlan,
-    MptcpEndpointMode, NATIVE_PROBE_CLIENT_PORT, NATIVE_PROBE_EXIT_PORT, PrepareClientIngress,
-    PrepareIntent, PrepareLeaseBatch, PublicUdpEndpoint, RemoveMptcpEndpoint,
-    TransportSocketAddress, TransportSocketKind, UnderlayEvidence as RoutingUnderlayEvidence,
-    WireguardRole,
+    AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress,
+    ActivateLeaseBatch, AddMptcpEndpoint, ClosedPreparePlan, ContextRole, DestroyClientIngress,
+    HELPER_HANDLE_BYTES, IngressAddressFamily, IngressSocketAddress, IngressSocketKind,
+    LeasePlan as RoutingLeasePlan, MptcpEndpointMode, NATIVE_PROBE_CLIENT_PORT,
+    NATIVE_PROBE_EXIT_PORT, PrepareClientIngress, PrepareIntent, PrepareLeaseBatch,
+    PublicUdpEndpoint, RemoveMptcpEndpoint, TransportSocketAddress, TransportSocketKind,
+    UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
 };
 use volparossa_wireguard::overlay_addresses;
 
@@ -56,6 +57,7 @@ use crate::{
         PreparedKernelLease,
     },
     internal_protocol::{
+        AcquireClientIngressReplySocket as InternalAcquireClientIngressReplySocket,
         AcquireClientIngressSocket as InternalAcquireClientIngressSocket,
         AcquireTransportSocket as InternalAcquireTransportSocket,
         ActivateClientIngress as InternalActivateClientIngress, ActivateLeases,
@@ -109,6 +111,7 @@ const STAGE_PREPARE_INGRESS: u8 = 10;
 const STAGE_ACQUIRE_INGRESS: u8 = 11;
 const STAGE_ACTIVATE_INGRESS: u8 = 12;
 const STAGE_DESTROY_INGRESS: u8 = 13;
+const STAGE_ACQUIRE_INGRESS_REPLY: u8 = 14;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
@@ -2125,6 +2128,77 @@ impl FunctionalAlphaLeaseBackend {
             .ok_or(BackendError::CleanupIncomplete)
     }
 
+    async fn acquire_ingress_reply_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: AcquireIngressReplySocket,
+    ) -> Result<OwnedFd, BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::AcquireReply,
+        )?;
+        let deadline = ingress_deadline(binding)?;
+        let application =
+            ingress_reply_ipv4(value.application.as_ref().ok_or(BackendError::Invalid)?)?;
+        prove_local_ingress_application(*application.ip(), deadline)?;
+        let worker_generation = {
+            let state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = exact_ingress_entry(state.as_ref(), binding)?;
+            if entry.phase != OpenIngressPhase::Active {
+                return Err(BackendError::Invalid);
+            }
+            entry.worker_generation
+        };
+        let internal = InternalAcquireClientIngressReplySocket {
+            client_runtime_id: binding.client_runtime_id.to_vec(),
+            remote: value.remote.as_ref().map(|endpoint| InternalSocketAddress {
+                address: endpoint.address.clone(),
+                port: endpoint.port,
+            }),
+            application: value
+                .application
+                .as_ref()
+                .map(|endpoint| InternalSocketAddress {
+                    address: endpoint.address.clone(),
+                    port: endpoint.port,
+                }),
+        };
+        let request = worker_request(
+            ingress_worker_request_id(binding, STAGE_ACQUIRE_INGRESS_REPLY),
+            internal_worker_request::Operation::AcquireClientIngressReplySocket(internal.clone()),
+        );
+        let execution = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let mut execution = execution.map_err(|_| BackendError::CleanupIncomplete)?;
+        let exact = execution.response.result == InternalWorkerResult::Ok as i32
+            && matches!(
+                execution.response.outcome.as_ref(),
+                Some(internal_worker_response::Outcome::IngressReplySocketReady(ready))
+                    if ready.client_runtime_id.as_slice() == binding.client_runtime_id
+                        && ready.remote == internal.remote
+                        && ready.application == internal.application
+            );
+        if !exact {
+            drop(execution.descriptor.take());
+            return Err(BackendError::CleanupIncomplete);
+        }
+        execution
+            .descriptor
+            .take()
+            .ok_or(BackendError::CleanupIncomplete)
+    }
+
     #[allow(clippy::too_many_lines, clippy::single_match_else)] // Parent and worker policy activation share one exact rollback transaction.
     async fn activate_ingress_one(
         &self,
@@ -2550,6 +2624,19 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
             IngressBackendCompletion {
                 binding,
                 result: self.acquire_ingress_one(binding, value).await,
+            }
+        })
+    }
+
+    fn acquire_client_ingress_reply_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressReplySocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.acquire_ingress_reply_one(binding, value).await,
             }
         })
     }
@@ -4932,6 +5019,45 @@ fn internal_ingress_family(value: i32) -> Result<InternalIngressAddressFamily, B
         IngressAddressFamily::Ipv6 => Ok(InternalIngressAddressFamily::Ipv6),
         IngressAddressFamily::Unspecified => Err(BackendError::Invalid),
     }
+}
+
+fn ingress_reply_ipv4(value: &IngressSocketAddress) -> Result<SocketAddrV4, BackendError> {
+    let address = Ipv4Addr::from(
+        <[u8; 4]>::try_from(value.address.as_slice()).map_err(|_| BackendError::Invalid)?,
+    );
+    let port = u16::try_from(value.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(BackendError::Invalid)?;
+    if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST {
+        return Err(BackendError::Invalid);
+    }
+    Ok(SocketAddrV4::new(address, port))
+}
+
+fn prove_local_ingress_application(
+    application: Ipv4Addr,
+    deadline: HardDeadline,
+) -> Result<(), BackendError> {
+    deadline
+        .ensure_remaining()
+        .map_err(|_| BackendError::Unavailable)?;
+    let local = getifaddrs()
+        .map_err(|_| BackendError::Unavailable)?
+        .filter_map(|interface| {
+            interface
+                .address
+                .as_ref()
+                .and_then(|address| address.as_sockaddr_in())
+                .copied()
+                .map(SocketAddrV4::from)
+        })
+        .any(|address| *address.ip() == application);
+    deadline
+        .complete(local)
+        .map_err(|_| BackendError::Unavailable)?
+        .then_some(())
+        .ok_or(BackendError::Invalid)
 }
 
 fn canonical_worker_ingress_sockets(

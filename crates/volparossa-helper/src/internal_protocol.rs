@@ -32,7 +32,7 @@ pub(crate) struct InternalWorkerRequest {
     pub(crate) request_id: Vec<u8>,
     #[prost(
         oneof = "internal_worker_request::Operation",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25"
     )]
     pub(crate) operation: Option<internal_worker_request::Operation>,
 }
@@ -62,10 +62,10 @@ pub(crate) mod internal_worker_request {
     use prost::Oneof;
 
     use super::{
-        AcquireClientIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeases,
-        AddMptcpEndpoint, DestroyClientIngress, DestroyContext, InitialiseClientIngress,
-        InitialiseContext, PrepareClientIngress, PrepareLeases, ProbeCommitLeases,
-        RemoveMptcpEndpoint,
+        AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireTransportSocket,
+        ActivateClientIngress, ActivateLeases, AddMptcpEndpoint, DestroyClientIngress,
+        DestroyContext, InitialiseClientIngress, InitialiseContext, PrepareClientIngress,
+        PrepareLeases, ProbeCommitLeases, RemoveMptcpEndpoint,
     };
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -96,6 +96,8 @@ pub(crate) mod internal_worker_request {
         ActivateClientIngress(ActivateClientIngress),
         #[prost(message, tag = "24")]
         DestroyClientIngress(DestroyClientIngress),
+        #[prost(message, tag = "25")]
+        AcquireClientIngressReplySocket(AcquireClientIngressReplySocket),
     }
 }
 
@@ -362,6 +364,16 @@ pub(crate) struct DestroyClientIngress {
     pub(crate) client_runtime_id: Vec<u8>,
 }
 
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct AcquireClientIngressReplySocket {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    pub(crate) remote: Option<InternalSocketAddress>,
+    #[prost(message, optional, tag = "3")]
+    pub(crate) application: Option<InternalSocketAddress>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
 pub(crate) enum InternalWorkerResult {
@@ -388,7 +400,7 @@ pub(crate) struct InternalWorkerResponse {
     pub(crate) request_digest: Vec<u8>,
     #[prost(
         oneof = "internal_worker_response::Outcome",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25"
     )]
     pub(crate) outcome: Option<internal_worker_response::Outcome>,
 }
@@ -398,9 +410,9 @@ pub(crate) mod internal_worker_response {
 
     use super::{
         ActivatedClientIngress, ActivatedLeases, ClientIngressDestroyed, ClientIngressInitialised,
-        ContextDestroyed, ContextInitialised, IngressSocketReady, MptcpEndpointAdded,
-        MptcpEndpointRemoved, PreparedClientIngress, PreparedLeases, ProbedLeases,
-        TransportSocketReady,
+        ContextDestroyed, ContextInitialised, IngressReplySocketReady, IngressSocketReady,
+        MptcpEndpointAdded, MptcpEndpointRemoved, PreparedClientIngress, PreparedLeases,
+        ProbedLeases, TransportSocketReady,
     };
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -431,6 +443,8 @@ pub(crate) mod internal_worker_response {
         ActivatedClientIngress(ActivatedClientIngress),
         #[prost(message, tag = "24")]
         ClientIngressDestroyed(ClientIngressDestroyed),
+        #[prost(message, tag = "25")]
+        IngressReplySocketReady(IngressReplySocketReady),
     }
 }
 
@@ -486,6 +500,16 @@ pub(crate) struct ActivatedClientIngress {
 pub(crate) struct ClientIngressDestroyed {
     #[prost(bytes = "vec", tag = "1")]
     pub(crate) client_runtime_id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct IngressReplySocketReady {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) client_runtime_id: Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    pub(crate) remote: Option<InternalSocketAddress>,
+    #[prost(message, optional, tag = "3")]
+    pub(crate) application: Option<InternalSocketAddress>,
 }
 
 /// A key and kernel-assigned port proven by the worker's correlated GET after binding.
@@ -650,6 +674,14 @@ fn response_matches_operation(
         }
         (Operation::DestroyClientIngress(request), Outcome::ClientIngressDestroyed(response)) => {
             request.client_runtime_id == response.client_runtime_id
+        }
+        (
+            Operation::AcquireClientIngressReplySocket(request),
+            Outcome::IngressReplySocketReady(response),
+        ) => {
+            request.client_runtime_id == response.client_runtime_id
+                && request.remote == response.remote
+                && request.application == response.application
         }
         _ => false,
     }
@@ -825,12 +857,49 @@ pub(crate) fn ingress_descriptor_source_released_binding(
     )
 }
 
+pub(crate) fn ingress_reply_descriptor_binding(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
+    if !matches!(
+        request.operation,
+        Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(_))
+    ) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    descriptor_event_binding(
+        b"VOLPAROSSA internal worker ingress reply completion v1\0",
+        request,
+        response,
+    )
+}
+
+pub(crate) fn ingress_reply_descriptor_source_released_binding(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
+    if response.result != InternalWorkerResult::Ok as i32
+        || !matches!(
+            request.operation,
+            Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(_))
+        )
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    descriptor_event_binding(
+        b"VOLPAROSSA internal worker ingress reply descriptor source released v1\0",
+        request,
+        response,
+    )
+}
+
 pub(crate) fn request_transfers_descriptor(request: &InternalWorkerRequest) -> bool {
     matches!(
         request.operation,
         Some(
             internal_worker_request::Operation::AcquireTransportSocket(_)
                 | internal_worker_request::Operation::AcquireClientIngressSocket(_)
+                | internal_worker_request::Operation::AcquireClientIngressReplySocket(_)
         )
     )
 }
@@ -851,6 +920,7 @@ fn descriptor_event_binding(
             u8::try_from(operation.descriptor_kind).map_err(|_| InternalProtocolError::Invalid)?,
             u8::try_from(operation.address_family).map_err(|_| InternalProtocolError::Invalid)?,
         ],
+        Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(_)) => vec![3],
         _ => return Err(InternalProtocolError::Invalid),
     };
     let canonical = response.encode_to_vec();
@@ -1058,6 +1128,25 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
             route_id(&operation.client_runtime_id)?;
             validate_ingress_identities(&operation.identities)
         }
+        Operation::AcquireClientIngressReplySocket(operation) => {
+            route_id(&operation.client_runtime_id)?;
+            let remote = concrete_ingress_ipv4(
+                operation
+                    .remote
+                    .as_ref()
+                    .ok_or(InternalProtocolError::Invalid)?,
+            )?;
+            let application = concrete_ingress_ipv4(
+                operation
+                    .application
+                    .as_ref()
+                    .ok_or(InternalProtocolError::Invalid)?,
+            )?;
+            if remote == application {
+                return Err(InternalProtocolError::Invalid);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1150,6 +1239,25 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
             }
             Outcome::ActivatedClientIngress(outcome) => route_id(&outcome.client_runtime_id),
             Outcome::ClientIngressDestroyed(outcome) => route_id(&outcome.client_runtime_id),
+            Outcome::IngressReplySocketReady(outcome) => {
+                route_id(&outcome.client_runtime_id)?;
+                let remote = concrete_ingress_ipv4(
+                    outcome
+                        .remote
+                        .as_ref()
+                        .ok_or(InternalProtocolError::Invalid)?,
+                )?;
+                let application = concrete_ingress_ipv4(
+                    outcome
+                        .application
+                        .as_ref()
+                        .ok_or(InternalProtocolError::Invalid)?,
+                )?;
+                if remote == application {
+                    return Err(InternalProtocolError::Invalid);
+                }
+                Ok(())
+            }
         },
         (InternalWorkerResult::Ok, None)
         | (InternalWorkerResult::Unspecified, _)
@@ -1205,6 +1313,25 @@ fn validate_ingress_local(
         return Err(InternalProtocolError::Invalid);
     }
     Ok(())
+}
+
+fn concrete_ingress_ipv4(
+    value: &InternalSocketAddress,
+) -> Result<std::net::SocketAddrV4, InternalProtocolError> {
+    let address: [u8; 4] = value
+        .address
+        .as_slice()
+        .try_into()
+        .map_err(|_| InternalProtocolError::Invalid)?;
+    let address = Ipv4Addr::from(address);
+    let port = u16::try_from(value.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(InternalProtocolError::Invalid)?;
+    if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(std::net::SocketAddrV4::new(address, port))
 }
 
 fn validate_ingress_identities(
@@ -2271,5 +2398,50 @@ mod tests {
             activated.leases[0].latest_handshake_nanoseconds = nanoseconds;
             assert!(encode_response(&wrong).is_err());
         }
+    }
+
+    #[test]
+    fn ingress_reply_descriptor_is_correlated_to_exact_connected_tuple() {
+        let remote = InternalSocketAddress {
+            address: vec![8, 8, 8, 8],
+            port: 443,
+        };
+        let application = InternalSocketAddress {
+            address: vec![192, 0, 2, 20],
+            port: 50_000,
+        };
+        let acquire = request(
+            internal_worker_request::Operation::AcquireClientIngressReplySocket(
+                AcquireClientIngressReplySocket {
+                    client_runtime_id: vec![7; 16],
+                    remote: Some(remote.clone()),
+                    application: Some(application.clone()),
+                },
+            ),
+        );
+        let response = correlated_response(
+            &acquire,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: vec![7; 16],
+                    remote: Some(remote),
+                    application: Some(application),
+                },
+            )),
+        );
+        validate_response_for_request(&acquire, &response).expect("exact tuple");
+        let binding = ingress_reply_descriptor_binding(&acquire, &response).expect("binding");
+        assert_ne!(binding, [0; 32]);
+
+        let mut changed = response;
+        let Some(internal_worker_response::Outcome::IngressReplySocketReady(ready)) =
+            changed.outcome.as_mut()
+        else {
+            panic!("reply outcome");
+        };
+        ready.remote.as_mut().expect("remote").port += 1;
+        assert!(validate_response_for_request(&acquire, &changed).is_err());
+        assert!(ingress_reply_descriptor_binding(&acquire, &changed).is_err());
     }
 }

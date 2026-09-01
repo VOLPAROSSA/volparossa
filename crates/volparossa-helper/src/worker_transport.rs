@@ -32,14 +32,15 @@ use volparossa_linux_uapi::{
 use crate::{
     deadline::{HardDeadline, wait_for_fd, wait_for_readable_fd},
     internal_protocol::{
-        AcquireClientIngressSocket, AcquireTransportSocket, DeadlineBoundWorkerRequest,
-        InternalEndpointRole, InternalIngressAddressFamily, InternalIngressSocketKind,
-        InternalProtocolError, InternalSocketAddress, InternalTransportSocketKind,
-        InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult,
-        MAX_INTERNAL_WORKER_FRAME, decode_deadline_bound_request, decode_request, decode_response,
-        encode_deadline_bound_request, encode_request, encode_response, ingress_descriptor_binding,
-        ingress_descriptor_source_released_binding, internal_worker_request,
-        request_transfers_descriptor, transport_descriptor_binding,
+        AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireTransportSocket,
+        DeadlineBoundWorkerRequest, InternalEndpointRole, InternalIngressAddressFamily,
+        InternalIngressSocketKind, InternalProtocolError, InternalSocketAddress,
+        InternalTransportSocketKind, InternalWorkerRequest, InternalWorkerResponse,
+        InternalWorkerResult, MAX_INTERNAL_WORKER_FRAME, decode_deadline_bound_request,
+        decode_request, decode_response, encode_deadline_bound_request, encode_request,
+        encode_response, ingress_descriptor_binding, ingress_descriptor_source_released_binding,
+        ingress_reply_descriptor_binding, ingress_reply_descriptor_source_released_binding,
+        internal_worker_request, request_transfers_descriptor, transport_descriptor_binding,
         transport_descriptor_source_released_binding, validate_response_for_request,
     },
     worker_sandbox::PinnedWorkerNetworkNamespace,
@@ -853,6 +854,9 @@ fn descriptor_binding(
         Some(internal_worker_request::Operation::AcquireClientIngressSocket(_)) => {
             ingress_descriptor_binding(request, response)
         }
+        Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(_)) => {
+            ingress_reply_descriptor_binding(request, response)
+        }
         _ => Err(InternalProtocolError::Invalid),
     }
 }
@@ -867,6 +871,9 @@ fn descriptor_source_released_binding(
         }
         Some(internal_worker_request::Operation::AcquireClientIngressSocket(_)) => {
             ingress_descriptor_source_released_binding(request, response)
+        }
+        Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(_)) => {
+            ingress_reply_descriptor_source_released_binding(request, response)
         }
         _ => Err(InternalProtocolError::Invalid),
     }
@@ -1090,6 +1097,96 @@ pub(crate) fn validate_adopted_ingress_socket(
         expected_port,
     )?;
     Ok(descriptor)
+}
+
+/// Create one connected transparent IPv4 UDP socket for an exact intercepted flow reply.
+pub(crate) fn create_client_ingress_reply_socket(
+    request: &AcquireClientIngressReplySocket,
+) -> Result<OwnedFd, WorkerTransportError> {
+    let (remote, application) = ingress_reply_endpoints(request)?;
+    let socket = Socket::new(
+        Domain::IPV4,
+        Type::DGRAM.nonblocking().cloexec(),
+        Some(Protocol::UDP),
+    )?;
+    setsockopt(&socket, sockopt::IpTransparent, &true).map_err(errno_io)?;
+    socket.set_reuse_address(true)?;
+    setsockopt(&socket, sockopt::ReusePort, &true).map_err(errno_io)?;
+    // A compromised caller cannot turn this local delivery socket into an egress primitive: a
+    // packet routed beyond the immediately adjacent parent namespace expires before forwarding.
+    socket.set_ttl_v4(1)?;
+    socket.bind(&SockAddr::from(remote))?;
+    socket.connect(&SockAddr::from(application))?;
+    validate_ingress_reply_socket(&socket, remote, application)?;
+    Ok(socket.into())
+}
+
+/// Revalidate a reply descriptor and prove it came from the pinned ingress worker namespace.
+pub(crate) fn validate_adopted_ingress_reply_socket(
+    expected_namespace: &PinnedWorkerNetworkNamespace,
+    request: &AcquireClientIngressReplySocket,
+    descriptor: OwnedFd,
+) -> Result<OwnedFd, WorkerTransportError> {
+    let (remote, application) = ingress_reply_endpoints(request)?;
+    let socket = Socket::from(descriptor);
+    let observed_namespace = socket_network_namespace(&socket)?;
+    if !expected_namespace.matches_descriptor(&observed_namespace)? {
+        return Err(WorkerTransportError::Invalid);
+    }
+    validate_ingress_reply_socket(&socket, remote, application)?;
+    Ok(socket.into())
+}
+
+fn ingress_reply_endpoints(
+    request: &AcquireClientIngressReplySocket,
+) -> Result<(SocketAddr, SocketAddr), WorkerTransportError> {
+    let remote = concrete_ingress_ipv4(
+        request
+            .remote
+            .as_ref()
+            .ok_or(WorkerTransportError::Invalid)?,
+    )?;
+    let application = concrete_ingress_ipv4(
+        request
+            .application
+            .as_ref()
+            .ok_or(WorkerTransportError::Invalid)?,
+    )?;
+    if remote == application {
+        return Err(WorkerTransportError::Invalid);
+    }
+    Ok((remote, application))
+}
+
+fn concrete_ingress_ipv4(
+    value: &InternalSocketAddress,
+) -> Result<SocketAddr, WorkerTransportError> {
+    let port = u16::try_from(value.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(WorkerTransportError::Invalid)?;
+    let address = Ipv4Addr::from(
+        <[u8; 4]>::try_from(value.address.as_slice()).map_err(|_| WorkerTransportError::Invalid)?,
+    );
+    if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST {
+        return Err(WorkerTransportError::Invalid);
+    }
+    Ok(SocketAddr::from((address, port)))
+}
+
+fn validate_ingress_reply_socket(
+    socket: &Socket,
+    remote: SocketAddr,
+    application: SocketAddr,
+) -> Result<(), WorkerTransportError> {
+    validate_common(socket, Type::DGRAM, Protocol::UDP, remote, false)?;
+    if socket.peer_addr()?.as_socket() != Some(application)
+        || !getsockopt(socket, sockopt::IpTransparent).map_err(errno_io)?
+        || socket.ttl_v4()? != 1
+    {
+        return Err(WorkerTransportError::Invalid);
+    }
+    Ok(())
 }
 
 fn kernel_ingress_kind(value: InternalIngressSocketKind) -> KernelIngressSocketKind {

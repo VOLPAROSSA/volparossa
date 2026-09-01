@@ -15,7 +15,7 @@ use subtle::ConstantTimeEq as _;
 use thiserror::Error;
 use volparossa_linux_uapi::{
     IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
-    receive_udp_with_original_destination,
+    duplicate_descriptor_cloexec, receive_udp_with_original_destination,
 };
 use volparossa_policy::{PolicyError, TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{ReplayCache, TimePolicy};
@@ -143,6 +143,35 @@ impl ClientIngressRuntime {
             policy,
             now_ms,
         )
+    }
+
+    pub(crate) fn duplicate_ipv4_udp_poll_descriptor(
+        &self,
+    ) -> Result<std::os::fd::OwnedFd, io::Error> {
+        let socket = self.active.socket(IPV4_TRANSPARENT_UDP).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "IPv4 UDP ingress unavailable")
+        })?;
+        duplicate_descriptor_cloexec(&socket.descriptor())
+    }
+
+    pub(crate) async fn send_ipv4_udp_response(
+        &self,
+        application: SocketAddrV4,
+        remote: SocketAddrV4,
+        payload: &[u8],
+    ) -> Result<(), ClientIngressUdpError> {
+        if payload.len() > MAX_UDP_PAYLOAD_BYTES {
+            return Err(ClientIngressUdpError::ReplyPayload);
+        }
+        let reply = self
+            .helper
+            .acquire_ingress_reply_socket(&self.active, remote, application)
+            .await
+            .map_err(ClientIngressUdpError::ReplyAcquire)?;
+        if reply.remote() != remote || reply.application() != application {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        reply.send(payload).map_err(ClientIngressUdpError::Reply)
     }
 
     pub(crate) async fn shutdown(self) -> Result<(), ClientIngressRuntimeError> {
@@ -358,6 +387,12 @@ pub(crate) enum ClientIngressUdpError {
     Authorization(#[source] UdpError),
     #[error("signed UDP destination did not match kernel ingress evidence")]
     DestinationBinding,
+    #[error("UDP reply payload exceeded the fixed datagram bound")]
+    ReplyPayload,
+    #[error("connected UDP reply descriptor acquisition failed")]
+    ReplyAcquire(#[source] HelperClientError),
+    #[error("connected UDP reply send failed")]
+    Reply(#[source] io::Error),
 }
 
 #[cfg(test)]

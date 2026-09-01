@@ -21,23 +21,24 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use volparossa_routing::{
-    AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeaseBatch,
-    ActivatedClientIngress, AddMptcpEndpoint, BindHelperRuntime, ClosedPreparePlan, CommittedLease,
-    CommittedLeaseBatch, ContextRole, DestroyClientIngress, DestroyedClientIngress,
-    DestroyedContext, Empty, HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION, HelperRequest,
-    HelperResponse, HelperResult, HelperRuntime, IngressAddressFamily, IngressSocketAddress,
-    IngressSocketKind, IngressSocketReady, LeaseActivation, LeasePlan, MptcpEndpointMode,
-    PrepareClientIngress, PrepareLeaseBatch, PreparedClientIngress, PreparedIngressSocket,
-    PreparedLease, PreparedLeaseBatch, PublicUdpEndpoint, REQUIRED_INGRESS_SOCKETS,
-    ReconcileExpiredPrepare, ReconciledExpiredPrepare, RemoveMptcpEndpoint,
-    TransportSocketKind as RoutingTransportSocketKind, TransportSocketReady, UnderlayEvidence,
-    WireguardRole, helper_request, helper_response, operation_digest,
+    AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress,
+    ActivateLeaseBatch, ActivatedClientIngress, AddMptcpEndpoint, BindHelperRuntime,
+    ClosedPreparePlan, CommittedLease, CommittedLeaseBatch, ContextRole, DestroyClientIngress,
+    DestroyedClientIngress, DestroyedContext, Empty, HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION,
+    HelperRequest, HelperResponse, HelperResult, HelperRuntime, IngressAddressFamily,
+    IngressReplySocketReady, IngressSocketAddress, IngressSocketKind, IngressSocketReady,
+    LeaseActivation, LeasePlan, MptcpEndpointMode, PrepareClientIngress, PrepareLeaseBatch,
+    PreparedClientIngress, PreparedIngressSocket, PreparedLease, PreparedLeaseBatch,
+    PublicUdpEndpoint, REQUIRED_INGRESS_SOCKETS, ReconcileExpiredPrepare, ReconciledExpiredPrepare,
+    RemoveMptcpEndpoint, TransportSocketKind as RoutingTransportSocketKind, TransportSocketReady,
+    UnderlayEvidence, WireguardRole, helper_request, helper_response, operation_digest,
 };
 use zeroize::Zeroizing;
 
 const MAX_CONTEXTS: usize = 64;
 const MAX_CACHED_REQUESTS: usize = 1_024;
 const MAX_TRANSPORT_ACQUIRE_REQUEST_IDS: usize = 1_024;
+const MAX_INGRESS_REPLY_SOCKETS: u16 = 64;
 const MAX_PREPARE_RECONCILIATIONS: usize = 1_024;
 const MAX_RECONCILIATION_REQUEST_IDS: usize = 1_024;
 const MAX_CLOSED_PREPARE_IDENTITIES: usize = 16;
@@ -99,6 +100,7 @@ struct ClientIngressRecord {
     hard_expires_at_boottime_ns: u64,
     phase: ClientIngressPhase,
     sockets: BTreeMap<(i32, i32), ClientIngressSocketRecord>,
+    reply_sockets_issued: u16,
 }
 
 struct ClientIngressSocketRecord {
@@ -501,6 +503,7 @@ pub(crate) struct BackendRuntimeCompletion<T> {
 pub(crate) enum IngressBackendAction {
     Prepare,
     Acquire,
+    AcquireReply,
     Activate,
     Destroy,
 }
@@ -674,6 +677,11 @@ pub(crate) trait AsyncLeaseBackend: Send + Sync {
         request: IngressBackendRequest<AcquireIngressSocket>,
     ) -> BackendFuture<IngressBackendCompletion<OwnedFd>>;
 
+    fn acquire_client_ingress_reply_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressReplySocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>>;
+
     fn activate_client_ingress(
         self: Arc<Self>,
         request: IngressBackendRequest<ActivateClientIngress>,
@@ -704,6 +712,19 @@ impl AsyncLeaseBackend for UnavailableLeaseBackend {
     ) -> BackendFuture<BackendCompletion<Vec<PreparedKernelLease>>> {
         let (completion, _) = request.into_parts();
         Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn acquire_client_ingress_reply_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressReplySocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+        let (binding, _) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: Err(BackendError::Unavailable),
+            }
+        })
     }
 
     fn activate(
@@ -1140,7 +1161,10 @@ impl HelperEngine {
         );
         let is_ingress_acquire = matches!(
             request.operation.as_ref(),
-            Some(helper_request::Operation::AcquireIngressSocket(_))
+            Some(
+                helper_request::Operation::AcquireIngressSocket(_)
+                    | helper_request::Operation::AcquireIngressReplySocket(_)
+            )
         );
 
         // Tag 28 and committed Acquire success both retain dedicated non-evictable request-ID
@@ -1423,6 +1447,10 @@ impl HelperEngine {
                 self.acquire_client_ingress_async(request, request_id, digest, value, sender)
                     .await
             }
+            Some(helper_request::Operation::AcquireIngressReplySocket(value)) => {
+                self.acquire_client_ingress_reply_async(request, request_id, digest, value, sender)
+                    .await
+            }
             Some(helper_request::Operation::ActivateClientIngress(value)) => {
                 self.activate_client_ingress_async(request, request_id, digest, value, sender)
                     .await
@@ -1471,6 +1499,7 @@ impl HelperEngine {
             Some(
                 helper_request::Operation::AcquireTransportSocket(_)
                     | helper_request::Operation::AcquireIngressSocket(_)
+                    | helper_request::Operation::AcquireIngressReplySocket(_)
             )
         ) && result.response.result
             == HelperResult::Ok as i32
@@ -3284,6 +3313,7 @@ impl HelperEngine {
             hard_expires_at_boottime_ns: deadlines.hard_boottime_ns,
             phase: ClientIngressPhase::Prepared,
             sockets: records,
+            reply_sockets_issued: 0,
         });
         Some(execution(
             response(
@@ -3485,6 +3515,146 @@ impl HelperEngine {
                         descriptor_kind: value.descriptor_kind,
                         address_family: value.address_family,
                         local: Some(local),
+                    },
+                )),
+            ),
+            Some(Arc::new(descriptor)),
+        ))
+    }
+
+    #[allow(clippy::too_many_lines)] // Descriptor adoption, ambiguity cleanup, and commit stay atomic.
+    async fn acquire_client_ingress_reply_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &AcquireIngressReplySocket,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        let now = expiry_now(self.inner.clock.as_ref());
+        let binding = {
+            let state = self.inner.state.lock().await;
+            let Some(ingress) = state.ingress.as_ref() else {
+                return Some(execution(
+                    response(request, HelperResult::NotFound, "INGRESS_ABSENT", None),
+                    None,
+                ));
+            };
+            if !deadline_live(
+                now,
+                ingress.hard_expires_at_unix,
+                ingress.hard_expires_at_boottime_ns,
+            ) {
+                return Some(execution(
+                    response(request, HelperResult::Expired, "INGRESS_EXPIRED", None),
+                    None,
+                ));
+            }
+            if value.client_runtime_id.as_slice() != ingress.client_runtime_id
+                || !matches_handle(&ingress.ingress_handle, &value.ingress_handle)
+                || ingress.phase != ClientIngressPhase::Active
+                || ingress.reply_sockets_issued >= MAX_INGRESS_REPLY_SOCKETS
+            {
+                return Some(execution(invalid_response(request), None));
+            }
+            IngressBackendBinding {
+                helper_runtime_id: self.inner.runtime_id,
+                client_runtime_id: ingress.client_runtime_id,
+                generation: ingress.generation,
+                request_id,
+                request_digest: digest,
+                action: IngressBackendAction::AcquireReply,
+                call_deadline: Instant::now() + self.inner.backend_timeout,
+            }
+        };
+        let backend = Arc::clone(&self.inner.backend);
+        let backend_request = IngressBackendRequest::new(binding, value.clone());
+        let call = self
+            .call_backend(binding.call_deadline, move || {
+                backend.acquire_client_ingress_reply_socket(backend_request)
+            })
+            .await;
+        let descriptor = match call {
+            BackendCall::Complete(completion) if completion.binding == binding => {
+                match completion.result {
+                    Ok(descriptor) => descriptor,
+                    Err(error) => {
+                        return Some(execution(
+                            backend_response(request, error, "INGRESS_REPLY_ACQUIRE_FAILED"),
+                            None,
+                        ));
+                    }
+                }
+            }
+            BackendCall::TimedOut(task) => {
+                self.send_ambiguous(request, sender).await;
+                if let Ok(completion) = task.await {
+                    drop(completion);
+                }
+                self.destroy_ingress_backend_quiet(binding.client_runtime_id, binding.generation)
+                    .await;
+                self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
+                    .await;
+                return None;
+            }
+            BackendCall::Complete(_) | BackendCall::Ambiguous => {
+                self.destroy_ingress_backend_quiet(binding.client_runtime_id, binding.generation)
+                    .await;
+                self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
+                    .await;
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "INGRESS_BACKEND_AMBIGUOUS",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+        };
+        let ingress_handle = {
+            let mut state = self.inner.state.lock().await;
+            let Some(ingress) = state.ingress.as_mut().filter(|ingress| {
+                ingress.client_runtime_id == binding.client_runtime_id
+                    && ingress.generation == binding.generation
+                    && ingress.phase == ClientIngressPhase::Active
+                    && ingress.reply_sockets_issued < MAX_INGRESS_REPLY_SOCKETS
+            }) else {
+                drop(descriptor);
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "INGRESS_STALE",
+                        None,
+                    ),
+                    None,
+                ));
+            };
+            ingress.reply_sockets_issued = ingress.reply_sockets_issued.saturating_add(1);
+            let ingress_handle = ingress.ingress_handle;
+            state.ingress_acquire_request_ids.insert(
+                request_id,
+                IngressAcquireRequestRecord {
+                    digest,
+                    client_runtime_id: binding.client_runtime_id,
+                    generation: binding.generation,
+                },
+            );
+            ingress_handle
+        };
+        Some(execution(
+            response(
+                request,
+                HelperResult::Ok,
+                "INGRESS_REPLY_SOCKET_READY",
+                Some(helper_response::Outcome::IngressReplySocketReady(
+                    IngressReplySocketReady {
+                        client_runtime_id: binding.client_runtime_id.to_vec(),
+                        ingress_handle: ingress_handle.to_vec(),
+                        remote: value.remote.clone(),
+                        application: value.application.clone(),
                     },
                 )),
             ),
@@ -5590,6 +5760,7 @@ fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
         }
         helper_request::Operation::PrepareClientIngress(_)
         | helper_request::Operation::AcquireIngressSocket(_)
+        | helper_request::Operation::AcquireIngressReplySocket(_)
         | helper_request::Operation::ActivateClientIngress(_)
         | helper_request::Operation::DestroyClientIngress(_)
         | helper_request::Operation::CleanupOwned(_) => return None,
@@ -6085,6 +6256,19 @@ mod tests {
         fn acquire_client_ingress_socket(
             self: Arc<Self>,
             request: IngressBackendRequest<AcquireIngressSocket>,
+        ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+            let (binding, _) = request.into_parts();
+            Box::pin(async move {
+                IngressBackendCompletion {
+                    binding,
+                    result: Err(BackendError::Unavailable),
+                }
+            })
+        }
+
+        fn acquire_client_ingress_reply_socket(
+            self: Arc<Self>,
+            request: IngressBackendRequest<AcquireIngressReplySocket>,
         ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
             let (binding, _) = request.into_parts();
             Box::pin(async move {

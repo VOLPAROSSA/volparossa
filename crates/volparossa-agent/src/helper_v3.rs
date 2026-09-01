@@ -4,7 +4,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Read,
-    os::fd::{AsFd, BorrowedFd, OwnedFd},
+    net::SocketAddrV4,
+    os::fd::{AsFd, AsRawFd as _, BorrowedFd, OwnedFd},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::Duration,
@@ -20,19 +21,19 @@ use tokio::{
 };
 use volparossa_linux_uapi::{
     IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
-    receive_fd_with_binding, validate_ingress_socket,
+    receive_fd_with_binding, validate_ingress_socket, validate_ingress_udp_reply_socket,
 };
 use volparossa_routing::{
-    AcquireIngressSocket, AcquireTransportSocket,
+    AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
     ActivateClientIngress as ActivateClientIngressRequest, ActivateLeaseBatch, ActivatedLeaseBatch,
     AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, ClosedPreparePlan, CommitLeaseBatch,
     CommittedLeaseBatch, DestroyClientIngress as DestroyClientIngressRequest, DestroyContext,
     DestroyedContext, Empty, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
-    HelperRuntime, IngressAddressFamily as WireIngressSocketFamily, IngressSocketAddress,
-    IngressSocketKind as WireIngressSocketKind, IngressSocketReady, IngressSocketReceipt,
-    PrepareClientIngress as PrepareClientIngressRequest, PrepareIntent, PrepareLeaseBatch,
-    PreparedClientIngress as PreparedClientIngressResponse, PreparedIngressSocket,
-    PreparedLeaseBatch, REQUIRED_INGRESS_SOCKETS, ReconcileExpiredPrepare,
+    HelperRuntime, IngressAddressFamily as WireIngressSocketFamily, IngressReplySocketReady,
+    IngressSocketAddress, IngressSocketKind as WireIngressSocketKind, IngressSocketReady,
+    IngressSocketReceipt, PrepareClientIngress as PrepareClientIngressRequest, PrepareIntent,
+    PrepareLeaseBatch, PreparedClientIngress as PreparedClientIngressResponse,
+    PreparedIngressSocket, PreparedLeaseBatch, REQUIRED_INGRESS_SOCKETS, ReconcileExpiredPrepare,
     ReconciledExpiredPrepare, RemoveMptcpEndpoint, TransportSocketReady, descriptor_fd_binding,
     encode_request, helper_request, helper_response, operation_digest, read_response,
 };
@@ -180,6 +181,39 @@ pub struct AcquiredIngressSocket {
     local: std::net::SocketAddr,
 }
 
+/// One connected, non-retargetable transparent UDP socket for an exact intercepted flow reply.
+pub(crate) struct AcquiredIngressReplySocket {
+    descriptor: OwnedFd,
+    remote: SocketAddrV4,
+    application: SocketAddrV4,
+}
+
+impl AcquiredIngressReplySocket {
+    pub(crate) fn send(&self, payload: &[u8]) -> Result<(), std::io::Error> {
+        let written = nix::sys::socket::send(
+            self.descriptor.as_raw_fd(),
+            payload,
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT | nix::sys::socket::MsgFlags::MSG_NOSIGNAL,
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+        if written != payload.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "kernel did not send the complete ingress UDP reply",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn remote(&self) -> SocketAddrV4 {
+        self.remote
+    }
+
+    pub(crate) const fn application(&self) -> SocketAddrV4 {
+        self.application
+    }
+}
+
 impl AcquiredIngressSocket {
     /// Borrow the close-on-exec descriptor without exposing a serializable integer.
     #[must_use]
@@ -292,6 +326,7 @@ enum DescriptorExpectation {
     None,
     Transport,
     Ingress,
+    IngressReply,
 }
 
 struct ClientExecution {
@@ -1113,6 +1148,42 @@ impl HelperClient {
         })
     }
 
+    /// Acquire one exact connected transparent IPv4 UDP reply descriptor for active ingress.
+    pub(crate) async fn acquire_ingress_reply_socket(
+        &self,
+        ingress: &ActiveClientIngress,
+        remote: SocketAddrV4,
+        application: SocketAddrV4,
+    ) -> Result<AcquiredIngressReplySocket, HelperClientError> {
+        let authority = ingress.authority;
+        let operation = AcquireIngressReplySocket {
+            client_runtime_id: authority.client_runtime_id.to_vec(),
+            ingress_handle: authority.ingress_handle.to_vec(),
+            remote: Some(ingress_ipv4_address(remote)),
+            application: Some(ingress_ipv4_address(application)),
+        };
+        let execution = self
+            .execute_operation(
+                helper_request::Operation::AcquireIngressReplySocket(operation),
+                DescriptorExpectation::IngressReply,
+            )
+            .await?;
+        let helper_response::Outcome::IngressReplySocketReady(ready) = execution.outcome else {
+            return Err(HelperClientError::Correlation);
+        };
+        if !ingress_reply_ready_matches(&ready, authority, remote, application) {
+            return Err(HelperClientError::Correlation);
+        }
+        let descriptor = execution.descriptor.ok_or(HelperClientError::Correlation)?;
+        validate_ingress_udp_reply_socket(&descriptor, remote, application)
+            .map_err(HelperClientError::DescriptorValidation)?;
+        Ok(AcquiredIngressReplySocket {
+            descriptor,
+            remote,
+            application,
+        })
+    }
+
     /// Idempotently destroy one prepared ingress capability.
     ///
     /// # Errors
@@ -1434,6 +1505,9 @@ impl HelperClient {
                 Some(helper_response::Outcome::IngressSocketReady(_)) => {
                     DescriptorExpectation::Ingress
                 }
+                Some(helper_response::Outcome::IngressReplySocketReady(_)) => {
+                    DescriptorExpectation::IngressReply
+                }
                 _ => DescriptorExpectation::None,
             };
             if actual_descriptor != descriptor_expectation {
@@ -1636,9 +1710,7 @@ fn client_ingress_local(
             if !address.is_unspecified() {
                 return Err(HelperClientError::Correlation);
             }
-            Ok(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
-                address, port,
-            )))
+            Ok(std::net::SocketAddr::V4(SocketAddrV4::new(address, port)))
         }
         ClientIngressSocketFamily::Ipv6 => {
             let address: [u8; 16] = value
@@ -1670,6 +1742,25 @@ fn ingress_ready_matches(
         && ready.descriptor_kind == wire_ingress_kind(identity.kind) as i32
         && ready.address_family == wire_ingress_family(identity.family) as i32
         && ready.local.as_ref() == Some(expected_local)
+}
+
+fn ingress_ipv4_address(value: SocketAddrV4) -> IngressSocketAddress {
+    IngressSocketAddress {
+        address: value.ip().octets().to_vec(),
+        port: u32::from(value.port()),
+    }
+}
+
+fn ingress_reply_ready_matches(
+    ready: &IngressReplySocketReady,
+    authority: IngressAuthority,
+    remote: SocketAddrV4,
+    application: SocketAddrV4,
+) -> bool {
+    ready.client_runtime_id.as_slice() == authority.client_runtime_id
+        && ready.ingress_handle.as_slice() == authority.ingress_handle
+        && ready.remote.as_ref() == Some(&ingress_ipv4_address(remote))
+        && ready.application.as_ref() == Some(&ingress_ipv4_address(application))
 }
 
 fn ingress_receipts(

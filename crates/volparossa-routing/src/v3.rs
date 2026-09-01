@@ -52,7 +52,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -62,10 +62,10 @@ pub mod helper_request {
     use prost::Oneof;
 
     use super::{
-        AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeaseBatch,
-        AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, CommitLeaseBatch, DestroyClientIngress,
-        DestroyContext, PrepareClientIngress, PrepareLeaseBatch, ReconcileExpiredPrepare,
-        RemoveMptcpEndpoint,
+        AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
+        ActivateClientIngress, ActivateLeaseBatch, AddMptcpEndpoint, BindHelperRuntime,
+        CleanupOwned, CommitLeaseBatch, DestroyClientIngress, DestroyContext, PrepareClientIngress,
+        PrepareLeaseBatch, ReconcileExpiredPrepare, RemoveMptcpEndpoint,
     };
 
     /// Exactly one typed operation.
@@ -113,6 +113,9 @@ pub mod helper_request {
         /// Read this helper process's non-secret per-start identity.
         #[prost(message, tag = "35")]
         BindHelperRuntime(BindHelperRuntime),
+        /// Acquire one exact connected IPv4 reply socket for an active ingress flow.
+        #[prost(message, tag = "36")]
+        AcquireIngressReplySocket(AcquireIngressReplySocket),
     }
 }
 
@@ -342,6 +345,23 @@ pub struct DestroyClientIngress {
     /// Opaque helper-issued ingress handle.
     #[prost(bytes = "vec", tag = "2")]
     pub ingress_handle: Vec<u8>,
+}
+
+/// Acquire one non-retargetable transparent UDP reply socket for an active IPv4 ingress flow.
+#[derive(Clone, PartialEq, Message)]
+pub struct AcquireIngressReplySocket {
+    /// Exact client runtime returned by prepare.
+    #[prost(bytes = "vec", tag = "1")]
+    pub client_runtime_id: Vec<u8>,
+    /// Opaque helper-issued ingress handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub ingress_handle: Vec<u8>,
+    /// Original Internet tuple which must become the reply socket's local tuple.
+    #[prost(message, optional, tag = "3")]
+    pub remote: Option<IngressSocketAddress>,
+    /// Kernel-observed application tuple which must become the connected peer.
+    #[prost(message, optional, tag = "4")]
+    pub application: Option<IngressSocketAddress>,
 }
 /// Public UDP endpoint. The helper never accepts a local listen address from the agent.
 #[derive(Clone, PartialEq, Message)]
@@ -638,7 +658,7 @@ pub struct HelperResponse {
     /// Operation-specific success output; absent on failure.
     #[prost(
         oneof = "helper_response::Outcome",
-        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35"
+        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36"
     )]
     pub outcome: Option<helper_response::Outcome>,
 }
@@ -649,8 +669,8 @@ pub mod helper_response {
 
     use super::{
         ActivatedClientIngress, ActivatedLeaseBatch, CommittedLeaseBatch, DestroyedClientIngress,
-        DestroyedContext, Empty, HelperRuntime, IngressSocketReady, PreparedClientIngress,
-        PreparedLeaseBatch, ReconciledExpiredPrepare, TransportSocketReady,
+        DestroyedContext, Empty, HelperRuntime, IngressReplySocketReady, IngressSocketReady,
+        PreparedClientIngress, PreparedLeaseBatch, ReconciledExpiredPrepare, TransportSocketReady,
     };
 
     /// Exactly one successful outcome.
@@ -692,6 +712,9 @@ pub mod helper_response {
         /// Non-secret identity of the helper process serving this connection.
         #[prost(message, tag = "35")]
         HelperRuntime(HelperRuntime),
+        /// Exact endpoints of one connected transparent IPv4 reply descriptor.
+        #[prost(message, tag = "36")]
+        IngressReplySocketReady(IngressReplySocketReady),
     }
 }
 
@@ -898,6 +921,23 @@ pub struct ActivatedClientIngress {
     pub ingress_handle: Vec<u8>,
 }
 
+/// Metadata bound to one separately transferred connected ingress reply descriptor.
+#[derive(Clone, PartialEq, Message)]
+pub struct IngressReplySocketReady {
+    /// Echoed ephemeral client runtime identifier.
+    #[prost(bytes = "vec", tag = "1")]
+    pub client_runtime_id: Vec<u8>,
+    /// Exact helper-issued ingress handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub ingress_handle: Vec<u8>,
+    /// Kernel-revalidated local tuple, equal to the original remote.
+    #[prost(message, optional, tag = "3")]
+    pub remote: Option<IngressSocketAddress>,
+    /// Kernel-revalidated connected peer, equal to the intercepted application.
+    #[prost(message, optional, tag = "4")]
+    pub application: Option<IngressSocketAddress>,
+}
+
 /// Idempotent client-ingress destruction result.
 #[derive(Clone, PartialEq, Message)]
 pub struct DestroyedClientIngress {
@@ -1064,6 +1104,32 @@ pub fn ingress_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperProt
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// Derive the exact binding sent atomically with one connected IPv4 ingress reply descriptor.
+///
+/// # Errors
+///
+/// Returns an error unless value is a valid successful ingress reply-socket response.
+pub fn ingress_reply_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperProtocolError> {
+    validate_response(value)?;
+    let Some(helper_response::Outcome::IngressReplySocketReady(ready)) = value.outcome.as_ref()
+    else {
+        return Err(HelperProtocolError::Invalid("ingress reply FD outcome"));
+    };
+    let canonical = value.encode_to_vec();
+    let canonical_length = u32::try_from(canonical.len())
+        .map_err(|_| HelperProtocolError::Invalid("ingress reply FD response length"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"VOLPAROSSA helper ingress reply descriptor binding v3\0");
+    hasher.update(&value.protocol_version.to_be_bytes());
+    hasher.update(&value.request_id);
+    hasher.update(&value.operation_digest);
+    hasher.update(&ready.client_runtime_id);
+    hasher.update(&ready.ingress_handle);
+    hasher.update(&canonical_length.to_be_bytes());
+    hasher.update(&canonical);
+    Ok(*hasher.finalize().as_bytes())
+}
+
 /// Derive the binding for either descriptor-bearing helper success outcome.
 ///
 /// # Errors
@@ -1073,6 +1139,9 @@ pub fn descriptor_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperP
     match value.outcome.as_ref() {
         Some(helper_response::Outcome::TransportSocketReady(_)) => transport_fd_binding(value),
         Some(helper_response::Outcome::IngressSocketReady(_)) => ingress_fd_binding(value),
+        Some(helper_response::Outcome::IngressReplySocketReady(_)) => {
+            ingress_reply_fd_binding(value)
+        }
         _ => Err(HelperProtocolError::Invalid("descriptor FD outcome")),
     }
 }
@@ -1141,6 +1210,9 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
             )
         }
         Operation::DestroyClientIngress(_) => "destroy one owned client ingress runtime".to_owned(),
+        Operation::AcquireIngressReplySocket(_) => {
+            "acquire one connected IPv4 client-ingress UDP reply descriptor".to_owned()
+        }
         Operation::BindHelperRuntime(value) if value.prepare_intent.is_some() => {
             "bind helper runtime and pre-register one Prepare intent".to_owned()
         }
@@ -1341,6 +1413,26 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
             runtime(&operation.client_runtime_id)?;
             handle(&operation.ingress_handle)
         }
+        Operation::AcquireIngressReplySocket(operation) => {
+            runtime(&operation.client_runtime_id)?;
+            handle(&operation.ingress_handle)?;
+            let remote = concrete_ingress_ipv4(
+                operation
+                    .remote
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
+            )?;
+            let application = concrete_ingress_ipv4(
+                operation
+                    .application
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
+            )?;
+            if remote == application {
+                return Err(HelperProtocolError::Invalid("ingress reply address pair"));
+            }
+            Ok(())
+        }
         Operation::BindHelperRuntime(operation) => {
             operation.prepare_intent.as_ref().map_or(Ok(()), |intent| {
                 if value.request_id == intent.prepare_request_id {
@@ -1522,6 +1614,26 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
         ),
         Outcome::PreparedClientIngress(value) => validate_prepared_ingress_outcome(value),
         Outcome::IngressSocketReady(value) => validate_ingress_ready_outcome(value),
+        Outcome::IngressReplySocketReady(value) => {
+            runtime(&value.client_runtime_id)?;
+            handle(&value.ingress_handle)?;
+            let remote = concrete_ingress_ipv4(
+                value
+                    .remote
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
+            )?;
+            let application = concrete_ingress_ipv4(
+                value
+                    .application
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
+            )?;
+            if remote == application {
+                return Err(HelperProtocolError::Invalid("ingress reply address pair"));
+            }
+            Ok(())
+        }
         Outcome::ActivatedClientIngress(value) => {
             runtime(&value.client_runtime_id)?;
             handle(&value.ingress_handle)
@@ -1733,6 +1845,25 @@ fn ingress_local(
         return Err(HelperProtocolError::Invalid("ingress local address"));
     }
     Ok(())
+}
+
+fn concrete_ingress_ipv4(
+    value: &IngressSocketAddress,
+) -> Result<std::net::SocketAddrV4, HelperProtocolError> {
+    let address: [u8; 4] = value
+        .address
+        .as_slice()
+        .try_into()
+        .map_err(|_| HelperProtocolError::Invalid("ingress reply IPv4 address"))?;
+    let address = Ipv4Addr::from(address);
+    let port = u16::try_from(value.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(HelperProtocolError::Invalid("ingress reply UDP port"))?;
+    if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST {
+        return Err(HelperProtocolError::Invalid("ingress reply IPv4 address"));
+    }
+    Ok(std::net::SocketAddrV4::new(address, port))
 }
 
 fn bound_context(context_id: &[u8], context_handle: &[u8]) -> Result<(), HelperProtocolError> {
@@ -2504,11 +2635,27 @@ mod tests {
                 ingress_handle: vec![8; 32],
             }),
         );
+        let reply = ingress_request(
+            35,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(IngressSocketAddress {
+                    address: vec![8, 8, 8, 8],
+                    port: 443,
+                }),
+                application: Some(IngressSocketAddress {
+                    address: vec![192, 0, 2, 20],
+                    port: 50_000,
+                }),
+            }),
+        );
         for (request, tag) in [
             (prepare, [0xfa, 0x01]),
             (acquire, [0x82, 0x02]),
             (activate, [0x8a, 0x02]),
             (destroy, [0x92, 0x02]),
+            (reply, [0xa2, 0x02]),
         ] {
             let bytes = request.encode_to_vec();
             assert!(bytes.windows(2).any(|window| window == tag));
@@ -3594,6 +3741,56 @@ mod tests {
         value.local = Some(ingress_local(IngressAddressFamily::Ipv6, 42_000));
         assert_ne!(
             ingress_fd_binding(&changed_family).expect("changed family binding"),
+            binding
+        );
+    }
+
+    #[test]
+    fn ingress_reply_descriptor_binding_commits_exact_flow_tuple() {
+        let remote = IngressSocketAddress {
+            address: vec![8, 8, 8, 8],
+            port: 443,
+        };
+        let application = IngressSocketAddress {
+            address: vec![192, 0, 2, 20],
+            port: 50_000,
+        };
+        let request = ingress_request(
+            35,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(remote.clone()),
+                application: Some(application.clone()),
+            }),
+        );
+        let response = HelperResponse {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: HelperResult::Ok as i32,
+            diagnostic_code: "INGRESS_REPLY_SOCKET_READY".to_owned(),
+            operation_digest: operation_digest(&request).expect("digest").to_vec(),
+            outcome: Some(helper_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                    remote: Some(remote),
+                    application: Some(application),
+                },
+            )),
+        };
+        let binding = ingress_reply_fd_binding(&response).expect("reply binding");
+        assert_eq!(descriptor_fd_binding(&response).expect("generic"), binding);
+
+        let mut changed = response;
+        let Some(helper_response::Outcome::IngressReplySocketReady(ready)) =
+            changed.outcome.as_mut()
+        else {
+            panic!("reply outcome");
+        };
+        ready.application.as_mut().expect("application").port += 1;
+        assert_ne!(
+            ingress_reply_fd_binding(&changed).expect("changed tuple"),
             binding
         );
     }

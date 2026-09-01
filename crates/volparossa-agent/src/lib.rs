@@ -36,6 +36,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
+    io::unix::AsyncFd,
     sync::{RwLock, watch},
     task::JoinHandle,
 };
@@ -45,7 +46,7 @@ use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
 
-use client_ingress::ClientIngressRuntime;
+use client_ingress::{ClientIngressRuntime, ClientIngressUdpError};
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
 use helper::HelperClient;
@@ -62,6 +63,7 @@ pub use paths::{
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+const INGRESS_POLICY_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Fully loaded unprivileged service.
 pub struct Agent {
@@ -158,18 +160,20 @@ impl Agent {
             Some(
                 ClientIngressRuntime::start(self.helper.clone())
                     .await
+                    .map(Arc::new)
                     .map_err(|_| AgentError::ClientIngress)?,
             )
         } else {
             None
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let routes = ClientRouteControl::default();
         let control_context = ControlContext {
             state: Arc::clone(&self.state),
             config: Arc::clone(&self.config),
             discovery: self.discovery_control.clone(),
             helper: self.helper.clone(),
-            routes: ClientRouteControl::default(),
+            routes: routes.clone(),
         };
         let mut control_task = tokio::spawn(serve_control(
             listener,
@@ -196,6 +200,14 @@ impl Agent {
             self.metrics.clone(),
             shutdown_tx.subscribe(),
         ));
+        let ingress_state = Arc::clone(&self.state);
+        let ingress_runtime = client_ingress.as_ref().map(Arc::clone);
+        let mut ingress_task = tokio::spawn(run_client_udp_ingress(
+            ingress_runtime,
+            ingress_state,
+            routes,
+            shutdown_tx.subscribe(),
+        ));
 
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
@@ -211,15 +223,21 @@ impl Agent {
                 Ok(Err(error)) => Err(AgentError::Metrics(error)),
                 Ok(Ok(())) | Err(_) => Err(AgentError::Task),
             },
+            _ = &mut ingress_task => Err(AgentError::Task),
         };
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
         stop_task(&mut discovery_task).await;
         stop_task(&mut maintenance_task).await;
         stop_task(&mut metrics_task).await;
+        stop_task(&mut ingress_task).await;
         drop(socket_guard);
 
         if let Some(client_ingress) = client_ingress {
+            let Ok(client_ingress) = Arc::try_unwrap(client_ingress) else {
+                let _ = self.helper.cleanup_owned().await;
+                return Err(AgentError::ShutdownCleanup);
+            };
             if client_ingress.shutdown().await.is_err() {
                 let _ = self.helper.cleanup_owned().await;
                 return Err(AgentError::ShutdownCleanup);
@@ -233,6 +251,140 @@ impl Agent {
                 .map_err(|_| AgentError::ShutdownCleanup)?;
         }
         run_result
+    }
+}
+
+#[allow(clippy::single_match_else, clippy::too_many_lines)] // Keep readiness and route ownership in one actor.
+async fn run_client_udp_ingress(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let Some(runtime) = runtime else {
+        wait_for_shutdown(&mut shutdown).await;
+        return;
+    };
+    let Ok(descriptor) = runtime.duplicate_ipv4_udp_poll_descriptor() else {
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "INGRESS_UDP_POLL_FAILED", unix_millis());
+        return;
+    };
+    let Ok(poll) = AsyncFd::new(descriptor) else {
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "INGRESS_UDP_POLL_FAILED", unix_millis());
+        return;
+    };
+    loop {
+        let mut ready = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            result = poll.readable() => match result {
+                Ok(ready) => ready,
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "INGRESS_UDP_POLL_FAILED",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            },
+        };
+        let now_ms = unix_millis();
+        let policy = state.read().await.active_policy(now_ms);
+        let Some(policy) = policy else {
+            ready.clear_ready();
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(INGRESS_POLICY_BACKOFF) => {}
+            }
+            continue;
+        };
+        let ingress = match runtime.try_receive_ipv4_udp(&policy, now_ms) {
+            Ok(ingress) => ingress,
+            Err(ClientIngressUdpError::Receive(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                ready.clear_ready();
+                continue;
+            }
+            Err(
+                ClientIngressUdpError::Policy(_)
+                | ClientIngressUdpError::PolicyBinding
+                | ClientIngressUdpError::DestinationBinding,
+            ) => {
+                ready.clear_ready();
+                state.write().await.record_policy_rejection();
+                continue;
+            }
+            Err(_) => {
+                ready.clear_ready();
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_UDP_DATAGRAM_REJECTED",
+                    unix_millis(),
+                );
+                continue;
+            }
+        };
+        ready.clear_ready();
+        if Box::pin(routes.activate_udp_ingress(ingress, &policy, now_ms))
+            .await
+            .is_err()
+        {
+            state.write().await.log(
+                LogLevel::Warn,
+                "INGRESS_UDP_ROUTE_UNAVAILABLE",
+                unix_millis(),
+            );
+            continue;
+        }
+        let response = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            result = routes.receive_udp_response() => match result {
+                Ok(response) => response,
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_UDP_RESPONSE_UNAVAILABLE",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+            },
+        };
+        if runtime
+            .send_ipv4_udp_response(
+                response.application(),
+                response.remote(),
+                response.payload(),
+            )
+            .await
+            .is_err()
+        {
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis());
+        }
     }
 }
 

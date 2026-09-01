@@ -463,6 +463,7 @@ async fn write_execution(
         Some(
             helper_response::Outcome::TransportSocketReady(_)
                 | helper_response::Outcome::IngressSocketReady(_)
+                | helper_response::Outcome::IngressReplySocketReady(_)
         )
     );
     let binding = match (expects_descriptor, execution.descriptor.as_ref()) {
