@@ -54,12 +54,13 @@ use volparossa_discovery::{
     MptcpSessionStartRequest, UdpExitSessionSignal as DiscoveryUdpExitSessionSignal,
     UdpSessionStartRequest,
 };
+use volparossa_local_control::{PathState, PathSummary};
 use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{
     MAX_CONTROL_MESSAGE_SIZE, ProbeAddressFamily, ProbeLegEvidence, ReplayCache, SignedEnvelope,
     TimePolicy, Transport, decode_canonical, encode_canonical,
 };
-use volparossa_quic::NativeClient;
+use volparossa_quic::{NativeClient, NativePathStatus};
 use volparossa_reservation::{
     ClientNativeRouteAuthorization, ExitReservationIntent, RelayPathIntent, ReservationCoordinator,
     SignedExitFinalizeRequest, SignedProbePermitRequest, VerifiedExitCapacityHold,
@@ -108,6 +109,7 @@ use crate::{
     mptcp_flow_runtime::{ActiveProductionMptcpClientFlow, activate_production_mptcp_client_flow},
     mptcp_transport::{ClientMptcpTransport, ExitMptcpListenerSignal},
     paths::DEFAULT_MPQUIC_SOCKET,
+    state::AgentState,
 };
 use retirement::{PreparedContextOwner, RetirementOutcome, RetirementSink, RetirementSupervisor};
 
@@ -130,6 +132,7 @@ const MPQUIC_READY_WAIT: Duration = Duration::from_secs(10);
 pub(crate) struct ClientRouteControl {
     state: Arc<Mutex<ClientRouteControlState>>,
     mpquic_socket: Arc<PathBuf>,
+    agent_state: Option<Arc<tokio::sync::RwLock<AgentState>>>,
 }
 
 impl Default for ClientRouteControl {
@@ -163,7 +166,21 @@ enum ClientTransportState {
 
 struct ActiveProductionMpquicRoute {
     session: ProductionMpquicSession,
+    identity: CommittedMpquicRouteIdentity,
     browser_flow: Option<BrowserQuicFlowBinding>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommittedMpquicPathIdentity {
+    path_id: u32,
+    relay_peer_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommittedMpquicRouteIdentity {
+    route_context_id: [u8; ID_BYTES],
+    exit_peer_id: String,
+    paths: Vec<CommittedMpquicPathIdentity>,
 }
 
 impl EstablishedClientRoute {
@@ -199,6 +216,55 @@ impl EstablishedClientRoute {
             let _ = Box::pin(route.disconnect()).await;
         }
         let _ = self.orchestrator.shutdown().await;
+    }
+}
+
+impl ActiveProductionMpquicRoute {
+    async fn path_summaries(&self) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
+        let statuses = self
+            .session
+            .path_statuses()
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        self.identity.project(&statuses)
+    }
+}
+
+impl CommittedMpquicRouteIdentity {
+    fn project(
+        &self,
+        statuses: &[NativePathStatus],
+    ) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
+        if statuses.len() != self.paths.len() || !(2..=8).contains(&statuses.len()) {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let statuses = statuses
+            .iter()
+            .map(|status| (status.path_id, status))
+            .collect::<BTreeMap<_, _>>();
+        if statuses.len() != self.paths.len() {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let mut summaries = Vec::with_capacity(statuses.len());
+        for identity in &self.paths {
+            let status = statuses
+                .get(&identity.path_id)
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            summaries.push(PathSummary {
+                route_context_id: self.route_context_id.to_vec(),
+                path_id: status.path_id,
+                relay_peer_id: identity.relay_peer_id.clone(),
+                exit_peer_id: self.exit_peer_id.clone(),
+                state: if status.data_carrying {
+                    PathState::Active as i32
+                } else {
+                    PathState::Reachable as i32
+                },
+                smoothed_rtt_micros: status.smoothed_rtt_us,
+                user_bytes: status.delivered_bytes,
+            });
+        }
+        Ok(summaries)
     }
 }
 
@@ -259,6 +325,18 @@ impl ClientRouteControl {
         Self {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
             mpquic_socket: Arc::new(mpquic_socket),
+            agent_state: None,
+        }
+    }
+
+    pub(crate) fn new_with_agent_state(
+        mpquic_socket: PathBuf,
+        agent_state: Arc<tokio::sync::RwLock<AgentState>>,
+    ) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
+            mpquic_socket: Arc::new(mpquic_socket),
+            agent_state: Some(agent_state),
         }
     }
 
@@ -359,17 +437,62 @@ impl ClientRouteControl {
             }
             Err(error) => Err(error),
         };
-        let mut state = self.state.lock().await;
         match result {
             Ok(established) => {
                 let progress = established.progress();
+                let mpquic_paths = match &established.transport {
+                    ClientTransportState::Mpquic(active) => match active.path_summaries().await {
+                        Ok(paths) => Some(paths),
+                        Err(error) => {
+                            Box::pin(established.shutdown()).await;
+                            let mut state = self.state.lock().await;
+                            *state = ClientRouteControlState::Idle;
+                            return Err(error);
+                        }
+                    },
+                    _ => None,
+                };
+                let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Established(Box::new(established));
+                if let Some(paths) = mpquic_paths {
+                    if self.replace_agent_mpquic_paths(paths).await.is_err() {
+                        let previous =
+                            std::mem::replace(&mut *state, ClientRouteControlState::Idle);
+                        drop(state);
+                        if let ClientRouteControlState::Established(established) = previous {
+                            Box::pin(established.shutdown()).await;
+                        }
+                        self.clear_agent_mpquic_paths().await;
+                        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+                    }
+                }
                 Ok(progress)
             }
             Err(error) => {
+                let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Idle;
                 Err(error)
             }
+        }
+    }
+
+    async fn replace_agent_mpquic_paths(
+        &self,
+        paths: Vec<PathSummary>,
+    ) -> Result<(), ClientRouteConnectError> {
+        let Some(agent_state) = self.agent_state.as_ref() else {
+            return Ok(());
+        };
+        agent_state
+            .write()
+            .await
+            .replace_mpquic_paths(paths)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    async fn clear_agent_mpquic_paths(&self) {
+        if let Some(agent_state) = self.agent_state.as_ref() {
+            agent_state.write().await.clear_mpquic_paths();
         }
     }
 
@@ -788,6 +911,9 @@ impl ClientRouteControl {
             .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
             .record_sent(now_ms)
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let paths = active.path_summaries().await?;
+        drop(state);
+        self.replace_agent_mpquic_paths(paths).await?;
         Ok(ClientRouteProgress::TransportActive)
     }
 
@@ -821,11 +947,15 @@ impl ClientRouteControl {
             .accept_response(&packet, policy, now_ms)
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
             .to_vec();
-        Ok(Some(ClientUdpResponse {
+        let response = ClientUdpResponse {
             application,
             remote,
             payload,
-        }))
+        };
+        let paths = active.path_summaries().await?;
+        drop(state);
+        self.replace_agent_mpquic_paths(paths).await?;
+        Ok(Some(response))
     }
 
     /// Whether periodic reverse polling is meaningful for the current route owner.
@@ -850,6 +980,7 @@ impl ClientRouteControl {
         if let ClientRouteControlState::Established(established) = previous {
             Box::pin(established.shutdown()).await;
         }
+        self.clear_agent_mpquic_paths().await;
     }
 }
 
@@ -1067,6 +1198,14 @@ async fn admit_completed_native_route(
                 let _ = orchestrator.shutdown().await;
                 return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
             };
+            let identity = match route.committed_mpquic_identity() {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let _ = route.disconnect().await;
+                    let _ = orchestrator.shutdown().await;
+                    return Err(error);
+                }
+            };
             let signal = start_mpquic_exit_session(&route, discovery, crate::unix_millis()).await;
             let Ok(signal) = signal else {
                 let _ = route.disconnect().await;
@@ -1103,6 +1242,7 @@ async fn admit_completed_native_route(
                     transport: ClientTransportState::Mpquic(Box::new(
                         ActiveProductionMpquicRoute {
                             session,
+                            identity,
                             browser_flow: None,
                         },
                     )),
@@ -3539,6 +3679,48 @@ impl ProductionRoute {
         &self.established.commit_proof.context_handle
     }
 
+    fn committed_mpquic_identity(
+        &self,
+    ) -> Result<CommittedMpquicRouteIdentity, ClientRouteConnectError> {
+        let path_count = self.established.relay_grants.len();
+        if self.selected_transport() != Some(Transport::MultipathQuic)
+            || !(2..=usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)).contains(&path_count)
+            || self.established.relay_authorities.len() != path_count
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let route_context_id = self.established.request.parameters.route_context_id;
+        let mut paths = Vec::with_capacity(path_count);
+        let mut path_ids = BTreeSet::new();
+        let mut relay_peers = BTreeSet::new();
+        for (grant, authority) in self
+            .established
+            .relay_grants
+            .iter()
+            .zip(&self.established.relay_authorities)
+        {
+            let path_id = grant.path_id();
+            let relay_peer_id = authority.peer_id.to_string();
+            if grant.route_context_id() != &route_context_id
+                || grant.relay_node_id() != &authority.node_id
+                || !path_ids.insert(path_id)
+                || !relay_peers.insert(relay_peer_id.clone())
+            {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+            paths.push(CommittedMpquicPathIdentity {
+                path_id,
+                relay_peer_id,
+            });
+        }
+        paths.sort_unstable_by_key(|path| path.path_id);
+        Ok(CommittedMpquicRouteIdentity {
+            route_context_id,
+            exit_peer_id: self.established.request.exit.peer_id.to_string(),
+            paths,
+        })
+    }
+
     /// Whether an authenticated Exit listener signal belongs to this committed path set.
     #[must_use]
     pub(crate) fn accepts_mptcp_listener(&self, signal: &ExitMptcpListenerSignal) -> bool {
@@ -5889,6 +6071,74 @@ mod tests {
     const NOW_MS: u64 = 1_700_000_000_000;
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
+
+    fn native_path_status(path_id: u32, data_carrying: bool) -> NativePathStatus {
+        NativePathStatus {
+            path_id,
+            smoothed_rtt_us: 1_000_u64.saturating_mul(u64::from(path_id)),
+            packets_lost: 0,
+            delivered_bytes: 0,
+            congestion_window_bytes: 64 * 1_024,
+            bytes_in_flight: 512,
+            delivery_rate_bps: 8_000_000,
+            data_carrying,
+        }
+    }
+
+    #[test]
+    fn committed_mpquic_identity_projects_native_status_by_exact_path_id() {
+        let identity = CommittedMpquicRouteIdentity {
+            route_context_id: [7; ID_BYTES],
+            exit_peer_id: "exit-peer".to_owned(),
+            paths: vec![
+                CommittedMpquicPathIdentity {
+                    path_id: 1,
+                    relay_peer_id: "relay-one".to_owned(),
+                },
+                CommittedMpquicPathIdentity {
+                    path_id: 2,
+                    relay_peer_id: "relay-two".to_owned(),
+                },
+            ],
+        };
+
+        let summaries = identity
+            .project(&[native_path_status(2, true), native_path_status(1, false)])
+            .expect("exact status projection");
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].path_id, 1);
+        assert_eq!(summaries[0].relay_peer_id, "relay-one");
+        assert_eq!(summaries[0].state, PathState::Reachable as i32);
+        assert_eq!(summaries[1].path_id, 2);
+        assert_eq!(summaries[1].relay_peer_id, "relay-two");
+        assert_eq!(summaries[1].state, PathState::Active as i32);
+        assert_eq!(summaries[1].smoothed_rtt_micros, 2_000);
+        assert!(summaries.iter().all(|summary| summary.user_bytes == 0));
+    }
+
+    #[test]
+    fn committed_mpquic_identity_rejects_duplicate_native_path_status() {
+        let identity = CommittedMpquicRouteIdentity {
+            route_context_id: [7; ID_BYTES],
+            exit_peer_id: "exit-peer".to_owned(),
+            paths: vec![
+                CommittedMpquicPathIdentity {
+                    path_id: 1,
+                    relay_peer_id: "relay-one".to_owned(),
+                },
+                CommittedMpquicPathIdentity {
+                    path_id: 2,
+                    relay_peer_id: "relay-two".to_owned(),
+                },
+            ],
+        };
+
+        assert!(matches!(
+            identity.project(&[native_path_status(1, true), native_path_status(1, true),]),
+            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        ));
+    }
 
     #[test]
     fn default_connect_profile_selects_configured_udp_ipv4_capacity_exactly() {

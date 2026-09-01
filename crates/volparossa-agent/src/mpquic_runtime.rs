@@ -19,9 +19,9 @@ use volparossa_discovery::ExitMpquicSessionSignal;
 use volparossa_exit::{ExitNativeRouteAuthorization, ExitNativeRouteCredentialAuthorization};
 use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_quic::{
-    AddPath, NativeClient, NativeClientError, NativeProcessRole, NativeResultCode, ReceiveDatagram,
-    ReceivedDatagram, SendDatagram, StartExitSession, StartSession, StopSession, TransportMode,
-    TunnelAssignment, VerifiedExitMpquicEndpoint,
+    AddPath, GetStatus, NativeClient, NativeClientError, NativePathStatus, NativeProcessRole,
+    NativeResultCode, ReceiveDatagram, ReceivedDatagram, SendDatagram, StartExitSession,
+    StartSession, StopSession, TransportMode, TunnelAssignment, VerifiedExitMpquicEndpoint,
 };
 use volparossa_reservation::{ClientNativeRouteAuthorization, VerifiedRelayGrant};
 use volparossa_routing::{
@@ -1083,6 +1083,33 @@ impl ProductionMpquicSession {
     #[must_use]
     pub fn active_path_ids(&self) -> &[u32] {
         &self.active_path_ids
+    }
+
+    /// Read one exact live native status snapshot for the committed path set.
+    ///
+    /// The native process owns path-level transport observation. Rust accepts the snapshot only
+    /// when it contains every committed path exactly once and no uncommitted path.
+    pub(crate) async fn path_statuses(
+        &self,
+    ) -> Result<Vec<NativePathStatus>, ProductionMpquicError> {
+        let mut statuses = self
+            .client
+            .status(GetStatus {
+                route_context_id: self.route_context_id.to_vec(),
+            })
+            .await?;
+        statuses.sort_unstable_by_key(|status| status.path_id);
+        if statuses.len() != self.active_path_ids.len()
+            || !statuses
+                .iter()
+                .map(|status| status.path_id)
+                .eq(self.active_path_ids.iter().copied())
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "exact native MPQUIC status path set",
+            ));
+        }
+        Ok(statuses)
     }
 
     /// Borrow the native CONNECT-IP tunnel assignment.

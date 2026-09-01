@@ -153,12 +153,16 @@ impl Agent {
     /// # Errors
     ///
     /// Returns an error when a service actor, local endpoint, or required helper cleanup fails.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one owner starts and shuts down the complete bounded service actor set"
+    )]
     pub async fn run_with_shutdown<F>(self, shutdown: F) -> Result<(), AgentError>
     where
         F: Future<Output = ()> + Send,
     {
-        let endpoint = bind_control_socket(&self.paths.control_socket)?;
-        let (listener, socket_guard) = endpoint.into_parts();
+        let (listener, socket_guard) =
+            bind_control_socket(&self.paths.control_socket)?.into_parts();
         let client_ingress = if self.config.roles.client {
             Some(
                 ClientIngressRuntime::start(self.helper.clone())
@@ -170,7 +174,7 @@ impl Agent {
             None
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let routes = ClientRouteControl::new(self.paths.mpquic_socket.clone());
+        let routes = production_client_routes(&self.paths, &self.state);
         let control_context = ControlContext {
             state: Arc::clone(&self.state),
             config: Arc::clone(&self.config),
@@ -210,10 +214,9 @@ impl Agent {
             self.discovery_control.clone(),
             self.helper.clone(),
             routes.clone(),
-            routes,
+            routes.clone(),
             &shutdown_tx,
         );
-
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
             () = &mut shutdown => Ok(()),
@@ -238,8 +241,8 @@ impl Agent {
         stop_task(&mut metrics_task).await;
         stop_task(&mut ingress_task).await;
         stop_task(&mut tcp_ingress_task).await;
+        routes.disconnect().await;
         drop(socket_guard);
-
         if let Some(client_ingress) = client_ingress {
             let Ok(client_ingress) = Arc::try_unwrap(client_ingress) else {
                 let _ = self.helper.cleanup_owned().await;
@@ -259,6 +262,13 @@ impl Agent {
         }
         run_result
     }
+}
+
+fn production_client_routes(
+    paths: &AgentPaths,
+    state: &Arc<RwLock<AgentState>>,
+) -> ClientRouteControl {
+    ClientRouteControl::new_with_agent_state(paths.mpquic_socket.clone(), Arc::clone(state))
 }
 
 #[allow(

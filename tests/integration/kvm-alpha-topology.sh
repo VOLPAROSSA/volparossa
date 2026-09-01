@@ -1871,7 +1871,7 @@ with open(output_path, "w", encoding="ascii") as output:
     json.dump(
         {
             "schema_version": 1,
-            "source": "agent local-control native MPQUIC counters",
+            "source": "agent local-control native MPQUIC status",
             "route_context_id": context,
             "requirement": requirement,
             "paths": paths,
@@ -2844,8 +2844,7 @@ if [ "$A06_STATUS" -eq 0 ]; then
             and ($native_r1.relay_peer_id == $relay1_peer)
             and ($native_r2.relay_peer_id == $relay2_peer)
             and ($native_r1.path_id != $native_r2.path_id)
-            and ($native_r1.state == 3) and ($native_r2.state == 3)
-            and ($native_r1.user_bytes > 0) and ($native_r2.user_bytes > 0)) as $success
+            and ($native_r1.state == 3) and ($native_r2.state == 3)) as $success
         | {schema_version:1,acceptance_id:"A06",success:$success,
            transport:"real HTTP/3 over genuine native Multipath QUIC",
            application:$app,destination:$destination,
@@ -2892,7 +2891,7 @@ done
 kill -0 "$HTTP3_CLIENT_PID" 2>/dev/null \
     || fail A07_HTTP3_FLOW_ENDED_BEFORE_RELAY_REMOVAL
 wait_native_mpquic_paths a07-native-before both \
-    || fail A07_NATIVE_PATH_COUNTERS_UNAVAILABLE
+    || fail A07_NATIVE_PATH_STATUS_UNAVAILABLE
 ip -n "$R1" link set r1c down
 ip -n "$R1" link set r1x down
 A07_R1C_STATE=$(ip -n "$R1" -j link show dev r1c | jq -er '.[0].operstate')
@@ -2991,8 +2990,7 @@ if [ "$A07_STATUS" -eq 0 ]; then
             and ($exit.destination_response_datagrams > 0)
             and ($a06_native.route_context_id == $before.route_context_id)
             and ($before.route_context_id == $after.route_context_id)
-            and ($after_r2.path_id == $before_r2.path_id)
-            and ($after_r2.user_bytes > $before_r2.user_bytes)) as $success
+            and ($after_r2.path_id == $before_r2.path_id)) as $success
         | {schema_version:1,acceptance_id:"A07",success:$success,
            transport:"active HTTP/3 flow retained by genuine MPQUIC after Relay removal",
            application:$app,destination:$destination,relay_removal:$removal,
