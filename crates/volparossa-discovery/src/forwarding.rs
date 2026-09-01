@@ -14,7 +14,8 @@ use prost::Message;
 use thiserror::Error;
 use volparossa_protocol::{
     ControlMessageType, ExitReservation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
-    PROTOCOL_VERSION, RelayAuthorization, SignedEnvelope, decode_canonical, encode_canonical,
+    MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE, NativeProbeAuthorizationChain, PROTOCOL_VERSION,
+    RelayAuthorization, SignedEnvelope, decode_canonical, encode_canonical,
     node_id_from_public_key,
 };
 
@@ -51,6 +52,8 @@ pub enum ExitForwardOperation {
     FinalizeReservation = 4,
     ConfirmRelay = 5,
     NativeProbePermit = 6,
+    /// Data-Relay-to-Exit native Start chain requesting one standard Relay authorization.
+    NativeProbeAuthorize = 7,
 }
 
 /// Detail-free forwarding result.
@@ -180,6 +183,13 @@ impl ExitForwardRequest {
                     return Err(ForwardingRpcError::InvalidFrame);
                 }
                 validate_signed_type(&self.canonical_request, request_type(operation)?)?;
+            }
+            ExitForwardOperation::NativeProbeAuthorize => {
+                validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
+                if self.exit_node_id == self.control_relay_node_id {
+                    return Err(ForwardingRpcError::InvalidFrame);
+                }
+                validate_native_probe_authorization_chain(&self.canonical_request)?;
             }
             ExitForwardOperation::Unspecified => {
                 return Err(ForwardingRpcError::InvalidOperation(self.operation));
@@ -762,6 +772,9 @@ fn validate_granted_responses(
         ExitForwardOperation::NativeProbePermit => {
             validate_exact_types(responses, &[ControlMessageType::NativeProbePermit])
         }
+        ExitForwardOperation::NativeProbeAuthorize => {
+            validate_exact_types(responses, &[ControlMessageType::RelayAuthorization])
+        }
         ExitForwardOperation::Unspecified => Err(ForwardingRpcError::InvalidOperation(0)),
     }
 }
@@ -835,10 +848,45 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
         }
         ExitForwardOperation::ConfirmRelay => Ok(ControlMessageType::ExitReservationConfirmation),
         ExitForwardOperation::NativeProbePermit => Ok(ControlMessageType::NativeProbePermitRequest),
-        ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => {
+        ExitForwardOperation::FetchExitAdvertisement
+        | ExitForwardOperation::NativeProbeAuthorize
+        | ExitForwardOperation::Unspecified => {
             Err(ForwardingRpcError::InvalidOperation(operation as i32))
         }
     }
+}
+
+fn validate_native_probe_authorization_chain(encoded: &[u8]) -> Result<(), ForwardingRpcError> {
+    let chain = decode_canonical::<NativeProbeAuthorizationChain>(
+        encoded,
+        MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+    )
+    .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+    for (signed, expected) in [
+        (
+            chain.signed_permit_request.as_slice(),
+            ControlMessageType::NativeProbePermitRequest,
+        ),
+        (
+            chain.signed_permit.as_slice(),
+            ControlMessageType::NativeProbePermit,
+        ),
+        (
+            chain.signed_exit_ready.as_slice(),
+            ControlMessageType::NativeProbeExitReady,
+        ),
+        (
+            chain.signed_relay_ready.as_slice(),
+            ControlMessageType::NativeProbeRelayReady,
+        ),
+        (
+            chain.signed_start.as_slice(),
+            ControlMessageType::NativeProbeStart,
+        ),
+    ] {
+        validate_signed_type(signed, expected)?;
+    }
+    Ok(())
 }
 
 fn validate_version(version: u32) -> Result<(), ForwardingRpcError> {
@@ -1081,6 +1129,24 @@ mod tests {
             assert_eq!(request.validated_operation().expect("operation"), operation);
         }
 
+        let native_chain = native_authorization_chain();
+        let request = ExitForwardRequest::new(
+            vec![1; REQUEST_ID_LENGTH],
+            relay_node.clone(),
+            relay_peer.clone(),
+            relay_public.clone(),
+            exit_peer.clone(),
+            vec![2; NODE_ID_LENGTH],
+            DEADLINE,
+            ExitForwardOperation::NativeProbeAuthorize,
+            native_chain,
+        )
+        .expect("valid native authorization chain mapping");
+        assert_eq!(
+            request.validated_operation().expect("operation"),
+            ExitForwardOperation::NativeProbeAuthorize
+        );
+
         let wrong_type = ExitForwardRequest::new(
             vec![1; REQUEST_ID_LENGTH],
             relay_node,
@@ -1254,6 +1320,42 @@ mod tests {
                 Err(ForwardingRpcError::InvalidFrame)
             ));
         }
+
+        let native_authorization = ExitForwardResponse::granted(
+            vec![1; REQUEST_ID_LENGTH],
+            ExitForwardOperation::NativeProbeAuthorize,
+            vec![2; NODE_ID_LENGTH],
+            native_exit_peer.clone(),
+            vec![envelope(ControlMessageType::RelayAuthorization, Vec::new())],
+        );
+        assert!(native_authorization.is_ok());
+        assert!(matches!(
+            ExitForwardResponse::granted(
+                vec![1; REQUEST_ID_LENGTH],
+                ExitForwardOperation::NativeProbeAuthorize,
+                vec![2; NODE_ID_LENGTH],
+                native_exit_peer,
+                vec![envelope(ControlMessageType::NativeProbePermit, Vec::new())],
+            ),
+            Err(ForwardingRpcError::InvalidFrame)
+        ));
+    }
+
+    fn native_authorization_chain() -> Vec<u8> {
+        encode_canonical(
+            &NativeProbeAuthorizationChain {
+                signed_permit_request: envelope(
+                    ControlMessageType::NativeProbePermitRequest,
+                    Vec::new(),
+                ),
+                signed_permit: envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+                signed_exit_ready: envelope(ControlMessageType::NativeProbeExitReady, Vec::new()),
+                signed_relay_ready: envelope(ControlMessageType::NativeProbeRelayReady, Vec::new()),
+                signed_start: envelope(ControlMessageType::NativeProbeStart, Vec::new()),
+            },
+            MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+        )
+        .expect("native authorization chain")
     }
 
     fn advertisement_request() -> ExitForwardRequest {

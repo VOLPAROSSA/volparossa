@@ -41,7 +41,9 @@ pub use advertisements::{
     advertisement_envelope_matches_peer,
 };
 use advertisements::{AdvertisementCodec, advertisement_behaviour};
-pub use connection_provenance::BoundNativeProbeControlConnection;
+pub use connection_provenance::{
+    BoundNativeProbeControlConnection, BoundNativeProbeDataRelayConnection,
+};
 use connection_provenance::{ConnectionProvenanceBehaviour, ConnectionProvenanceEvent};
 pub use forwarding::{
     EXIT_FORWARD_PROTOCOL, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_PROTOCOL,
@@ -1203,6 +1205,33 @@ impl DiscoveryService {
             .ok_or(DiscoveryError::ProtocolPeer)
     }
 
+    /// Bind the exact authenticated data-Relay connection carrying a native authorization chain.
+    ///
+    /// This is distinct from control-Relay Permit provenance and grants no datapath authority.
+    /// The affine token can be consumed only while replying through this service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, self connection, or stale, closed, foreign, or
+    /// otherwise untracked connection lineage.
+    pub fn bind_native_probe_data_relay_connection(
+        &self,
+        authenticated_data_relay: PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+    ) -> Result<BoundNativeProbeDataRelayConnection, DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        if authenticated_data_relay == *self.local_peer_id() {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour()
+            .connection_provenance
+            .bind_native_probe_data_relay(authenticated_data_relay, connection_id)
+            .ok_or(DiscoveryError::ProtocolPeer)
+    }
+
     /// Sends one canonical exit response to the authenticated control relay.
     ///
     /// # Errors
@@ -1267,6 +1296,43 @@ impl DiscoveryService {
             .send_response(channel, response)
             .map_err(|_| {
                 DiscoveryError::Swarm("native-probe Permit response channel closed".into())
+            })
+    }
+
+    /// Consume exact authenticated data-Relay lineage while returning one native authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-authorization response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_authorization_response(
+        &mut self,
+        connection: BoundNativeProbeDataRelayConnection,
+        authenticated_data_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbeAuthorize
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_data_relay(connection, authenticated_data_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| {
+                DiscoveryError::Swarm("native-probe authorization response channel closed".into())
             })
     }
 
