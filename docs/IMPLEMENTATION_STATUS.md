@@ -1086,10 +1086,16 @@ single clean-build A01--A15 run; the score is not a release claim.
   behaviours deliberately reproduce the same behaviour-local outbound ID, but their real response
   cannot bind when sealed by another service. It emits no
   origin claim, RTT, capacity measurement, Fresh evidence, admission, reservation or route
-  authority. The agent event loop does not call this responder yet, and the forwarded Exit upstream
-  responder/control wrapper and signer are still absent. There is also no production root or
-  lifecycle owner, sampler, A0 response-verification/replay consumer, A1a exact-set join, or
-  conversion into fresh local evidence.
+  authority. The production discovery actor now selects this private responder pump only for its
+  immutable Relay role and an exact currently active threshold-verified policy snapshot, and lends
+  the same actor-owned permanent identity only for the synchronous signing callback. Policy
+  application cancels that poll branch before the actor can observe the next event. The responder
+  still requires an exact currently served Relay advertisement; because production deliberately
+  publishes no usable Relay/Exit capability before dataplane readiness is proved, this lifecycle
+  integration emits no successful production response and makes no readiness claim yet. The
+  forwarded Exit upstream responder/control wrapper and signer are still absent. There is still no
+  outbound production attempt owner, sampler, A0 response-verification/replay consumer, A1a
+  exact-set join, or conversion into fresh local evidence.
   A future A1c boundary must consume and exact-set join these real request/connection proofs before
   phase-A evidence. A first dormant private A1c precursor now passively tracks authenticated libp2p
   establish/address-change/close lineage under the existing 384-global/four-per-peer ceilings.

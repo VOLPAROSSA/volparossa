@@ -184,10 +184,16 @@ authority, ambiguous lineage and signing failure return no response. The affine 
 is retained until the exact response-channel handoff and exposes no getter.
 
 That responder records no origin claim, RTT, capacity, reachability, reservation, route or Fresh
-authority. Forwarded Exit upstream receipt production and the control-signed prefix wrapper remain
-absent, as do the production event-loop caller and A0 response-verification/A1a join owner. Dormant
-A1a remains only a static consumer of verifier/consume functions. The opaque transcripts,
-transport proof and wire wrappers are not yet local freshness, capacity, or route authority.
+authority. The production discovery actor now polls its private direct-Relay responder only while
+the immutable Relay role and an exact active threshold-verified policy snapshot are present. It
+uses the same actor-owned permanent identity, and a policy command cancels the poll before applying
+the replacement. The responder still requires an exact currently served Relay advertisement;
+production deliberately publishes no usable Relay/Exit capability before dataplane readiness is
+proved, so no successful production response or readiness claim follows from this lifecycle
+connection yet. Forwarded Exit upstream receipt production, the control-signed prefix wrapper, the
+outbound attempt owner and the A0 response-verification/A1a join owner remain absent. Dormant A1a
+remains only a static consumer of verifier/consume functions. The opaque transcripts, transport
+proof and wire wrappers are not yet local freshness, capacity, or route authority.
 
 The agent now contains a dormant A1a ownership prerequisite. Snapshot construction privately mints
 an endpoint-free, non-derived subject set from the exact freshly revalidated stored signed

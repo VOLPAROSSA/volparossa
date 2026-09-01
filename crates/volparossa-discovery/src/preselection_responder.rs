@@ -169,7 +169,10 @@ impl DiscoveryService {
     /// without a response and polling continues until another discovery event is available.
     ///
     /// The supplied signing closure should delegate to the same permanent Ed25519 identity used
-    /// to build this discovery service. The agent event loop does not call this seam yet.
+    /// to build this discovery service. The agent discovery actor calls this seam only for its
+    /// immutable Relay role and a currently active threshold-verified policy snapshot; the
+    /// responder still independently requires an exact current locally served Relay
+    /// advertisement before it can emit a response.
     pub async fn next_event_with_direct_preselection_responder<F>(
         &mut self,
         policy: LocalPreselectionPolicy,

@@ -273,11 +273,17 @@ response. A real two-swarm test proves that the originating channel carries the 
 receipt. Companion transport regressions prove that neither public pump exposes an inbound channel
 and that a sibling service cannot answer a privately captured originating channel. The receipt
 includes no prefix, endpoint, RTT, capacity, reachability, admission,
-reservation, route-session or evidence authority. The agent does not call this seam yet, and the
-upstream Exit responder/control wrapper and signer remain absent. A later owner must consume the
-unchanged response bytes, retained caller context and opaque proofs together before any observation
-can become usable. There is no A0 response-verification/replay consumer, A1a exact-set join or
-Fresh-evidence conversion. The fixed alpha score remains **11/100 (11%)**.
+reservation, route-session or evidence authority. The production discovery actor now polls this
+private seam only with its immutable Relay role, an exact active threshold-verified policy snapshot
+and the same actor-owned permanent identity. A policy command cancels the outstanding poll before
+the actor applies the replacement. Successful response production additionally requires an exact
+currently served Relay advertisement. Production intentionally advertises no usable Relay/Exit
+capability before dataplane readiness is proved, so this lifecycle caller remains fail closed and
+does not make the responder, a transport, or a route ready. The upstream Exit responder/control
+wrapper and signer remain absent. A later outbound owner must consume the unchanged response bytes,
+retained caller context and opaque proofs together before any observation can become usable. There
+is no production A0 response-verification/replay consumer, A1a exact-set join or Fresh-evidence
+conversion. The fixed alpha score remains **11/100 (11%)**.
 
 Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
 relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7

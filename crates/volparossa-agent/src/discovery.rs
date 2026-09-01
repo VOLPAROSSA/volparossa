@@ -36,9 +36,10 @@ use volparossa_discovery::{
     DatapathRelayRequest, DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles,
     DiscoveryService, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT,
     ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
-    MAX_CONCURRENT_DATAPATH_RELAY_STREAMS, MAX_CONCURRENT_FORWARDING_STREAMS,
-    MAX_FORWARDING_FRAME_BYTES, PeerLink, UpstreamExitForwardRequest, UpstreamExitForwardResponse,
-    advertisement_envelope_matches_peer, capability, signed_envelope_matches_peer,
+    LocalPreselectionPolicy, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
+    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES, PeerLink,
+    UpstreamExitForwardRequest, UpstreamExitForwardResponse, advertisement_envelope_matches_peer,
+    capability, signed_envelope_matches_peer,
 };
 use volparossa_exit::{ExitService, ExitServiceConfig};
 use volparossa_identity::Identity;
@@ -1190,6 +1191,11 @@ impl DiscoveryRuntime {
         let mut reservation_maintenance = tokio::time::interval(RESERVATION_MAINTENANCE_INTERVAL);
         reservation_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
+            let responder_policy = {
+                let now_ms = unix_millis();
+                let policy = state.read().await.policy_snapshot(now_ms);
+                direct_preselection_responder_policy(self.roles, &policy, now_ms)
+            };
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -1246,25 +1252,13 @@ impl DiscoveryRuntime {
                         ).await;
                     }
                 }
-                event = self.service.next_event() => {
-                    match event {
-                        DiscoveryEvent::Other(event) => self.handle_event(event, &state).await,
-                        DiscoveryEvent::ClientPreselectionResponse(_)
-                        | DiscoveryEvent::UpstreamPreselectionResponse(_) => {
-                            state.write().await.log(
-                                LogLevel::Error,
-                                "PRESELECTION_RESPONSE_WITHOUT_OWNER",
-                                unix_millis(),
-                            );
-                        }
-                        _ => {
-                            state.write().await.log(
-                                LogLevel::Error,
-                                "UNSUPPORTED_SANITIZED_DISCOVERY_EVENT",
-                                unix_millis(),
-                            );
-                        }
-                    }
+                event = next_actor_discovery_event(
+                    &mut self.service,
+                    &self.identity,
+                    self.local_public_key,
+                    responder_policy,
+                ) => {
+                    self.handle_sanitized_event(event, &state).await;
                 }
                 command = self.role_commands.recv() => {
                     let Some(command) = command else {
@@ -1280,6 +1274,31 @@ impl DiscoveryRuntime {
         self.withdraw_local();
         clear_relay_metric(&self.metrics);
         clear_exit_metric(&self.metrics);
+    }
+
+    async fn handle_sanitized_event(
+        &mut self,
+        event: DiscoveryEvent,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        match event {
+            DiscoveryEvent::Other(event) => self.handle_event(event, state).await,
+            DiscoveryEvent::ClientPreselectionResponse(_)
+            | DiscoveryEvent::UpstreamPreselectionResponse(_) => {
+                state.write().await.log(
+                    LogLevel::Error,
+                    "PRESELECTION_RESPONSE_WITHOUT_OWNER",
+                    unix_millis(),
+                );
+            }
+            _ => {
+                state.write().await.log(
+                    LogLevel::Error,
+                    "UNSUPPORTED_SANITIZED_DISCOVERY_EVENT",
+                    unix_millis(),
+                );
+            }
+        }
     }
 
     async fn handle_command(&mut self, command: DiscoveryCommand, state: &Arc<RwLock<AgentState>>) {
@@ -4756,6 +4775,33 @@ impl DiscoveryRuntime {
     }
 }
 
+fn direct_preselection_responder_policy(
+    roles: RolesConfig,
+    policy: &AgentPolicySnapshot,
+    now_ms: u64,
+) -> Option<LocalPreselectionPolicy> {
+    if !roles.relay || !policy.active || policy.expires_at_ms <= now_ms {
+        return None;
+    }
+    let hash = fixed_bytes::<32>(&policy.policy_hash)?;
+    LocalPreselectionPolicy::new(policy.manifest_version, hash, policy.expires_at_ms).ok()
+}
+
+async fn next_actor_discovery_event(
+    service: &mut DiscoveryService,
+    identity: &Identity,
+    public_key: [u8; 32],
+    responder_policy: Option<LocalPreselectionPolicy>,
+) -> DiscoveryEvent {
+    let Some(policy) = responder_policy else {
+        return service.next_event().await;
+    };
+    let mut signer = |message: &[u8]| identity.sign(message).ok();
+    service
+        .next_event_with_direct_preselection_responder(policy, public_key, &mut signer)
+        .await
+}
+
 async fn log_reservation_event(state: &Arc<RwLock<AgentState>>, event_code: &'static str) {
     state
         .write()
@@ -6044,6 +6090,79 @@ mod tests {
         assert_eq!(verified.sender_id(), &node_id);
         assert_eq!(verified.message().node_id, node_id.to_vec());
         assert_eq!(verified.message().peer_id, peer_id.to_bytes());
+    }
+
+    #[test]
+    fn direct_preselection_responder_authority_is_exactly_relay_and_active_policy_scoped() {
+        let now_ms = unix_millis();
+        let active = AgentPolicySnapshot {
+            manifest_version: 7,
+            policy_hash: vec![0x5a; 32],
+            expires_at_ms: now_ms.saturating_add(60_000),
+            verified_signatures: 2,
+            active: true,
+        };
+        let relay_roles = RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        };
+        assert_eq!(
+            direct_preselection_responder_policy(relay_roles, &active, now_ms),
+            LocalPreselectionPolicy::new(
+                active.manifest_version,
+                [0x5a; 32],
+                active.expires_at_ms,
+            )
+            .ok(),
+        );
+
+        let mut inactive = active.clone();
+        inactive.active = false;
+        let mut malformed = active.clone();
+        malformed.policy_hash.pop();
+        let mut zero_version = active.clone();
+        zero_version.manifest_version = 0;
+        let mut expired = active.clone();
+        expired.expires_at_ms = now_ms;
+        for (roles, policy) in [
+            (RolesConfig::default(), active),
+            (relay_roles, inactive),
+            (relay_roles, malformed),
+            (relay_roles, zero_version),
+            (relay_roles, expired),
+        ] {
+            assert_eq!(
+                direct_preselection_responder_policy(roles, &policy, now_ms),
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_actor_polls_only_the_private_direct_preselection_responder_seam() {
+        let source = include_str!("discovery.rs");
+        let run = braced_item(source, "pub async fn run(");
+        assert_eq!(
+            run.matches("direct_preselection_responder_policy(self.roles, &policy, now_ms)")
+                .count(),
+            1,
+        );
+        assert_eq!(run.matches("next_actor_discovery_event(").count(), 1);
+        assert!(!run.contains("dispatch_preselection_observation("));
+        assert!(!run.contains("dispatch_preselection_observation_upstream("));
+
+        let actor_pump = braced_item(source, "async fn next_actor_discovery_event(");
+        assert_eq!(
+            actor_pump
+                .matches("next_event_with_direct_preselection_responder")
+                .count(),
+            1,
+        );
+        assert_eq!(actor_pump.matches("identity.sign(message).ok()").count(), 1);
+        assert!(!actor_pump.contains("request_exit_forward"));
+        assert!(!actor_pump.contains("dispatch_preselection_observation"));
+        assert!(!actor_pump.contains("Fresh"));
     }
 
     #[test]
