@@ -11879,8 +11879,10 @@ fn production_exit_prepare_request(
     {
         return None;
     }
-    let setup_expires_at_unix = setup_expires_at_ms.checked_add(999)? / 1_000;
-    let hard_expires_at_unix = hard_expires_at_ms.checked_add(999)? / 1_000;
+    // Helper ownership may never extend past the millisecond authority that created it. Rounding
+    // up would make almost every non-second-aligned signed grant fail Activate's expiry binding.
+    let setup_expires_at_unix = setup_expires_at_ms / 1_000;
+    let hard_expires_at_unix = hard_expires_at_ms / 1_000;
     if setup_expires_at_unix <= unix_seconds() || hard_expires_at_unix < setup_expires_at_unix {
         return None;
     }
@@ -11929,8 +11931,10 @@ fn production_service_prepare_request(
     {
         return None;
     }
-    let setup_expires_at_unix = setup_expires_at_ms.checked_add(999)? / 1_000;
-    let hard_expires_at_unix = hard_expires_at_ms.checked_add(999)? / 1_000;
+    // Keep privileged lifetime within the exact signed millisecond authority (see the Exit path
+    // above); truncation is deliberately fail-closed by at most 999 ms.
+    let setup_expires_at_unix = setup_expires_at_ms / 1_000;
+    let hard_expires_at_unix = hard_expires_at_ms / 1_000;
     if setup_expires_at_unix <= unix_seconds() || hard_expires_at_unix < setup_expires_at_unix {
         return None;
     }
@@ -19397,6 +19401,55 @@ mod tests {
                     exit_peer,
                 })
         );
+    }
+
+    #[test]
+    fn production_helper_expiry_is_rounded_within_signed_authority() {
+        let now = unix_seconds();
+        let setup_seconds = now.checked_add(60).expect("setup seconds");
+        let hard_seconds = now.checked_add(120).expect("hard seconds");
+        let finalize = ExitReservationFinalizeRequest {
+            route_context_id: vec![0x91; FORWARD_ID_BYTES],
+            relay_paths: vec![volparossa_protocol::FinalizedRelayPath {
+                path_id: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        for residue_ms in [1_u64, 999] {
+            let setup_ms = setup_seconds
+                .checked_mul(1_000)
+                .and_then(|value| value.checked_add(residue_ms))
+                .expect("setup milliseconds");
+            let hard_ms = hard_seconds
+                .checked_mul(1_000)
+                .and_then(|value| value.checked_add(residue_ms))
+                .expect("hard milliseconds");
+            let exit = production_exit_prepare_request(&finalize, setup_ms, hard_ms)
+                .expect("Exit helper scope");
+            let service = production_service_prepare_request(
+                [0x92; FORWARD_ID_BYTES],
+                ContextRole::Relay,
+                1,
+                setup_ms,
+                hard_ms,
+            )
+            .expect("service helper scope");
+
+            for prepare in [exit, service] {
+                assert_eq!(prepare.setup_expires_at_unix, setup_seconds);
+                assert_eq!(prepare.hard_expires_at_unix, hard_seconds);
+                assert!(
+                    prepare.setup_expires_at_unix * 1_000 <= setup_ms,
+                    "helper setup ownership must not outlive signed authority"
+                );
+                assert!(
+                    prepare.hard_expires_at_unix * 1_000 <= hard_ms,
+                    "helper hard ownership must not outlive signed authority"
+                );
+            }
+        }
     }
 
     #[allow(
