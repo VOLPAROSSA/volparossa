@@ -399,7 +399,8 @@ chown "$AGENT_UID:$AGENT_GID" "$WORK/development-policy.manifest" \
 write_config() {
     node=$1; operator=$2; relay_role=$3; exit_role=$4; listen_ip=$5
     bootstrap_one=$6; bootstrap_two=$7
-    relay_capacity=0; exit_capacity=0; advertised_asn=0; advertised_prefix=null
+    client_role=false; relay_capacity=0; exit_capacity=0; advertised_asn=0; advertised_prefix=null
+    [ "$node" != client ] || client_role=true
     [ "$relay_role" = false ] || relay_capacity=32
     [ "$exit_role" = false ] || exit_capacity=32
     case $node in
@@ -422,7 +423,8 @@ write_config() {
             || printf '    - %s\n' "$bootstrap_one"
         [ "$bootstrap_two" = none ] \
             || printf '    - %s\n' "$bootstrap_two"
-        printf 'roles:\n  client: true\n  relay: %s\n  exit: %s\n' "$relay_role" "$exit_role"
+        printf 'roles:\n  client: %s\n  relay: %s\n  exit: %s\n' \
+            "$client_role" "$relay_role" "$exit_role"
         printf 'capacity:\n  relay_upload_limit_mbps: %s\n' "$relay_capacity"
         printf '  relay_download_limit_mbps: %s\n' "$relay_capacity"
         printf '  exit_upload_limit_mbps: %s\n' "$exit_capacity"
@@ -712,6 +714,9 @@ for node in client relay1 relay2 exit; do
         >"$WORK/roles-$node.txt"
 done
 grep -Fx 'client: true' "$WORK/roles-client.txt" >/dev/null || fail CLIENT_ROLE_INVALID
+grep -Fx 'client: false' "$WORK/roles-relay1.txt" >/dev/null || fail RELAY1_CLIENT_ROLE_INVALID
+grep -Fx 'client: false' "$WORK/roles-relay2.txt" >/dev/null || fail RELAY2_CLIENT_ROLE_INVALID
+grep -Fx 'client: false' "$WORK/roles-exit.txt" >/dev/null || fail EXIT_CLIENT_ROLE_INVALID
 grep -Fx 'relay: true' "$WORK/roles-relay1.txt" >/dev/null || fail RELAY1_ROLE_INVALID
 grep -Fx 'relay: true' "$WORK/roles-relay2.txt" >/dev/null || fail RELAY2_ROLE_INVALID
 grep -Fx 'exit: true' "$WORK/roles-exit.txt" >/dev/null || fail EXIT_ROLE_INVALID
@@ -738,12 +743,20 @@ done
 
 PHASE=client-connect
 CONNECT_REQUESTED=true
-set +e
-"$binary_directory/volparossa" \
-    --control-socket "$WORK/runtime-client/control/agent.sock" connect \
-    >"$WORK/connect-client.out" 2>"$WORK/connect-client.err"
-CONNECT_STATUS=$?
-set -e
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    set +e
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" connect \
+        >"$WORK/connect-client.out" 2>"$WORK/connect-client.err"
+    CONNECT_STATUS=$?
+    set -e
+    [ "$CONNECT_STATUS" -ne 0 ] || break
+    grep -F 'PRESELECTION_UNAVAILABLE' "$WORK/connect-client.err" >/dev/null \
+        || break
+    sleep 1
+    attempt=$((attempt + 1))
+done
 
 for node in client relay1 relay2 exit; do
     "$binary_directory/volparossa" \
