@@ -1016,6 +1016,7 @@ may_own_driver_entry_failure_stage_is_safe() {
         unit-name|\
         gid|\
         main-pid|\
+        service-cgroup-argument|\
         observer-pid|\
         proc-records|\
         process-credentials|\
@@ -1025,8 +1026,13 @@ may_own_driver_entry_failure_stage_is_safe() {
         manager-main-pid|\
         network-namespace|\
         control-pid|\
+        service-cgroup-root|\
+        service-cgroup-filesystem|\
+        service-cgroup-type|\
+        service-cgroup-stat|\
         service-cgroup-procs|\
-        service-cgroup-members)
+        service-cgroup-members|\
+        service-cgroup-stability)
             return 0
             ;;
         *) return 1 ;;
@@ -3797,6 +3803,113 @@ report_may_own_driver_start_failure_stage() {
     fi
 }
 
+may_own_kernel_object_identity_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_kernel_device=${1%%:*}
+    may_own_kernel_inode=${1#*:}
+    [ "$1" = "$may_own_kernel_device:$may_own_kernel_inode" ] || return 1
+    for may_own_kernel_number in \
+        "$may_own_kernel_device" "$may_own_kernel_inode"
+    do
+        case $may_own_kernel_number in
+            ''|0|0*|*[!0-9]*) return 1 ;;
+        esac
+        [ "${#may_own_kernel_number}" -le 20 ] || return 1
+    done
+}
+
+may_own_cgroup_members_are_exact() {
+    [ "$#" -eq 2 ] || return 1
+    may_own_members_file=$1
+    may_own_members_main_pid=$2
+    case $may_own_members_main_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ -f "$may_own_members_file" ] && [ ! -L "$may_own_members_file" ] \
+        || return 1
+    /usr/bin/awk -v expected_pid="$may_own_members_main_pid" '
+        NR > 32 || $0 != expected_pid { invalid = 1 }
+        END { if (invalid || NR < 1) exit 1 }
+    ' "$may_own_members_file"
+}
+
+may_own_cgroup_stat_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_stat_file=$1
+    [ -f "$may_own_stat_file" ] && [ ! -L "$may_own_stat_file" ] \
+        || return 1
+    /usr/bin/awk '
+        NR > 256 { invalid = 1 }
+        $1 == "nr_descendants" {
+            if (seen_descendants || NF != 2 || $2 != 0) invalid = 1
+            seen_descendants = 1
+        }
+        $1 == "nr_dying_descendants" {
+            if (seen_dying || NF != 2 || $2 != 0) invalid = 1
+            seen_dying = 1
+        }
+        END {
+            if (invalid || !seen_descendants || !seen_dying) exit 1
+        }
+    ' "$may_own_stat_file"
+}
+
+may_own_host_service_cgroup_identity() {
+    [ "$#" -eq 2 ] || return 1
+    may_own_host_cgroup_main_pid=$1
+    may_own_host_cgroup_invocation=$2
+    case $may_own_host_cgroup_main_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    unit_invocation_id_is_safe "$may_own_host_cgroup_invocation" || return 1
+    unit_name_is_safe || return 1
+    may_own_host_cgroup_path=/sys/fs/cgroup/system.slice/$unit_name
+    [ "$(systemctl show --property=ControlGroup --value "$unit_name")" = \
+        "/system.slice/$unit_name" ] || return 1
+    [ -d "$may_own_host_cgroup_path" ] \
+        && [ ! -L "$may_own_host_cgroup_path" ] || return 1
+    may_own_host_cgroup_identity_before=$(stat -Lc '%d:%i' \
+        "$may_own_host_cgroup_path") || return 1
+    may_own_kernel_object_identity_is_safe \
+        "$may_own_host_cgroup_identity_before" || return 1
+    [ "$(stat -f -Lc '%T' "$may_own_host_cgroup_path")" = cgroup2fs ] \
+        || return 1
+    [ -f "$may_own_host_cgroup_path/cgroup.type" ] \
+        && [ ! -L "$may_own_host_cgroup_path/cgroup.type" ] \
+        && [ "$(cat "$may_own_host_cgroup_path/cgroup.type")" = domain ] \
+        || return 1
+    may_own_cgroup_stat_is_exact \
+        "$may_own_host_cgroup_path/cgroup.stat" || return 1
+    may_own_host_cgroup_procs=$may_own_host_cgroup_path/cgroup.procs
+    [ -f "$may_own_host_cgroup_procs" ] \
+        && [ ! -L "$may_own_host_cgroup_procs" ] || return 1
+    may_own_host_cgroup_procs_identity_before=$(stat -Lc '%d:%i' \
+        "$may_own_host_cgroup_procs") || return 1
+    may_own_kernel_object_identity_is_safe \
+        "$may_own_host_cgroup_procs_identity_before" || return 1
+    may_own_cgroup_members_are_exact "$may_own_host_cgroup_procs" \
+        "$may_own_host_cgroup_main_pid" || return 1
+    [ "$(systemctl show --property=MainPID --value "$unit_name")" = \
+        "$may_own_host_cgroup_main_pid" ] || return 1
+    [ "$(systemctl show --property=ControlPID --value "$unit_name")" = 0 ] \
+        || return 1
+    [ "$(unit_current_invocation_id)" = "$may_own_host_cgroup_invocation" ] \
+        || return 1
+    [ "$(systemctl show --property=ControlGroup --value "$unit_name")" = \
+        "/system.slice/$unit_name" ] || return 1
+    may_own_host_cgroup_identity_after=$(stat -Lc '%d:%i' \
+        "$may_own_host_cgroup_path") || return 1
+    may_own_host_cgroup_procs_identity_after=$(stat -Lc '%d:%i' \
+        "$may_own_host_cgroup_procs") || return 1
+    [ "$may_own_host_cgroup_identity_after" = \
+        "$may_own_host_cgroup_identity_before" ] \
+        && [ "$may_own_host_cgroup_procs_identity_after" = \
+            "$may_own_host_cgroup_procs_identity_before" ] || return 1
+    may_own_cgroup_members_are_exact "$may_own_host_cgroup_procs" \
+        "$may_own_host_cgroup_main_pid" || return 1
+    printf '%s\n' "$may_own_host_cgroup_identity_after"
+}
+
 may_own_service_shape_is_exact() {
     may_own_preexec_barrier_failure_stage=arguments
     [ "$#" -eq 4 ] || return 1
@@ -4276,6 +4389,11 @@ start_may_own_driver_observer() {
     [ "$(stat -Lc '%d:%i' "/proc/$may_own_driver_main_pid/ns/net")" != \
         "$(stat -Lc '%d:%i' /proc/1/ns/net)" ] || return 1
     unit_description_matches_marker || return 1
+    may_own_driver_cgroup_identity=$(may_own_host_service_cgroup_identity \
+        "$may_own_driver_main_pid" "$may_own_driver_expected_invocation") \
+        || return 1
+    may_own_kernel_object_identity_is_safe \
+        "$may_own_driver_cgroup_identity" || return 1
     may_own_driver_observer_stdout=$temporary_stage/may-own-driver-$may_own_driver_label.stdout
     may_own_driver_observer_stderr=$temporary_stage/may-own-driver-$may_own_driver_label.stderr
     for may_own_driver_absent_path in \
@@ -4294,6 +4412,7 @@ start_may_own_driver_observer() {
         /run/volparossa-helper-production-ipc-hook may-own-driver-start \
             "$unit_name" "$agent_uid" "$agent_gid" "$operator_gid" \
             "$worker_uid" "$worker_gid" "$may_own_driver_main_pid" \
+            "$may_own_driver_cgroup_identity" \
         >"$may_own_driver_observer_stdout" \
         2>"$may_own_driver_observer_stderr" &
     may_own_driver_observer_pid=$!

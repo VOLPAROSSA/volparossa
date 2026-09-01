@@ -945,7 +945,7 @@ may_own_driver_entry_contract=$tmp/may-own-driver-entry-contract.sh
 sed -n '/^may_own_driver_entry_contract_is_exact() {$/,/^}$/p' \
     "$hook" >"$may_own_driver_entry_contract"
 sh -n "$may_own_driver_entry_contract"
-may_own_driver_entry_categories='arguments unit-name gid main-pid observer-pid proc-records process-credentials observer-cgroup-record observer-cgroup-length observer-cgroup-boundary manager-main-pid network-namespace control-pid service-cgroup-procs service-cgroup-members'
+may_own_driver_entry_categories='arguments unit-name gid main-pid service-cgroup-argument observer-pid proc-records process-credentials observer-cgroup-record observer-cgroup-length observer-cgroup-boundary manager-main-pid network-namespace control-pid service-cgroup-root service-cgroup-filesystem service-cgroup-type service-cgroup-stat service-cgroup-procs service-cgroup-members service-cgroup-stability'
 may_own_driver_entry_mapping_is_exact() {
     [ "$#" -eq 1 ] || return 1
     awk '
@@ -956,51 +956,338 @@ may_own_driver_entry_mapping_is_exact() {
         /^    may_own_driver_entry_failure_stage=$/ {
             clear = NR; clear_count++
         }
-        /\[ "\$#" -eq 3 \] \|\| return 1/ { predicate[1] = NR; count[1]++ }
+        /\[ "\$#" -eq 4 \] \|\| return 1/ { predicate[1] = NR; count[1]++ }
         /unit_name_is_safe "\$hook_driver_unit" \|\| return 1/ { predicate[2] = NR; count[2]++ }
         /number_is_safe "\$hook_driver_gid" \|\| return 1/ { predicate[3] = NR; count[3]++ }
         /number_is_safe "\$hook_driver_main_pid" \|\| return 1/ { predicate[4] = NR; count[4]++ }
-        /\[ "\$\$" != "\$hook_driver_main_pid" \] \|\| return 1/ { predicate[5] = NR; count[5]++ }
-        /\[ -f "\$hook_driver_status" \]/ { predicate[6] = NR; count[6]++ }
-        /\/usr\/bin\/awk -v expected_gid="\$hook_driver_gid"/ { predicate[7] = NR; count[7]++ }
-        /hook_driver_cgroup=\$\(\/usr\/bin\/awk/ { predicate[8] = NR; count[8]++ }
-        /\$\{#hook_driver_cgroup\}" -le 4096/ { predicate[9] = NR; count[9]++ }
-        /^    case \$hook_driver_cgroup in$/ { predicate[10] = NR; count[10]++ }
-        /unit_main_pid "\$hook_driver_unit"/ { predicate[11] = NR; count[11]++ }
-        /hook_driver_network_identity=\$\(stat -Lc/ { predicate[12] = NR; count[12]++ }
-        /org\.freedesktop\.systemd1\.Service ControlPID/ { predicate[13] = NR; count[13]++ }
-        /\[ -f "\$hook_driver_service_procs" \]/ { predicate[14] = NR; count[14]++ }
-        /\/usr\/bin\/awk -v expected_pid="\$hook_driver_main_pid"/ { predicate[15] = NR; count[15]++ }
+        /kernel_object_identity_is_safe/ && !predicate[5] { predicate[5] = NR; count[5]++ }
+        /\[ "\$\$" != "\$hook_driver_main_pid" \] \|\| return 1/ { predicate[6] = NR; count[6]++ }
+        /\[ -f "\$hook_driver_status" \]/ { predicate[7] = NR; count[7]++ }
+        /\/usr\/bin\/awk -v expected_gid="\$hook_driver_gid"/ { predicate[8] = NR; count[8]++ }
+        /hook_driver_cgroup=\$\(\/usr\/bin\/awk/ { predicate[9] = NR; count[9]++ }
+        /\$\{#hook_driver_cgroup\}" -le 4096/ { predicate[10] = NR; count[10]++ }
+        /^    case \$hook_driver_cgroup in$/ { predicate[11] = NR; count[11]++ }
+        /unit_main_pid "\$hook_driver_unit"/ && !predicate[12] { predicate[12] = NR; count[12]++ }
+        /hook_driver_network_identity=\$\(stat -Lc/ { predicate[13] = NR; count[13]++ }
+        /org\.freedesktop\.systemd1\.Service ControlPID/ && !predicate[14] { predicate[14] = NR; count[14]++ }
+        /\[ -d "\$hook_driver_service_cgroup" \]/ { predicate[15] = NR; count[15]++ }
+        /stat -f -Lc '\''%T'\'' "\$hook_driver_service_cgroup"/ && !predicate[16] { predicate[16] = NR; count[16]++ }
+        /hook_driver_service_cgroup_type=\$hook_driver_service_cgroup\/cgroup\.type/ { predicate[17] = NR; count[17]++ }
+        /may_own_driver_cgroup_stat_is_exact/ && !predicate[18] { predicate[18] = NR; count[18]++ }
+        /\[ -f "\$hook_driver_service_procs" \]/ { predicate[19] = NR; count[19]++ }
+        /may_own_driver_cgroup_members_are_exact/ && !predicate[20] { predicate[20] = NR; count[20]++ }
+        /hook_driver_service_cgroup_identity_after=\$\(stat -Lc/ { predicate[21] = NR; count[21]++ }
         END {
             expected[1] = "arguments"
             expected[2] = "unit-name"
             expected[3] = "gid"
             expected[4] = "main-pid"
-            expected[5] = "observer-pid"
-            expected[6] = "proc-records"
-            expected[7] = "process-credentials"
-            expected[8] = "observer-cgroup-record"
-            expected[9] = "observer-cgroup-length"
-            expected[10] = "observer-cgroup-boundary"
-            expected[11] = "manager-main-pid"
-            expected[12] = "network-namespace"
-            expected[13] = "control-pid"
-            expected[14] = "service-cgroup-procs"
-            expected[15] = "service-cgroup-members"
-            valid = stage_count == 15 && clear_count == 1
-            for (i = 1; i <= 15; i++) {
+            expected[5] = "service-cgroup-argument"
+            expected[6] = "observer-pid"
+            expected[7] = "proc-records"
+            expected[8] = "process-credentials"
+            expected[9] = "observer-cgroup-record"
+            expected[10] = "observer-cgroup-length"
+            expected[11] = "observer-cgroup-boundary"
+            expected[12] = "manager-main-pid"
+            expected[13] = "network-namespace"
+            expected[14] = "control-pid"
+            expected[15] = "service-cgroup-root"
+            expected[16] = "service-cgroup-filesystem"
+            expected[17] = "service-cgroup-type"
+            expected[18] = "service-cgroup-stat"
+            expected[19] = "service-cgroup-procs"
+            expected[20] = "service-cgroup-members"
+            expected[21] = "service-cgroup-stability"
+            valid = stage_count == 21 && clear_count == 1
+            for (i = 1; i <= 21; i++) {
                 valid = valid && stage[i] == "    may_own_driver_entry_failure_stage=" expected[i]
                 valid = valid && count[i] == 1
                 valid = valid && stage_line[i] < predicate[i]
-                if (i < 15) valid = valid && predicate[i] < stage_line[i + 1]
+                if (i < 21) valid = valid && predicate[i] < stage_line[i + 1]
             }
-            valid = valid && predicate[15] < clear
+            valid = valid && predicate[21] < clear
             if (!valid) exit 1
         }
     ' "$1"
 }
 may_own_driver_entry_mapping_is_exact "$may_own_driver_entry_contract" \
-    || exit 1
+    || {
+        printf '%s\n' 'MayOwn driver-entry diagnostic mapping is not exact' >&2
+        exit 1
+    }
+
+may_own_cgroup_members_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc '[ -f "' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc '[ ! -L "' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'NR > 32 || $0 != expected_pid { invalid = 1 }' \
+        "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'END { if (invalid || NR < 1) exit 1 }' "$1")" -eq 1 ] \
+        || return 1
+}
+may_own_cgroup_stat_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc '[ -f "' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc '[ ! -L "' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'NR > 256 { invalid = 1 }' "$1")" -eq 1 ] \
+        || return 1
+    [ "$(grep -Fc '$1 == "nr_descendants" {' "$1")" -eq 1 ] \
+        || return 1
+    [ "$(grep -Fc \
+        'if (seen_descendants || NF != 2 || $2 != 0) invalid = 1' \
+        "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'seen_descendants = 1' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc '$1 == "nr_dying_descendants" {' "$1")" -eq 1 ] \
+        || return 1
+    [ "$(grep -Fc \
+        'if (seen_dying || NF != 2 || $2 != 0) invalid = 1' \
+        "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'seen_dying = 1' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'if (invalid || !seen_descendants || !seen_dying) exit 1' \
+        "$1")" -eq 1 ] || return 1
+}
+may_own_driver_members_contract=$tmp/may-own-driver-members-contract.sh
+may_own_driver_stat_contract=$tmp/may-own-driver-stat-contract.sh
+may_own_host_members_contract=$tmp/may-own-host-members-contract.sh
+may_own_host_stat_contract=$tmp/may-own-host-stat-contract.sh
+sed -n '/^may_own_driver_cgroup_members_are_exact() {$/,/^}$/p' \
+    "$hook" >"$may_own_driver_members_contract"
+sed -n '/^may_own_driver_cgroup_stat_is_exact() {$/,/^}$/p' \
+    "$hook" >"$may_own_driver_stat_contract"
+sed -n '/^may_own_cgroup_members_are_exact() {$/,/^}$/p' \
+    "$gate" >"$may_own_host_members_contract"
+sed -n '/^may_own_cgroup_stat_is_exact() {$/,/^}$/p' \
+    "$gate" >"$may_own_host_stat_contract"
+for may_own_members_contract in \
+    "$may_own_driver_members_contract" "$may_own_host_members_contract"
+do
+    sh -n "$may_own_members_contract"
+    may_own_cgroup_members_contract_is_exact "$may_own_members_contract" \
+        || exit 1
+done
+for may_own_stat_contract in \
+    "$may_own_driver_stat_contract" "$may_own_host_stat_contract"
+do
+    sh -n "$may_own_stat_contract"
+    may_own_cgroup_stat_contract_is_exact "$may_own_stat_contract" || exit 1
+done
+may_own_members_predicate_mutant=$tmp/may-own-members-predicate-mutant.sh
+sed 's/\$0 != expected_pid/\$0 == expected_pid/' \
+    "$may_own_driver_members_contract" >"$may_own_members_predicate_mutant"
+if may_own_cgroup_members_contract_is_exact \
+    "$may_own_members_predicate_mutant"; then
+    printf '%s\n' 'MayOwn cgroup members contract accepted predicate mutant' >&2
+    exit 1
+fi
+may_own_stat_zero_mutant=$tmp/may-own-stat-zero-mutant.sh
+sed '0,/\$2 != 0/s//\$2 != 1/' "$may_own_driver_stat_contract" \
+    >"$may_own_stat_zero_mutant"
+if may_own_cgroup_stat_contract_is_exact "$may_own_stat_zero_mutant"; then
+    printf '%s\n' 'MayOwn cgroup stat contract accepted zero mutant' >&2
+    exit 1
+fi
+
+may_own_private_cgroup_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_private_cgroup_source=$1
+    [ "$(grep -Fxc \
+        '    hook_driver_service_cgroup=/sys/fs/cgroup' \
+        "$may_own_private_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '/sys/fs/cgroup/system.slice' \
+        "$may_own_private_cgroup_source")" -eq 0 ] || return 1
+    [ "$(grep -Fc '/proc/1/root' "$may_own_private_cgroup_source")" -eq 0 ] \
+        || return 1
+    [ "$(grep -Fc \
+        'hook_driver_service_cgroup_identity_before=$(stat -Lc' \
+        "$may_own_private_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'hook_driver_service_cgroup_identity_after=$(stat -Lc' \
+        "$may_own_private_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '"$hook_driver_expected_cgroup_identity"' \
+        "$may_own_private_cgroup_source")" -eq 3 ] || return 1
+    [ "$(grep -Fc \
+        'stat -f -Lc '\''%T'\'' "$hook_driver_service_cgroup"' \
+        "$may_own_private_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc '= cgroup2fs ]' \
+        "$may_own_private_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc \
+        'hook_driver_service_cgroup_type=$hook_driver_service_cgroup/cgroup.type' \
+        "$may_own_private_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'cat "$hook_driver_service_cgroup_type"' \
+        "$may_own_private_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc '= domain ]' \
+        "$may_own_private_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc 'may_own_driver_cgroup_stat_is_exact' \
+        "$may_own_private_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc 'may_own_driver_cgroup_members_are_exact' \
+        "$may_own_private_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc \
+        'hook_driver_service_procs_identity_before=$(stat -Lc' \
+        "$may_own_private_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'hook_driver_service_procs_identity_after=$(stat -Lc' \
+        "$may_own_private_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'unit_main_pid "$hook_driver_unit"' \
+        "$may_own_private_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc 'org.freedesktop.systemd1.Service ControlPID' \
+        "$may_own_private_cgroup_source")" -eq 2 ] || return 1
+}
+may_own_private_cgroup_contract_is_exact "$may_own_driver_entry_contract" \
+    || {
+        printf '%s\n' 'MayOwn private cgroup root proof is not exact' >&2
+        exit 1
+    }
+may_own_private_cgroup_root_mutant=$tmp/may-own-private-cgroup-root-mutant
+sed 's@hook_driver_service_cgroup=/sys/fs/cgroup$@hook_driver_service_cgroup=/sys/fs/cgroup/system.slice/$hook_driver_unit@' \
+    "$may_own_driver_entry_contract" >"$may_own_private_cgroup_root_mutant"
+may_own_private_cgroup_member_mutant=$tmp/may-own-private-cgroup-member-mutant
+sed '0,/may_own_driver_cgroup_members_are_exact/s//true/' \
+    "$may_own_driver_entry_contract" >"$may_own_private_cgroup_member_mutant"
+may_own_private_cgroup_filesystem_mutant=$tmp/may-own-private-cgroup-filesystem-mutant
+sed '0,/cgroup2fs/s//tmpfs/' "$may_own_driver_entry_contract" \
+    >"$may_own_private_cgroup_filesystem_mutant"
+for may_own_private_cgroup_mutant in \
+    "$may_own_private_cgroup_root_mutant" \
+    "$may_own_private_cgroup_member_mutant" \
+    "$may_own_private_cgroup_filesystem_mutant"
+do
+    sh -n "$may_own_private_cgroup_mutant"
+    if may_own_private_cgroup_contract_is_exact \
+        "$may_own_private_cgroup_mutant"; then
+        printf 'MayOwn private cgroup contract accepted mutant: %s\n' \
+            "${may_own_private_cgroup_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+may_own_host_cgroup_contract=$tmp/may-own-host-cgroup-contract.sh
+sed -n '/^may_own_host_service_cgroup_identity() {$/,/^}$/p' \
+    "$gate" >"$may_own_host_cgroup_contract"
+may_own_host_cgroup_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_host_cgroup_source=$1
+    [ "$(grep -Fc \
+        'may_own_host_cgroup_path=/sys/fs/cgroup/system.slice/$unit_name' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '/proc/1/root' "$may_own_host_cgroup_source")" -eq 0 ] \
+        || return 1
+    [ "$(grep -Fc 'systemctl show --property=ControlGroup' \
+        "$may_own_host_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc \
+        'may_own_host_cgroup_identity_before=$(stat -Lc' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'may_own_host_cgroup_identity_after=$(stat -Lc' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'stat -f -Lc '\''%T'\''' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '/cgroup.type' \
+        "$may_own_host_cgroup_source")" -eq 3 ] || return 1
+    [ "$(grep -Fc '= domain ]' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'may_own_cgroup_stat_is_exact' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'may_own_cgroup_members_are_exact' \
+        "$may_own_host_cgroup_source")" -eq 2 ] || return 1
+    [ "$(grep -Fc '[ -f "$may_own_host_cgroup_procs" ]' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc '[ ! -L "$may_own_host_cgroup_procs" ]' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'may_own_host_cgroup_procs_identity_before=$(stat -Lc' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc \
+        'may_own_host_cgroup_procs_identity_after=$(stat -Lc' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'systemctl show --property=MainPID' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'systemctl show --property=ControlPID' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'unit_current_invocation_id' \
+        "$may_own_host_cgroup_source")" -eq 1 ] || return 1
+    tail -n 2 "$may_own_host_cgroup_source" \
+        | grep -F 'printf '\''%s\n'\'' "$may_own_host_cgroup_identity_after"' \
+        >/dev/null || return 1
+}
+may_own_host_cgroup_contract_is_exact "$may_own_host_cgroup_contract" \
+    || {
+        printf '%s\n' 'MayOwn outer host cgroup proof is not exact' >&2
+        exit 1
+    }
+may_own_host_cgroup_member_mutant=$tmp/may-own-host-cgroup-member-mutant
+sed '0,/may_own_cgroup_members_are_exact/s//true/' \
+    "$may_own_host_cgroup_contract" >"$may_own_host_cgroup_member_mutant"
+may_own_host_cgroup_path_mutant=$tmp/may-own-host-cgroup-path-mutant
+sed 's@/sys/fs/cgroup/system.slice@/proc/1/root/sys/fs/cgroup/system.slice@' \
+    "$may_own_host_cgroup_contract" >"$may_own_host_cgroup_path_mutant"
+for may_own_host_cgroup_mutant in \
+    "$may_own_host_cgroup_member_mutant" "$may_own_host_cgroup_path_mutant"
+do
+    sh -n "$may_own_host_cgroup_mutant"
+    if may_own_host_cgroup_contract_is_exact \
+        "$may_own_host_cgroup_mutant"; then
+        printf 'MayOwn host cgroup contract accepted mutant: %s\n' \
+            "${may_own_host_cgroup_mutant##*/}" >&2
+        exit 1
+    fi
+done
+
+may_own_driver_launch_contract=$tmp/may-own-driver-launch-contract.sh
+sed -n '/^start_may_own_driver_observer() {$/,/^}$/p' \
+    "$gate" >"$may_own_driver_launch_contract"
+if ! awk '
+    /may_own_driver_cgroup_identity=\$\(may_own_host_service_cgroup_identity/ {
+        capture = NR; capture_count++
+    }
+    /may_own_kernel_object_identity_is_safe/ {
+        validation = NR; validation_count++
+    }
+    /\/usr\/bin\/nsenter --mount=/ { nsenter_line = NR; nsenter_count++ }
+    /--net=.* -- \\/ { net = NR; net_count++ }
+    /\/run\/volparossa-helper-production-ipc-hook may-own-driver-start/ {
+        hook_line = NR; hook_count++
+    }
+    /"\$may_own_driver_cgroup_identity" \\/ {
+        handoff = NR; handoff_count++
+    }
+    /--cgroup/ { forbidden_cgroup_namespace++ }
+    /\/proc\/1\/root/ { forbidden_host_root++ }
+    END {
+        valid = capture_count == 1 && validation_count == 1
+        valid = valid && nsenter_count == 1 && net_count == 1
+        valid = valid && hook_count == 1 && handoff_count == 1
+        valid = valid && forbidden_cgroup_namespace == 0
+        valid = valid && forbidden_host_root == 0
+        valid = valid && capture < validation && validation < nsenter_line
+        valid = valid && nsenter_line < net && net < hook_line
+        valid = valid && hook_line < handoff
+        if (!valid) exit 1
+    }
+' "$may_own_driver_launch_contract"; then
+    printf '%s\n' 'MayOwn driver cgroup identity handoff is not exact' >&2
+    exit 1
+fi
+if ! awk '
+    /start_may_own_driver_observer one/ { outer_before = NR; before_count++ }
+    /while ! vp_capture_file_is_safe .*may-own-output\/unit.identity/ {
+        identity_wait = NR; wait_count++
+    }
+    /may_own_service_shape_is_exact "\$may_own_pid_one"/ {
+        outer_after = NR; after_count++
+    }
+    END {
+        valid = before_count == 1 && wait_count == 1 && after_count == 1
+        valid = valid && outer_before < identity_wait
+        valid = valid && identity_wait < outer_after
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'MayOwn cgroup proof is not bracketed around first identity' >&2
+    exit 1
+fi
 
 may_own_driver_entry_stage_functions=$tmp/may-own-driver-entry-stage-functions.sh
 sed -n '/^may_own_driver_entry_failure_stage_is_safe() {$/,/^}$/p' \

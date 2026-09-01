@@ -287,6 +287,9 @@ grep -F 'may_own_initial_namespaces_are_ready "$may_own_pid_one" \' \
 driver_entry=$tmp/driver-entry
 sed -n '/^may_own_driver_entry_contract_is_exact() {$/,/^}$/p' \
     "$hook" >"$driver_entry"
+driver_entry_members=$tmp/driver-entry-members
+sed -n '/^may_own_driver_cgroup_members_are_exact() {$/,/^}$/p' \
+    "$hook" >"$driver_entry_members"
 grep -F '"/system.slice/$hook_driver_unit"|"/system.slice/$hook_driver_unit/"*)' \
     "$driver_entry" >/dev/null
 grep -F 'org.freedesktop.systemd1.Service ControlPID)" = 0 ]' \
@@ -298,7 +301,7 @@ grep -F 'stat -Lc '\''%d:%i'\'' /proc/1/ns/net' "$driver_start" >/dev/null
 grep -F 'hook_driver_service_procs=$hook_driver_service_cgroup/cgroup.procs' \
     "$driver_entry" >/dev/null
 grep -F 'NR > 32 || $0 != expected_pid { invalid = 1 }' \
-    "$driver_entry" >/dev/null
+    "$driver_entry_members" >/dev/null
 [ "$(grep -Fc 'may-own-driver-start)' "$hook")" -eq 1 ]
 [ "$(grep -Fc 'may-own-start)' "$hook")" -eq 0 ]
 

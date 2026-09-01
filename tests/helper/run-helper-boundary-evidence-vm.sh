@@ -611,6 +611,7 @@ non_retained_may_own_driver_entry_stage_is_safe() {
         unit-name|\
         gid|\
         main-pid|\
+        service-cgroup-argument|\
         observer-pid|\
         proc-records|\
         process-credentials|\
@@ -620,8 +621,13 @@ non_retained_may_own_driver_entry_stage_is_safe() {
         manager-main-pid|\
         network-namespace|\
         control-pid|\
+        service-cgroup-root|\
+        service-cgroup-filesystem|\
+        service-cgroup-type|\
+        service-cgroup-stat|\
         service-cgroup-procs|\
-        service-cgroup-members)
+        service-cgroup-members|\
+        service-cgroup-stability)
             return 0
             ;;
         *) return 1 ;;

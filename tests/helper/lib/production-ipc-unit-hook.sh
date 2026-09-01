@@ -72,6 +72,7 @@ may_own_driver_entry_failure_record=$proof_directory/may-own.driver-entry.failur
 may_own_relay_mode=no
 may_own_driver_observer_mode=no
 may_own_driver_expected_main_pid=
+may_own_driver_expected_cgroup_identity=
 may_own_driver_entry_failure_stage=
 functional_peer_public_key=$functional_relay_public_key
 functional_peer_endpoint=$functional_underlay_address:$functional_relay_listen_port
@@ -310,6 +311,7 @@ may_own_driver_entry_failure_stage_is_safe() {
         unit-name|\
         gid|\
         main-pid|\
+        service-cgroup-argument|\
         observer-pid|\
         proc-records|\
         process-credentials|\
@@ -319,8 +321,13 @@ may_own_driver_entry_failure_stage_is_safe() {
         manager-main-pid|\
         network-namespace|\
         control-pid|\
+        service-cgroup-root|\
+        service-cgroup-filesystem|\
+        service-cgroup-type|\
+        service-cgroup-stat|\
         service-cgroup-procs|\
-        service-cgroup-members)
+        service-cgroup-members|\
+        service-cgroup-stability)
             return 0
             ;;
         *) return 1 ;;
@@ -1414,18 +1421,56 @@ probe_output_is_exact() {
     rm -f -- "$hook_expected_output"
 }
 
+may_own_driver_cgroup_members_are_exact() {
+    [ "$#" -eq 2 ] || return 1
+    hook_driver_members_file=$1
+    hook_driver_members_main_pid=$2
+    number_is_safe "$hook_driver_members_main_pid" || return 1
+    [ -f "$hook_driver_members_file" ] \
+        && [ ! -L "$hook_driver_members_file" ] || return 1
+    /usr/bin/awk -v expected_pid="$hook_driver_members_main_pid" '
+        NR > 32 || $0 != expected_pid { invalid = 1 }
+        END { if (invalid || NR < 1) exit 1 }
+    ' "$hook_driver_members_file"
+}
+
+may_own_driver_cgroup_stat_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_driver_stat_file=$1
+    [ -f "$hook_driver_stat_file" ] \
+        && [ ! -L "$hook_driver_stat_file" ] || return 1
+    /usr/bin/awk '
+        NR > 256 { invalid = 1 }
+        $1 == "nr_descendants" {
+            if (seen_descendants || NF != 2 || $2 != 0) invalid = 1
+            seen_descendants = 1
+        }
+        $1 == "nr_dying_descendants" {
+            if (seen_dying || NF != 2 || $2 != 0) invalid = 1
+            seen_dying = 1
+        }
+        END {
+            if (invalid || !seen_descendants || !seen_dying) exit 1
+        }
+    ' "$hook_driver_stat_file"
+}
+
 may_own_driver_entry_contract_is_exact() {
     may_own_driver_entry_failure_stage=arguments
-    [ "$#" -eq 3 ] || return 1
+    [ "$#" -eq 4 ] || return 1
     hook_driver_unit=$1
     hook_driver_gid=$2
     hook_driver_main_pid=$3
+    hook_driver_expected_cgroup_identity=$4
     may_own_driver_entry_failure_stage=unit-name
     unit_name_is_safe "$hook_driver_unit" || return 1
     may_own_driver_entry_failure_stage=gid
     number_is_safe "$hook_driver_gid" || return 1
     may_own_driver_entry_failure_stage=main-pid
     number_is_safe "$hook_driver_main_pid" || return 1
+    may_own_driver_entry_failure_stage=service-cgroup-argument
+    kernel_object_identity_is_safe \
+        "$hook_driver_expected_cgroup_identity" || return 1
     may_own_driver_entry_failure_stage=observer-pid
     [ "$$" != "$hook_driver_main_pid" ] || return 1
     hook_driver_status=/proc/$$/status
@@ -1494,16 +1539,60 @@ may_own_driver_entry_contract_is_exact() {
     may_own_driver_entry_failure_stage=control-pid
     [ "$(unit_u32_property "$hook_driver_unit" \
         org.freedesktop.systemd1.Service ControlPID)" = 0 ] || return 1
-    hook_driver_service_cgroup=/sys/fs/cgroup/system.slice/$hook_driver_unit
+    hook_driver_service_cgroup=/sys/fs/cgroup
+    may_own_driver_entry_failure_stage=service-cgroup-root
+    [ -d "$hook_driver_service_cgroup" ] \
+        && [ ! -L "$hook_driver_service_cgroup" ] || return 1
+    hook_driver_service_cgroup_identity_before=$(stat -Lc '%d:%i' \
+        "$hook_driver_service_cgroup") || return 1
+    [ "$hook_driver_service_cgroup_identity_before" = \
+        "$hook_driver_expected_cgroup_identity" ] || return 1
+    may_own_driver_entry_failure_stage=service-cgroup-filesystem
+    [ "$(stat -f -Lc '%T' "$hook_driver_service_cgroup")" = cgroup2fs ] \
+        || return 1
+    may_own_driver_entry_failure_stage=service-cgroup-type
+    hook_driver_service_cgroup_type=$hook_driver_service_cgroup/cgroup.type
+    [ -f "$hook_driver_service_cgroup_type" ] \
+        && [ ! -L "$hook_driver_service_cgroup_type" ] \
+        && [ "$(cat "$hook_driver_service_cgroup_type")" = domain ] \
+        || return 1
+    may_own_driver_entry_failure_stage=service-cgroup-stat
+    hook_driver_service_cgroup_stat=$hook_driver_service_cgroup/cgroup.stat
+    may_own_driver_cgroup_stat_is_exact \
+        "$hook_driver_service_cgroup_stat" || return 1
     hook_driver_service_procs=$hook_driver_service_cgroup/cgroup.procs
     may_own_driver_entry_failure_stage=service-cgroup-procs
     [ -f "$hook_driver_service_procs" ] \
         && [ ! -L "$hook_driver_service_procs" ] || return 1
+    hook_driver_service_procs_identity_before=$(stat -Lc '%d:%i' \
+        "$hook_driver_service_procs") || return 1
+    kernel_object_identity_is_safe \
+        "$hook_driver_service_procs_identity_before" || return 1
     may_own_driver_entry_failure_stage=service-cgroup-members
-    /usr/bin/awk -v expected_pid="$hook_driver_main_pid" '
-        NR > 32 || $0 != expected_pid { invalid = 1 }
-        END { if (invalid || NR < 1) exit 1 }
-    ' "$hook_driver_service_procs" || return 1
+    may_own_driver_cgroup_members_are_exact "$hook_driver_service_procs" \
+        "$hook_driver_main_pid" || return 1
+    may_own_driver_entry_failure_stage=service-cgroup-stability
+    [ "$(unit_main_pid "$hook_driver_unit")" = "$hook_driver_main_pid" ] \
+        || return 1
+    [ "$(unit_u32_property "$hook_driver_unit" \
+        org.freedesktop.systemd1.Service ControlPID)" = 0 ] || return 1
+    hook_driver_service_cgroup_identity_after=$(stat -Lc '%d:%i' \
+        "$hook_driver_service_cgroup") || return 1
+    hook_driver_service_procs_identity_after=$(stat -Lc '%d:%i' \
+        "$hook_driver_service_procs") || return 1
+    [ "$hook_driver_service_cgroup_identity_after" = \
+        "$hook_driver_service_cgroup_identity_before" ] \
+        && [ "$hook_driver_service_cgroup_identity_after" = \
+            "$hook_driver_expected_cgroup_identity" ] \
+        && [ "$hook_driver_service_procs_identity_after" = \
+            "$hook_driver_service_procs_identity_before" ] || return 1
+    [ "$(stat -f -Lc '%T' "$hook_driver_service_cgroup")" = cgroup2fs ] \
+        || return 1
+    [ "$(cat "$hook_driver_service_cgroup_type")" = domain ] || return 1
+    may_own_driver_cgroup_stat_is_exact \
+        "$hook_driver_service_cgroup_stat" || return 1
+    may_own_driver_cgroup_members_are_exact "$hook_driver_service_procs" \
+        "$hook_driver_main_pid" || return 1
     may_own_driver_entry_failure_stage=
 }
 
@@ -6627,15 +6716,17 @@ may_own_observe_hook() {
 }
 
 may_own_start_hook() {
-    [ "$#" -eq 7 ] || fail 'MayOwn start hook argument count is invalid'
+    [ "$#" -eq 8 ] || fail 'MayOwn start hook argument count is invalid'
     hook_may_own_unit=$1
     hook_may_own_gid=$3
     may_own_driver_expected_main_pid=$7
+    may_own_driver_expected_cgroup_identity=$8
     [ "$may_own_driver_observer_mode" = yes ] \
         || fail 'MayOwn start hook is not driver-observed'
     if ! may_own_driver_entry_contract_is_exact \
         "$hook_may_own_unit" "$hook_may_own_gid" \
-        "$may_own_driver_expected_main_pid"; then
+        "$may_own_driver_expected_main_pid" \
+        "$may_own_driver_expected_cgroup_identity"; then
         publish_may_own_driver_entry_failure || :
         fail 'MayOwn driver observer boundary is not exact'
     fi
