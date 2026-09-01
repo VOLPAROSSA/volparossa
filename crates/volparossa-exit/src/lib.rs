@@ -14,7 +14,7 @@
 
 #[allow(
     dead_code,
-    reason = "callerless affine Exit foundation awaits its same-helper and datapath providers"
+    reason = "private Ready/Result phases still await same-helper and datapath providers"
 )]
 mod native_preselection;
 mod reservation_v4;
@@ -506,6 +506,7 @@ pub struct ExitService {
         HashMap<[u8; NODE_ID_BYTES], CachedControlResponse<AcceptedExitCapacityHold>>,
     permit_response_cache:
         HashMap<[u8; NODE_ID_BYTES], CachedControlResponse<AcceptedRelayProbePermit>>,
+    native_probe_permit_ledger: native_preselection::NativeProbePermitLedger,
     finalize_response_cache:
         HashMap<[u8; NODE_ID_BYTES], CachedControlResponse<AcceptedExitReservationBundle>>,
     confirmation_response_cache:
@@ -599,6 +600,9 @@ impl ExitService {
             exit_boot_id,
             hold_response_cache: HashMap::with_capacity(response_cache_capacity),
             permit_response_cache: HashMap::with_capacity(response_cache_capacity),
+            native_probe_permit_ledger: native_preselection::NativeProbePermitLedger::new(
+                response_cache_capacity,
+            ),
             finalize_response_cache: HashMap::with_capacity(response_cache_capacity),
             confirmation_response_cache: HashMap::with_capacity(response_cache_capacity),
             response_cache_capacity,
@@ -1040,6 +1044,7 @@ impl ExitService {
                     hex::encode(cached.response.confirmed_path().reservation_id()).as_str(),
                 )
         });
+        self.native_probe_permit_ledger.purge_expired(now_ms);
         self.sync_metrics();
         removed.len()
     }
@@ -1219,6 +1224,40 @@ impl ExitService {
             let result = metrics.set_exit_reservations(ledger.allocation_count());
             debug_assert!(result.is_ok(), "validated exit metric bound");
         }
+    }
+}
+
+/// Cloneable transport response for one internally retained native-probe Permit owner.
+///
+/// This value carries only the canonical Exit-signed response bytes and their exclusive expiry.
+/// Dropping it, including after a failed network send, does not remove or consume the affine owner
+/// retained by [`ExitService`].
+#[derive(Clone)]
+pub struct AcceptedNativeProbePermit {
+    encoded: Vec<u8>,
+    expires_at_ms: u64,
+}
+
+impl AcceptedNativeProbePermit {
+    /// Return the canonical Exit-signed native-probe Permit envelope.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+
+    /// Return the exclusive Permit expiry in Unix milliseconds.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+}
+
+impl fmt::Debug for AcceptedNativeProbePermit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcceptedNativeProbePermit")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
     }
 }
 

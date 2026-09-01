@@ -1,15 +1,17 @@
-//! Callerless Exit-side ownership for one endpoint-separated native preselection probe.
+//! Exit-side ownership for one endpoint-separated native preselection probe.
 //!
-//! This module intentionally has no runtime entry point. It proves the smallest safe Exit-side
-//! transition boundary while the helper still lacks a same-connection prepared-lease/lifecycle
-//! provider and post-baseline challenge evidence. The only state that can reach readiness retains a
-//! typed projection from an `ExitEndpointLease`, and the only state that can reach a result consumes
-//! a private helper/datapath observation. The projection is not helper-resource custody, and no
-//! phase seam is visible outside this module. The authenticated node/Peer-ID arguments are raw test
-//! inputs until a future connection-owning caller supplies them. Every produced phase caps its own
-//! local lifetime and retains the process boot incarnation; the bounded request replay cache itself
-//! is deliberately process-local.
+//! A bounded production API verifies and retains an affine Permit owner before exposing only
+//! transport response bytes. Later readiness/result transitions remain private while the helper
+//! still lacks a same-connection prepared-lease/lifecycle provider and post-baseline challenge
+//! evidence. The only state that can reach readiness retains a typed projection from an
+//! `ExitEndpointLease`, and the only state that can reach a result consumes a private
+//! helper/datapath observation. The projection is not helper-resource custody. Every produced phase
+//! caps its own local lifetime and retains the process boot incarnation; both the bounded Permit
+//! ledger and request replay cache are deliberately process-local.
 
+use std::collections::{HashMap, hash_map::Entry};
+
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use volparossa_protocol::{
@@ -23,7 +25,7 @@ use volparossa_protocol::{
 };
 use volparossa_wireguard::ExitEndpointLease;
 
-use super::{ExitError, ExitService, NODE_ID_BYTES, wire_endpoint};
+use super::{AcceptedNativeProbePermit, ExitError, ExitService, NODE_ID_BYTES, wire_endpoint};
 
 const ID_BYTES: usize = 16;
 const NONCE_BYTES: usize = 32;
@@ -47,6 +49,163 @@ impl IssuedNativeProbePermit {
     /// Borrow the exact Exit permit for client and data-Relay verification.
     fn signed_permit(&self) -> &[u8] {
         &self.signed_permit
+    }
+}
+
+/// Bounded process-local custody for native-probe Permit phase owners.
+///
+/// Only a response projection can leave `ExitService`; the affine owner stays here until a future
+/// exact readiness transition consumes it or its exclusive expiry is purged.
+pub(super) struct NativeProbePermitLedger {
+    entries: HashMap<[u8; NODE_ID_BYTES], StoredNativeProbePermit>,
+    capacity: usize,
+}
+
+struct StoredNativeProbePermit {
+    authenticated_control_relay_node_id: [u8; NODE_ID_BYTES],
+    authenticated_control_relay_peer_id: Vec<u8>,
+    exit_boot_id: [u8; ID_BYTES],
+    policy_version: u64,
+    policy_hash: [u8; NODE_ID_BYTES],
+    policy_expires_at_ms: u64,
+    probe_id: [u8; ID_BYTES],
+    expires_at_ms: u64,
+    owner: IssuedNativeProbePermit,
+}
+
+impl NativeProbePermitLedger {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub(super) fn purge_expired(&mut self, now_ms: u64) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, stored| stored.expires_at_ms > now_ms);
+        before.saturating_sub(self.entries.len())
+    }
+
+    fn ensure_capacity(&self) -> Result<(), ExitError> {
+        if self.entries.len() >= self.capacity {
+            Err(ExitError::IdempotencyCapacity)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_probe_vacant(
+        &self,
+        probe_id: &[u8],
+        request_hash: &[u8; NODE_ID_BYTES],
+    ) -> Result<(), ExitError> {
+        let probe_id: [u8; ID_BYTES] = probe_id
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native probe ID"))?;
+        if self
+            .entries
+            .iter()
+            .any(|(stored_hash, stored)| stored.probe_id == probe_id && stored_hash != request_hash)
+        {
+            return Err(ExitError::InvalidGrant(
+                "native probe Permit request substitution",
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the idempotency lookup checks every authenticated and process-local binding"
+    )]
+    fn cached_response(
+        &self,
+        request_hash: &[u8; NODE_ID_BYTES],
+        request: &[u8],
+        authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_control_relay_peer_id: &[u8],
+        exit_boot_id: [u8; ID_BYTES],
+        policy_version: u64,
+        policy_hash: &[u8; NODE_ID_BYTES],
+        policy_expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<AcceptedNativeProbePermit>, ExitError> {
+        let Some(stored) = self.entries.get(request_hash) else {
+            return Ok(None);
+        };
+        if stored.owner.signed_request != request {
+            return Err(ExitError::InvalidGrant(
+                "native probe Permit request hash collision",
+            ));
+        }
+        if stored.authenticated_control_relay_node_id != *authenticated_control_relay_node_id
+            || stored.authenticated_control_relay_peer_id != authenticated_control_relay_peer_id
+        {
+            return Err(ExitError::ControlRelayMismatch);
+        }
+        if stored.exit_boot_id != exit_boot_id {
+            return Err(ExitError::ExitBootMismatch);
+        }
+        if stored.policy_version != policy_version
+            || stored.policy_hash != *policy_hash
+            || stored.policy_expires_at_ms != policy_expires_at_ms
+        {
+            return Err(ExitError::InvalidGrant(
+                "native probe Permit idempotency policy",
+            ));
+        }
+        if stored.expires_at_ms <= now_ms || stored.owner.expires_at_ms != stored.expires_at_ms {
+            return Err(ExitError::InvalidGrant(
+                "native probe Permit idempotency expiry",
+            ));
+        }
+        Ok(Some(AcceptedNativeProbePermit {
+            encoded: stored.owner.signed_permit.clone(),
+            expires_at_ms: stored.expires_at_ms,
+        }))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the retained owner records every authenticated and process-local binding"
+    )]
+    fn store(
+        &mut self,
+        request_hash: [u8; NODE_ID_BYTES],
+        authenticated_control_relay_node_id: [u8; NODE_ID_BYTES],
+        authenticated_control_relay_peer_id: Vec<u8>,
+        exit_boot_id: [u8; ID_BYTES],
+        policy_version: u64,
+        policy_hash: [u8; NODE_ID_BYTES],
+        policy_expires_at_ms: u64,
+        owner: IssuedNativeProbePermit,
+    ) -> Result<(), ExitError> {
+        let probe_id = owner
+            .scope
+            .probe_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native probe ID"))?;
+        let stored = StoredNativeProbePermit {
+            authenticated_control_relay_node_id,
+            authenticated_control_relay_peer_id,
+            exit_boot_id,
+            policy_version,
+            policy_hash,
+            policy_expires_at_ms,
+            probe_id,
+            expires_at_ms: owner.expires_at_ms,
+            owner,
+        };
+        match self.entries.entry(request_hash) {
+            Entry::Vacant(entry) => {
+                entry.insert(stored);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(ExitError::LeaseInvariant),
+        }
     }
 }
 
@@ -137,6 +296,91 @@ impl IssuedNativeProbeExitResult {
 }
 
 impl ExitService {
+    /// Verify, sign and retain one native-probe Permit before returning transport-only bytes.
+    ///
+    /// The bounded process-local ledger binds exact request bytes, authenticated control-Relay
+    /// node and Peer ID, Exit boot incarnation, active policy and exclusive expiry. An identical
+    /// retry returns the original signed bytes without entering replay verification or invoking the
+    /// signer. The retained affine owner is not exposed, so dropping the returned projection after
+    /// a failed send cannot consume it.
+    ///
+    /// # Errors
+    ///
+    /// Rejects disabled mode, inactive policy, wrong local or forwarding identity, stale or
+    /// substituted requests, replay, ledger exhaustion, invalid scope, expiry or signing failure.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "all authenticated channel, local identity and signing authorities stay explicit"
+    )]
+    pub fn issue_native_probe_permit_with<F>(
+        &mut self,
+        encoded_request: &[u8],
+        authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_control_relay_peer_id: &[u8],
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        signer: F,
+    ) -> Result<AcceptedNativeProbePermit, ExitError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        self.require_enabled()?;
+        self.policy.ensure_active_at(now_ms)?;
+        self.ensure_native_probe_local_identity(local_public_key)?;
+        self.native_probe_permit_ledger.purge_expired(now_ms);
+
+        let request_hash: [u8; NODE_ID_BYTES] = Sha256::digest(encoded_request).into();
+        let policy_version = self.policy.manifest_version();
+        let policy_hash = *self.policy.policy_hash();
+        let policy_expires_at_ms = self.policy.expires_at_ms();
+        if let Some(response) = self.native_probe_permit_ledger.cached_response(
+            &request_hash,
+            encoded_request,
+            authenticated_control_relay_node_id,
+            authenticated_control_relay_peer_id,
+            self.exit_boot_id,
+            policy_version,
+            &policy_hash,
+            policy_expires_at_ms,
+            now_ms,
+        )? {
+            return Ok(response);
+        }
+        self.native_probe_permit_ledger.ensure_capacity()?;
+
+        let owner = self.mint_native_probe_permit_owner_with(
+            encoded_request.to_vec(),
+            authenticated_control_relay_node_id,
+            authenticated_control_relay_peer_id,
+            now_ms,
+            local_public_key,
+            signer,
+        )?;
+        self.native_probe_permit_ledger.store(
+            request_hash,
+            *authenticated_control_relay_node_id,
+            authenticated_control_relay_peer_id.to_vec(),
+            self.exit_boot_id,
+            policy_version,
+            policy_hash,
+            policy_expires_at_ms,
+            owner,
+        )?;
+        self.native_probe_permit_ledger
+            .cached_response(
+                &request_hash,
+                encoded_request,
+                authenticated_control_relay_node_id,
+                authenticated_control_relay_peer_id,
+                self.exit_boot_id,
+                policy_version,
+                &policy_hash,
+                policy_expires_at_ms,
+                now_ms,
+            )?
+            .ok_or(ExitError::LeaseInvariant)
+    }
+
     /// Verify one exact client request and mint one affine endpoint-free Exit permit.
     ///
     /// The caller-supplied authenticated channel identity must match the signed control Relay.
@@ -147,7 +391,7 @@ impl ExitService {
         clippy::too_many_arguments,
         reason = "all authenticated channel, local identity and signing authorities stay explicit"
     )]
-    fn issue_native_probe_permit_with<F>(
+    fn mint_native_probe_permit_owner_with<F>(
         &mut self,
         signed_request: Vec<u8>,
         authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
@@ -186,6 +430,9 @@ impl ExitService {
             if verified.sender_public_key() != scope.client_session_public_key.as_slice() {
                 return Err(ExitError::InvalidGrant("native probe client session"));
             }
+            let request_hash: [u8; NODE_ID_BYTES] = Sha256::digest(&signed_request).into();
+            self.native_probe_permit_ledger
+                .ensure_probe_vacant(&scope.probe_id, &request_hash)?;
 
             let expires_at_ms = native_probe_phase_expiry(request.expires_at_ms, now_ms)?;
             let nonce = generate_nonce();
@@ -536,6 +783,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_replay_capacity(64)
+        }
+
+        fn with_replay_capacity(replay_capacity: usize) -> Self {
             let exit_key = SigningKey::from_bytes(&[4; NODE_ID_BYTES]);
             let control_key = SigningKey::from_bytes(&[2; NODE_ID_BYTES]);
             let relay_key = SigningKey::from_bytes(&[3; NODE_ID_BYTES]);
@@ -572,7 +823,7 @@ mod tests {
                     8,
                     900,
                     30,
-                    64,
+                    replay_capacity,
                 ),
                 policy.clone(),
                 None,
@@ -589,6 +840,24 @@ mod tests {
                 scope,
                 signed_request,
             }
+        }
+
+        fn signed_request_with_nonce(&self, nonce: [u8; NONCE_BYTES]) -> Vec<u8> {
+            let request = NativeProbePermitRequest {
+                scope: Some(self.scope.clone()),
+                created_at_ms: NOW_MS,
+                expires_at_ms: ATTEMPT_EXPIRY_MS,
+                nonce: nonce.to_vec(),
+            };
+            sign_control_message(
+                &request,
+                &self.client_key,
+                NOW_MS,
+                ATTEMPT_EXPIRY_MS,
+                nonce,
+                native_time_policy(),
+            )
+            .expect("request")
         }
 
         fn exit_public_key(&self) -> [u8; NODE_ID_BYTES] {
@@ -618,7 +887,7 @@ mod tests {
             let control_peer_id = self.control_peer_id();
             let public_key = self.exit_public_key();
             let exit_key = &self.exit_key;
-            self.service.issue_native_probe_permit_with(
+            self.service.mint_native_probe_permit_owner_with(
                 self.signed_request.clone(),
                 &control_node_id,
                 &control_peer_id,
@@ -953,6 +1222,178 @@ mod tests {
     }
 
     #[test]
+    fn production_permit_is_stored_before_projection_and_retry_is_byte_identical() {
+        let mut fixture = Fixture::new();
+        let control_node_id = fixture.control_node_id();
+        let control_peer_id = fixture.control_peer_id();
+        let exit_public_key = fixture.exit_public_key();
+        let request = fixture.signed_request.clone();
+        let exit_key = &fixture.exit_key;
+        let mut signer_calls = 0_u8;
+        let first = fixture
+            .service
+            .issue_native_probe_permit_with(
+                &request,
+                &control_node_id,
+                &control_peer_id,
+                NOW_MS + 1,
+                exit_public_key,
+                |message| {
+                    signer_calls = signer_calls.saturating_add(1);
+                    Some(exit_key.sign(message).to_bytes())
+                },
+            )
+            .expect("first production Permit");
+        assert_eq!(signer_calls, 1);
+        assert_eq!(fixture.service.native_probe_permit_ledger.entries.len(), 1);
+        assert_eq!(fixture.service.native_probe_request_replay.len(), 1);
+
+        let request_hash: [u8; NODE_ID_BYTES] = Sha256::digest(&request).into();
+        let stored = fixture
+            .service
+            .native_probe_permit_ledger
+            .entries
+            .get(&request_hash)
+            .expect("owner retained before response");
+        assert_eq!(stored.owner.signed_request, request);
+        assert_eq!(stored.authenticated_control_relay_node_id, control_node_id);
+        assert_eq!(stored.authenticated_control_relay_peer_id, control_peer_id);
+        assert_eq!(stored.exit_boot_id, fixture.service.exit_boot_id);
+        assert_eq!(stored.policy_version, fixture.policy.manifest_version());
+        assert_eq!(stored.policy_hash, *fixture.policy.policy_hash());
+        assert_eq!(stored.policy_expires_at_ms, fixture.policy.expires_at_ms());
+        assert_eq!(stored.expires_at_ms, first.expires_at_ms());
+        assert_eq!(stored.owner.signed_permit(), first.encoded());
+
+        let original = first.encoded().to_vec();
+        drop(first); // A closed response channel cannot consume the retained owner.
+        let retry = fixture
+            .service
+            .issue_native_probe_permit_with(
+                &request,
+                &control_node_id,
+                &control_peer_id,
+                NOW_MS + 2,
+                exit_public_key,
+                |_message| -> Option<[u8; 64]> { panic!("an identical retry must bypass signing") },
+            )
+            .expect("idempotent retry after simulated send failure");
+        assert_eq!(retry.encoded(), original);
+        assert_eq!(fixture.service.native_probe_permit_ledger.entries.len(), 1);
+        assert_eq!(fixture.service.native_probe_request_replay.len(), 1);
+    }
+
+    #[test]
+    fn production_permit_rejects_cross_identity_and_request_substitution() {
+        let mut fixture = Fixture::new();
+        let control_node_id = fixture.control_node_id();
+        let control_peer_id = fixture.control_peer_id();
+        let exit_public_key = fixture.exit_public_key();
+        let request = fixture.signed_request.clone();
+        let exit_key = &fixture.exit_key;
+        fixture
+            .service
+            .issue_native_probe_permit_with(
+                &request,
+                &control_node_id,
+                &control_peer_id,
+                NOW_MS + 1,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            )
+            .expect("stored Permit");
+
+        assert!(matches!(
+            fixture.service.issue_native_probe_permit_with(
+                &request,
+                &[0xf1; NODE_ID_BYTES],
+                &control_peer_id,
+                NOW_MS + 2,
+                exit_public_key,
+                |_message| -> Option<[u8; 64]> { panic!("foreign control node must not sign") },
+            ),
+            Err(ExitError::ControlRelayMismatch)
+        ));
+        assert!(matches!(
+            fixture.service.issue_native_probe_permit_with(
+                &request,
+                &control_node_id,
+                &[0xf2; 38],
+                NOW_MS + 2,
+                exit_public_key,
+                |_message| -> Option<[u8; 64]> { panic!("foreign control Peer ID must not sign") },
+            ),
+            Err(ExitError::ControlRelayMismatch)
+        ));
+
+        let substituted = fixture.signed_request_with_nonce([11; NONCE_BYTES]);
+        assert!(matches!(
+            fixture.service.issue_native_probe_permit_with(
+                &substituted,
+                &control_node_id,
+                &control_peer_id,
+                NOW_MS + 2,
+                exit_public_key,
+                |_message| -> Option<[u8; 64]> {
+                    panic!("substituted request must reject before signing")
+                },
+            ),
+            Err(ExitError::InvalidGrant(
+                "native probe Permit request substitution"
+            ))
+        ));
+        assert_eq!(fixture.service.native_probe_permit_ledger.entries.len(), 1);
+        assert_eq!(fixture.service.native_probe_request_replay.len(), 1);
+    }
+
+    #[test]
+    fn production_permit_capacity_precedes_replay_and_expiry_purges_owner() {
+        let mut fixture = Fixture::with_replay_capacity(1);
+        let control_node_id = fixture.control_node_id();
+        let control_peer_id = fixture.control_peer_id();
+        let exit_public_key = fixture.exit_public_key();
+        let request = fixture.signed_request.clone();
+        let exit_key = &fixture.exit_key;
+        fixture
+            .service
+            .issue_native_probe_permit_with(
+                &request,
+                &control_node_id,
+                &control_peer_id,
+                NOW_MS + 1,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            )
+            .expect("sole bounded owner");
+        assert_eq!(fixture.service.native_probe_request_replay.len(), 1);
+
+        assert!(matches!(
+            fixture.service.issue_native_probe_permit_with(
+                b"not a canonical envelope",
+                &control_node_id,
+                &control_peer_id,
+                NOW_MS + 2,
+                exit_public_key,
+                |_message| -> Option<[u8; 64]> {
+                    panic!("full-ledger preflight must precede replay and signing")
+                },
+            ),
+            Err(ExitError::IdempotencyCapacity)
+        ));
+        assert_eq!(fixture.service.native_probe_request_replay.len(), 1);
+        assert_eq!(fixture.service.native_probe_permit_ledger.entries.len(), 1);
+
+        assert_eq!(fixture.service.purge_expired(ATTEMPT_EXPIRY_MS), 0);
+        assert!(
+            fixture
+                .service
+                .native_probe_permit_ledger
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn disabled_exit_rejects_before_verification_or_signing() {
         let fixture = Fixture::new();
         let policy = verified_development_manifest(NOW_MS, Vec::new()).expect("policy");
@@ -964,7 +1405,7 @@ mod tests {
         )
         .expect("disabled service");
         assert!(matches!(
-            disabled.issue_native_probe_permit_with(
+            disabled.mint_native_probe_permit_owner_with(
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
@@ -984,7 +1425,7 @@ mod tests {
         let mut fixture = Fixture::new();
         let public_key = fixture.exit_public_key();
         assert!(matches!(
-            fixture.service.issue_native_probe_permit_with(
+            fixture.service.mint_native_probe_permit_owner_with(
                 fixture.signed_request.clone(),
                 &[0xf1; NODE_ID_BYTES],
                 &fixture.control_peer_id(),
@@ -999,7 +1440,7 @@ mod tests {
         assert!(fixture.service.native_probe_request_replay.is_empty());
 
         assert!(matches!(
-            fixture.service.issue_native_probe_permit_with(
+            fixture.service.mint_native_probe_permit_owner_with(
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &[0xf2; 38],
@@ -1022,7 +1463,7 @@ mod tests {
         let control_peer_id = fixture.control_peer_id();
         let public_key = fixture.exit_public_key();
         assert!(matches!(
-            fixture.service.issue_native_probe_permit_with(
+            fixture.service.mint_native_probe_permit_owner_with(
                 fixture.signed_request.clone(),
                 &control_node_id,
                 &control_peer_id,
@@ -1207,7 +1648,7 @@ mod tests {
         let _permit = fixture.issue_permit();
         assert_eq!(fixture.service.native_probe_request_replay.len(), 1);
         assert!(matches!(
-            fixture.service.issue_native_probe_permit_with(
+            fixture.service.mint_native_probe_permit_owner_with(
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
@@ -1224,7 +1665,7 @@ mod tests {
     fn stale_or_peer_substituted_request_never_reaches_the_signer() {
         let mut expired = Fixture::new();
         assert!(matches!(
-            expired.service.issue_native_probe_permit_with(
+            expired.service.mint_native_probe_permit_owner_with(
                 expired.signed_request.clone(),
                 &expired.control_node_id(),
                 &expired.control_peer_id(),
@@ -1257,7 +1698,7 @@ mod tests {
         )
         .expect("request whose opaque Peer ID is structurally valid");
         assert!(matches!(
-            substituted.service.issue_native_probe_permit_with(
+            substituted.service.mint_native_probe_permit_owner_with(
                 substituted.signed_request.clone(),
                 &substituted.control_node_id(),
                 &substituted.control_peer_id(),
@@ -1291,7 +1732,7 @@ mod tests {
         )
         .expect("drifted service");
         assert!(matches!(
-            fixture.service.issue_native_probe_permit_with(
+            fixture.service.mint_native_probe_permit_owner_with(
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
