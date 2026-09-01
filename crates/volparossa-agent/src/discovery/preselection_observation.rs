@@ -1,4 +1,4 @@
-//! Callerless affine ownership and exact A1a/A1c freshness join for one bounded attempt.
+//! Actor-owned affine state and exact A1a/A1c freshness join for one bounded attempt.
 //!
 //! This child owns challenge generation, replay state, exact snapshot/request binding, opaque A0
 //! transcript tokens, and the one-way join with service-bound client transport proofs. The join
@@ -39,7 +39,7 @@ use super::{
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const BATCH_ID_LENGTH: usize = 16;
@@ -47,7 +47,7 @@ const BATCH_ID_LENGTH: usize = 16;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const CHALLENGE_LENGTH: usize = 32;
@@ -55,7 +55,7 @@ const CHALLENGE_LENGTH: usize = 32;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const MAXIMUM_REQUEST_BYTES: usize = 4 * 1024;
@@ -63,7 +63,7 @@ const MAXIMUM_REQUEST_BYTES: usize = 4 * 1024;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const MAXIMUM_OTHER_RELAYS: usize = 8;
@@ -71,7 +71,7 @@ const MAXIMUM_OTHER_RELAYS: usize = 8;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const MINIMUM_REQUESTS: usize = 2;
@@ -79,7 +79,7 @@ const MINIMUM_REQUESTS: usize = 2;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const MAXIMUM_REQUESTS: usize = 9;
@@ -87,7 +87,7 @@ const MAXIMUM_REQUESTS: usize = 9;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const MAXIMUM_ENVELOPES: usize = 10;
@@ -95,7 +95,7 @@ const MAXIMUM_ENVELOPES: usize = 10;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const MAXIMUM_TOMBSTONES: usize = 36;
@@ -103,7 +103,7 @@ const MAXIMUM_TOMBSTONES: usize = 36;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const MAXIMUM_BATCH_TOMBSTONES: usize = 4;
@@ -111,7 +111,7 @@ const MAXIMUM_BATCH_TOMBSTONES: usize = 4;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const REPLAY_CAPACITY: usize = 40;
@@ -119,7 +119,7 @@ const REPLAY_CAPACITY: usize = 40;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const REQUEST_LIFETIME_MS: u64 = 5_000;
@@ -127,7 +127,7 @@ const REQUEST_LIFETIME_MS: u64 = 5_000;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const ATTEMPT_LIFETIME_MS: u64 = 30_000;
@@ -135,7 +135,7 @@ const ATTEMPT_LIFETIME_MS: u64 = 30_000;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const TOMBSTONE_LIFETIME_MS: u64 = 120_000;
@@ -143,7 +143,7 @@ const TOMBSTONE_LIFETIME_MS: u64 = 120_000;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const TOMBSTONE_LIFETIME: Duration = Duration::from_secs(120);
@@ -151,7 +151,7 @@ const TOMBSTONE_LIFETIME: Duration = Duration::from_secs(120);
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const COOLDOWN_MS: u64 = 30_000;
@@ -159,7 +159,7 @@ const COOLDOWN_MS: u64 = 30_000;
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 const COOLDOWN: Duration = Duration::from_secs(30);
@@ -168,7 +168,7 @@ const COOLDOWN: Duration = Duration::from_secs(30);
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) struct PreselectionSubjectBinding {
@@ -191,7 +191,7 @@ pub(super) struct PreselectionSubjectBinding {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) struct PreselectionSubjectSet {
@@ -397,7 +397,7 @@ fn subject_identities_are_unique(entries: &[PreselectionSubjectBinding]) -> bool
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 struct ChallengeTombstone {
@@ -409,7 +409,7 @@ struct ChallengeTombstone {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 struct BatchTombstone {
@@ -422,7 +422,7 @@ struct BatchTombstone {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) struct PreselectionAttemptGate {
@@ -435,7 +435,7 @@ pub(super) struct PreselectionAttemptGate {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(crate) struct CoolingPreselectionAttemptGate {
@@ -448,7 +448,7 @@ pub(crate) struct CoolingPreselectionAttemptGate {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 struct MintedAttemptEntropy {
@@ -460,7 +460,7 @@ struct MintedAttemptEntropy {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 struct ObservationDispatchId {
@@ -472,7 +472,7 @@ struct ObservationDispatchId {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 #[derive(Clone, Copy)]
@@ -485,7 +485,7 @@ enum PendingRequestKind {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 struct RequestPlan {
@@ -500,7 +500,7 @@ struct RequestPlan {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 struct PendingRequest {
@@ -520,7 +520,7 @@ struct PendingRequest {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 enum BoundTranscript {
@@ -532,7 +532,7 @@ enum BoundTranscript {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 struct BoundTranscriptRecord {
@@ -548,7 +548,7 @@ struct BoundTranscriptRecord {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) struct PendingPreselectionAttempt {
@@ -578,7 +578,7 @@ pub(super) struct PendingPreselectionAttempt {
     not(test),
     allow(
         dead_code,
-        reason = "owner-only A1a dispatch transition awaits DiscoveryRuntime integration"
+        reason = "opaque A1 dispatch transition used only by DiscoveryRuntime"
     )
 )]
 pub(super) struct DispatchedPreselectionAttempt {
@@ -589,7 +589,7 @@ pub(super) struct DispatchedPreselectionAttempt {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) enum PreselectionResponseOutcome {
@@ -601,7 +601,7 @@ pub(super) enum PreselectionResponseOutcome {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) struct ReadyPreselectionAttempt {
@@ -625,7 +625,7 @@ pub(super) struct ReadyPreselectionAttempt {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) struct BoundPreselectionTranscriptBatch {
@@ -645,7 +645,7 @@ pub(super) struct BoundPreselectionTranscriptBatch {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(crate) struct CompletedPreselectionAttempt {
@@ -880,7 +880,7 @@ impl CompletedPreselectionFreshnessAttempt {
     not(test),
     allow(
         dead_code,
-        reason = "the discovery actor will retain this gate once it owns client preselection"
+        reason = "the discovery actor retains this gate across client preselection cooldown"
     )
 )]
 pub(crate) struct PreselectionFreshnessJoinFailure {
@@ -892,7 +892,7 @@ pub(crate) struct PreselectionFreshnessJoinFailure {
     not(test),
     allow(
         dead_code,
-        reason = "the discovery actor will inspect this failure once it owns client preselection"
+        reason = "the discovery actor purpose-consumes this exact proof-join failure"
     )
 )]
 impl PreselectionFreshnessJoinFailure {
@@ -909,7 +909,7 @@ impl PreselectionFreshnessJoinFailure {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 struct ValidatedAttemptInput {
@@ -931,7 +931,7 @@ struct ValidatedAttemptInput {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 #[derive(Clone, Copy)]
@@ -949,7 +949,7 @@ struct AttemptStart {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 #[derive(Clone, Copy)]
@@ -968,7 +968,7 @@ struct RequestPreparation<'a> {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 #[derive(Clone, Copy)]
@@ -988,7 +988,7 @@ struct RequestBinding<'a> {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1008,7 +1008,7 @@ pub(super) enum PreselectionAttemptError {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) struct PreselectionBeginFailure {
@@ -1017,11 +1017,24 @@ pub(super) struct PreselectionBeginFailure {
     error: PreselectionAttemptError,
 }
 
+/// Exact affine recovery after attempt admission stops before or after entropy commitment.
+pub(super) enum PreselectionGateRecovery {
+    Available(Box<PreselectionAttemptGate>),
+    Cooling(Box<CoolingPreselectionAttemptGate>),
+    Closed,
+}
+
+/// Exact local recovery after an undispatched Pending or Ready owner terminates.
+pub(super) enum PreselectionLocalRecovery {
+    Cooling(CoolingPreselectionAttemptGate),
+    Closed,
+}
+
 #[cfg_attr(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 pub(super) struct PreselectionAttemptFailure {
@@ -1038,7 +1051,7 @@ pub(super) struct PreselectionAttemptFailure {
     not(test),
     allow(
         dead_code,
-        reason = "owner-only A1a dispatch transition awaits DiscoveryRuntime integration"
+        reason = "opaque A1 dispatch transition used only by DiscoveryRuntime"
     )
 )]
 pub(super) enum PreselectionOwnerTransitionFailure {
@@ -1047,11 +1060,22 @@ pub(super) enum PreselectionOwnerTransitionFailure {
     Closed,
 }
 
+/// Purpose-consume a failed begin without exposing its gate or admission classification.
+pub(super) fn consume_preselection_begin_failure(
+    failure: PreselectionBeginFailure,
+) -> PreselectionGateRecovery {
+    match (failure.gate, failure.cooling_gate) {
+        (Some(gate), None) => PreselectionGateRecovery::Available(gate),
+        (None, Some(gate)) => PreselectionGateRecovery::Cooling(gate),
+        _ => PreselectionGateRecovery::Closed,
+    }
+}
+
 #[cfg_attr(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 impl PreselectionAttemptGate {
@@ -1259,7 +1283,7 @@ impl PreselectionAttemptGate {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 impl CoolingPreselectionAttemptGate {
@@ -1285,7 +1309,7 @@ impl CoolingPreselectionAttemptGate {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 impl PendingPreselectionAttempt {
@@ -1530,7 +1554,7 @@ impl PendingPreselectionAttempt {
     not(test),
     allow(
         dead_code,
-        reason = "owner-only A1a dispatch transition awaits DiscoveryRuntime integration"
+        reason = "opaque A1 dispatch transition used only by DiscoveryRuntime"
     )
 )]
 impl DispatchedPreselectionAttempt {
@@ -1600,9 +1624,21 @@ fn preselection_attempt_error(error: PreselectionDispatchError) -> PreselectionA
 fn into_owner_transition_failure(
     failure: PreselectionAttemptFailure,
 ) -> PreselectionOwnerTransitionFailure {
+    match consume_local_preselection_attempt_failure(failure) {
+        PreselectionLocalRecovery::Cooling(gate) => {
+            PreselectionOwnerTransitionFailure::Cooling(gate)
+        }
+        PreselectionLocalRecovery::Closed => PreselectionOwnerTransitionFailure::Closed,
+    }
+}
+
+/// Purpose-consume an undispatched local failure without admitting a Retained transaction state.
+pub(super) fn consume_local_preselection_attempt_failure(
+    failure: PreselectionAttemptFailure,
+) -> PreselectionLocalRecovery {
     match failure.gate {
-        Some(gate) => PreselectionOwnerTransitionFailure::Cooling(gate),
-        None => PreselectionOwnerTransitionFailure::Closed,
+        Some(gate) => PreselectionLocalRecovery::Cooling(gate),
+        None => PreselectionLocalRecovery::Closed,
     }
 }
 
@@ -1610,7 +1646,7 @@ fn into_owner_transition_failure(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn verify_and_bind_response(
@@ -1651,7 +1687,7 @@ fn verify_and_bind_response(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn bound_transcript_record(
@@ -1672,7 +1708,7 @@ fn bound_transcript_record(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 impl ReadyPreselectionAttempt {
@@ -1799,7 +1835,7 @@ impl ReadyPreselectionAttempt {
     not(test),
     allow(
         dead_code,
-        reason = "the discovery actor will hand its bounded sealed transports to this exact owner"
+        reason = "the discovery actor hands bounded sealed transports to this exact owner"
     )
 )]
 impl CompletedPreselectionAttempt {
@@ -2141,7 +2177,7 @@ const fn observation_ip_family(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn validate_attempt_input(
@@ -2220,7 +2256,7 @@ fn validate_attempt_input(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn validate_attempt_start(
@@ -2266,7 +2302,7 @@ fn validate_attempt_start(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn validate_subject_set_matches_snapshot(
@@ -2374,7 +2410,7 @@ fn validate_subject_set_matches_snapshot(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn static_scope_supported(
@@ -2401,7 +2437,7 @@ fn static_scope_supported(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn mint_attempt_entropy(
@@ -2429,7 +2465,7 @@ fn mint_attempt_entropy(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn all_challenges_unique(challenges: &[[u8; CHALLENGE_LENGTH]]) -> bool {
@@ -2441,7 +2477,7 @@ fn all_challenges_unique(challenges: &[[u8; CHALLENGE_LENGTH]]) -> bool {
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn record_prepared_entropy(
@@ -2491,7 +2527,7 @@ fn record_prepared_entropy(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn build_request_plans(
@@ -2530,7 +2566,7 @@ fn build_request_plans(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn prepare_request(
@@ -2603,7 +2639,7 @@ fn prepare_request(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn request_for_subject(
@@ -2659,7 +2695,7 @@ fn request_for_subject(
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn actor_binding(subject: &PreselectionSubjectBinding) -> PreselectionActorBinding {
@@ -2678,7 +2714,7 @@ fn actor_binding(subject: &PreselectionSubjectBinding) -> PreselectionActorBindi
     not(test),
     allow(
         dead_code,
-        reason = "callerless A1a prerequisite; no production caller"
+        reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
 fn cooling_gate(
@@ -4964,6 +5000,20 @@ mod tests {
         );
         assert_source_fields(
             product,
+            "pub(super) enum PreselectionGateRecovery {",
+            &[
+                "Available(Box<PreselectionAttemptGate>),",
+                "Cooling(Box<CoolingPreselectionAttemptGate>),",
+                "Closed,",
+            ],
+        );
+        assert_source_fields(
+            product,
+            "pub(super) enum PreselectionLocalRecovery {",
+            &["Cooling(CoolingPreselectionAttemptGate),", "Closed,"],
+        );
+        assert_source_fields(
+            product,
             "pub(super) enum PreselectionOwnerTransitionFailure {",
             &[
                 "Retained(Box<DispatchedPreselectionAttempt>),",
@@ -5047,12 +5097,13 @@ mod tests {
     }
 
     fn assert_a1a_affine_surface(product: &str) {
-        const DEAD_CODE_REASON: &str = "callerless A1a prerequisite; no production caller";
+        const DEAD_CODE_REASON: &str =
+            "private affine A1 owner internals; only DiscoveryRuntime enters";
         const DEAD_CODE_ATTRIBUTE: &str = "#[cfg_attr(
     not(test),
     allow(
         dead_code,
-        reason = \"callerless A1a prerequisite; no production caller\"
+        reason = \"private affine A1 owner internals; only DiscoveryRuntime enters\"
     )
 )]";
         assert_eq!(product.matches(DEAD_CODE_REASON).count(), 59);
@@ -5115,8 +5166,8 @@ mod tests {
             1
         );
         assert_eq!(product.matches("pub(super) struct ").count(), 9);
-        assert_eq!(product.matches("pub(super) enum ").count(), 3);
-        assert_eq!(product.matches("pub(super) fn ").count(), 11);
+        assert_eq!(product.matches("pub(super) enum ").count(), 5);
+        assert_eq!(product.matches("pub(super) fn ").count(), 13);
         assert_eq!(product.matches("pub(crate) struct ").count(), 7);
         assert_eq!(product.matches("pub(crate) enum ").count(), 1);
         assert_eq!(product.matches("pub(crate) fn ").count(), 6);
@@ -5720,9 +5771,9 @@ mod tests {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "one source-contract audit keeps the complete callerless ownership boundary together"
+        reason = "one source-contract audit keeps the complete actor ownership boundary together"
     )]
-    fn assert_a1a_parent_snapshot_and_callerlessness(product: &str) {
+    fn assert_a1a_parent_snapshot_and_actor_ownership(product: &str) {
         let parent = include_str!("../discovery.rs");
         let parent_test_marker = "\n#[cfg(test)]\nmod tests {";
         assert_eq!(parent.matches(parent_test_marker).count(), 1);
@@ -5737,13 +5788,6 @@ mod tests {
                 "policy: RouteCandidatePolicySnapshot,",
                 "direct_relays: Vec<DirectRelayCandidateSnapshot>,",
                 "forwarded_exits: Vec<ForwardedExitCandidateSnapshot>,",
-                "#[cfg_attr(",
-                "not(test),",
-                "allow(",
-                "dead_code,",
-                "reason = \"callerless A1a prerequisite; no production caller\"",
-                ")",
-                ")]",
                 "preselection_subjects: preselection_observation::PreselectionSubjectSet,",
             ],
         );
@@ -5751,7 +5795,7 @@ mod tests {
             parent_product
                 .matches("callerless A1a prerequisite; no production caller")
                 .count(),
-            1
+            0
         );
         let snapshot_item = parent_product
             .split_once("/// Bounded, actor-linearized input to route-selection preflight.")
@@ -5789,8 +5833,7 @@ mod tests {
             1
         );
         assert!(!parent_product.contains("fn preselection_subject"));
-        let outside_owner = [
-            parent_product,
+        let outside_actor = [
             include_str!("../advertisement.rs"),
             include_str!("../route_setup.rs"),
             include_str!("../route_setup/selection_bridge.rs"),
@@ -5815,22 +5858,59 @@ mod tests {
             "BoundPreselectionTranscriptBatch",
             "PreselectionResponseOutcome",
             "PreselectionOwnerTransitionFailure",
+            "PreselectionLocalRecovery",
         ] {
             assert_eq!(
-                outside_owner
+                outside_actor
                     .split(|character: char| {
                         !character.is_ascii_alphanumeric() && character != '_'
                     })
                     .filter(|token| *token == symbol)
                     .count(),
                 0,
-                "outside caller {symbol}"
+                "non-actor caller {symbol}"
+            );
+        }
+        for symbol in [
+            "PendingPreselectionAttempt",
+            "ReadyPreselectionAttempt",
+            "BoundPreselectionTranscriptBatch",
+        ] {
+            assert_eq!(
+                parent_product
+                    .split(|character: char| {
+                        !character.is_ascii_alphanumeric() && character != '_'
+                    })
+                    .filter(|token| *token == symbol)
+                    .count(),
+                0,
+                "actor escape {symbol}"
+            );
+        }
+        assert!(parent_product.contains("enum ClientPreselectionOwner {"));
+        assert!(parent_product.contains("dispatch: DispatchedPreselectionAttempt,"));
+        assert!(
+            parent_product.contains("match dispatch.bind_response(&mut self.service, arrival)")
+        );
+        assert!(parent_product.contains("match pending.dispatch(&mut self.service)"));
+        assert!(parent_product.contains("completed.join_transport_proofs(transports)"));
+        assert!(!parent_product.contains("pub struct ClientPreselectionOwner"));
+        for forbidden in [
+            "fn preselection_target(",
+            "fn preselection_peer(",
+            "fn preselection_endpoint(",
+            "fn preselection_dispatch_id(",
+            "fn preselection_authority(",
+        ] {
+            assert!(
+                !parent_product.contains(forbidden),
+                "actor escape {forbidden}"
             );
         }
     }
 
     #[test]
-    fn a1a_a1c_product_surface_is_affine_bounded_callerless_and_exactly_joined() {
+    fn a1a_a1c_product_surface_is_affine_bounded_actor_owned_and_exactly_joined() {
         let source = include_str!("preselection_observation.rs");
         let test_marker = "\n#[cfg(test)]\nmod tests {";
         assert_eq!(source.matches(test_marker).count(), 1);
@@ -5843,6 +5923,6 @@ mod tests {
         assert_owner_only_dispatch_transitions(product);
         assert_a1a_bounds_entropy_and_no_producer(product);
         assert_a1a_transcript_only(product);
-        assert_a1a_parent_snapshot_and_callerlessness(product);
+        assert_a1a_parent_snapshot_and_actor_ownership(product);
     }
 }
