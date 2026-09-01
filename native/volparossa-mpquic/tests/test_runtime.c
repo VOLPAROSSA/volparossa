@@ -102,6 +102,19 @@ static void init_mock(mock_transport_t *mock)
     mock->assignment.mtu = 1280U;
 }
 
+static void set_complete_path_metrics(
+    vmp_transport_path_snapshot_t *path, uint64_t seed,
+    uint64_t acked_transport_bytes)
+{
+    path->metrics_valid = UINT64_C(0x3f);
+    path->smoothed_rtt_us = seed + UINT64_C(1);
+    path->packets_lost = seed + UINT64_C(2);
+    path->congestion_window_bytes = seed + UINT64_C(3);
+    path->bytes_in_flight = seed + UINT64_C(4);
+    path->estimated_rate_bytes_per_sec = seed + UINT64_C(5);
+    path->acked_transport_bytes = acked_transport_bytes;
+}
+
 static vmp_transport_error_t mock_create(
     void *factory_context, const vmp_transport_create_params_t *params,
     void **out_session)
@@ -779,6 +792,9 @@ static void test_required_multipath_and_honest_failures(void)
     mock.ready = true;
     mock.paths[0].state = VMP_TRANSPORT_PATH_ACTIVE;
     mock.paths[1].state = VMP_TRANSPORT_PATH_ACTIVE;
+    set_complete_path_metrics(&mock.paths[0], UINT64_C(100),
+                              UINT64_C(4096));
+    set_complete_path_metrics(&mock.paths[1], UINT64_C(200), 0U);
     response = dispatch(runtime, &start);
     assert(response.result == VMP_RESULT_OK);
 
@@ -801,10 +817,25 @@ static void test_required_multipath_and_honest_failures(void)
     vmp_request_t status =
         context_request(VMP_OPERATION_GET_STATUS, 0x11U);
     response = dispatch(runtime, &status);
-    assert(response.result == VMP_RESULT_TRANSPORT);
-    assert(strcmp(response.diagnostic_code,
-                  "unique_delivery_metric_unsupported") == 0);
-    assert(response.path_count == 0U);
+    assert(response.result == VMP_RESULT_OK);
+    assert(strcmp(response.diagnostic_code, "ok") == 0);
+    assert(response.path_count == 2U);
+    assert(response.paths[0].path_id == 1U);
+    assert(response.paths[0].smoothed_rtt_us == UINT64_C(101));
+    assert(response.paths[0].packets_lost == UINT64_C(102));
+    assert(response.paths[0].delivered_bytes == 0U);
+    assert(response.paths[0].congestion_window_bytes == UINT64_C(103));
+    assert(response.paths[0].bytes_in_flight == UINT64_C(104));
+    assert(response.paths[0].delivery_rate_bps == UINT64_C(840));
+    assert(response.paths[0].data_carrying);
+    assert(response.paths[1].path_id == 2U);
+    assert(response.paths[1].smoothed_rtt_us == UINT64_C(201));
+    assert(response.paths[1].packets_lost == UINT64_C(202));
+    assert(response.paths[1].delivered_bytes == 0U);
+    assert(response.paths[1].congestion_window_bytes == UINT64_C(203));
+    assert(response.paths[1].bytes_in_flight == UINT64_C(204));
+    assert(response.paths[1].delivery_rate_bps == UINT64_C(1640));
+    assert(!response.paths[1].data_carrying);
 
     vmp_request_t remove;
     memset(&remove, 0, sizeof(remove));
@@ -829,6 +860,60 @@ static void test_required_multipath_and_honest_failures(void)
     assert(response.result == VMP_RESULT_NOT_FOUND);
     vmp_runtime_destroy(runtime);
     assert(mock.destroy_calls == 1U);
+}
+
+static vmp_runtime_t *ready_status_runtime(mock_transport_t *mock,
+                                           mock_clock_t *clock)
+{
+    init_mock(mock);
+    clock->boottime_ms = TEST_BOOTTIME_MS;
+    clock->realtime_ms = TEST_NOW_MS;
+    vmp_runtime_t *runtime =
+        create_runtime(VMP_RUNTIME_CLIENT, mock, clock);
+    assert(runtime != NULL);
+    const vmp_request_t start = start_request(
+        0x31U, 17U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    assert(dispatch(runtime, &start).result ==
+           VMP_RESULT_INSUFFICIENT_PATHS);
+    const vmp_request_t add = add_request(0x31U, 1U, 12U);
+    assert(dispatch(runtime, &add).result == VMP_RESULT_OK);
+    mock->ready = true;
+    mock->paths[0].state = VMP_TRANSPORT_PATH_ACTIVE;
+    assert(dispatch(runtime, &start).result == VMP_RESULT_OK);
+    return runtime;
+}
+
+static void assert_status_fails_closed(uint64_t metrics_valid,
+                                       uint64_t rate,
+                                       bool corrupt_handle)
+{
+    mock_transport_t mock;
+    mock_clock_t clock = {0};
+    vmp_runtime_t *runtime = ready_status_runtime(&mock, &clock);
+    set_complete_path_metrics(&mock.paths[0], UINT64_C(300),
+                              UINT64_C(1));
+    mock.paths[0].metrics_valid = metrics_valid;
+    mock.paths[0].estimated_rate_bytes_per_sec = rate;
+    if (corrupt_handle) mock.paths[0].handle = INT64_C(999);
+
+    const vmp_request_t status =
+        context_request(VMP_OPERATION_GET_STATUS, 0x31U);
+    const vmp_response_t response = dispatch(runtime, &status);
+    assert(response.result == VMP_RESULT_TRANSPORT);
+    assert(strcmp(response.diagnostic_code,
+                  corrupt_handle ? "native_transport_failed"
+                                 : "path_metrics_unavailable") == 0);
+    assert(response.path_count == 0U);
+    vmp_runtime_destroy(runtime);
+}
+
+static void test_status_metrics_fail_closed(void)
+{
+    assert_status_fails_closed(UINT64_C(0x1f), UINT64_C(1), false);
+    assert_status_fails_closed(UINT64_C(0x800000000000003f),
+                               UINT64_C(1), false);
+    assert_status_fails_closed(UINT64_C(0x3f), UINT64_MAX, false);
+    assert_status_fails_closed(UINT64_C(0x3f), UINT64_C(1), true);
 }
 
 static void test_explicit_modes_and_contexts(void)
@@ -1608,6 +1693,7 @@ int main(void)
     test_process_instance_preflight_and_restart_rejection();
     test_ready_transport_without_assignment_fails_closed();
     test_required_multipath_and_honest_failures();
+    test_status_metrics_fail_closed();
     test_explicit_modes_and_contexts();
     test_reverse_receive_and_overflow();
     test_session_credentials_versions_and_expiry();

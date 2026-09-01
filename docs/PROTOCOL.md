@@ -1070,10 +1070,12 @@ address, and wipes retained state on fatal transport failure. This does not prov
 exit allocated the address uniquely for the route lifetime, that the helper assigned it in the
 exact namespace, or that a real packet traversed it. Each path wire record reserves fields for path
 ID, smoothed RTT, loss, unique delivered payload bytes, congestion window, bytes in flight,
-delivery rate, and validation/real-carriage state. The pinned backend currently exposes ACKed
-transport bytes rather than unique payload bytes, so the runtime returns
-`unique_delivery_metric_unsupported` instead of claiming that evidence. These fields are necessary
-to prevent a native process from falsely reporting mere path configuration as multipath operation.
+delivery rate, and validation/real-carriage state. The runtime now publishes an exact current path
+set only when the pinned backend supplies every required metric and a valid normalized path state.
+It uses ACKed transport bytes only for the real-carriage boolean and keeps unique delivered payload
+bytes at zero, because transport framing and retransmissions make the former unsuitable for the
+latter. These fields are necessary to prevent a native process from falsely reporting mere path
+configuration as multipath operation.
 
 ## Policy manifest encoding
 

@@ -12,6 +12,18 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define VMP_STATUS_METRIC_SRTT (UINT64_C(1) << 0U)
+#define VMP_STATUS_METRIC_LOSS (UINT64_C(1) << 1U)
+#define VMP_STATUS_METRIC_CWND (UINT64_C(1) << 2U)
+#define VMP_STATUS_METRIC_INFLIGHT (UINT64_C(1) << 3U)
+#define VMP_STATUS_METRIC_ESTIMATED_RATE (UINT64_C(1) << 4U)
+#define VMP_STATUS_METRIC_ACKED_TRANSPORT (UINT64_C(1) << 5U)
+#define VMP_STATUS_METRICS_REQUIRED                                      \
+    (VMP_STATUS_METRIC_SRTT | VMP_STATUS_METRIC_LOSS |                  \
+     VMP_STATUS_METRIC_CWND | VMP_STATUS_METRIC_INFLIGHT |              \
+     VMP_STATUS_METRIC_ESTIMATED_RATE |                                 \
+     VMP_STATUS_METRIC_ACKED_TRANSPORT)
+
 typedef struct runtime_path {
     bool used;
     int64_t transport_handle;
@@ -524,6 +536,18 @@ static runtime_path_t *free_path(runtime_session_t *session)
     return NULL;
 }
 
+static const runtime_path_t *find_path_by_handle(
+    const runtime_session_t *session, int64_t handle)
+{
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        if (session->paths[index].used &&
+            session->paths[index].transport_handle == handle) {
+            return &session->paths[index];
+        }
+    }
+    return NULL;
+}
+
 static bool start_matches(const runtime_session_t *session,
                           const vmp_start_session_t *start)
 {
@@ -804,12 +828,23 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
                                              bool *out_ready,
                                              bool *out_has_assignment,
                                              vmp_tunnel_assignment_t
-                                                 *out_assignment)
+                                                 *out_assignment,
+                                             vmp_transport_path_snapshot_t
+                                                 *out_snapshots,
+                                             size_t *out_snapshot_count)
 {
     *out_active = 0U;
     *out_ready = false;
     *out_has_assignment = false;
     memset(out_assignment, 0, sizeof(*out_assignment));
+    if ((out_snapshots == NULL) != (out_snapshot_count == NULL)) {
+        return VMP_TRANSPORT_INVALID;
+    }
+    if (out_snapshots != NULL) {
+        memset(out_snapshots, 0,
+               VMP_MAX_PATHS * sizeof(*out_snapshots));
+        *out_snapshot_count = 0U;
+    }
     if (session->failed) return VMP_TRANSPORT_ENGINE;
     if (session->transport_session == NULL) return VMP_TRANSPORT_OK;
 
@@ -858,6 +893,11 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
     *out_ready = ready;
     *out_has_assignment = has_assignment;
     if (has_assignment) memcpy(out_assignment, &assignment, sizeof(assignment));
+    if (out_snapshots != NULL) {
+        memcpy(out_snapshots, snapshots,
+               count * sizeof(*out_snapshots));
+        *out_snapshot_count = count;
+    }
     secure_zero(&assignment, sizeof(assignment));
     if (!ready || *out_active < session->start.minimum_paths) {
         session->started = false;
@@ -1226,7 +1266,8 @@ static void dispatch_start(vmp_runtime_t *runtime,
     vmp_tunnel_assignment_t assignment;
     memset(&assignment, 0, sizeof(assignment));
     const vmp_transport_error_t snapshot_error = snapshot_active(
-        runtime, session, &active, &ready, &has_assignment, &assignment);
+        runtime, session, &active, &ready, &has_assignment, &assignment,
+        NULL, NULL);
     if (snapshot_error != VMP_TRANSPORT_OK) {
         secure_zero(&assignment, sizeof(assignment));
         set_result(response,
@@ -1432,7 +1473,8 @@ static bool require_active(vmp_runtime_t *runtime, runtime_session_t *session,
     vmp_tunnel_assignment_t assignment;
     memset(&assignment, 0, sizeof(assignment));
     const vmp_transport_error_t snapshot_error = snapshot_active(
-        runtime, session, &active, &ready, &has_assignment, &assignment);
+        runtime, session, &active, &ready, &has_assignment, &assignment,
+        NULL, NULL);
     if (snapshot_error != VMP_TRANSPORT_OK) {
         secure_zero(&assignment, sizeof(assignment));
         set_result(response,
@@ -1667,14 +1709,82 @@ static void dispatch_status(vmp_runtime_t *runtime,
         return;
     }
     if (!require_live(runtime, session, response)) return;
-    if (!require_active(runtime, session, response)) return;
+    if (session->reverse_overflow) {
+        set_result(response, VMP_RESULT_QUEUE_OVERFLOW,
+                   "reverse_queue_overflow");
+        return;
+    }
+    size_t active = 0U;
+    bool ready = false;
+    bool has_assignment = false;
+    vmp_tunnel_assignment_t assignment;
+    vmp_transport_path_snapshot_t snapshots[VMP_MAX_PATHS];
+    size_t snapshot_count = 0U;
+    memset(&assignment, 0, sizeof(assignment));
+    const vmp_transport_error_t snapshot_error = snapshot_active(
+        runtime, session, &active, &ready, &has_assignment, &assignment,
+        snapshots, &snapshot_count);
+    secure_zero(&assignment, sizeof(assignment));
+    if (snapshot_error != VMP_TRANSPORT_OK) {
+        set_result(response,
+                   snapshot_error == VMP_TRANSPORT_OVERFLOW
+                       ? VMP_RESULT_QUEUE_OVERFLOW
+                       : VMP_RESULT_TRANSPORT,
+                   snapshot_error == VMP_TRANSPORT_OVERFLOW
+                       ? "reverse_queue_overflow"
+                       : "native_transport_failed");
+        return;
+    }
+    if (!session->started || !ready || !has_assignment ||
+        active < session->start.minimum_paths) {
+        set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
+                   "required_paths_not_active");
+        return;
+    }
 
-    /* xquic's exposed delivered counter is ACKed QUIC transport bytes and can
-     * include retransmissions and framing. NativePathStatus requires unique
-     * delivered payload bytes, so returning zero or relabelling that counter
-     * would be false telemetry. */
-    set_result(response, VMP_RESULT_TRANSPORT,
-               "unique_delivery_metric_unsupported");
+    vmp_path_status_t paths[VMP_MAX_PATHS];
+    memset(paths, 0, sizeof(paths));
+    for (size_t index = 0U; index < snapshot_count; ++index) {
+        const vmp_transport_path_snapshot_t *snapshot = &snapshots[index];
+        const runtime_path_t *path =
+            find_path_by_handle(session, snapshot->handle);
+        if (path == NULL ||
+            snapshot->metrics_valid != VMP_STATUS_METRICS_REQUIRED ||
+            snapshot->estimated_rate_bytes_per_sec > UINT64_MAX / 8U) {
+            session->failed = true;
+            session->started = false;
+            set_result(response, VMP_RESULT_TRANSPORT,
+                       "path_metrics_unavailable");
+            return;
+        }
+        vmp_path_status_t *status = &paths[index];
+        status->path_id = path->request.path_id;
+        status->smoothed_rtt_us = snapshot->smoothed_rtt_us;
+        status->packets_lost = snapshot->packets_lost;
+        /* ACKed transport can contain framing and retransmissions. It proves
+         * that a path carried transport data, but never unique inner bytes. */
+        status->delivered_bytes = 0U;
+        status->congestion_window_bytes =
+            snapshot->congestion_window_bytes;
+        status->bytes_in_flight = snapshot->bytes_in_flight;
+        status->delivery_rate_bps =
+            snapshot->estimated_rate_bytes_per_sec * 8U;
+        status->data_carrying = snapshot->acked_transport_bytes > 0U;
+    }
+    for (size_t index = 1U; index < snapshot_count; ++index) {
+        vmp_path_status_t current = paths[index];
+        size_t insertion = index;
+        while (insertion > 0U &&
+               paths[insertion - 1U].path_id > current.path_id) {
+            paths[insertion] = paths[insertion - 1U];
+            --insertion;
+        }
+        paths[insertion] = current;
+    }
+    set_result(response, VMP_RESULT_OK, "ok");
+    memcpy(response->paths, paths,
+           snapshot_count * sizeof(*response->paths));
+    response->path_count = snapshot_count;
 }
 
 static void dispatch_start_exit(vmp_runtime_t *runtime,

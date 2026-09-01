@@ -138,8 +138,12 @@ applicable.
 
 There is no mock production dispatcher and no ordinary-QUIC fallback.
 `SendDatagram` and request-driven reverse polling cross the real mqvpn adapter
-for an active client session. `GetStatus` still fails closed rather than
-relabeling ACKed QUIC transport bytes as uniquely delivered payload.
+for an active client session. `GetStatus` returns the exact current client path
+set only when every path has a valid native state and complete RTT, loss,
+congestion-window, in-flight, estimated-rate, and ACKed-transport metrics.
+`data_carrying` means that xquic has ACKed transport bytes on that path;
+`delivered_bytes` remains zero because that counter is not unique inner
+payload delivery.
 
 ## Executable contract
 
@@ -363,9 +367,9 @@ The following gates remain hard blockers:
    adoption remains blocked until an affine helper-to-native capability binds
    each descriptor to the attested helper acquisition.
 2. **No unique payload-delivery metric.** xquic's counter includes QUIC
-   transport overhead and retransmission. It cannot satisfy
-   `NativePathStatus.delivered_bytes`, which promises uniquely delivered
-   payload. `GetStatus` returns `unique_delivery_metric_unsupported`.
+   transport overhead and retransmission. `GetStatus` uses it only to prove
+   per-path transport activity and leaves `NativePathStatus.delivered_bytes`
+   zero; it never relabels those bytes as unique delivered payload.
 3. **No operational exit lifecycle.** The patched mqvpn server can report a
    session-correlated inbound packet and can initialize xquic from bounded
    in-memory TLS candidate material without a caller-supplied secret pathname.
