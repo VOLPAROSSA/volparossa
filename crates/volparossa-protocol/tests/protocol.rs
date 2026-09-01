@@ -1552,6 +1552,7 @@ fn assert_native_probe_core_schema(rust: &str, schema: &str) {
                 ("policy_expires_at_ms", 14),
                 ("challenge_hash", 15),
                 ("attempt_expires_at_ms", 16),
+                ("required_path_count", 17),
             ],
         ),
         (
@@ -1586,6 +1587,7 @@ fn assert_native_probe_readiness_schema(rust: &str, schema: &str) {
                 ("route_context_id", 2),
                 ("endpoint", 3),
                 ("prepared_lease_commitment", 4),
+                ("path_id", 5),
             ],
         ),
         (
@@ -1703,8 +1705,16 @@ fn assert_native_probe_messages(rust: &str, schema: &str, messages: &[(&str, &[(
     for (message, fields) in messages {
         let rust_body = item_body(rust, &format!("pub struct {message} {{"));
         let schema_body = item_body(schema, &format!("message {message} {{"));
-        assert_eq!(rust_body.matches("#[prost(").count(), fields.len());
-        assert_eq!(schema_body.matches(';').count(), fields.len());
+        assert_eq!(
+            rust_body.matches("#[prost(").count(),
+            fields.len(),
+            "Rust field count drift for {message}"
+        );
+        assert_eq!(
+            schema_body.matches(';').count(),
+            fields.len(),
+            "checked-in schema field count drift for {message}"
+        );
         for (field, tag) in *fields {
             assert!(rust_body.contains(&format!("tag = \"{tag}\"")));
             assert!(rust_body.contains(&format!("pub {field}:")));

@@ -223,6 +223,7 @@ message NativeProbePathScope {
   uint64 policy_expires_at_ms = 14;
   bytes challenge_hash = 15;
   uint64 attempt_expires_at_ms = 16;
+  uint32 required_path_count = 17;
 }
 
 // Permit exchange is endpoint-free and binds one exact attempt, candidate set,
@@ -254,6 +255,7 @@ message NativeProbeEndpointBinding {
   bytes route_context_id = 2;
   WireguardEndpoint endpoint = 3;
   bytes prepared_lease_commitment = 4;
+  uint32 path_id = 5;
 }
 
 // Delivered only to the exact data Relay. Neither the client nor control Relay
