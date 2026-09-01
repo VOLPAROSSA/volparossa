@@ -197,9 +197,10 @@ affinely.
 
 The sampler applies strict operator-ID, ASN and requested-family advertised-prefix-hint diversity
 across the Exit, control and Relay slate. Those signed canonical public `/24` or `/48` hints are not
-authenticated network origins and do not satisfy A1c. Only the later exact-set transport join may
-substitute direct connection-derived or control-attested prefixes, re-enforce actual origin
-diversity and mint Fresh evidence. No product actor invokes the sampler or connects it to dispatch.
+authenticated network origins and do not satisfy A1c. The later exact-set transport join may mint
+only direct connection-derived or control-attested prefixes into private Fresh evidence. The
+existing FreshEvidence/selection hard filter must re-enforce actual origin diversity before route
+planning. No product actor invokes the sampler or connects it to dispatch.
 
 The agent now has a separate dormant A1a consumer around this protocol boundary. Its
 discovery-private `pub(super)` affine `PreselectionAttemptGate` validates one endpoint-free reduced

@@ -230,9 +230,10 @@ Preselection diversity is strict across the chosen control, Exit and every other
 operator ID, non-zero ASN and a canonical public advertised IPv4 `/24` or IPv6 `/48` hint in the
 requested family. The hints are inexpensive signed claims, not authenticated network origins;
 they provide no Fresh, route, reservation or reachability authority. The later exact-set transport
-join must replace each hint with the direct connection-derived or control-attested native prefix
-and re-enforce actual network-origin diversity before minting `FreshEvidenceBatch`. The sampler is
-still dormant: it has no production attempt actor, network dispatch or Fresh-evidence caller.
+join may mint only direct connection-derived or control-attested native prefixes into its private
+Fresh evidence. The existing FreshEvidence/selection hard filter must then re-enforce actual
+network-origin diversity before route planning. The sampler is still dormant: it has no production
+attempt actor, network dispatch or Fresh-evidence caller.
 
 Each discovery-private `pub(super)` affine `PreselectionAttemptGate` lineage admits at most one
 attempt at a time. It validates a batch-wide non-zero conservative local bandwidth ceiling and an

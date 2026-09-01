@@ -1021,10 +1021,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   role/transport/family, unavailable advertised capacity, active serious faults and insufficient
   diversity before materialization; failure retains the exact original snapshot in a boxed affine
   error. It enforces strict operator, non-zero ASN and canonical public advertised `/24` or `/48`
-  hint diversity, but those signed hints are not authenticated origins. A later exact-set join must
-  replace them with connection-derived or control-attested prefixes and re-enforce actual
-  network-origin diversity before Fresh evidence. It never creates a direct Exit candidate and has
-  no production attempt actor, dispatch or Fresh-evidence caller. Control-v4 tags 17 and 18 now
+  hint diversity, but those signed hints are not authenticated origins. A later exact-set join may
+  mint only connection-derived or control-attested prefixes into private Fresh evidence; the
+  existing FreshEvidence/selection hard filter must re-enforce actual network-origin diversity
+  before route planning. It never creates a direct Exit candidate and has no production attempt
+  actor, dispatch or Fresh-evidence caller. Control-v4 tags 17 and 18 now
   define a protocol precursor with no production/network caller for an actor-signed direct
   observation transcript or an exit-signed receipt nested in a control-signed public-prefix claim.
   The dedicated verifiers are transactional and return opaque affine transcripts. A separate dormant
