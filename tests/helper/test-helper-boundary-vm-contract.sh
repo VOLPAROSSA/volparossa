@@ -1878,6 +1878,14 @@ for non_retained_production_stage in \
     functional-exit-worker-observation functional-exit-relay-fixture \
     functional-exit-relay-traffic functional-exit-relay-cleanup \
     functional-exit-release functional-exit-cleanup \
+    functional-exit-cleanup-retirement \
+    functional-exit-cleanup-process-pin \
+    functional-exit-cleanup-wireguard-absence \
+    functional-exit-cleanup-namespace-pin \
+    functional-exit-cleanup-process-close \
+    functional-exit-cleanup-namespace-close \
+    functional-exit-cleanup-fdstore-absence \
+    functional-exit-cleanup-parent-custody \
     functional-relay-pair-ready functional-relay-pair-worker-observation \
     functional-relay-pair-fixtures functional-relay-pair-traffic \
     functional-relay-pair-cleanup \

@@ -995,6 +995,14 @@ production_start_failure_stage_is_safe() {
         functional-exit-relay-cleanup|\
         functional-exit-release|\
         functional-exit-cleanup|\
+        functional-exit-cleanup-retirement|\
+        functional-exit-cleanup-process-pin|\
+        functional-exit-cleanup-wireguard-absence|\
+        functional-exit-cleanup-namespace-pin|\
+        functional-exit-cleanup-process-close|\
+        functional-exit-cleanup-namespace-close|\
+        functional-exit-cleanup-fdstore-absence|\
+        functional-exit-cleanup-parent-custody|\
         functional-relay-pair-ready|\
         functional-relay-pair-worker-observation|\
         functional-relay-pair-fixtures|\

@@ -580,6 +580,14 @@ printf '%s\n' \
     functional-exit-relay-cleanup \
     functional-exit-release \
     functional-exit-cleanup \
+    functional-exit-cleanup-retirement \
+    functional-exit-cleanup-process-pin \
+    functional-exit-cleanup-wireguard-absence \
+    functional-exit-cleanup-namespace-pin \
+    functional-exit-cleanup-process-close \
+    functional-exit-cleanup-namespace-close \
+    functional-exit-cleanup-fdstore-absence \
+    functional-exit-cleanup-parent-custody \
     functional-relay-pair-ready \
     functional-relay-pair-worker-observation \
     functional-relay-pair-fixtures \
@@ -8369,8 +8377,41 @@ if ! awk '
     in_functional && /advance_start_failure_stage functional-exit-release/ {
         exit_release_stage = NR
     }
-    in_functional && /advance_start_failure_stage functional-exit-cleanup/ {
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup \|\|/ {
         exit_cleanup_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-retirement/ {
+        exit_cleanup_retirement_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-process-pin/ {
+        exit_cleanup_process_pin_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-wireguard-absence/ {
+        exit_cleanup_wireguard_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-namespace-pin/ {
+        exit_cleanup_namespace_pin_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-process-close/ {
+        exit_cleanup_process_close_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-namespace-close/ {
+        exit_cleanup_namespace_close_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-fdstore-absence/ {
+        exit_cleanup_fdstore_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-exit-cleanup-parent-custody/ {
+        exit_cleanup_parent_stage = NR
     }
     in_functional && /advance_start_failure_stage functional-relay-pair-ready/ {
         pair_ready_stage = NR
@@ -8484,9 +8525,17 @@ if ! awk '
         valid = valid && exit_release_stage < exit_release
         valid = valid && exit_release < exit_settled_wait
         valid = valid && exit_settled_wait < exit_cleanup_stage
-        valid = valid && exit_cleanup_stage < exit_retired
-        valid = valid && exit_retired < exit_wireguard_absent
-        valid = valid && exit_wireguard_absent < exit_settlement_release
+        valid = valid && exit_cleanup_stage < exit_cleanup_retirement_stage
+        valid = valid && exit_cleanup_retirement_stage < exit_retired
+        valid = valid && exit_retired < exit_cleanup_process_pin_stage
+        valid = valid && exit_cleanup_process_pin_stage < exit_cleanup_wireguard_stage
+        valid = valid && exit_cleanup_wireguard_stage < exit_wireguard_absent
+        valid = valid && exit_wireguard_absent < exit_cleanup_namespace_pin_stage
+        valid = valid && exit_cleanup_namespace_pin_stage < exit_cleanup_process_close_stage
+        valid = valid && exit_cleanup_process_close_stage < exit_cleanup_namespace_close_stage
+        valid = valid && exit_cleanup_namespace_close_stage < exit_cleanup_fdstore_stage
+        valid = valid && exit_cleanup_fdstore_stage < exit_cleanup_parent_stage
+        valid = valid && exit_cleanup_parent_stage < exit_settlement_release
         valid = valid && exit_settlement_release < pair_ready_wait
         valid = valid && pair_ready_wait < pair_ready_stage
         valid = valid && pair_ready_stage < pair_worker_stage

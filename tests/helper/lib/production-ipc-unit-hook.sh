@@ -291,6 +291,14 @@ start_failure_stage_is_safe() {
         functional-exit-relay-cleanup|\
         functional-exit-release|\
         functional-exit-cleanup|\
+        functional-exit-cleanup-retirement|\
+        functional-exit-cleanup-process-pin|\
+        functional-exit-cleanup-wireguard-absence|\
+        functional-exit-cleanup-namespace-pin|\
+        functional-exit-cleanup-process-close|\
+        functional-exit-cleanup-namespace-close|\
+        functional-exit-cleanup-fdstore-absence|\
+        functional-exit-cleanup-parent-custody|\
         functional-relay-pair-ready|\
         functional-relay-pair-worker-observation|\
         functional-relay-pair-fixtures|\
@@ -418,7 +426,15 @@ advance_start_failure_stage() {
         functional-exit-relay-traffic:functional-exit-relay-cleanup|\
         functional-exit-relay-cleanup:functional-exit-release|\
         functional-exit-release:functional-exit-cleanup|\
-        functional-exit-cleanup:functional-relay-pair-ready|\
+        functional-exit-cleanup:functional-exit-cleanup-retirement|\
+        functional-exit-cleanup-retirement:functional-exit-cleanup-process-pin|\
+        functional-exit-cleanup-process-pin:functional-exit-cleanup-wireguard-absence|\
+        functional-exit-cleanup-wireguard-absence:functional-exit-cleanup-namespace-pin|\
+        functional-exit-cleanup-namespace-pin:functional-exit-cleanup-process-close|\
+        functional-exit-cleanup-process-close:functional-exit-cleanup-namespace-close|\
+        functional-exit-cleanup-namespace-close:functional-exit-cleanup-fdstore-absence|\
+        functional-exit-cleanup-fdstore-absence:functional-exit-cleanup-parent-custody|\
+        functional-exit-cleanup-parent-custody:functional-relay-pair-ready|\
         functional-relay-pair-ready:functional-relay-pair-worker-observation|\
         functional-relay-pair-worker-observation:functional-relay-pair-fixtures|\
         functional-relay-pair-fixtures:functional-relay-pair-traffic|\
@@ -5714,24 +5730,33 @@ run_functional_client_lease_probe() {
     done
 
     advance_start_failure_stage functional-exit-cleanup || return 1
+    advance_start_failure_stage functional-exit-cleanup-retirement || return 1
     hook_functional_wait_attempt=0
     while ! worker_process_fd_is_retired 8; do
         hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
         [ "$hook_functional_wait_attempt" -lt 100 ] || return 1
         sleep 0.05
     done
+    advance_start_failure_stage functional-exit-cleanup-process-pin || return 1
     [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
         "$hook_functional_exit_process_identity" ] || return 1
+    advance_start_failure_stage functional-exit-cleanup-wireguard-absence \
+        || return 1
     worker_wireguard_is_absent \
         7 "$hook_functional_exit_peer_address" || return 1
+    advance_start_failure_stage functional-exit-cleanup-namespace-pin || return 1
     [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
         "$hook_functional_exit_worker_namespace" ] || return 1
+    advance_start_failure_stage functional-exit-cleanup-process-close || return 1
     command exec 8>&- || return 1
     [ ! -e /proc/self/fd/8 ] && [ ! -L /proc/self/fd/8 ] || return 1
+    advance_start_failure_stage functional-exit-cleanup-namespace-close || return 1
     command exec 7>&- || return 1
     [ ! -e /proc/self/fd/7 ] && [ ! -L /proc/self/fd/7 ] || return 1
+    advance_start_failure_stage functional-exit-cleanup-fdstore-absence || return 1
     unit_fdstore_prior_custody_is_absent \
         "$hook_functional_unit" "$hook_functional_exit_custody_name" || return 1
+    advance_start_failure_stage functional-exit-cleanup-parent-custody || return 1
     helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
 
     printf '%s' "$functional_release_byte" >&6 || return 1
