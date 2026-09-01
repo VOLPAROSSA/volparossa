@@ -1,7 +1,7 @@
 //! Callable ownership seam for the native multipath QUIC client process.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
@@ -22,9 +22,9 @@ use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{ReplayCache, TimePolicy};
 use volparossa_quic::{
     AddPath, GetStatus, NativeClient, NativeClientError, NativePathStatus, NativeProcessRole,
-    NativeResultCode, ReceiveDatagram, ReceivedDatagram, SendDatagram, StartExitSession,
-    StartSession, StopSession, TransportMode, TunnelAssignment, VerifiedExitMpquicEndpoint,
-    parse_initial,
+    NativeResultCode, ReceiveDatagram, ReceivedDatagram, RemovePath, SendDatagram,
+    StartExitSession, StartSession, StopSession, TransportMode, TunnelAssignment,
+    VerifiedExitMpquicEndpoint, parse_initial,
 };
 use volparossa_reservation::{ClientNativeRouteAuthorization, VerifiedRelayGrant};
 use volparossa_routing::{
@@ -1023,23 +1023,43 @@ impl ProductionMpquicPreflight {
         context_handle: [u8; HELPER_HANDLE_BYTES],
         authorization: ClientNativeRouteAuthorization,
         grants: &[VerifiedRelayGrant],
+        active_path_ids: &[u32],
+        minimum_paths: usize,
         signal: &ExitMpquicSessionSignal,
         now_ms: u64,
         ready_wait: Duration,
     ) -> Result<ProductionMpquicSession, ProductionMpquicError> {
         validate_committed_signal(&self, &authorization, grants, signal, now_ms)?;
-        let mut paths = Vec::with_capacity(grants.len());
+        let active_ids = active_path_ids.iter().copied().collect::<BTreeSet<_>>();
+        if active_ids.len() != active_path_ids.len()
+            || !(MINIMUM_MULTIPATH_PATHS..=active_ids.len()).contains(&minimum_paths)
+            || active_ids
+                .iter()
+                .any(|path_id| !grants.iter().any(|grant| grant.path_id() == *path_id))
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "MPQUIC active and minimum path set",
+            ));
+        }
+        let mut active_paths = Vec::with_capacity(active_ids.len());
+        let mut warm_paths = Vec::with_capacity(grants.len().saturating_sub(active_ids.len()));
         for grant in grants {
             let request = committed_client_socket_request(context_handle, grant)?;
             let acquired = helper.acquire_transport_socket(request).await?;
-            paths.push(CommittedMpquicPath::from_authenticated_exit_signal(
-                acquired, grant, signal,
-            )?);
+            let path =
+                CommittedMpquicPath::from_authenticated_exit_signal(acquired, grant, signal)?;
+            if active_ids.contains(&path.path_id()) {
+                active_paths.push(path);
+            } else {
+                warm_paths.push(path);
+            }
         }
-        ProductionMpquicSession::establish_preflighted(
+        ProductionMpquicSession::establish_preflighted_with_backups(
             self,
             authorization,
-            paths,
+            active_paths,
+            warm_paths,
+            minimum_paths,
             now_ms,
             ready_wait,
         )
@@ -1062,6 +1082,10 @@ pub struct CommittedMpquicPath {
 }
 
 impl CommittedMpquicPath {
+    const fn path_id(&self) -> u32 {
+        self.add.path_id
+    }
+
     /// Bind a helper-correlated committed descriptor to one verified Relay grant and Exit port.
     ///
     /// # Errors
@@ -1221,6 +1245,8 @@ pub struct ProductionMpquicSession {
     route_context_id: [u8; 16],
     masque_context_id: u64,
     active_path_ids: Vec<u32>,
+    warm_paths: BTreeMap<u32, CommittedMpquicPath>,
+    minimum_paths: usize,
     assignment: TunnelAssignment,
 }
 
@@ -1255,6 +1281,28 @@ impl ProductionMpquicSession {
         now_ms: u64,
         ready_wait: Duration,
     ) -> Result<Self, ProductionMpquicError> {
+        let minimum_paths = paths.len();
+        Self::establish_preflighted_with_backups(
+            preflight,
+            authorization,
+            paths,
+            Vec::new(),
+            minimum_paths,
+            now_ms,
+            ready_wait,
+        )
+        .await
+    }
+
+    async fn establish_preflighted_with_backups(
+        preflight: ProductionMpquicPreflight,
+        authorization: ClientNativeRouteAuthorization,
+        active_paths: Vec<CommittedMpquicPath>,
+        warm_paths: Vec<CommittedMpquicPath>,
+        minimum_paths: usize,
+        now_ms: u64,
+        ready_wait: Duration,
+    ) -> Result<Self, ProductionMpquicError> {
         if ready_wait.is_zero() || ready_wait > MAXIMUM_READY_WAIT {
             return Err(ProductionMpquicError::Invalid("MPQUIC ready wait"));
         }
@@ -1271,9 +1319,37 @@ impl ProductionMpquicSession {
                 "authorized native Client instance",
             ));
         }
-        let start = start_request(&authorization, paths.len(), now_ms)?;
-        let path_ids = validate_complete_path_set(&start, &paths, now_ms)?;
-        let assignment = setup_native_session(&client, &start, paths, ready_wait).await?;
+        if !(MINIMUM_MULTIPATH_PATHS..=active_paths.len()).contains(&minimum_paths)
+            || active_paths.len().saturating_add(warm_paths.len()) > MAXIMUM_MULTIPATH_PATHS
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "MPQUIC active and minimum path cardinality",
+            ));
+        }
+        let start = start_request(&authorization, minimum_paths, now_ms)?;
+        let path_ids = validate_complete_path_set(&start, &active_paths, now_ms)?;
+        let mut all_ids = path_ids.iter().copied().collect::<BTreeSet<_>>();
+        let mut relay_ids = active_paths
+            .iter()
+            .map(|path| path.relay_node_id)
+            .collect::<BTreeSet<_>>();
+        if relay_ids.len() != active_paths.len() {
+            return Err(ProductionMpquicError::Invalid(
+                "distinct active MPQUIC Relays",
+            ));
+        }
+        let mut warm_by_id = BTreeMap::new();
+        for path in warm_paths {
+            validate_committed_path(&start, &path, now_ms)?;
+            let path_id = path.path_id();
+            if !all_ids.insert(path_id)
+                || !relay_ids.insert(path.relay_node_id)
+                || warm_by_id.insert(path_id, path).is_some()
+            {
+                return Err(ProductionMpquicError::Invalid("distinct warm MPQUIC paths"));
+            }
+        }
+        let assignment = setup_native_session(&client, &start, active_paths, ready_wait).await?;
         Ok(Self {
             client,
             authorization,
@@ -1284,6 +1360,8 @@ impl ProductionMpquicSession {
                 .map_err(|_| ProductionMpquicError::Invalid("MPQUIC route context"))?,
             masque_context_id: start.masque_context_id,
             active_path_ids: path_ids,
+            warm_paths: warm_by_id,
+            minimum_paths,
             assignment,
         })
     }
@@ -1292,6 +1370,17 @@ impl ProductionMpquicSession {
     #[must_use]
     pub fn active_path_ids(&self) -> &[u32] {
         &self.active_path_ids
+    }
+
+    /// Borrow the already authorized helper-owned paths retained outside ordinary scheduling.
+    pub(crate) fn warm_path_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.warm_paths.keys().copied()
+    }
+
+    /// Required path count below which this association must fail closed.
+    #[must_use]
+    pub(crate) const fn minimum_paths(&self) -> usize {
+        self.minimum_paths
     }
 
     /// Read one exact live native status snapshot for the committed path set.
@@ -1319,6 +1408,78 @@ impl ProductionMpquicSession {
             ));
         }
         Ok(statuses)
+    }
+
+    /// Replace one unhealthy active path with an already selected warm path.
+    ///
+    /// The warm descriptor was acquired from the same committed helper context and is bound to
+    /// an already confirmed Relay grant and Exit listener. It is added before the unhealthy path
+    /// is removed, so the native association never deliberately crosses below its hard minimum.
+    pub(crate) async fn replace_active_path(
+        &mut self,
+        unhealthy_path_id: u32,
+        warm_path_id: u32,
+        now_ms: u64,
+        ready_wait: Duration,
+    ) -> Result<(), ProductionMpquicError> {
+        validate_reconfiguration_wait(ready_wait)?;
+        if !self.active_path_ids.contains(&unhealthy_path_id)
+            || self.active_path_ids.contains(&warm_path_id)
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "MPQUIC replacement path state",
+            ));
+        }
+        let start = start_request(&self.authorization, self.minimum_paths, now_ms)?;
+        let warm = self
+            .warm_paths
+            .remove(&warm_path_id)
+            .ok_or(ProductionMpquicError::Invalid(
+                "MPQUIC warm replacement path",
+            ))?;
+        validate_committed_path(&start, &warm, now_ms)?;
+        self.client.add_path(warm.add, warm.descriptor).await?;
+        self.client
+            .remove_path(RemovePath {
+                route_context_id: self.route_context_id.to_vec(),
+                path_id: unhealthy_path_id,
+            })
+            .await?;
+        self.assignment = await_reconfigured_session(&self.client, &start, ready_wait).await?;
+        self.active_path_ids
+            .retain(|path_id| *path_id != unhealthy_path_id);
+        self.active_path_ids.push(warm_path_id);
+        self.active_path_ids.sort_unstable();
+        Ok(())
+    }
+
+    /// Remove an unhealthy path when the remaining active set still satisfies the signed hard
+    /// minimum. This never weakens the native session's immutable minimum-path contract.
+    pub(crate) async fn remove_active_path(
+        &mut self,
+        unhealthy_path_id: u32,
+        now_ms: u64,
+        ready_wait: Duration,
+    ) -> Result<(), ProductionMpquicError> {
+        validate_reconfiguration_wait(ready_wait)?;
+        if !self.active_path_ids.contains(&unhealthy_path_id)
+            || self.active_path_ids.len().saturating_sub(1) < self.minimum_paths
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "MPQUIC minimum path removal",
+            ));
+        }
+        let start = start_request(&self.authorization, self.minimum_paths, now_ms)?;
+        self.client
+            .remove_path(RemovePath {
+                route_context_id: self.route_context_id.to_vec(),
+                path_id: unhealthy_path_id,
+            })
+            .await?;
+        self.assignment = await_reconfigured_session(&self.client, &start, ready_wait).await?;
+        self.active_path_ids
+            .retain(|path_id| *path_id != unhealthy_path_id);
+        Ok(())
     }
 
     /// Borrow the native CONNECT-IP tunnel assignment.
@@ -1441,6 +1602,33 @@ impl ProductionMpquicSession {
     }
 }
 
+fn validate_reconfiguration_wait(ready_wait: Duration) -> Result<(), ProductionMpquicError> {
+    if ready_wait.is_zero() || ready_wait > MAXIMUM_READY_WAIT {
+        return Err(ProductionMpquicError::Invalid("MPQUIC ready wait"));
+    }
+    Ok(())
+}
+
+async fn await_reconfigured_session(
+    client: &NativeClient,
+    start: &StartSession,
+    ready_wait: Duration,
+) -> Result<TunnelAssignment, ProductionMpquicError> {
+    let deadline = Instant::now() + ready_wait;
+    loop {
+        match MultipathNativeControl::start(client, start.clone()).await? {
+            StartReadiness::Ready(assignment) => return Ok(assignment),
+            StartReadiness::Pending => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(ProductionMpquicError::ReadyTimeout);
+                }
+                sleep_until((now + READY_POLL_INTERVAL).min(deadline)).await;
+            }
+        }
+    }
+}
+
 fn validate_committed_signal(
     preflight: &ProductionMpquicPreflight,
     authorization: &ClientNativeRouteAuthorization,
@@ -1552,32 +1740,12 @@ fn validate_complete_path_set(
     paths: &[CommittedMpquicPath],
     now_ms: u64,
 ) -> Result<Vec<u32>, ProductionMpquicError> {
-    let route_context: [u8; 16] = start
-        .route_context_id
-        .as_slice()
-        .try_into()
-        .map_err(|_| ProductionMpquicError::Invalid("MPQUIC route context"))?;
-    let reservation_id: [u8; 16] = start
-        .reservation_id
-        .as_slice()
-        .try_into()
-        .map_err(|_| ProductionMpquicError::Invalid("MPQUIC reservation"))?;
     let mut path_ids = BTreeSet::new();
     let mut relay_ids = BTreeSet::new();
-    let expected_exit_instance: [u8; 32] = start
-        .exit_native_instance_id
-        .as_slice()
-        .try_into()
-        .map_err(|_| ProductionMpquicError::Invalid("Exit native instance"))?;
     let mut listener_set_ready = false;
     for path in paths {
-        if path.add.route_context_id.as_slice() != route_context
-            || path.reservation_id != reservation_id
-            || path.expires_at_ms <= now_ms
-            || path.exit_native_instance_id != expected_exit_instance
-            || !path_ids.insert(path.add.path_id)
-            || !relay_ids.insert(path.relay_node_id)
-        {
+        validate_committed_path(start, path, now_ms)?;
+        if !path_ids.insert(path.add.path_id) || !relay_ids.insert(path.relay_node_id) {
             return Err(ProductionMpquicError::Invalid(
                 "distinct committed MPQUIC paths",
             ));
@@ -1593,6 +1761,36 @@ fn validate_complete_path_set(
         ));
     }
     Ok(path_ids.into_iter().collect())
+}
+
+fn validate_committed_path(
+    start: &StartSession,
+    path: &CommittedMpquicPath,
+    now_ms: u64,
+) -> Result<(), ProductionMpquicError> {
+    let route_context: [u8; 16] = start
+        .route_context_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProductionMpquicError::Invalid("MPQUIC route context"))?;
+    let reservation_id: [u8; 16] = start
+        .reservation_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProductionMpquicError::Invalid("MPQUIC reservation"))?;
+    let expected_exit_instance: [u8; 32] = start
+        .exit_native_instance_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProductionMpquicError::Invalid("Exit native instance"))?;
+    if path.add.route_context_id.as_slice() != route_context
+        || path.reservation_id != reservation_id
+        || path.expires_at_ms <= now_ms
+        || path.exit_native_instance_id != expected_exit_instance
+    {
+        return Err(ProductionMpquicError::Invalid("committed MPQUIC path"));
+    }
+    Ok(())
 }
 
 enum StartReadiness {

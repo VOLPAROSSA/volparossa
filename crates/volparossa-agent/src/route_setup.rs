@@ -43,7 +43,7 @@ use tokio::{
 };
 use volparossa_config::{ClientAddressFamily, Config, TcpTransport};
 use volparossa_core::{
-    Bandwidth, IpFamily, NodeId, ObservedNetworkPrefix, OperatorId, ServiceRole,
+    Bandwidth, IpFamily, NodeId, ObservedNetworkPrefix, OperatorId, PathId, ServiceRole,
     Transport as SelectionTransport, UnixTime,
 };
 use volparossa_discovery::{
@@ -77,8 +77,9 @@ use volparossa_routing::{PreparedLeaseBatch, TransportSocketAddress, TransportSo
 #[cfg(test)]
 use volparossa_selection::Candidate;
 use volparossa_selection::{
-    FilterRequirements, ProjectedRelayPath, RelaySelectionPolicy, SelectionMix,
-    select_projected_relay_paths,
+    FilterRequirements, HysteresisPolicy, PathMetrics, PathState as SelectionPathState, PathStatus,
+    ProjectedRelayPath, RelaySelectionPolicy, ReplacementDecision, ReplacementHysteresis,
+    SelectionMix, select_projected_relay_paths,
 };
 use volparossa_tcp_proxy::VerifiedMptcpRoute;
 use volparossa_udp::{
@@ -168,7 +169,27 @@ enum ClientTransportState {
 struct ActiveProductionMpquicRoute {
     session: ProductionMpquicSession,
     identity: CommittedMpquicRouteIdentity,
+    health: ProductionMpquicPathHealth,
     browser_flow: Option<BrowserQuicFlowBinding>,
+}
+
+#[derive(Clone, Copy)]
+struct NativePathCounters {
+    delivered_bytes: u64,
+    packets_lost: u64,
+    last_progress_at: UnixTime,
+}
+
+struct ProductionMpquicPathHealth {
+    statuses: BTreeMap<u32, PathStatus>,
+    counters: BTreeMap<u32, NativePathCounters>,
+    hysteresis: ReplacementHysteresis,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientPathMaintenance {
+    Unchanged,
+    Reconfigured,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -226,29 +247,111 @@ impl ActiveProductionMpquicRoute {
             .path_statuses()
             .await
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-        self.identity.project(&statuses)
+        self.identity
+            .project(&statuses, self.session.warm_path_ids())
+    }
+
+    async fn maintain(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<ClientPathMaintenance, ClientRouteConnectError> {
+        let now = UnixTime::from_secs(now_ms / 1_000);
+        let statuses = self
+            .session
+            .path_statuses()
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let unhealthy = self
+            .health
+            .observe(&statuses, now)
+            .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let Some(unhealthy_path_id) = unhealthy.first().copied() else {
+            return Ok(ClientPathMaintenance::Unchanged);
+        };
+
+        let warm_path_id = self.session.warm_path_ids().next();
+        if let Some(warm_path_id) = warm_path_id {
+            if !self
+                .health
+                .authorizes_replacement(unhealthy_path_id, warm_path_id, now)
+            {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+            self.session
+                .replace_active_path(unhealthy_path_id, warm_path_id, now_ms, MPQUIC_READY_WAIT)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            self.health
+                .record_replacement(unhealthy_path_id, warm_path_id, now)
+                .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        } else {
+            self.session
+                .remove_active_path(unhealthy_path_id, now_ms, MPQUIC_READY_WAIT)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            self.health.retire(unhealthy_path_id);
+        }
+
+        let statuses = self
+            .session
+            .path_statuses()
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        self.health
+            .observe(&statuses, now)
+            .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        if self.session.active_path_ids().len() < self.session.minimum_paths() {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        Ok(ClientPathMaintenance::Reconfigured)
     }
 }
 
 impl CommittedMpquicRouteIdentity {
-    fn project(
+    fn project<I>(
         &self,
         statuses: &[NativePathStatus],
-    ) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
-        if statuses.len() != self.paths.len() || !(2..=8).contains(&statuses.len()) {
+        warm_path_ids: I,
+    ) -> Result<Vec<PathSummary>, ClientRouteConnectError>
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        if !(2..=8).contains(&statuses.len()) || statuses.len() > self.paths.len() {
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
+        let status_count = statuses.len();
         let statuses = statuses
             .iter()
             .map(|status| (status.path_id, status))
             .collect::<BTreeMap<_, _>>();
-        if statuses.len() != self.paths.len() {
+        let identities = self
+            .paths
+            .iter()
+            .map(|identity| (identity.path_id, identity))
+            .collect::<BTreeMap<_, _>>();
+        if identities.len() != self.paths.len()
+            || statuses.len() != status_count
+            || statuses
+                .keys()
+                .any(|path_id| !identities.contains_key(path_id))
+        {
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
-        let mut summaries = Vec::with_capacity(statuses.len());
-        for identity in &self.paths {
-            let status = statuses
-                .get(&identity.path_id)
+        let warm_path_ids = warm_path_ids.into_iter().collect::<Vec<_>>();
+        let warm_path_count = warm_path_ids.len();
+        let warm_path_ids = warm_path_ids.into_iter().collect::<BTreeSet<_>>();
+        if warm_path_ids.len() != warm_path_count
+            || warm_path_ids
+                .iter()
+                .any(|path_id| statuses.contains_key(path_id) || !identities.contains_key(path_id))
+            || statuses.len().saturating_add(warm_path_ids.len()) > self.paths.len()
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let mut summaries = Vec::with_capacity(statuses.len() + warm_path_ids.len());
+        for (path_id, status) in statuses {
+            let identity = identities
+                .get(&path_id)
                 .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
             summaries.push(PathSummary {
                 route_context_id: self.route_context_id.to_vec(),
@@ -264,8 +367,217 @@ impl CommittedMpquicRouteIdentity {
                 user_bytes: status.delivered_bytes,
             });
         }
+        for path_id in warm_path_ids {
+            let identity = identities
+                .get(&path_id)
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            summaries.push(PathSummary {
+                route_context_id: self.route_context_id.to_vec(),
+                path_id,
+                relay_peer_id: identity.relay_peer_id.clone(),
+                exit_peer_id: self.exit_peer_id.clone(),
+                state: PathState::Backup as i32,
+                smoothed_rtt_micros: 0,
+                user_bytes: 0,
+            });
+        }
+        summaries.sort_unstable_by_key(|path| path.path_id);
         Ok(summaries)
     }
+}
+
+impl ProductionMpquicPathHealth {
+    fn new(
+        active_path_ids: &[u32],
+        warm_path_ids: impl IntoIterator<Item = u32>,
+        now: UnixTime,
+    ) -> Result<Self, ClientRouteConnectError> {
+        let mut statuses = BTreeMap::new();
+        for path_id in active_path_ids {
+            insert_health_status(&mut statuses, *path_id, SelectionPathState::Active, now)?;
+        }
+        for path_id in warm_path_ids {
+            insert_health_status(&mut statuses, path_id, SelectionPathState::Backup, now)?;
+        }
+        if active_path_ids.len() < 2 || statuses.len() > 8 {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let hysteresis = ReplacementHysteresis::new(HysteresisPolicy::default())
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        Ok(Self {
+            statuses,
+            counters: BTreeMap::new(),
+            hysteresis,
+        })
+    }
+
+    fn observe(&mut self, native: &[NativePathStatus], now: UnixTime) -> Result<Vec<u32>, ()> {
+        let native_ids = native
+            .iter()
+            .map(|status| status.path_id)
+            .collect::<BTreeSet<_>>();
+        let expected_ids = self
+            .statuses
+            .iter()
+            .filter_map(|(path_id, status)| {
+                matches!(
+                    status.state,
+                    SelectionPathState::Active
+                        | SelectionPathState::Degraded
+                        | SelectionPathState::Dead
+                )
+                .then_some(*path_id)
+            })
+            .collect::<BTreeSet<_>>();
+        if native_ids.len() != native.len() || native_ids != expected_ids {
+            return Err(());
+        }
+        for status in native {
+            if let Some(previous) = self.counters.get(&status.path_id) {
+                if status.delivered_bytes < previous.delivered_bytes
+                    || status.packets_lost < previous.packets_lost
+                {
+                    return Err(());
+                }
+            }
+        }
+        let route_progressed = native.iter().any(|status| {
+            self.counters
+                .get(&status.path_id)
+                .is_some_and(|previous| status.delivered_bytes > previous.delivered_bytes)
+        });
+        for status in native {
+            let previous = self.counters.get(&status.path_id).copied();
+            let delivered_delta =
+                previous.map_or(0, |value| status.delivered_bytes - value.delivered_bytes);
+            let lost_delta = previous.map_or(0, |value| status.packets_lost - value.packets_lost);
+            let last_progress_at = previous.map_or(now, |value| {
+                if delivered_delta != 0 || !route_progressed {
+                    now
+                } else {
+                    value.last_progress_at
+                }
+            });
+            let delivered_packets = delivered_delta.saturating_add(1_199) / 1_200;
+            let observed_packets = delivered_packets.saturating_add(lost_delta);
+            #[allow(clippy::cast_precision_loss)]
+            let packet_loss_ratio = if observed_packets == 0 {
+                0.0
+            } else {
+                lost_delta as f64 / observed_packets as f64
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let metrics = PathMetrics {
+                smoothed_rtt_ms: status.smoothed_rtt_us as f64 / 1_000.0,
+                rtt_variance_ms: 0.0,
+                packet_loss_ratio,
+                delivery_rate_mbps: status.delivery_rate_bps as f64 / 1_000_000.0,
+                loaded_rtt_ms: status.smoothed_rtt_us as f64 / 1_000.0,
+                bytes_in_flight: status.bytes_in_flight,
+                last_progress_at,
+                relay_reported_free: Bandwidth::default(),
+                locally_estimated_free: Bandwidth::default(),
+            };
+            self.statuses
+                .get_mut(&status.path_id)
+                .ok_or(())?
+                .observe(metrics, now, HysteresisPolicy::default())
+                .map_err(|_| ())?;
+            self.counters.insert(
+                status.path_id,
+                NativePathCounters {
+                    delivered_bytes: status.delivered_bytes,
+                    packets_lost: status.packets_lost,
+                    last_progress_at,
+                },
+            );
+        }
+        let mut unhealthy = self
+            .statuses
+            .iter()
+            .filter_map(|(path_id, status)| {
+                matches!(
+                    status.state,
+                    SelectionPathState::Degraded | SelectionPathState::Dead
+                )
+                .then_some((*path_id, status.state))
+            })
+            .collect::<Vec<_>>();
+        unhealthy.sort_unstable_by_key(|(path_id, state)| {
+            (u8::from(*state != SelectionPathState::Dead), *path_id)
+        });
+        Ok(unhealthy.into_iter().map(|(path_id, _)| path_id).collect())
+    }
+
+    fn authorizes_replacement(
+        &mut self,
+        unhealthy_path_id: u32,
+        warm_path_id: u32,
+        now: UnixTime,
+    ) -> bool {
+        let Some(unhealthy) = self.statuses.get(&unhealthy_path_id).cloned() else {
+            return false;
+        };
+        let Some(warm) = self.statuses.get(&warm_path_id).cloned() else {
+            return false;
+        };
+        matches!(
+            self.hysteresis.consider(&unhealthy, &warm, now),
+            Ok(ReplacementDecision::Replace { .. })
+        )
+    }
+
+    fn record_replacement(
+        &mut self,
+        unhealthy_path_id: u32,
+        warm_path_id: u32,
+        now: UnixTime,
+    ) -> Result<(), ()> {
+        self.retire(unhealthy_path_id);
+        let warm = self.statuses.get_mut(&warm_path_id).ok_or(())?;
+        warm.transition(SelectionPathState::Active, now)
+            .map_err(|_| ())?;
+        self.counters.remove(&warm_path_id);
+        Ok(())
+    }
+
+    fn retire(&mut self, path_id: u32) {
+        self.statuses.remove(&path_id);
+        self.counters.remove(&path_id);
+    }
+}
+
+fn insert_health_status(
+    statuses: &mut BTreeMap<u32, PathStatus>,
+    path_id: u32,
+    state: SelectionPathState,
+    now: UnixTime,
+) -> Result<(), ClientRouteConnectError> {
+    let path_id_value = u16::try_from(path_id)
+        .ok()
+        .and_then(|path_id| PathId::new(path_id).ok())
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let status = PathStatus::new(
+        path_id_value,
+        state,
+        PathMetrics {
+            smoothed_rtt_ms: 0.0,
+            rtt_variance_ms: 0.0,
+            packet_loss_ratio: 0.0,
+            delivery_rate_mbps: 0.0,
+            loaded_rtt_ms: 0.0,
+            bytes_in_flight: 0,
+            last_progress_at: now,
+            relay_reported_free: Bandwidth::default(),
+            locally_estimated_free: Bandwidth::default(),
+        },
+        now,
+    )
+    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    if statuses.insert(path_id, status).is_some() {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    Ok(())
 }
 
 /// Detail-free current production boundary reached by a successful native-path bootstrap.
@@ -1092,6 +1404,29 @@ impl ClientRouteControl {
         )
     }
 
+    /// Assess and, when necessary, reconfigure the live native multipath route.
+    ///
+    /// Single-relay UDP is deliberately excluded: it owns one immutable Relay association and a
+    /// failed association must be torn down before ingress can create a new one. MPTCP continues
+    /// to rely on the kernel path manager until per-subflow telemetry crosses the helper boundary.
+    pub(crate) async fn maintain_path_health(
+        &self,
+        now_ms: u64,
+    ) -> Result<ClientPathMaintenance, ClientRouteConnectError> {
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Ok(ClientPathMaintenance::Unchanged);
+        };
+        let ClientTransportState::Mpquic(active) = &mut established.transport else {
+            return Ok(ClientPathMaintenance::Unchanged);
+        };
+        let outcome = active.maintain(now_ms).await?;
+        let paths = active.path_summaries().await?;
+        drop(state);
+        self.replace_agent_mpquic_paths(paths).await?;
+        Ok(outcome)
+    }
+
     /// Cancels any pre-route affine ownership; helper cleanup remains a separate fail-closed step.
     pub(crate) async fn disconnect(&self) {
         let previous = {
@@ -1354,6 +1689,14 @@ async fn admit_completed_native_route(
                 let _ = orchestrator.shutdown().await;
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
+            let active_path_ids = route.established.active_path_ids.clone();
+            let minimum_paths = route
+                .established
+                .request
+                .parameters
+                .post_probe_policy
+                .relay_policy
+                .minimum_paths;
             let Some(authorization) = route.established.native_authorization.take() else {
                 let _ = route.disconnect().await;
                 let _ = orchestrator.shutdown().await;
@@ -1367,17 +1710,31 @@ async fn admit_completed_native_route(
                     context_handle,
                     authorization,
                     &grants,
+                    &active_path_ids,
+                    minimum_paths,
                     &signal,
                     crate::unix_millis(),
                     MPQUIC_READY_WAIT,
                 )
                 .await;
             if let Ok(session) = session {
+                let health = ProductionMpquicPathHealth::new(
+                    session.active_path_ids(),
+                    session.warm_path_ids(),
+                    UnixTime::from_secs(crate::unix_seconds()),
+                );
+                let Ok(health) = health else {
+                    let _ = session.shutdown().await;
+                    let _ = route.disconnect().await;
+                    let _ = orchestrator.shutdown().await;
+                    return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+                };
                 Ok(EstablishedClientRoute {
                     transport: ClientTransportState::Mpquic(Box::new(
                         ActiveProductionMpquicRoute {
                             session,
                             identity,
+                            health,
                             browser_flow: None,
                         },
                     )),
@@ -6258,7 +6615,10 @@ mod tests {
         };
 
         let summaries = identity
-            .project(&[native_path_status(2, true), native_path_status(1, false)])
+            .project(
+                &[native_path_status(2, true), native_path_status(1, false)],
+                std::iter::empty(),
+            )
             .expect("exact status projection");
 
         assert_eq!(summaries.len(), 2);
@@ -6290,9 +6650,67 @@ mod tests {
         };
 
         assert!(matches!(
-            identity.project(&[native_path_status(1, true), native_path_status(1, true),]),
+            identity.project(
+                &[native_path_status(1, true), native_path_status(1, true),],
+                std::iter::empty(),
+            ),
             Err(ClientRouteConnectError::TransportRuntimeUnavailable)
         ));
+    }
+
+    #[test]
+    fn committed_mpquic_identity_keeps_warm_path_out_of_active_projection() {
+        let identity = CommittedMpquicRouteIdentity {
+            route_context_id: [7; ID_BYTES],
+            exit_peer_id: "exit-peer".to_owned(),
+            paths: (1..=3)
+                .map(|path_id| CommittedMpquicPathIdentity {
+                    path_id,
+                    relay_peer_id: format!("relay-{path_id}"),
+                })
+                .collect(),
+        };
+
+        let summaries = identity
+            .project(
+                &[native_path_status(1, true), native_path_status(2, true)],
+                [3],
+            )
+            .expect("active plus warm projection");
+
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries[2].path_id, 3);
+        assert_eq!(summaries[2].state, PathState::Backup as i32);
+        assert_eq!(summaries[2].user_bytes, 0);
+    }
+
+    #[test]
+    fn production_health_promotes_warm_path_after_live_peer_progress_stalls() {
+        let start = UnixTime::from_secs(1_000);
+        let mut health =
+            ProductionMpquicPathHealth::new(&[1, 2], [3], start).expect("health state");
+        let initial = [native_path_status(1, true), native_path_status(2, true)];
+        assert!(health.observe(&initial, start).expect("initial").is_empty());
+
+        let mut progressed = initial;
+        progressed[0].delivered_bytes = 2_400;
+        let degraded_at = UnixTime::from_secs(1_011);
+        assert_eq!(
+            health.observe(&progressed, degraded_at).expect("metrics"),
+            [2]
+        );
+        assert!(health.authorizes_replacement(2, 3, degraded_at));
+        health
+            .record_replacement(2, 3, degraded_at)
+            .expect("promote warm path");
+
+        let promoted = [progressed[0].clone(), native_path_status(3, false)];
+        assert!(
+            health
+                .observe(&promoted, degraded_at)
+                .expect("post replacement")
+                .is_empty()
+        );
     }
 
     #[test]

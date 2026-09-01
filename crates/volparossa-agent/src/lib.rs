@@ -57,7 +57,7 @@ use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResour
 use helper::HelperClient;
 use policy::load_active_policy;
 use roles::{RoleStore, ensure_private_state_directory};
-use route_setup::ClientRouteControl;
+use route_setup::{ClientPathMaintenance, ClientRouteControl};
 use secret::read_identity_credential;
 use state::AgentState;
 
@@ -198,11 +198,13 @@ impl Agent {
         let maintenance_config = Arc::clone(&self.config);
         let maintenance_trust = self.paths.policy_trust.clone();
         let maintenance_discovery = self.discovery_control.clone();
+        let maintenance_routes = routes.clone();
         let mut maintenance_task = tokio::spawn(run_maintenance(
             maintenance_state,
             maintenance_config,
             maintenance_trust,
             maintenance_discovery,
+            maintenance_routes,
             shutdown_rx,
         ));
         let mut metrics_task = tokio::spawn(run_metrics_endpoint(
@@ -916,6 +918,7 @@ async fn run_maintenance(
     config: Arc<Config>,
     trust_path: std::path::PathBuf,
     discovery: DiscoveryControlHandle,
+    routes: ClientRouteControl,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(MAINTENANCE_INTERVAL);
@@ -949,17 +952,36 @@ async fn run_maintenance(
                     );
                     break;
                 }
-                let mut state = state.write().await;
+                let mut locked = state.write().await;
                 if policy_load_failed {
                     if was_active {
-                        state.log(LogLevel::Error, "POLICY_LOAD_FAILED", now_ms);
+                        locked.log(LogLevel::Error, "POLICY_LOAD_FAILED", now_ms);
                     }
                 } else if is_active != was_active {
-                    state.log(
+                    locked.log(
                         if is_active { LogLevel::Info } else { LogLevel::Warn },
                         if is_active { "POLICY_ACTIVE" } else { "POLICY_UNAVAILABLE" },
                         now_ms,
                     );
+                }
+                drop(locked);
+                match routes.maintain_path_health(now_ms).await {
+                    Ok(ClientPathMaintenance::Unchanged) => {}
+                    Ok(ClientPathMaintenance::Reconfigured) => {
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "MPQUIC_PATH_RECONFIGURED",
+                            now_ms,
+                        );
+                    }
+                    Err(_) => {
+                        routes.disconnect().await;
+                        state.write().await.log(
+                            LogLevel::Error,
+                            "MPQUIC_PATH_FAIL_CLOSED",
+                            now_ms,
+                        );
+                    }
                 }
             }
         }

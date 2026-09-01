@@ -324,7 +324,7 @@ fn validate_mpquic_paths(paths: &[PathSummary]) -> Result<&[u8], StateError> {
             || !relay_peer_ids.insert(path.relay_peer_id.as_str())
             || !matches!(
                 PathState::try_from(path.state).ok(),
-                Some(PathState::Reachable | PathState::Active)
+                Some(PathState::Reachable | PathState::Active | PathState::Backup)
             )
         {
             return Err(StateError::InvalidMpquicPaths);
