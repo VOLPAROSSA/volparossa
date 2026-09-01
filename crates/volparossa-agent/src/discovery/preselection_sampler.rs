@@ -1000,8 +1000,10 @@ mod tests {
         assert!(protocol.contains("crate-private, callerless native-preselection child"));
         for document in [discovery, status, protocol] {
             assert!(document.contains("module-private, non-Clone Exit"));
-            assert!(document.contains("production runtime"));
         }
+        assert!(discovery.contains("It remains dormant because the current local publisher"));
+        assert!(status.contains("The normal runtime cannot currently reach that success path"));
+        assert!(protocol.contains("handler remains dormant in the current product"));
         assert!(status.contains(
             "| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |"
         ));

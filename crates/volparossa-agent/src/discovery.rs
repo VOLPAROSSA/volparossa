@@ -30,8 +30,10 @@ use std::{
 };
 
 use libp2p::{
-    Multiaddr, PeerId as Libp2pPeerId, kad, multiaddr::Protocol, request_response,
-    swarm::SwarmEvent,
+    Multiaddr, PeerId as Libp2pPeerId, kad,
+    multiaddr::Protocol,
+    request_response,
+    swarm::{ConnectionId, SwarmEvent},
 };
 #[cfg(test)]
 use std::cell::Cell;
@@ -50,15 +52,15 @@ use volparossa_core::{
 };
 use volparossa_discovery::{
     AdvertisementResponse, BehaviourEvent, BoundClientPreselectionTransport,
-    ClientPreselectionResponseArrival, DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation,
-    DatapathRelayRequest, DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles,
-    DiscoveryService, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT,
-    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ForwardStatus,
-    LocalPreselectionPolicy, MAX_CONCURRENT_DATAPATH_RELAY_STREAMS,
-    MAX_CONCURRENT_FORWARDING_STREAMS, MAX_FORWARDING_FRAME_BYTES,
-    PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink, UpstreamExitForwardRequest,
-    UpstreamExitForwardResponse, advertisement_envelope_matches_peer, capability,
-    signed_envelope_matches_peer,
+    BoundNativeProbeControlConnection, ClientPreselectionResponseArrival,
+    DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation, DatapathRelayRequest,
+    DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles, DiscoveryService,
+    EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation,
+    ExitForwardRequest, ExitForwardResponse, ForwardStatus, LocalPreselectionPolicy,
+    MAX_CONCURRENT_DATAPATH_RELAY_STREAMS, MAX_CONCURRENT_FORWARDING_STREAMS,
+    MAX_FORWARDING_FRAME_BYTES, PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink,
+    UpstreamExitForwardRequest, UpstreamExitForwardResponse, advertisement_envelope_matches_peer,
+    capability, signed_envelope_matches_peer,
 };
 use volparossa_exit::{ExitService, ExitServiceConfig};
 use volparossa_identity::Identity;
@@ -69,11 +71,12 @@ use volparossa_metrics::MetricsRegistry;
 use volparossa_peerstore::PeerStore;
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
-    ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
-    ExitReservationConfirmation, ExitReservationFinalizeRequest,
-    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, RelayAuthorization,
-    RelayProbePermit, RelayProbePermitRequest, RelayReservationRequest, ReplayCache,
-    SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
+    AdvertisementCapabilities, ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest,
+    ExitReservation, ExitReservationConfirmation, ExitReservationFinalizeRequest,
+    MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbePathScope, NativeProbePermitRequest,
+    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, PreselectionActorBinding,
+    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservationRequest,
+    ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
     node_id_from_public_key, verify_control_message,
 };
 use volparossa_relay::{RelayService, RelayServiceConfig};
@@ -565,6 +568,19 @@ struct RetryLedgerEntry {
     target_peer: Libp2pPeerId,
 }
 
+/// Exact service-local handoff for one authenticated native-Permit response.
+///
+/// The opaque connection proof and behaviour-local response channel stay together until the
+/// immediate synchronous send boundary. Signed Permit bytes are only a response projection; the
+/// affine phase owner remains inside `ExitService` across a closed or ambiguous channel.
+#[must_use = "a prepared native-Permit response must be sent or dropped as one owner"]
+struct PreparedNativeProbePermitResponse {
+    connection: BoundNativeProbeControlConnection,
+    authenticated_control_relay: Libp2pPeerId,
+    channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    response: UpstreamExitForwardResponse,
+}
+
 /// Opaque identity of one freshly verified canonical advertisement payload.
 ///
 /// The bytes never cross the agent's public API. Equality is carried through discovery,
@@ -585,6 +601,13 @@ impl AdvertisementPayloadHash {
     /// equality token. The digest remains non-authoritative and never reveals an endpoint.
     pub(crate) fn append_native_probe_commitment(&self, output: &mut Vec<u8>) {
         output.extend_from_slice(&self.0);
+    }
+
+    /// Compare one untrusted wire digest to this exact authenticated native-probe commitment.
+    ///
+    /// This purpose-limited equality check avoids exposing the opaque digest bytes to the caller.
+    fn matches_native_probe_commitment(&self, wire_digest: &[u8]) -> bool {
+        self.0.as_slice() == wire_digest
     }
 
     #[cfg(test)]
@@ -3575,12 +3598,13 @@ impl DiscoveryRuntime {
         match event {
             request_response::Event::Message {
                 peer,
+                connection_id,
                 message:
                     request_response::Message::Request {
                         request, channel, ..
                     },
                 ..
-            } => self.answer_exit_forward_upstream(peer, request, channel),
+            } => self.answer_exit_forward_upstream(peer, connection_id, request, channel),
             request_response::Event::Message {
                 peer,
                 message:
@@ -4023,6 +4047,7 @@ impl DiscoveryRuntime {
     fn answer_exit_forward_upstream(
         &mut self,
         authenticated_control_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
         request: UpstreamExitForwardRequest,
         channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
     ) {
@@ -4030,6 +4055,17 @@ impl DiscoveryRuntime {
         let Ok(operation) = request.validated_operation() else {
             return;
         };
+        if operation == ExitForwardOperation::NativeProbePermit {
+            if let Some(prepared) = self.prepare_native_probe_permit_response(
+                authenticated_control_relay,
+                connection_id,
+                &request,
+                channel,
+            ) {
+                self.send_prepared_native_probe_permit_response(prepared);
+            }
+            return;
+        }
         let Some(control_relay_node_id) = fixed_bytes::<32>(request.control_relay_node_id()) else {
             return;
         };
@@ -4108,6 +4144,119 @@ impl DiscoveryRuntime {
                 .service
                 .send_exit_forward_upstream_response(channel, response.into());
         }
+    }
+
+    /// Validate one native-Permit request and prepare its exact connection-owned response.
+    ///
+    /// Every state-free wrapper, signature, current-capability and local-advertisement check runs
+    /// before connection provenance is bound. The bind itself precedes the only Exit replay/sign
+    /// call. There is no suspension point from that bind through the returned response owner. The
+    /// current product deliberately publishes no local Exit advertisement, so this composed
+    /// handler remains fail-closed until a later truthful Exit-capability producer exists.
+    fn prepare_native_probe_permit_response(
+        &mut self,
+        authenticated_control_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    ) -> Option<PreparedNativeProbePermitResponse> {
+        let now_ms = unix_millis();
+        if request.validate().is_err() || !self.roles.exit {
+            return None;
+        }
+        let scope = verified_native_probe_forward_scope(request, now_ms)?;
+        let control = scope.control.as_ref()?;
+        let exit = scope.exit.as_ref()?;
+        let control_relay_node_id = fixed_bytes::<32>(request.control_relay_node_id())?;
+        let control_relay_public_key = fixed_bytes::<32>(request.control_relay_public_key())?;
+        let control_relay_peer = Libp2pPeerId::from_bytes(request.control_relay_peer_id()).ok()?;
+        let exit_node_id = fixed_bytes::<32>(request.exit_node_id())?;
+        let exit_peer = Libp2pPeerId::from_bytes(request.exit_peer_id()).ok()?;
+        let local_peer = *self.service.local_peer_id();
+        let current_control = self.direct_relays.get(&authenticated_control_relay)?;
+        if control_relay_peer != authenticated_control_relay
+            || control_relay_public_key != current_control.public_key
+            || exit_node_id != self.local_node_id
+            || exit_peer != local_peer
+            || exit_peer == authenticated_control_relay
+            || !native_probe_control_capability_matches(
+                current_control,
+                control,
+                &scope,
+                authenticated_control_relay,
+                request.deadline_unix_ms(),
+            )
+            || !self
+                .served_local_advertisement
+                .as_ref()
+                .is_some_and(|advertisement| {
+                    local_native_probe_exit_actor_matches(
+                        advertisement,
+                        exit,
+                        &scope,
+                        self.local_node_id,
+                        local_peer,
+                        self.local_public_key,
+                        now_ms,
+                    )
+                })
+        {
+            return None;
+        }
+
+        // This purpose token comes from the exact inbound event's authenticated PeerId and
+        // behaviour-local ConnectionId. Bind before the Exit can consume replay or invoke its
+        // signer; a closed, stale, foreign-service or substituted lineage therefore fails first.
+        let connection = self
+            .service
+            .bind_native_probe_control_connection(authenticated_control_relay, connection_id)
+            .ok()?;
+        let authenticated_control_peer = authenticated_control_relay.to_bytes();
+        let identity = &self.identity;
+        let accepted = self
+            .exit_service
+            .as_mut()?
+            .issue_native_probe_permit_with(
+                request.canonical_request(),
+                &control_relay_node_id,
+                &authenticated_control_peer,
+                now_ms,
+                self.local_public_key,
+                |message| identity.sign(message).ok(),
+            )
+            .ok()?;
+        let response = ExitForwardResponse::granted(
+            request.forward_id().to_vec(),
+            ExitForwardOperation::NativeProbePermit,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            vec![accepted.encoded().to_vec()],
+        )
+        .ok()?;
+        Some(PreparedNativeProbePermitResponse {
+            connection,
+            authenticated_control_relay,
+            channel,
+            response: response.into(),
+        })
+    }
+
+    fn send_prepared_native_probe_permit_response(
+        &mut self,
+        prepared: PreparedNativeProbePermitResponse,
+    ) {
+        let PreparedNativeProbePermitResponse {
+            connection,
+            authenticated_control_relay,
+            channel,
+            response,
+        } = prepared;
+        let _ = self.service.send_native_probe_permit_response(
+            connection,
+            authenticated_control_relay,
+            channel,
+            response,
+        );
     }
 
     async fn ingest_client_forwarded_advertisement(
@@ -5993,6 +6142,163 @@ fn reservation_authorization_scope_matches(
         && authorization.control_relay_peer_id == exit.control_relay_peer_id
 }
 
+fn verified_native_probe_forward_scope(
+    request: &ExitForwardRequest,
+    now_ms: u64,
+) -> Option<NativeProbePathScope> {
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbePermit
+        || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+    {
+        return None;
+    }
+    let mut replay = ReplayCache::new(1).ok()?;
+    let verified = verify_control_message::<NativeProbePermitRequest>(
+        request.canonical_request(),
+        now_ms,
+        native_probe_time_policy(),
+        &mut replay,
+    )
+    .ok()?;
+    let scope = verified.message().scope.as_ref()?;
+    let control = scope.control.as_ref()?;
+    let exit = scope.exit.as_ref()?;
+    inner_forward_scope_matches(
+        request,
+        verified.nonce(),
+        verified.expires_at_ms(),
+        &control.node_id,
+        &control.peer_id,
+        &exit.node_id,
+        &exit.peer_id,
+    )
+    .then(|| scope.clone())
+}
+
+fn native_probe_control_capability_matches(
+    capability: &DirectRelayCapability,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    required_until_ms: u64,
+) -> bool {
+    scope.control.as_ref() == Some(actor)
+        && actor.node_id.as_slice() == capability.node_id
+        && actor.peer_id == capability.peer_id.to_bytes()
+        && actor.public_key.as_slice() == capability.public_key
+        && actor.advertisement_sequence == capability.advertisement_sequence
+        && actor.advertisement_expires_at_ms == capability.advertisement_expires_at_ms
+        && capability
+            .advertisement_payload_hash
+            .matches_native_probe_commitment(&actor.advertisement_payload_hash)
+        && actor.capability_expires_at_ms == capability.expires_at_ms
+        && capability.peer_id == authenticated_peer
+        && capability.policy_version == scope.policy_version
+        && capability.policy_hash.as_slice() == scope.policy_hash
+        && capability.policy_expires_at_ms == scope.policy_expires_at_ms
+        && capability.expires_at_ms >= required_until_ms
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the local signed advertisement and exact native scope stay explicit"
+)]
+fn local_native_probe_exit_actor_matches(
+    encoded_advertisement: &[u8],
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    local_node_id: [u8; 32],
+    local_peer_id: Libp2pPeerId,
+    local_public_key: [u8; 32],
+    now_ms: u64,
+) -> bool {
+    let Ok(envelope) = decode_canonical::<SignedEnvelope>(
+        encoded_advertisement,
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    ) else {
+        return false;
+    };
+    let Some(payload_hash) = fixed_bytes::<32>(&envelope.payload_hash) else {
+        return false;
+    };
+    let Ok(mut replay) = ReplayCache::new(1) else {
+        return false;
+    };
+    let Ok(verified) = verify_control_message::<WireAdvertisement>(
+        encoded_advertisement,
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    ) else {
+        return false;
+    };
+    let advertisement = verified.message();
+    let Some(roles) = advertisement.roles.as_ref() else {
+        return false;
+    };
+    let Some(capabilities) = advertisement.capabilities.as_ref() else {
+        return false;
+    };
+    let Some(policy) = advertisement.policy.as_ref() else {
+        return false;
+    };
+    let Some(network) = advertisement.network.as_ref() else {
+        return false;
+    };
+    let Some(control) = scope.control.as_ref() else {
+        return false;
+    };
+    let expected_capability_expiry = verified
+        .expires_at_ms()
+        .min(scope.policy_expires_at_ms)
+        .min(control.capability_expires_at_ms);
+    scope.exit.as_ref() == Some(actor)
+        && roles.exit
+        && network.asn != 0
+        && native_probe_capabilities_support_scope(capabilities, scope)
+        && verified.sender_id() == &local_node_id
+        && verified.sender_public_key() == &local_public_key
+        && advertisement.node_id.as_slice() == local_node_id
+        && advertisement.peer_id == local_peer_id.to_bytes()
+        && advertisement.sequence_number != 0
+        && advertisement.expires_at_ms == verified.expires_at_ms()
+        && policy.whitelist_version == scope.policy_version
+        && policy.whitelist_hash == scope.policy_hash
+        && verified.expires_at_ms() <= scope.policy_expires_at_ms
+        && actor.node_id.as_slice() == local_node_id
+        && actor.peer_id == local_peer_id.to_bytes()
+        && actor.public_key.as_slice() == local_public_key
+        && actor.advertisement_sequence == advertisement.sequence_number
+        && actor.advertisement_expires_at_ms == verified.expires_at_ms()
+        && actor.advertisement_payload_hash.as_slice() == payload_hash
+        && actor.capability_expires_at_ms == expected_capability_expiry
+        && expected_capability_expiry > now_ms
+}
+
+fn native_probe_capabilities_support_scope(
+    capabilities: &AdvertisementCapabilities,
+    scope: &NativeProbePathScope,
+) -> bool {
+    let family_supported = match ObservationAddressFamily::try_from(scope.address_family) {
+        Ok(ObservationAddressFamily::Ipv4) => capabilities.ipv4,
+        Ok(ObservationAddressFamily::Ipv6) => capabilities.ipv6,
+        Ok(ObservationAddressFamily::Unspecified) | Err(_) => false,
+    };
+    let transport_supported = match Transport::try_from(scope.transport) {
+        Ok(Transport::TcpMptcp) => capabilities.tcp_mptcp,
+        Ok(Transport::UdpSinglePath) => capabilities.udp_single_path,
+        Ok(Transport::MultipathQuic) => capabilities.multipath_quic,
+        Ok(Transport::Unspecified) | Err(_) => false,
+    };
+    family_supported && transport_supported
+}
+
+fn native_probe_time_policy() -> TimePolicy {
+    TimePolicy {
+        maximum_lifetime_ms: MAX_NATIVE_PROBE_LIFETIME_MS,
+        maximum_clock_skew_ms: TimePolicy::default().maximum_clock_skew_ms,
+    }
+}
+
 fn forward_request_scope_matches(
     request: &ExitForwardRequest,
     operation: ExitForwardOperation,
@@ -6083,6 +6389,9 @@ fn forward_request_scope_matches(
                 &verified.message().exit_node_id,
                 &verified.message().exit_peer_id,
             )
+        }
+        ExitForwardOperation::NativeProbePermit => {
+            verified_native_probe_forward_scope(request, now_ms).is_some()
         }
         ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
     }
@@ -7262,6 +7571,466 @@ mod tests {
         )
         .expect("signed service advertisement");
         AdvertisementResponse::new(envelope).expect("bounded advertisement")
+    }
+
+    struct NativePermitForwardFixture {
+        fixture: RuntimeFixture,
+        now_ms: u64,
+        control: DirectRelayCapability,
+        scope: NativeProbePathScope,
+        request: ExitForwardRequest,
+        local_advertisement: Vec<u8>,
+    }
+
+    fn actor_from_direct_capability(
+        capability: &DirectRelayCapability,
+    ) -> PreselectionActorBinding {
+        PreselectionActorBinding {
+            node_id: capability.node_id.to_vec(),
+            peer_id: capability.peer_id.to_bytes(),
+            public_key: capability.public_key.to_vec(),
+            advertisement_sequence: capability.advertisement_sequence,
+            advertisement_expires_at_ms: capability.advertisement_expires_at_ms,
+            advertisement_payload_hash: capability.advertisement_payload_hash.0.to_vec(),
+            capability_expires_at_ms: capability.expires_at_ms,
+        }
+    }
+
+    fn actor_from_signed_advertisement(
+        encoded: &[u8],
+        identity: &Identity,
+        capability_expires_at_ms: u64,
+        now_ms: u64,
+    ) -> PreselectionActorBinding {
+        let envelope: SignedEnvelope =
+            decode_canonical(encoded, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE)
+                .expect("signed advertisement envelope");
+        let payload_hash = fixed_bytes::<32>(&envelope.payload_hash).expect("payload hash");
+        let mut replay = ReplayCache::new(1).expect("advertisement replay");
+        let verified = verify_control_message::<WireAdvertisement>(
+            encoded,
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("verified signed advertisement");
+        let public_key = identity
+            .ed25519_public_key_bytes()
+            .expect("Ed25519 public key");
+        PreselectionActorBinding {
+            node_id: verified.sender_id().to_vec(),
+            peer_id: identity.peer_id().to_bytes(),
+            public_key: public_key.to_vec(),
+            advertisement_sequence: verified.message().sequence_number,
+            advertisement_expires_at_ms: verified.expires_at_ms(),
+            advertisement_payload_hash: payload_hash.to_vec(),
+            capability_expires_at_ms,
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture preserves every signed native-Permit provenance field explicitly"
+    )]
+    fn native_permit_forward_fixture() -> NativePermitForwardFixture {
+        let roles = RolesConfig {
+            client: true,
+            relay: false,
+            exit: true,
+        };
+        let mut fixture = fixture(roles);
+        let now_ms = unix_millis();
+        let request_expires_at_ms = now_ms.saturating_add(5_000);
+        let actor_expires_at_ms = now_ms.saturating_add(20_000);
+
+        let control_identity = Identity::generate();
+        let control =
+            direct_capability(&control_identity, &fixture.policy, 17, actor_expires_at_ms);
+        fixture
+            .runtime
+            .direct_relays
+            .insert(control.peer_id, control.clone());
+        let control_actor = actor_from_direct_capability(&control);
+
+        let data_relay_identity = Identity::generate();
+        let data_relay = direct_capability(
+            &data_relay_identity,
+            &fixture.policy,
+            19,
+            actor_expires_at_ms,
+        );
+        let data_relay_actor = actor_from_direct_capability(&data_relay);
+
+        let local_advertisement = service_advertisement(
+            &fixture.runtime.identity,
+            roles,
+            &fixture.policy,
+            23,
+            [0x73; 32],
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let envelope: SignedEnvelope = decode_canonical(
+            &local_advertisement,
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("local Exit advertisement envelope");
+        let exit_capability_expiry = envelope
+            .expires_at_ms
+            .min(fixture.policy.expires_at_ms())
+            .min(control.expires_at_ms);
+        let exit_actor = actor_from_signed_advertisement(
+            &local_advertisement,
+            &fixture.runtime.identity,
+            exit_capability_expiry,
+            now_ms,
+        );
+
+        let session_identity = Identity::generate();
+        let session_public_key = session_identity
+            .ed25519_public_key_bytes()
+            .expect("session Ed25519 public key");
+        let scope = NativeProbePathScope {
+            attempt_id: vec![0x31; 16],
+            probe_id: vec![0x32; 16],
+            candidate_set_hash: vec![0x33; 32],
+            candidate_ordinal: 1,
+            data_relay: Some(data_relay_actor),
+            control: Some(control_actor),
+            exit: Some(exit_actor),
+            client_session_id: node_id_from_public_key(&session_public_key).to_vec(),
+            client_session_public_key: session_public_key.to_vec(),
+            transport: Transport::UdpSinglePath as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: fixture.policy.manifest_version(),
+            policy_hash: fixture.policy.policy_hash().to_vec(),
+            policy_expires_at_ms: fixture.policy.expires_at_ms(),
+            challenge_hash: vec![0x34; 32],
+            attempt_expires_at_ms: request_expires_at_ms,
+        };
+        let nonce = [0x35; 32];
+        let permit_request = NativeProbePermitRequest {
+            scope: Some(scope.clone()),
+            created_at_ms: now_ms,
+            expires_at_ms: request_expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        let signed_request = sign_control_message_with(
+            &permit_request,
+            session_public_key,
+            now_ms,
+            request_expires_at_ms,
+            nonce,
+            native_probe_time_policy(),
+            |message| session_identity.sign(message).ok(),
+        )
+        .expect("session-signed native Permit request");
+        let request = ExitForwardRequest::new(
+            nonce[..FORWARD_ID_BYTES].to_vec(),
+            control.node_id.to_vec(),
+            control.peer_id.to_bytes(),
+            control.public_key.to_vec(),
+            fixture.runtime.service.local_peer_id().to_bytes(),
+            fixture.runtime.local_node_id.to_vec(),
+            request_expires_at_ms,
+            ExitForwardOperation::NativeProbePermit,
+            signed_request,
+        )
+        .expect("native Permit forward wrapper");
+        fixture.runtime.served_local_advertisement = Some(local_advertisement.clone());
+        NativePermitForwardFixture {
+            fixture,
+            now_ms,
+            control,
+            scope,
+            request,
+            local_advertisement,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_permit_forward_scope_requires_exact_signed_wrapper_lineage() {
+        let fixture = native_permit_forward_fixture();
+        let verified = verified_native_probe_forward_scope(&fixture.request, fixture.now_ms)
+            .expect("exact native Permit scope");
+        assert!(verified == fixture.scope);
+        assert!(forward_request_scope_matches(
+            &fixture.request,
+            ExitForwardOperation::NativeProbePermit,
+            fixture.now_ms,
+        ));
+
+        let rebuild = |forward_id: Vec<u8>, deadline_unix_ms: u64, canonical_request: Vec<u8>| {
+            ExitForwardRequest::new(
+                forward_id,
+                fixture.control.node_id.to_vec(),
+                fixture.control.peer_id.to_bytes(),
+                fixture.control.public_key.to_vec(),
+                fixture.fixture.runtime.service.local_peer_id().to_bytes(),
+                fixture.fixture.runtime.local_node_id.to_vec(),
+                deadline_unix_ms,
+                ExitForwardOperation::NativeProbePermit,
+                canonical_request,
+            )
+            .expect("structurally valid native Permit wrapper")
+        };
+        let wrong_forward = rebuild(
+            vec![0x91; FORWARD_ID_BYTES],
+            fixture.request.deadline_unix_ms(),
+            fixture.request.canonical_request().to_vec(),
+        );
+        assert!(verified_native_probe_forward_scope(&wrong_forward, fixture.now_ms).is_none());
+        let wrong_deadline = rebuild(
+            fixture.request.forward_id().to_vec(),
+            fixture.request.deadline_unix_ms().saturating_sub(1),
+            fixture.request.canonical_request().to_vec(),
+        );
+        assert!(verified_native_probe_forward_scope(&wrong_deadline, fixture.now_ms).is_none());
+
+        let mut envelope: SignedEnvelope = decode_canonical(
+            fixture.request.canonical_request(),
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("native Permit envelope");
+        envelope.signature[0] ^= 1;
+        let tampered = encode_canonical(&envelope, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE)
+            .expect("canonical tampered envelope");
+        let wrong_signature = rebuild(
+            fixture.request.forward_id().to_vec(),
+            fixture.request.deadline_unix_ms(),
+            tampered,
+        );
+        assert!(verified_native_probe_forward_scope(&wrong_signature, fixture.now_ms).is_none());
+    }
+
+    #[tokio::test]
+    async fn native_permit_control_actor_matches_every_current_capability_field() {
+        let fixture = native_permit_forward_fixture();
+        let actor = fixture.scope.control.as_ref().expect("control actor");
+        let peer = fixture.control.peer_id;
+        let deadline = fixture.request.deadline_unix_ms();
+        assert!(native_probe_control_capability_matches(
+            &fixture.control,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+
+        let mut changed = fixture.control.clone();
+        changed.advertisement_sequence = changed.advertisement_sequence.saturating_add(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.advertisement_expires_at_ms = changed.advertisement_expires_at_ms.saturating_add(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.advertisement_payload_hash = changed.advertisement_payload_hash.xor_for_test();
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.policy_version = changed.policy_version.saturating_add(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.policy_hash[0] ^= 1;
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.policy_expires_at_ms = changed.policy_expires_at_ms.saturating_sub(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        let mut changed = fixture.control.clone();
+        changed.expires_at_ms = changed.expires_at_ms.saturating_sub(1);
+        assert!(!native_probe_control_capability_matches(
+            &changed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        assert!(!native_probe_control_capability_matches(
+            &fixture.control,
+            actor,
+            &fixture.scope,
+            Identity::generate().peer_id().to_owned(),
+            deadline,
+        ));
+
+        let mut substituted_actor = actor.clone();
+        substituted_actor.advertisement_payload_hash[0] ^= 1;
+        let mut substituted_scope = fixture.scope.clone();
+        substituted_scope.control = Some(substituted_actor.clone());
+        assert!(!native_probe_control_capability_matches(
+            &fixture.control,
+            &substituted_actor,
+            &substituted_scope,
+            peer,
+            deadline,
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_permit_local_exit_actor_requires_current_signed_role_and_policy() {
+        let fixture = native_permit_forward_fixture();
+        let runtime = &fixture.fixture.runtime;
+        let actor = fixture.scope.exit.as_ref().expect("Exit actor");
+        let matches = |advertisement: &[u8], actor: &PreselectionActorBinding, scope| {
+            local_native_probe_exit_actor_matches(
+                advertisement,
+                actor,
+                scope,
+                runtime.local_node_id,
+                *runtime.service.local_peer_id(),
+                runtime.local_public_key,
+                fixture.now_ms,
+            )
+        };
+        assert!(matches(&fixture.local_advertisement, actor, &fixture.scope,));
+
+        let mut wrong_actor = actor.clone();
+        wrong_actor.advertisement_sequence = wrong_actor.advertisement_sequence.saturating_add(1);
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.exit = Some(wrong_actor.clone());
+        assert!(!matches(
+            &fixture.local_advertisement,
+            &wrong_actor,
+            &wrong_scope,
+        ));
+        let mut wrong_actor = actor.clone();
+        wrong_actor.advertisement_payload_hash[0] ^= 1;
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.exit = Some(wrong_actor.clone());
+        assert!(!matches(
+            &fixture.local_advertisement,
+            &wrong_actor,
+            &wrong_scope,
+        ));
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.policy_hash[0] ^= 1;
+        assert!(!matches(&fixture.local_advertisement, actor, &wrong_scope,));
+        let mut unsupported = fixture.scope.clone();
+        unsupported.transport = Transport::MultipathQuic as i32;
+        assert!(!matches(&fixture.local_advertisement, actor, &unsupported,));
+
+        let relay_only = service_advertisement(
+            &runtime.identity,
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: false,
+            },
+            &fixture.fixture.policy,
+            actor.advertisement_sequence,
+            [0x74; 32],
+            fixture.now_ms,
+            &fixture.fixture.directory,
+        );
+        assert!(!matches(
+            relay_only.signed_envelope(),
+            actor,
+            &fixture.scope,
+        ));
+    }
+
+    #[test]
+    fn native_permit_production_caller_keeps_connection_owner_until_immediate_send() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+        let handler = braced_item(production, "async fn handle_exit_forward_upstream_event(");
+        assert!(handler.contains("connection_id,"));
+        assert!(
+            handler.contains(
+                "self.answer_exit_forward_upstream(peer, connection_id, request, channel)"
+            )
+        );
+
+        let caller = braced_item(production, "fn prepare_native_probe_permit_response(");
+        assert_eq!(
+            production
+                .matches(".issue_native_probe_permit_with(")
+                .count(),
+            1,
+        );
+        let capability_check = caller
+            .find("native_probe_control_capability_matches(")
+            .expect("current control capability check");
+        let local_advertisement_check = caller
+            .find("local_native_probe_exit_actor_matches(")
+            .expect("current local Exit advertisement check");
+        let connection_bind = caller
+            .find(".bind_native_probe_control_connection(")
+            .expect("event connection bind");
+        let exit_call = caller
+            .find(".issue_native_probe_permit_with(")
+            .expect("Exit Permit call");
+        assert!(capability_check < connection_bind);
+        assert!(local_advertisement_check < connection_bind);
+        assert!(connection_bind < exit_call);
+        assert!(!caller.contains(".await"));
+        assert!(!caller.contains("issue_native_probe_ready"));
+        assert!(!caller.contains("issue_native_probe_result"));
+        assert!(!caller.contains("HelperClient"));
+        assert!(!caller.contains("network_address_usable"));
+
+        let prepared = braced_item(production, "struct PreparedNativeProbePermitResponse {");
+        for retained in [
+            "connection: BoundNativeProbeControlConnection",
+            "channel: request_response::ResponseChannel<UpstreamExitForwardResponse>",
+            "response: UpstreamExitForwardResponse",
+        ] {
+            assert!(prepared.contains(retained));
+        }
+        assert!(!prepared.contains("derive("));
+
+        let sender = braced_item(production, "fn send_prepared_native_probe_permit_response(");
+        assert!(sender.contains("send_native_probe_permit_response("));
+        assert!(!sender.contains(".await"));
+
+        let publisher = braced_item(production, "async fn publish_local(");
+        let exit_role_guard = publisher
+            .find("if self.roles.relay || self.roles.exit")
+            .expect("current product withdraws local Relay/Exit advertisements");
+        let served_assignment = publisher
+            .find("self.served_local_advertisement = Some(")
+            .expect("client-only local advertisement assignment");
+        assert!(exit_role_guard < served_assignment);
     }
 
     async fn ingest_direct_snapshot_advertisement(

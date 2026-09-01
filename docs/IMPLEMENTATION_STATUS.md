@@ -1176,14 +1176,22 @@ single clean-build A01--A15 run; the score is not a release claim.
   the exact Prepared handoff through its test seam while the five-second receipts remain live and
   mint a separate at-most-30-second endpoint-separated client/wire/verifier/data-Relay affine
   contract. It does not extend the receipts or claim usability. A separate module-private,
-  non-Clone Exit wire-phase owner produces its Permit, ExitReady and ExitResult phases in tests only
-  after enabled-role, exact current policy and actor/Peer-ID equality checks. The authenticated
-  channel values remain raw test inputs without a production connection-owned source. Its typed
+  non-Clone Exit wire-phase owner can retain a Permit through one production-composed server-side
+  caller. That caller validates the full forwarding scope, current exact control capability and locally
+  served Exit advertisement, binds the inbound control Relay's exact libp2p connection, and
+  consumes that token with the response channel. The bounded Exit ledger stores the affine owner
+  before handoff and returns byte-identical output for an exact same-actor retry without re-signing.
+  The normal runtime cannot currently reach that success path because the local publisher
+  deliberately withdraws for an Exit role; only the test fixture injects the required signed Exit
+  advertisement. No usable Exit capability is published.
+  ExitReady and ExitResult remain test-only; their authenticated data-Relay values still lack a
+  production connection-owned source. Its typed
   projection from the `Copy` `ExitEndpointLease` proves no helper-resource custody,
   same-connection provenance or cleanup authority; its exact helper/datapath observation
   deliberately has no constructor. A
-  production runtime caller, challenge delivery, the actual sampler, helper/datapath authority or
-  evidence, measured capacity/readiness, usability promotion and route admission are absent. No
+  production client Permit dispatcher, Ready/Result caller, challenge delivery, the actual sampler,
+  helper/datapath authority or evidence, measured capacity/readiness, usability promotion and route
+  admission are absent. No
   checkbox is closed. Production still publishes no usable relay/exit capability, route
   finalization still fails closed with
   `ProbeEvidenceUnavailable`, and no downstream route orchestrator or disposable live-network proof
@@ -1214,13 +1222,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   reservation or dispatch authority. Explicit validity is bounded by freshness, attempt, policy,
   advertisement and actor capability expiry. The discovery actor invokes the bridge into an opaque
   Prepared handoff. Its private callerless native owner can consume it only through a test seam and
-  mint endpoint-free cryptographic attempt states; no production caller, helper-backed sampler or
-  helper/datapath evidence consumes or completes them. The mint
+  mint endpoint-free cryptographic attempt states; no production client caller, helper-backed
+  sampler or helper/datapath evidence consumes or completes them. The mint
   deliberately sets dataplane address usability false, so the actor path remains at zero usable
   route candidates instead of substituting control-plane or stored evidence. A module-private,
-  non-Clone Exit wire-phase owner exists, but its `ExitEndpointLease` projection is not
-  helper-resource custody or cleanup authority and its post-baseline challenge observation has no
-  constructor.
+  non-Clone Exit wire-phase owner can retain one Permit through the connection-bound,
+  production-composed server responder, but the normal runtime cannot pass its deliberately absent
+  local Exit-advertisement gate. Its `ExitEndpointLease` projection is not helper-resource custody
+  or cleanup authority and its post-baseline challenge observation has no constructor.
 - [ ] A bounded 70/20/10 exploration primitive and a peer-only prospective relay selector are
   tested. The latter canonically handles at most 200 candidates, returns at most eight, and applies
   strict control/exit/slate diversity without synthetic complete-path metrics. Its dormant
@@ -1261,9 +1270,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   records and later capability re-resolution. The production discovery owner now exact-set joins
   A1a/A1c proofs, mints the existing private Fresh batch and exposes only an opaque Prepared
   handoff. A private callerless native attempt owner consumes it in tests and retains affine
-  endpoint-separated contracts. A module-private, non-Clone Exit wire-phase owner exists, but its
+  endpoint-separated contracts. A module-private, non-Clone Exit wire-phase owner can retain one
+  Permit from a connection-bound, production-composed server caller in a bounded idempotency ledger,
+  but the current local publisher serves no Exit advertisement, so normal runtime issuance remains
+  fail-closed. Its
   typed `ExitEndpointLease` projection provides no helper-resource custody or cleanup authority.
-  There is no production runtime caller, same-helper prepared-lease provider, post-baseline
+  There is no production client Permit dispatcher, Ready/Result caller, same-helper prepared-lease
+  provider, post-baseline
   challenge evidence producer, helper provisioning, actual sampler, measured capacity/readiness,
   datapath evidence or route admission. Its output remains deliberately unusable for selection.
 - [ ] Relay selection measures and scores the complete client-relay-exit path. The second dormant

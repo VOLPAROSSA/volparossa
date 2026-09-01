@@ -4196,6 +4196,7 @@ mod tests {
                     )]
                 }
                 ExitForwardOperation::FetchExitAdvertisement
+                | ExitForwardOperation::NativeProbePermit
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -4524,6 +4525,7 @@ mod tests {
                     vec![accepted.signed_receipt().to_vec()]
                 }
                 ExitForwardOperation::FetchExitAdvertisement
+                | ExitForwardOperation::NativeProbePermit
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(

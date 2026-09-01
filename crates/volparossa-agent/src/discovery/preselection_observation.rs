@@ -5521,7 +5521,7 @@ mod tests {
             1
         );
         assert_eq!(token_surface.matches("#[cfg(test)]").count(), 2);
-        assert_eq!(token_surface.matches("fn ").count(), 5);
+        assert_eq!(token_surface.matches("fn ").count(), 6);
         assert_eq!(
             token_surface
                 .matches("impl AdvertisementPayloadHash {")
@@ -5558,6 +5558,13 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            token_surface
+                .matches("fn matches_native_probe_commitment(")
+                .count(),
+            1
+        );
+        assert!(!token_surface.contains("pub(crate) fn matches_native_probe_commitment("));
         assert_eq!(
             token_surface
                 .matches("AdvertisementPayloadHash([REDACTED])")

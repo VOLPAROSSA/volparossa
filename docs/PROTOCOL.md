@@ -267,7 +267,7 @@ runtime invokes it. Neither the Prepared handoff nor the child grants admission,
 route, usability or datapath authority. The server-side responders and forwarding wrapper operate
 independently of this client value.
 
-### Callerless native-preselection contract foundation
+### Native-preselection contract and server-side Permit provider
 
 Tags 19 through 25 define an endpoint-separated native-probe transcript and affine verification
 states. The private client owner consumes the exact Prepared handoff before its signed five-second
@@ -297,23 +297,35 @@ and affine states, never by ordering wall clocks owned by different nodes; each 
 enforces its own bounded lifetime, expiry ceiling and the normal clock-skew policy. Replay failures
 and cross-binding substitutions roll back only the newly admitted entries and fail closed.
 
-This is deliberately a callerless contract/test foundation. A module-private, non-Clone Exit
-wire-phase owner exists, but its typed projection from the `Copy` `ExitEndpointLease` proves neither
-helper-resource custody nor same-connection runtime provenance or cleanup authority. The private
-helper/datapath observation has no constructor. It has no production runtime caller, helper
-lifecycle/cleanup ownership, challenge delivery, live WireGuard probe, measured readiness/capacity,
-terminal helper-evidence producer, usability promotion or route admission. The generic wire structs
-and generic envelope signer are not production authority. In particular, this foundation cannot
-set `network_address_usable = true`; the existing hard filter continues to reject its output.
+The client-side native attempt, ExitReady and ExitResult remain callerless contract/test
+foundations. The Exit now composes one production server-side Permit handler on the existing
+forwarded control protocol. That handler remains dormant in the current product: the local
+publisher intentionally serves no Exit advertisement or usable Exit capability yet, so a normal
+runtime cannot satisfy its exact-local-advertisement gate. An agent unit fixture injects a valid
+signed local Exit advertisement to prove the exact gate validators; a separate discovery transport
+integration proves connection-bound response handoff. No test claims the whole handler succeeds
+end to end. Once a truthful producer exists, the handler accepts
+only the exact signed native Permit request received from an authenticated control Relay, rechecks
+the current full Relay capability and exact locally served Exit advertisement, and consumes a
+purpose-specific token for that exact libp2p `ConnectionId` when handing the response back.
+Multiple or Circuit-Relay control connections are valid; this is authenticated control-channel
+provenance, not native-prefix or datapath evidence. The Exit API stores the response before handoff
+in a bounded no-live-eviction ledger together with its affine Permit owner. An exact retry by the
+same authenticated control actor returns the byte-identical signed Permit without signing or
+consuming replay again; request or actor substitution fails closed.
 
-The Exit test seam receives authenticated node and Peer-ID values as raw call arguments and checks
-them exactly against the signed actors. With no runtime caller, those values are not yet
-connection-owned provenance. Permit, ExitReady and ExitResult each cap their own lifetime at the
-lower of the parent expiry and local production time plus 30 seconds. Private phase owners retain
-the process-unique Exit boot incarnation and reject cross-restart consumption. The dedicated
-request replay cache is bounded and expiry-pruned but intentionally process-local and is reset by a
-restart; boot-incarnation rejection, rather than replay persistence, keeps an old phase owner from
-crossing that boundary.
+Only Permit has that production-composed caller, and it cannot currently issue in a normal runtime.
+The module-private, non-Clone Exit readiness/result owner
+still uses raw test-seam data-Relay identities. Its typed projection from the `Copy`
+`ExitEndpointLease` proves neither helper-resource custody nor same-connection helper-runtime
+provenance or cleanup authority, and the private helper/datapath observation has no constructor.
+There is no production client Permit dispatcher, Ready/Result caller, helper lifecycle/cleanup
+owner, challenge delivery, live WireGuard probe, measured readiness/capacity, terminal
+helper-evidence producer, usability promotion or route admission. Permit, ExitReady and ExitResult
+each cap their own lifetime at the lower of the parent expiry and local production time plus 30
+seconds. Private phase owners retain the process-unique Exit boot incarnation and reject
+cross-restart consumption. In particular, Permit production cannot set
+`network_address_usable = true`; the existing hard filter continues to reject its output.
 
 Discovery composes A1c wire protocols without changing A0 or adding a protobuf wrapper.
 `/volparossa/preselection-observation/4` carries an exact canonical Relay or forwarded
@@ -425,14 +437,16 @@ lineage; it is not an external-network measurement. This is still control-plane 
 production only: it makes no Fresh, readiness, capacity, reservation, route or datapath claim.
 
 A production discovery owner now drives the snapshot, native-agnostic sampler, exact affine
-request/bind lineage, A1a/A1c join and opaque Prepared handoff. The private callerless child and v4
-native-probe contract can consume that handoff only through a test seam. A separate module-private,
-non-Clone Exit wire-phase owner verifies the exact client/control/Exit actor and active-policy
-bindings while producing Permit, ExitReady and ExitResult in tests. The raw authenticated-channel
-arguments still have no production connection-owned source. Its typed
-`ExitEndpointLease` projection is not helper-resource custody or cleanup authority, and its result
-requires a private helper/datapath observation type with no constructor. A production runtime
-caller, real same-helper custody/lifecycle and challenge providers, live dataplane evidence,
+request/bind lineage, A1a/A1c join and opaque Prepared handoff. The private client child can consume
+that handoff only through a test seam. A separate module-private, non-Clone Exit owner can retain
+one Permit in a bounded idempotency ledger. Its sole production-composed caller binds the request
+and response channel to the exact authenticated control-Relay connection and current control/Exit
+advertisement and policy identities, but the current product has no local Exit-advertisement source
+that can satisfy the gate. ExitReady and ExitResult remain test-only; their
+data-Relay arguments still have no production connection-owned source. The typed
+`ExitEndpointLease` projection is not helper-resource custody or cleanup authority, and the result
+requires a private helper/datapath observation type with no constructor. Production client Permit
+dispatch, real same-helper custody/lifecycle and challenge providers, live dataplane evidence,
 measured readiness/capacity, usability promotion, route admission and reservation are still absent.
 The fixed alpha score remains
 **11/100 (11%)**.

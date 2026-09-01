@@ -401,8 +401,16 @@ injected public endpoint lineage and is not external-network evidence. Neither r
 claims origin, RTT, capacity, Fresh evidence, reservation, route, admission, readiness, or datapath
 authority. The production agent supplies the policy and permanent signer, and its discovery actor
 now owns the client-side sampler, exact request/bind lineage, exact-set join and private
-Fresh-evidence mint. Its callerless native-preselection child and v4 contract foundation still have
-no production runtime or route-orchestrator caller.
+Fresh-evidence mint. Its client-side native-preselection child still has no production dispatcher
+or route-orchestrator caller. The Exit-side actor composes one deliberately narrow production
+Permit responder: it binds the exact inbound control-Relay `ConnectionId`, current actor identities
+and policy before invoking the Exit signer, and consumes that connection token with the response
+channel without an intervening await. It remains dormant because the current local publisher
+deliberately withdraws for an Exit role and therefore cannot supply the required exact served Exit
+advertisement. An agent unit fixture injects that signed advertisement to test the exact validators;
+the separate discovery transport integration proves only connection-bound handoff. The normal
+runtime does not supply the advertisement. The responder provides no Ready, Result, helper or
+datapath work.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than
@@ -454,14 +462,17 @@ data Relay alone verifies the hidden Relay-Exit and Exit endpoints and all four 
 topology before signing its result. The terminal client state relies on that exact affine signed
 chain for hidden topology and does not itself create or independently attest helper evidence.
 
-A separate module-private, non-Clone Exit wire-phase owner produces Permit, ExitReady and ExitResult
-in tests only after enabled-role, exact active-policy, Exit/control/data-Relay actor and Peer-ID
-equality checks. Those authenticated-channel values are still raw test-seam arguments, not
-connection-owned production provenance. Its readiness state consumes a typed projection from the `Copy`
-`ExitEndpointLease`; that projection proves neither helper-resource custody nor same-connection
-runtime provenance or cleanup authority. Its result consumes a private exact-runtime/context/
-commitment and challenge observation with no constructor. There is still no production caller,
-helper provisioning/lifecycle/cleanup ownership, one-shot challenge delivery, live WireGuard probe,
+A separate module-private, non-Clone Exit wire-phase owner can retain a Permit before its response
+is handed off. A bounded no-live-eviction ledger makes an identical retry from the same
+authenticated control actor byte-identical without a second signature, while altered requests or
+actors fail closed. ExitReady and ExitResult are still produced only in tests after exact
+data-Relay checks; those later authenticated-channel values remain raw test-seam arguments. The
+readiness state consumes a typed projection from the `Copy` `ExitEndpointLease`; that projection
+proves neither helper-resource custody nor same-connection runtime provenance or cleanup authority.
+Its result consumes a private exact-runtime/context/commitment and challenge observation with no
+constructor. There is still no production local Exit-advertisement/capability producer which can
+open this responder gate, client Permit dispatcher, Ready/Result caller, helper
+provisioning/lifecycle/cleanup ownership, one-shot challenge delivery, live WireGuard probe,
 measured readiness/capacity, terminal helper-evidence producer, usability promotion or route
 admission. Generic wire values and the generic envelope signer are not production actor authority.
 The child therefore cannot set `network_address_usable = true`, and the reported usable production
