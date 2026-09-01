@@ -3092,6 +3092,12 @@ impl DiscoveryRuntime {
             && response.relay_node_id() == pending.relay_node_id
             && response.relay_peer_id() == peer.to_bytes()
             && (response.validated_status() != Ok(ForwardStatus::Granted)
+                || matches!(
+                    pending.operation,
+                    DatapathRelayOperation::UdpSessionStart
+                        | DatapathRelayOperation::MptcpSessionStart
+                        | DatapathRelayOperation::MpquicSessionStart
+                )
                 || signed_envelope_matches_peer(response.signed_response(), &peer));
         let pending = self.pending_datapath.remove(&request_id).expect("present");
         self.datapath_index.remove(&pending.key);
@@ -14098,6 +14104,12 @@ fn exit_response_matches(
         && response.exit_peer_id() == expected_exit_peer.to_bytes()
         && expected_exit_node_id.is_none_or(|node_id| response.exit_node_id() == node_id)
         && (response.validated_status() != Ok(ForwardStatus::Granted)
+            || matches!(
+                operation,
+                ExitForwardOperation::UdpSessionStart
+                    | ExitForwardOperation::MptcpSessionStart
+                    | ExitForwardOperation::MpquicSessionStart
+            )
             || response
                 .signed_responses()
                 .iter()
