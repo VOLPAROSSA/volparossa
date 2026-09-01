@@ -151,8 +151,11 @@ R1=$PREFIX-r1
 R2=$PREFIX-r2
 EXIT_NODE=$PREFIX-x
 DEST=$PREFIX-d
-WORK=$(mktemp -d "/var/tmp/volparossa-alpha-topology.$RUN_ID.XXXXXX")
-case $WORK in /var/tmp/volparossa-alpha-topology.*) ;; *) exit 69 ;; esac
+# PrivateTmp is part of both production service sandboxes.  Keep the staged
+# executables and configuration outside /tmp and /var/tmp so the transient
+# units see the exact artifacts that this disposable VM prepared for them.
+WORK=$(mktemp -d "/run/volparossa-alpha-topology.$RUN_ID.XXXXXX")
+case $WORK in /run/volparossa-alpha-topology.*) ;; *) exit 69 ;; esac
 chmod 0700 "$WORK"
 
 PHASE=identity-setup
