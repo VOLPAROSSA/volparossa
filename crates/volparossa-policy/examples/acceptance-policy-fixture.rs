@@ -1,8 +1,10 @@
-//! Generate one short-lived, empty, threshold-signed development policy for the disposable
-//! acceptance topology. The fixed keys are test material and are never accepted in production.
+//! Generate one short-lived, threshold-signed development policy for the disposable acceptance
+//! topology. It permits only the topology's exact A05 UDP echo tuple. The fixed keys are test
+//! material and are never accepted in production.
 
 use std::{
     env, fs,
+    net::{IpAddr, Ipv4Addr},
     os::unix::fs::OpenOptionsExt as _,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -10,8 +12,8 @@ use std::{
 
 use ed25519_dalek::SigningKey;
 use volparossa_policy::{
-    MaintainerEnvironment, ManifestSpec, POLICY_PROTOCOL_VERSION, PolicyMode, TrustStore,
-    TrustedMaintainer, sign_manifest,
+    DestinationRule, MaintainerEnvironment, ManifestSpec, POLICY_PROTOCOL_VERSION, PolicyMode,
+    ProtocolPort, TransportProtocol, TrustStore, TrustedMaintainer, sign_manifest,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,13 +36,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect(),
     )?;
     let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
-    let specification = ManifestSpec::new(
+    let mut specification = ManifestSpec::new(
         1,
         POLICY_PROTOCOL_VERSION,
         now.saturating_sub(1_000),
         now.saturating_sub(1_000),
         now.saturating_add(600_000),
     )?;
+    specification.add_rule(DestinationRule::exact_ip(
+        IpAddr::V4(Ipv4Addr::new(10, 241, 31, 2)),
+        [ProtocolPort::new(TransportProtocol::Udp, 18_081)?],
+    )?)?;
     let signers = keys.iter().collect::<Vec<_>>();
     let manifest = sign_manifest(&specification, &trust, &signers)?;
     write_private(

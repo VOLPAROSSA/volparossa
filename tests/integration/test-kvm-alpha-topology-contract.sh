@@ -53,5 +53,15 @@ if grep -E 'ip -n "\$CLIENT" route add (unicast )?46\.162\.3\.1' "$GUEST"; then 
 if grep -F 'link_nodes "$CLIENT"' "$GUEST" | grep -F '"$EXIT_NODE"'; then
     exit 1
 fi
+grep -F 'payload, source = udp.recvfrom(2048)' "$GUEST" >/dev/null
+grep -F 'sent = udp.sendto(payload, source)' "$GUEST" >/dev/null
+grep -F 'ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID"' "$GUEST" >/dev/null
+grep -F 'application.sendto(payload, destination)' "$GUEST" >/dev/null
+grep -F 'response, source = application.recvfrom(2048)' "$GUEST" >/dev/null
+grep -F 'direct_client_exit_packets' "$GUEST" >/dev/null
+grep -F 'selected_relay:$selected' "$GUEST" >/dev/null
+grep -F 'acceptance_id:"A05",success:$success' "$GUEST" >/dev/null
+grep -F 'a05_udp_echo:{requested:$a05_requested,succeeded:$a05_succeeded' "$GUEST" \
+    >/dev/null
 
 printf '%s\n' 'KVM alpha topology static contract passed'
