@@ -83,14 +83,22 @@ impl<'a> TcpAuthorizationScope<'a> {
 
         let port = u16::try_from(message.port)
             .map_err(|_| TcpProxyError::InvalidBinding("destination port"))?;
-        let (hostname, destination_ip) = if message.destination_ip.is_empty() {
+        let (hostname, destination_ip) = if !message.hostname.is_empty() {
             self.policy.authorize_domain(
                 now_ms,
                 &message.hostname,
                 TransportProtocol::Tcp,
                 port,
             )?;
-            (Some(message.hostname.clone()), None)
+            let destination_ip = if message.destination_ip.is_empty() {
+                None
+            } else {
+                Some(
+                    parse_ip_bytes(&message.destination_ip)
+                        .ok_or(TcpProxyError::InvalidBinding("destination IP"))?,
+                )
+            };
+            (Some(message.hostname.clone()), destination_ip)
         } else {
             let destination_ip = parse_ip_bytes(&message.destination_ip)
                 .ok_or(TcpProxyError::InvalidBinding("destination IP"))?;
@@ -150,8 +158,8 @@ impl AuthorizedTcpFlow {
         self.hostname.as_deref()
     }
 
-    /// Return the exact policy-approved destination IP, when this is a raw-IP flow.
-    /// Callers must not persist or log this value.
+    /// Return the exact destination IP, when this is a raw-IP flow or a hostname flow pinned by
+    /// transparent-ingress evidence. Callers must not persist or log this value.
     #[must_use]
     pub const fn destination_ip(&self) -> Option<IpAddr> {
         self.destination_ip

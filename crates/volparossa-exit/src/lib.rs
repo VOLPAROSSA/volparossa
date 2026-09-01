@@ -2019,23 +2019,27 @@ async fn resolve_and_connect(
     dns_timeout: Duration,
     connect_timeout: Duration,
 ) -> Result<TcpStream, ExitError> {
-    let addresses = if let Some(destination_ip) = destination_ip {
-        if !permitted_egress(destination_ip) || hostname.is_some() {
-            return Err(ExitError::ResolutionFailed);
-        }
-        vec![SocketAddr::new(destination_ip, port)]
-    } else {
-        let hostname = hostname.ok_or(ExitError::ResolutionFailed)?;
+    let addresses = if let Some(hostname) = hostname {
         let resolved = time::timeout(dns_timeout, lookup_host((hostname, port)))
             .await
             .map_err(|_| ExitError::EgressTimeout("DNS"))??;
         let mut addresses = Vec::new();
         for address in resolved.take(MAX_DNS_RESULTS) {
-            if permitted_egress(address.ip()) && !addresses.contains(&address) {
+            if permitted_egress(address.ip())
+                && destination_ip.is_none_or(|pinned| pinned == address.ip())
+                && !addresses.contains(&address)
+            {
                 addresses.push(address);
             }
         }
         addresses
+    } else if let Some(destination_ip) = destination_ip {
+        if !permitted_egress(destination_ip) {
+            return Err(ExitError::ResolutionFailed);
+        }
+        vec![SocketAddr::new(destination_ip, port)]
+    } else {
+        return Err(ExitError::ResolutionFailed);
     };
     if addresses.is_empty() {
         return Err(ExitError::ResolutionFailed);
@@ -2071,7 +2075,7 @@ where
     flow.ensure_active_at(now_ms)?;
     policy.ensure_active_at(now_ms)?;
 
-    let initial = if flow.port() == 443 && flow.destination_ip().is_none() {
+    let initial = if flow.port() == 443 && flow.hostname().is_some() {
         let hostname = flow.hostname().ok_or(ExitError::ResolutionFailed)?;
         match time::timeout(
             limits.client_hello_timeout,

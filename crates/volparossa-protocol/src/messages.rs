@@ -1142,13 +1142,15 @@ impl ControlPayload for OpenTcp {
             &self.client_ephemeral_id,
             "open_tcp.client_ephemeral_id",
         )?;
-        match (self.hostname.is_empty(), self.destination_ip.is_empty()) {
-            (false, true) => validate_canonical_hostname(&self.hostname)?,
-            (true, false) => {
-                parse_ip_bytes(&self.destination_ip)
-                    .ok_or(ProtocolError::InvalidField("open_tcp.destination_ip"))?;
-            }
-            _ => return Err(ProtocolError::InvalidField("open_tcp destination")),
+        if self.hostname.is_empty() && self.destination_ip.is_empty() {
+            return Err(ProtocolError::InvalidField("open_tcp destination"));
+        }
+        if !self.hostname.is_empty() {
+            validate_canonical_hostname(&self.hostname)?;
+        }
+        if !self.destination_ip.is_empty() {
+            parse_ip_bytes(&self.destination_ip)
+                .ok_or(ProtocolError::InvalidField("open_tcp.destination_ip"))?;
         }
         validate_port(self.port, "open_tcp.port")?;
         require_nonzero_length::<HASH_LENGTH>(&self.policy_hash, "open_tcp.policy_hash")?;

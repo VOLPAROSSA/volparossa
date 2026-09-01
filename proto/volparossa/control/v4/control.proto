@@ -818,8 +818,9 @@ message OpenTcp {
   uint64 timestamp_ms = 7;
   uint64 expires_at_ms = 8;
   bytes nonce = 9;
-  // Exactly one of hostname and destination_ip MUST be populated.
-  // Raw-IP transparent ingress uses the kernel-observed destination bytes.
+  // Hostname is required for a DNS policy flow. destination_ip may additionally pin that flow
+  // to the address observed by transparent ingress; the Exit re-resolves and requires an exact
+  // match. A raw-IP flow populates only destination_ip and never inherits domain authority.
   bytes destination_ip = 10;
 }
 

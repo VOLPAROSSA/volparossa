@@ -572,6 +572,55 @@ impl ReservationCoordinator {
         .map_err(CoordinatorError::from)
     }
 
+    /// Sign one hostname flow pinned to the exact destination address observed by transparent
+    /// ingress. The Exit must resolve the hostname itself and accept this address only when it is
+    /// present in the current bounded DNS answer set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid hostname, address, port, scope, lifetime, or canonical
+    /// signature frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_open_tcp_pinned(
+        &self,
+        route_context_id: [u8; ID_BYTES],
+        policy_hash: [u8; KEY_BYTES],
+        hostname: &str,
+        destination_ip: IpAddr,
+        port: u16,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if timestamp_ms >= expires_at_ms {
+            return Err(CoordinatorError::Scope("TCP flow lifetime"));
+        }
+        let nonce = generate_nonce();
+        let message = OpenTcp {
+            route_context_id: route_context_id.to_vec(),
+            flow_id: random_nonzero_id().to_vec(),
+            client_ephemeral_id: self.client_session_id.to_vec(),
+            hostname: hostname.to_owned(),
+            port: u32::from(port),
+            policy_hash: policy_hash.to_vec(),
+            timestamp_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+            destination_ip: match destination_ip {
+                IpAddr::V4(address) => address.octets().to_vec(),
+                IpAddr::V6(address) => address.octets().to_vec(),
+            },
+        };
+        sign_control_message(
+            &message,
+            &self.session_key,
+            timestamp_ms,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(CoordinatorError::from)
+    }
+
     /// Sign one policy-bound raw-IP TCP flow with this fresh route-attempt session.
     ///
     /// # Errors
@@ -2049,6 +2098,34 @@ mod tests {
         )
         .unwrap();
         assert!(verified.message().hostname.is_empty());
+        assert_eq!(verified.message().destination_ip, vec![93, 184, 216, 34]);
+        assert_eq!(verified.message().port, 443);
+    }
+
+    #[test]
+    fn hostname_open_tcp_can_be_pinned_to_transparent_destination_bytes() {
+        let coordinator = ReservationCoordinator::new(8).unwrap();
+        let destination = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let encoded = coordinator
+            .sign_open_tcp_pinned(
+                [1; 16],
+                [2; 32],
+                "allowed.example",
+                destination,
+                443,
+                NOW,
+                NOW + 60_000,
+            )
+            .unwrap();
+        let mut replay = ReplayCache::new(2).unwrap();
+        let verified = verify_control_message::<OpenTcp>(
+            &encoded,
+            NOW + 1,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .unwrap();
+        assert_eq!(verified.message().hostname, "allowed.example");
         assert_eq!(verified.message().destination_ip, vec![93, 184, 216, 34]);
         assert_eq!(verified.message().port, 443);
     }

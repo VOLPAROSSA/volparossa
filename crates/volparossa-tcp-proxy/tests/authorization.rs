@@ -500,6 +500,37 @@ fn signed_open_frame_binds_exact_raw_ip_to_policy() {
 }
 
 #[test]
+fn signed_open_frame_binds_allowed_hostname_to_transparent_destination_ip() {
+    let (route, client, _) = verified_route_fixture();
+    let destination_ip: IpAddr = "93.184.216.34".parse().unwrap();
+    let domain_policy = policy();
+    let nonce = [64; 32];
+    let open = OpenTcp {
+        route_context_id: route.route_context_id().to_vec(),
+        flow_id: vec![65; 16],
+        client_ephemeral_id: node_id(&client),
+        hostname: "www.example.com".to_owned(),
+        port: 443,
+        policy_hash: domain_policy.policy_hash().to_vec(),
+        timestamp_ms: NOW,
+        expires_at_ms: EXPIRY,
+        nonce: nonce.to_vec(),
+        destination_ip: match destination_ip {
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
+        },
+    };
+    let signed =
+        sign_control_message(&open, &client, NOW, EXPIRY, nonce, TimePolicy::default()).unwrap();
+    let mut replay = ReplayCache::new(2).unwrap();
+    let authorized = TcpAuthorizationScope::new(&route, &domain_policy)
+        .verify(&signed, NOW + 2, TimePolicy::default(), &mut replay)
+        .unwrap();
+    assert_eq!(authorized.hostname(), Some("www.example.com"));
+    assert_eq!(authorized.destination_ip(), Some(destination_ip));
+}
+
+#[test]
 fn route_rejects_reusing_one_relay_for_two_paths() {
     let control_relay = key(69);
     let exit = key(70);
