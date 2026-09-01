@@ -8,7 +8,7 @@
 
 mod native_preselection;
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, net::UdpSocket as StdUdpSocket, time::Duration};
 
 use crate::{
     discovery::{
@@ -22,12 +22,17 @@ use crate::{
     endpoint_leases::{
         EndpointLeaseBindingError, bind_prepared_endpoint_leases, protocol_endpoint_for_native,
     },
-    helper::RuntimeBoundPreparedLeaseBatch,
+    helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
 };
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{sync::watch, time::Instant};
+use tokio::{
+    net::UdpSocket,
+    sync::watch,
+    task::JoinSet,
+    time::{Instant, timeout},
+};
 use volparossa_core::{
     Bandwidth, IpFamily, NodeId, ObservedNetworkPrefix, OperatorId, PeerId, PolicyHash,
     ServiceRole, Transport as SelectionTransport, UnixTime,
@@ -42,9 +47,11 @@ use volparossa_protocol::{
 };
 use volparossa_reservation::RelayPathIntent;
 use volparossa_routing::{
-    ActivateLeaseBatch, ActivatedLeaseBatch, CommitLeaseBatch, CommittedLeaseBatch, ContextRole,
-    DestroyContext, LeaseActivation, LeaseCommit, LeasePlan, PrepareLeaseBatch, PublicUdpEndpoint,
-    WireguardRole,
+    AcquireTransportSocket, ActivateLeaseBatch, ActivatedLeaseBatch, CommitLeaseBatch,
+    CommittedLeaseBatch, ContextRole, DestroyContext, DestroyedContext, LeaseActivation,
+    LeaseCommit, LeasePlan, NATIVE_PROBE_CLIENT_PORT, NATIVE_PROBE_DATAGRAM_BYTES,
+    NATIVE_PROBE_EXIT_PORT, PrepareLeaseBatch, PublicUdpEndpoint, TransportSocketAddress,
+    TransportSocketKind, WireguardRole,
 };
 use volparossa_selection::{
     Candidate, CandidateEvidence, CompleteRelayPathMetrics, DiversityAnchor, FilterRequirements,
@@ -54,6 +61,7 @@ use volparossa_selection::{
     select_projected_relay_paths, select_prospective_relays_with_observed_prefixes,
     validate_relay_selection_policy,
 };
+use volparossa_wireguard::overlay_addresses;
 
 use super::{
     DiversitySnapshot, ID_BYTES, LocalRouteBackend, MAXIMUM_REPLAY_CAPACITY,
@@ -67,6 +75,7 @@ use super::{
 };
 
 const MAXIMUM_EVIDENCE_AGE_MS: u64 = 60_000;
+const NATIVE_PROBE_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Eq, PartialEq)]
 struct ActorRelayDiversity {
@@ -979,7 +988,6 @@ pub(crate) struct AwaitingClientNativeProbeResult {
 
 struct AwaitingClientNativePathResult {
     awaiting: native_preselection::AwaitingNativeResult,
-    signed_relay_result: Vec<u8>,
     path_id: u32,
     lease_handle: Vec<u8>,
     prepared_lease_commitment: [u8; 32],
@@ -989,6 +997,7 @@ struct AwaitingClientNativePathResult {
 #[must_use = "native proof-batch ownership must remain with later route admission"]
 pub(crate) struct CompletedClientNativeProbe {
     batch: ClientNativeProbeBatchOwner,
+    sampler_destroyed: bool,
 }
 
 /// Terminal sampler ownership plus the real, still-undispatched reservation continuation.
@@ -1444,11 +1453,60 @@ impl AuthorizedPreparedClientNativeProbe {
         self.prepared_owner.destroy_request()
     }
 
-    /// Correlate helper activation, then dispatch the already-authorized Start for its Result.
-    pub(crate) async fn accept_activation_and_dispatch_start(
+    /// Exchange each exact one-shot challenge through its Activated-only helper socket.
+    pub(crate) async fn exchange_challenges(
+        &self,
+        helper: &HelperClient,
+    ) -> Result<(), ClientNativeProbeError> {
+        for path in &self.paths {
+            let request = native_probe_client_socket_request(
+                self.route_context_id,
+                &self.context_handle,
+                path.path_id,
+            )?;
+            let acquired = helper
+                .acquire_transport_socket(request.clone())
+                .await
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            if acquired.metadata().path_id != request.path_id
+                || acquired.metadata().role != request.role
+                || acquired.metadata().descriptor_kind != request.descriptor_kind
+                || acquired.metadata().local != request.expected_local
+                || acquired.metadata().remote != request.expected_remote
+            {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            let (descriptor, _) = acquired.into_parts();
+            let socket = StdUdpSocket::from(descriptor);
+            socket
+                .set_nonblocking(true)
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            let socket = UdpSocket::from_std(socket)
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            let challenge = path.awaiting.challenge();
+            let sent = timeout(NATIVE_PROBE_CHALLENGE_TIMEOUT, socket.send(challenge))
+                .await
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            if sent != NATIVE_PROBE_DATAGRAM_BYTES {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            let mut echoed = [0_u8; NATIVE_PROBE_DATAGRAM_BYTES];
+            let received = timeout(NATIVE_PROBE_CHALLENGE_TIMEOUT, socket.recv(&mut echoed))
+                .await
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            if received != NATIVE_PROBE_DATAGRAM_BYTES || echoed.as_slice() != challenge {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+        }
+        Ok(())
+    }
+
+    /// Correlate the exact helper activation before any terminal Start is dispatched.
+    pub(crate) fn accept_activation(
         self,
         activated: &ActivatedLeaseBatch,
-        discovery: &DiscoveryControlHandle,
     ) -> Result<AwaitingClientNativeProbeResult, ClientNativeProbeError> {
         if activated.context_handle != self.context_handle
             || activated
@@ -1461,14 +1519,8 @@ impl AuthorizedPreparedClientNativeProbe {
         }
         let mut paths = Vec::with_capacity(self.paths.len());
         for path in self.paths {
-            let (awaiting, signed_relay_result) = path
-                .awaiting
-                .into_relay_start_dispatch()?
-                .execute(discovery)
-                .await?;
             paths.push(AwaitingClientNativePathResult {
-                awaiting,
-                signed_relay_result,
+                awaiting: path.awaiting,
                 path_id: path.path_id,
                 lease_handle: path.lease_handle,
                 prepared_lease_commitment: path.prepared_lease_commitment,
@@ -1513,16 +1565,18 @@ impl AwaitingClientNativeProbeResult {
         self.prepared_owner.destroy_request()
     }
 
-    /// Consume exact local commit facts and the already-correlated signed Relay result.
-    pub(crate) fn accept_committed(
+    /// Consume local commit facts, then dispatch every terminal Start concurrently.
+    pub(crate) async fn accept_committed_and_dispatch(
         mut self,
         committed: CommittedLeaseBatch,
+        discovery: &DiscoveryControlHandle,
     ) -> Result<CompletedClientNativeProbe, ClientNativeProbeError> {
         if committed.context_handle != self.context_handle
             || committed.leases.len() != self.paths.len()
         {
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
+        let mut dispatches = JoinSet::new();
         for (path, lease) in self.paths.into_iter().zip(committed.leases) {
             if lease.lease_handle != path.lease_handle
                 || lease.latest_handshake_unix == 0
@@ -1531,29 +1585,79 @@ impl AwaitingClientNativeProbeResult {
             {
                 return Err(ClientNativeProbeError::HelperCorrelation);
             }
-            let proof = path.awaiting.accept_result(
+            let discovery = discovery.clone();
+            dispatches.spawn(async move {
+                let dispatch = path.awaiting.into_relay_start_dispatch()?;
+                let (awaiting, signed_relay_result) = dispatch.execute(&discovery).await?;
+                Ok::<_, native_preselection::NativePreselectionError>((
+                    path.path_id,
+                    path.prepared_lease_commitment,
+                    lease,
+                    awaiting,
+                    signed_relay_result,
+                ))
+            });
+        }
+        let mut results = Vec::with_capacity(dispatches.len());
+        while let Some(joined) = dispatches.join_next().await {
+            results.push(joined.map_err(|_| {
+                ClientNativeProbeError::Native(
+                    native_preselection::NativePreselectionError::RelayTransportUnavailable,
+                )
+            })??);
+        }
+        results.sort_unstable_by_key(|(path_id, ..)| *path_id);
+        for (_path_id, prepared_lease_commitment, lease, awaiting, signed_relay_result) in results {
+            let proof = awaiting.accept_result(
                 NativeProbeLeaseProof {
                     helper_runtime_id: self.helper_runtime_id.to_vec(),
                     route_context_id: self.route_context_id.to_vec(),
-                    prepared_lease_commitment: path.prepared_lease_commitment.to_vec(),
+                    prepared_lease_commitment: prepared_lease_commitment.to_vec(),
                     latest_handshake_unix: lease.latest_handshake_unix,
                     received_bytes_after_baseline: lease.received_bytes,
                     transmitted_bytes_after_baseline: lease.transmitted_bytes,
                 },
-                &path.signed_relay_result,
+                &signed_relay_result,
                 &mut self.batch.replay,
             )?;
             self.batch.proofs.push(proof);
         }
         self.batch.committed_owner = Some(self.prepared_owner);
-        Ok(CompletedClientNativeProbe { batch: self.batch })
+        Ok(CompletedClientNativeProbe {
+            batch: self.batch,
+            sampler_destroyed: false,
+        })
     }
 }
 
 impl CompletedClientNativeProbe {
+    /// Borrow the exact committed sampler owner for terminal confirmed destruction.
+    pub(crate) fn runtime_owner(
+        &self,
+    ) -> Result<&RuntimeBoundPreparedLeaseBatch, ClientNativeProbeError> {
+        self.batch
+            .committed_owner
+            .as_ref()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)
+    }
+
+    /// Consume a correlated helper Destroy acknowledgement before route admission can continue.
+    pub(crate) fn accept_destroyed(
+        mut self,
+        _destroyed: DestroyedContext,
+    ) -> Result<Self, ClientNativeProbeError> {
+        self.batch
+            .committed_owner
+            .take()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        self.sampler_destroyed = true;
+        Ok(self)
+    }
+
     /// Number of exact per-path Result proofs retained with the shared committed helper context.
     pub(crate) fn completed_path_count(&self) -> usize {
-        debug_assert!(self.batch.committed_owner.is_some());
+        debug_assert!(self.batch.committed_owner.is_none());
+        debug_assert!(self.sampler_destroyed);
         self.batch.proofs.len()
     }
 
@@ -1648,6 +1752,32 @@ impl CompletedClientNativeProbe {
             remote_retirement: RemoteNativeSamplerRetirement::AwaitingProtocolAcknowledgement,
         })
     }
+}
+
+fn native_probe_client_socket_request(
+    route_context_id: [u8; 16],
+    context_handle: &[u8],
+    path_id: u32,
+) -> Result<AcquireTransportSocket, ClientNativeProbeError> {
+    let path_number =
+        u8::try_from(path_id).map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+    let addresses = overlay_addresses(route_context_id, path_number)
+        .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+    Ok(AcquireTransportSocket {
+        route_context_id: route_context_id.to_vec(),
+        context_handle: context_handle.to_vec(),
+        path_id,
+        role: WireguardRole::Client as i32,
+        descriptor_kind: TransportSocketKind::NativeProbeUdpConnected as i32,
+        expected_local: Some(TransportSocketAddress {
+            address: addresses.client.octets().to_vec(),
+            port: u32::from(NATIVE_PROBE_CLIENT_PORT),
+        }),
+        expected_remote: Some(TransportSocketAddress {
+            address: addresses.exit.octets().to_vec(),
+            port: u32::from(NATIVE_PROBE_EXIT_PORT),
+        }),
+    })
 }
 
 struct ActorFreshnessProjection {

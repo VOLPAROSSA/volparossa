@@ -962,6 +962,11 @@ impl AwaitingNativeResult {
         self.issued_start.encoded_start()
     }
 
+    /// Borrow the exact one-time challenge for the activated probe socket only.
+    pub(super) fn challenge(&self) -> &[u8; KEY_BYTES] {
+        &self._challenge
+    }
+
     /// Consume the signed start into a direct RPC to the exact readiness-signing data Relay.
     pub(super) fn into_relay_start_dispatch(
         self,

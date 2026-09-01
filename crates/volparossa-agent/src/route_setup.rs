@@ -451,9 +451,13 @@ async fn complete_client_native_probe(
             .await;
         return Err(ClientRouteConnectError::NativeHelperActivateUnavailable);
     };
-    let Ok(mut awaiting) =
-        Box::pin(authorized.accept_activation_and_dispatch_start(&activated, discovery)).await
-    else {
+    if authorized.exchange_challenges(helper).await.is_err() {
+        let _ = helper
+            .destroy_context(&*authorized.runtime_owner_mut())
+            .await;
+        return Err(ClientRouteConnectError::NativeStartUnavailable);
+    }
+    let Ok(mut awaiting) = authorized.accept_activation(&activated) else {
         let _ = helper.cleanup_owned().await;
         return Err(ClientRouteConnectError::NativeStartUnavailable);
     };
@@ -465,11 +469,21 @@ async fn complete_client_native_probe(
         let _ = helper.destroy_context(&*awaiting.runtime_owner_mut()).await;
         return Err(ClientRouteConnectError::NativeHelperCommitUnavailable);
     };
-    let Ok(completed) = awaiting.accept_committed(committed) else {
+    let Ok(completed) =
+        Box::pin(awaiting.accept_committed_and_dispatch(committed, discovery)).await
+    else {
         let _ = helper.cleanup_owned().await;
         return Err(ClientRouteConnectError::NativeProofUnavailable);
     };
-    Ok(completed)
+    let owner = completed
+        .runtime_owner()
+        .map_err(|_| ClientRouteConnectError::NativeProofUnavailable)?;
+    let Ok(destroyed) = helper.destroy_context(owner).await else {
+        return Err(ClientRouteConnectError::NativeHelperCommitUnavailable);
+    };
+    completed
+        .accept_destroyed(destroyed)
+        .map_err(|_| ClientRouteConnectError::NativeProofUnavailable)
 }
 
 async fn begin_client_route(
