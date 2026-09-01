@@ -221,6 +221,50 @@ write_active_stat_fixture() {
         printf ' 777\n'
     } >"$active_stat_fixture"
 }
+
+pre_boundary_starttime_contract=$tmp/pre-boundary-starttime-function
+sed -n '/^pre_boundary_process_starttime_from_stat() {$/,/^}$/p' \
+    "$gate" >"$pre_boundary_starttime_contract"
+pre_boundary_starttime_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fc 'value[1] !~ /^(R|S|D|t)$/' "$1")" -eq 1 ] \
+        && [ "$(grep -Fc '|T)' "$1")" -eq 0 ] \
+        && [ "$(grep -Fc 'starttime = value[20]' "$1")" -eq 1 ]
+}
+pre_boundary_starttime_source_is_exact \
+    "$pre_boundary_starttime_contract" || exit 1
+sh -n "$pre_boundary_starttime_contract"
+# shellcheck disable=SC1090
+. "$pre_boundary_starttime_contract"
+for pre_boundary_starttime_state in R S D t; do
+    pre_boundary_starttime_fixture=$tmp/pre-boundary-starttime.$pre_boundary_starttime_state
+    write_active_stat_fixture \
+        "$pre_boundary_starttime_fixture" "$pre_boundary_starttime_state"
+    [ "$(pre_boundary_process_starttime_from_stat \
+        "$(cat "$pre_boundary_starttime_fixture")" 202)" = 777 ]
+done
+for pre_boundary_starttime_state in T X; do
+    pre_boundary_starttime_mutant=$tmp/pre-boundary-starttime.$pre_boundary_starttime_state
+    write_active_stat_fixture \
+        "$pre_boundary_starttime_mutant" "$pre_boundary_starttime_state"
+    if pre_boundary_process_starttime_from_stat \
+        "$(cat "$pre_boundary_starttime_mutant")" 202 >/dev/null 2>&1; then
+        printf 'pre-boundary custody accepted unsafe state: %s\n' \
+            "$pre_boundary_starttime_state" >&2
+        exit 1
+    fi
+done
+pre_boundary_starttime_state_mutant=$tmp/pre-boundary-starttime-state-mutant
+sed 's/|t)\$/|t|T)$/' \
+    "$pre_boundary_starttime_contract" \
+    >"$pre_boundary_starttime_state_mutant"
+sh -n "$pre_boundary_starttime_state_mutant"
+if pre_boundary_starttime_source_is_exact \
+    "$pre_boundary_starttime_state_mutant"; then
+    printf '%s\n' 'pre-boundary starttime source accepted state mutant' >&2
+    exit 1
+fi
+
 active_starttime_exact=$tmp/active-starttime.t
 write_active_stat_fixture "$active_starttime_exact" t
 [ "$(tracing_stop_process_starttime_from_stat \

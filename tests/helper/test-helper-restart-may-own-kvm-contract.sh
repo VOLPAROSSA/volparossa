@@ -1485,8 +1485,10 @@ may_own_first_active_wait_is_exact() {
     [ "$(grep -Fc 'unit_current_invocation_id' \
         "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc \
-        'capture_tracing_stop_process_starttime "$may_own_pid_one"' \
+        'capture_pre_boundary_process_starttime "$may_own_pid_one"' \
         "$may_own_first_active_source")" -eq 1 ] || return 1
+    [ "$(grep -Fc 'capture_tracing_stop_process_starttime' \
+        "$may_own_first_active_source")" -eq 0 ] || return 1
     [ "$(grep -Fc '"$may_own_wait" -ge 600' \
         "$may_own_first_active_source")" -eq 1 ] || return 1
     [ "$(grep -Fc \
@@ -1545,7 +1547,7 @@ may_own_first_active_worker_mutant=$tmp/may-own-first-active-worker-mutant.sh
 sed "s/sed -n '8p'/sed -n '10p'/" \
     "$may_own_first_active_wait" >"$may_own_first_active_worker_mutant"
 may_own_first_active_main_state_mutant=$tmp/may-own-first-active-main-state-mutant.sh
-sed 's/capture_tracing_stop_process_starttime/capture_process_starttime/' \
+sed 's/capture_pre_boundary_process_starttime/capture_process_starttime/' \
     "$may_own_first_active_wait" >"$may_own_first_active_main_state_mutant"
 may_own_first_active_observer_identity_mutant=$tmp/may-own-first-active-observer-identity-mutant.sh
 sed 's/"$may_own_driver_observer_starttime"/"$may_own_debugger_starttime"/' \
