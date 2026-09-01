@@ -185,7 +185,9 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
                 control_response::Payload::Status(status),
             )
         }
-        control_request::Operation::Connect(_) => connect_response(request_id, context).await,
+        control_request::Operation::Connect(_) => {
+            Box::pin(connect_response(request_id, context)).await
+        }
         control_request::Operation::Disconnect(_) => disconnect_response(request_id, context).await,
         control_request::Operation::Peers(_) => {
             let peers = context.state.read().await.peer_list();
@@ -265,15 +267,17 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             );
         }
     }
-    let (result, diagnostic, log_code) = match context
-        .routes
-        .connect(&context.config, &context.discovery)
-        .await
+    let (result, diagnostic, log_code) = match Box::pin(context.routes.connect(
+        &context.config,
+        &context.discovery,
+        &context.helper,
+    ))
+    .await
     {
-        Ok(ClientRouteProgress::AwaitingHelperPrepare) => (
+        Ok(ClientRouteProgress::NativeProbeComplete) => (
             ControlResult::Unavailable,
-            "NATIVE_HELPER_PREPARE_UNAVAILABLE",
-            "CONNECT_NATIVE_RELAY_READY",
+            "NATIVE_ROUTE_ADMISSION_UNAVAILABLE",
+            "CONNECT_NATIVE_PROBE_COMPLETE",
         ),
         Err(ClientRouteConnectError::Busy) => (
             ControlResult::InvalidState,
@@ -299,6 +303,36 @@ async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> Cont
             ControlResult::Unavailable,
             "NATIVE_RELAY_READY_UNAVAILABLE",
             "CONNECT_NATIVE_RELAY_READY_UNAVAILABLE",
+        ),
+        Err(ClientRouteConnectError::NativeHelperPrepareUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_HELPER_PREPARE_UNAVAILABLE",
+            "CONNECT_NATIVE_HELPER_PREPARE_UNAVAILABLE",
+        ),
+        Err(ClientRouteConnectError::NativeAuthorizationUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_PROBE_AUTHORIZE_UNAVAILABLE",
+            "CONNECT_NATIVE_PROBE_AUTHORIZE_UNAVAILABLE",
+        ),
+        Err(ClientRouteConnectError::NativeHelperActivateUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_HELPER_ACTIVATE_UNAVAILABLE",
+            "CONNECT_NATIVE_HELPER_ACTIVATE_UNAVAILABLE",
+        ),
+        Err(ClientRouteConnectError::NativeStartUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_PROBE_START_UNAVAILABLE",
+            "CONNECT_NATIVE_PROBE_START_UNAVAILABLE",
+        ),
+        Err(ClientRouteConnectError::NativeHelperCommitUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_HELPER_COMMIT_UNAVAILABLE",
+            "CONNECT_NATIVE_HELPER_COMMIT_UNAVAILABLE",
+        ),
+        Err(ClientRouteConnectError::NativeProofUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_PROBE_PROOF_UNAVAILABLE",
+            "CONNECT_NATIVE_PROBE_PROOF_UNAVAILABLE",
         ),
     };
     context

@@ -3,8 +3,8 @@
 //! Stored advertisements may nominate identities for selection, but they never authorize an RPC.
 //! Every control relay, forwarded exit, and prospective datapath relay is resolved again through
 //! the discovery actor immediately before setup. The local Connect boundary now owns one affine
-//! A1/native-preselection attempt through exact data-Relay readiness; production still stops
-//! before helper preparation.
+//! A1/native-preselection attempt through a helper-backed native path proof. The resulting affine
+//! proof owner remains local until the later full-route admission stage consumes it.
 
 #![allow(
     dead_code,
@@ -102,13 +102,13 @@ enum ClientRouteControlState {
     #[default]
     Idle,
     Connecting,
-    AwaitingHelperPrepare(Box<selection_bridge::ClientNativeRelayReady>),
+    NativeProbeComplete(Box<selection_bridge::CompletedClientNativeProbe>),
 }
 
-/// Detail-free current production boundary reached by a successful bootstrap.
+/// Detail-free current production boundary reached by a successful native-path bootstrap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClientRouteProgress {
-    AwaitingHelperPrepare,
+    NativeProbeComplete,
 }
 
 /// Stable local classification for a failed client-route bootstrap.
@@ -119,6 +119,12 @@ pub(crate) enum ClientRouteConnectError {
     PreselectionUnavailable,
     NativePermitUnavailable,
     NativeRelayUnavailable,
+    NativeHelperPrepareUnavailable,
+    NativeAuthorizationUnavailable,
+    NativeHelperActivateUnavailable,
+    NativeStartUnavailable,
+    NativeHelperCommitUnavailable,
+    NativeProofUnavailable,
 }
 
 impl ClientRouteControl {
@@ -127,6 +133,7 @@ impl ClientRouteControl {
         &self,
         config: &Config,
         discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         {
             let mut state = self.state.lock().await;
@@ -137,11 +144,15 @@ impl ClientRouteControl {
         }
 
         let result = begin_client_route(config, discovery).await;
+        let result = match result {
+            Ok(ready) => Box::pin(complete_client_native_probe(ready, discovery, helper)).await,
+            Err(error) => Err(error),
+        };
         let mut state = self.state.lock().await;
         match result {
-            Ok(attempt) => {
-                *state = ClientRouteControlState::AwaitingHelperPrepare(Box::new(attempt));
-                Ok(ClientRouteProgress::AwaitingHelperPrepare)
+            Ok(completed) => {
+                *state = ClientRouteControlState::NativeProbeComplete(Box::new(completed));
+                Ok(ClientRouteProgress::NativeProbeComplete)
             }
             Err(error) => {
                 *state = ClientRouteControlState::Idle;
@@ -154,6 +165,62 @@ impl ClientRouteControl {
     pub(crate) async fn disconnect(&self) {
         *self.state.lock().await = ClientRouteControlState::Idle;
     }
+}
+
+/// Drive the first selected path through the exact helper runtime and both signed native RPCs.
+///
+/// A helper-side context is destroyed immediately when the affine runtime owner is still
+/// available. Failures at consuming protocol joins fall back to the existing agent-scoped cleanup
+/// token because those joins intentionally reveal no reusable helper capability on failure.
+async fn complete_client_native_probe(
+    ready: selection_bridge::ClientNativeRelayReady,
+    discovery: &DiscoveryControlHandle,
+    helper: &HelperClient,
+) -> Result<selection_bridge::CompletedClientNativeProbe, ClientRouteConnectError> {
+    let prepare = ready
+        .prepare_request()
+        .map_err(|_| ClientRouteConnectError::NativeHelperPrepareUnavailable)?;
+    let Ok(prepared) = helper.prepare_lease_batch(prepare.clone()).await else {
+        let _ = helper.cleanup_owned().await;
+        return Err(ClientRouteConnectError::NativeHelperPrepareUnavailable);
+    };
+    let Ok(prepared) = ready.bind_prepared_endpoint(&prepare, prepared) else {
+        let _ = helper.cleanup_owned().await;
+        return Err(ClientRouteConnectError::NativeHelperPrepareUnavailable);
+    };
+    let Ok(mut authorized) = prepared.request_activation_authority(discovery).await else {
+        let _ = helper.cleanup_owned().await;
+        return Err(ClientRouteConnectError::NativeAuthorizationUnavailable);
+    };
+    let activation = authorized.activation_request().clone();
+    let Ok(activated) = helper
+        .activate_lease_batch(authorized.runtime_owner_mut(), activation)
+        .await
+    else {
+        let _ = helper
+            .destroy_context(&*authorized.runtime_owner_mut())
+            .await;
+        return Err(ClientRouteConnectError::NativeHelperActivateUnavailable);
+    };
+    let Ok(mut awaiting) =
+        Box::pin(authorized.accept_activation_and_dispatch_start(&activated, discovery)).await
+    else {
+        let _ = helper.cleanup_owned().await;
+        return Err(ClientRouteConnectError::NativeStartUnavailable);
+    };
+    let commit = awaiting.commit_request();
+    let Ok(committed) = helper
+        .commit_lease_batch(awaiting.runtime_owner_mut(), commit)
+        .await
+    else {
+        let _ = helper.destroy_context(&*awaiting.runtime_owner_mut()).await;
+        return Err(ClientRouteConnectError::NativeHelperCommitUnavailable);
+    };
+    let Ok(completed) = awaiting.accept_committed(committed) else {
+        let _ = helper.cleanup_owned().await;
+        return Err(ClientRouteConnectError::NativeProofUnavailable);
+    };
+    Ok(completed)
 }
 
 async fn begin_client_route(
