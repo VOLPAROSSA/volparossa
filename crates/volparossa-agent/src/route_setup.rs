@@ -221,6 +221,24 @@ impl EstablishedClientRoute {
         }
     }
 
+    const fn matches_transport(&self, transport: Transport, native_single_udp: bool) -> bool {
+        matches!(
+            (&self.transport, transport, native_single_udp),
+            (ClientTransportState::TcpMptcp(_), Transport::TcpMptcp, _)
+                | (
+                    ClientTransportState::UdpReady(_) | ClientTransportState::UdpActive(_),
+                    Transport::UdpSinglePath,
+                    false
+                )
+                | (
+                    ClientTransportState::NativeUdp(_),
+                    Transport::UdpSinglePath,
+                    true
+                )
+                | (ClientTransportState::Mpquic(_), Transport::MultipathQuic, _)
+        )
+    }
+
     async fn shutdown(self) {
         if let Some(flow) = self.tcp_flow {
             flow.shutdown();
@@ -697,7 +715,7 @@ impl ClientRouteControl {
         let mut tcp_profile = config.clone();
         tcp_profile.udp.enabled = false;
         tcp_profile.quic.enabled = false;
-        Box::pin(self.connect(&tcp_profile, discovery, helper)).await
+        Box::pin(self.connect_with_udp_mode(&tcp_profile, discovery, helper, false)).await
     }
 
     /// Ensure UDP/443 uses one genuine multipath-only route, never general UDP fallback.
@@ -731,7 +749,7 @@ impl ClientRouteControl {
         let mut profile = config.clone();
         profile.tcp.enabled = false;
         profile.udp.enabled = false;
-        Box::pin(self.connect(&profile, discovery, helper)).await
+        Box::pin(self.connect_with_udp_mode(&profile, discovery, helper, false)).await
     }
 
     /// Ensure one relay-only single-path QUIC route is ready for UDP or protected DNS.
@@ -761,7 +779,7 @@ impl ClientRouteControl {
         let mut profile = config.clone();
         profile.tcp.enabled = false;
         profile.quic.enabled = false;
-        Box::pin(self.connect(&profile, discovery, helper)).await
+        Box::pin(self.connect_with_udp_mode(&profile, discovery, helper, false)).await
     }
 
     /// Ensure general UDP uses native single-path MASQUE CONNECT-IP through one Relay.
@@ -773,20 +791,6 @@ impl ClientRouteControl {
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         if !config.udp.enabled {
             return Err(ClientRouteConnectError::InvalidProfile);
-        }
-        {
-            let state = self.state.lock().await;
-            match &*state {
-                ClientRouteControlState::Established(established)
-                    if matches!(established.transport, ClientTransportState::NativeUdp(_)) =>
-                {
-                    return Ok(ClientRouteProgress::TransportActive);
-                }
-                ClientRouteControlState::Idle => {}
-                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
-                    return Err(ClientRouteConnectError::Busy);
-                }
-            }
         }
         let mut profile = config.clone();
         profile.tcp.enabled = false;
@@ -801,7 +805,7 @@ impl ClientRouteControl {
         discovery: &DiscoveryControlHandle,
         helper: &HelperClient,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
-        Box::pin(self.connect_with_udp_mode(config, discovery, helper, false)).await
+        Box::pin(self.connect_with_udp_mode(config, discovery, helper, config.udp.enabled)).await
     }
 
     async fn connect_with_udp_mode(
@@ -811,12 +815,27 @@ impl ClientRouteControl {
         helper: &HelperClient,
         native_single_udp: bool,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
-        {
+        let (requested_transport, _) = client_native_path_requirement(config)?;
+        let previous = {
             let mut state = self.state.lock().await;
-            if !matches!(*state, ClientRouteControlState::Idle) {
-                return Err(ClientRouteConnectError::Busy);
+            match std::mem::replace(&mut *state, ClientRouteControlState::Connecting) {
+                ClientRouteControlState::Idle => None,
+                ClientRouteControlState::Established(established)
+                    if established.matches_transport(requested_transport, native_single_udp) =>
+                {
+                    let progress = established.progress();
+                    *state = ClientRouteControlState::Established(established);
+                    return Ok(progress);
+                }
+                ClientRouteControlState::Established(previous) => Some(previous),
+                ClientRouteControlState::Connecting => {
+                    return Err(ClientRouteConnectError::Busy);
+                }
             }
-            *state = ClientRouteControlState::Connecting;
+        };
+        if let Some(previous) = previous {
+            Box::pin(previous.shutdown()).await;
+            self.clear_agent_mpquic_paths().await;
         }
 
         let result = begin_client_route(config, discovery).await;
