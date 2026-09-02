@@ -155,27 +155,29 @@ impl ClientMptcpTransport {
         let request = client_acquire_request(&signal, context_handle.clone(), local_port)?;
         let acquired = helper.acquire_transport_socket(request).await?;
         let mut transport = Self::activate(
-            helper,
             acquired,
             signal.route_context_id.to_vec(),
             context_handle,
             selected_paths,
-        )
-        .await?;
+        )?;
         transport.certificate_der = Some(certificate_der);
         transport.signal = Some(signal);
         Ok(transport)
     }
 
-    /// Adopts a committed helper descriptor and registers every additional selected path.
+    /// Adopts a committed helper descriptor and retains the exact selected path requirement.
+    ///
+    /// The Exit signals every additional address before the Client connects. Linux then derives
+    /// the matching Client source from the exact per-path route and records it as an implicit local
+    /// endpoint. Registering that same source again returns `EINVAL`; readiness below still requires
+    /// every selected subflow to be genuinely active before application payload is accepted.
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid capability metadata, fewer than two paths, a helper endpoint
-    /// refusal, or a descriptor that is not a genuinely negotiated MPTCP stream. Exact selected
-    /// subflow readiness is checked after TLS and `OPEN_TCP` have primed each application flow.
-    pub async fn activate(
-        helper: &HelperClient,
+    /// Returns an error for invalid capability metadata, fewer than two paths, or a descriptor that
+    /// is not a genuinely negotiated MPTCP stream. Exact selected subflow readiness is checked after
+    /// TLS and `OPEN_TCP` have primed each application flow.
+    pub fn activate(
         acquired: AcquiredTransportSocket,
         route_context_id: Vec<u8>,
         context_handle: Vec<u8>,
@@ -184,28 +186,13 @@ impl ClientMptcpTransport {
         let paths = selected_path_ids(selected_paths)?;
         let required_subflows = paths.len();
         let stream = adopt_client_stream(acquired)?;
-        let mut active_paths = Vec::with_capacity(paths.len().saturating_sub(1));
-        for path_id in additional_path_ids(&paths) {
-            let request = AddMptcpEndpoint {
-                route_context_id: route_context_id.clone(),
-                context_handle: context_handle.clone(),
-                path_id,
-                mode: MptcpEndpointMode::Subflow as i32,
-                backup: false,
-            };
-            if let Err(error) = helper.add_mptcp_endpoint(request).await {
-                rollback_paths(helper, &route_context_id, &context_handle, &active_paths).await;
-                return Err(MptcpTransportError::Helper(error));
-            }
-            active_paths.push(path_id);
-        }
         Ok(Self {
             initial_stream: Some(stream),
             signal: None,
             route_context_id,
             context_handle,
             required_subflows,
-            active_paths,
+            active_paths: Vec::new(),
             certificate_der: None,
         })
     }
@@ -250,7 +237,8 @@ impl ClientMptcpTransport {
         })
     }
 
-    /// Removes all selected endpoints before releasing the adopted stream.
+    /// Releases every explicitly owned endpoint before the adopted stream and route are dropped.
+    /// Client-side additional sources are kernel-implicit, so this set is normally empty.
     ///
     /// # Errors
     ///
