@@ -26,7 +26,10 @@ pub const LEGACY_EXIT_CONFIRMATION_PROTOCOL_V2: &str =
 /// Exact datapath-relay RPC schema version.
 pub const DATAPATH_RELAY_RPC_VERSION: u32 = 4;
 /// Fixed direct datapath-relay transport timeout.
-pub const DATAPATH_RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// A datapath Relay may perform one bounded five-second Exit RPC before it can answer the Client,
+/// so the outer hop must not expire at the same instant as its nested operation.
+pub const DATAPATH_RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum combined inbound and outbound datapath-relay streams.
 pub const MAX_CONCURRENT_DATAPATH_RELAY_STREAMS: usize = 64;
 /// Maximum canonical datapath-relay request or response frame size.

@@ -6118,6 +6118,7 @@ impl DiscoveryRuntime {
                 .service
                 .add_known_peer(exit_peer, &exit_control_address)
                 .is_err()
+            || self.service.dial_peerlink(&exit_peerlink).is_err()
         {
             reject!("NATIVE_PROBE_READY_EXIT_ADDRESS_REJECTED");
         }

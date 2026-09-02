@@ -328,7 +328,9 @@ impl DiscoveryBehaviour {
         kad_config.set_kbucket_inserts(kad::BucketInserts::Manual);
         kad_config.set_record_ttl(Some(Duration::from_secs(300)));
         kad_config.set_provider_record_ttl(Some(Duration::from_secs(300)));
-        kad_config.set_provider_publication_interval(Some(Duration::from_secs(180)));
+        // Retry capability publication inside the same bounded window as LAN discovery. A
+        // successful initial AddProvider exchange can still precede full routing convergence.
+        kad_config.set_provider_publication_interval(Some(Duration::from_secs(10)));
         let mut kademlia =
             kad::Behaviour::with_config(local_peer_id, MemoryStore::new(local_peer_id), kad_config);
         // Voluntary service nodes and role-less bootstrap contacts are explicit private-overlay
@@ -905,7 +907,13 @@ impl DiscoveryService {
         protocol_roles: DiscoveryProtocolRoles,
     ) -> Result<Self, DiscoveryError> {
         let local_peer_id = keypair.public().to_peer_id();
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
+        // A lost startup multicast must not leave a directly attached Relay undiscoverable for
+        // libp2p-mDNS's five-minute default interval.
+        let mdns_config = mdns::Config {
+            query_interval: Duration::from_secs(10),
+            ..mdns::Config::default()
+        };
+        let mdns = mdns::tokio::Behaviour::new(mdns_config, local_peer_id)
             .map_err(|error| DiscoveryError::Build(error.to_string()))?;
         let memory_noise = noise::Config::new(&keypair)
             .map_err(|error| DiscoveryError::Build(error.to_string()))?;
