@@ -1225,7 +1225,7 @@ impl FunctionalAlphaLeaseBackend {
         binding: BackendBinding,
         value: AddMptcpEndpoint,
     ) -> Result<(), BackendError> {
-        let (key, generation) = validate_mptcp_endpoint_binding(
+        let (key, generation, context_role) = validate_mptcp_endpoint_binding(
             &self.state,
             binding,
             &value.route_context_id,
@@ -1233,13 +1233,7 @@ impl FunctionalAlphaLeaseBackend {
             value.path_id,
             BackendAction::AddMptcpEndpoint,
         )?;
-        let mode =
-            match MptcpEndpointMode::try_from(value.mode).map_err(|_| BackendError::Invalid)? {
-                MptcpEndpointMode::Signal => InternalMptcpMode::Signal,
-                MptcpEndpointMode::Subflow => InternalMptcpMode::Subflow,
-                MptcpEndpointMode::SignalAndSubflow => InternalMptcpMode::SignalAndSubflow,
-                MptcpEndpointMode::Unspecified => return Err(BackendError::Invalid),
-            };
+        let mode = validated_mptcp_endpoint_mode(context_role, value.mode, value.backup)?;
         let deadline = prepare_deadline(binding)?;
         let request = worker_request(
             worker_attempt_request_id(key, STAGE_ADD_MPTCP_ENDPOINT, binding),
@@ -1290,7 +1284,7 @@ impl FunctionalAlphaLeaseBackend {
         binding: BackendBinding,
         value: RemoveMptcpEndpoint,
     ) -> Result<(), BackendError> {
-        let (key, generation) = validate_mptcp_endpoint_binding(
+        let (key, generation, _) = validate_mptcp_endpoint_binding(
             &self.state,
             binding,
             &value.route_context_id,
@@ -3265,7 +3259,7 @@ fn validate_mptcp_endpoint_binding(
     context_handle: &[u8],
     path_id: u32,
     action: BackendAction,
-) -> Result<(OpenLineageKey, u64), BackendError> {
+) -> Result<(OpenLineageKey, u64, ContextRole), BackendError> {
     let context_id: [u8; 16] = route_context_id
         .try_into()
         .map_err(|_| BackendError::Invalid)?;
@@ -3298,9 +3292,12 @@ fn validate_mptcp_endpoint_binding(
         .coordinates
         .worker_generation
         .get();
-    let role = WireguardRole::Client as i32;
+    let role = match entry.context_role {
+        ContextRole::Client => WireguardRole::Client as i32,
+        ContextRole::Exit => WireguardRole::Exit as i32,
+        ContextRole::Unspecified | ContextRole::Relay => return Err(BackendError::Invalid),
+    };
     let exact = entry.phase == OpenLeasePhase::Committed
-        && entry.context_role == ContextRole::Client
         && entry.wireguard.iter().any(|wireguard| {
             wireguard.resource().key() == (u8::try_from(path_id).unwrap_or(0), role)
         })
@@ -3315,7 +3312,27 @@ fn validate_mptcp_endpoint_binding(
     if !exact {
         return Err(BackendError::Invalid);
     }
-    Ok((key, generation))
+    Ok((key, generation, entry.context_role))
+}
+
+fn validated_mptcp_endpoint_mode(
+    context_role: ContextRole,
+    mode: i32,
+    backup: bool,
+) -> Result<InternalMptcpMode, BackendError> {
+    let mode = MptcpEndpointMode::try_from(mode).map_err(|_| BackendError::Invalid)?;
+    if mode == MptcpEndpointMode::Unspecified
+        || matches!(context_role, ContextRole::Unspecified | ContextRole::Relay)
+        || (context_role == ContextRole::Exit && (mode != MptcpEndpointMode::Signal || backup))
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(match mode {
+        MptcpEndpointMode::Signal => InternalMptcpMode::Signal,
+        MptcpEndpointMode::Subflow => InternalMptcpMode::Subflow,
+        MptcpEndpointMode::SignalAndSubflow => InternalMptcpMode::SignalAndSubflow,
+        MptcpEndpointMode::Unspecified => return Err(BackendError::Invalid),
+    })
 }
 
 #[cfg(test)]
@@ -5750,6 +5767,19 @@ mod tests {
         binding
     }
 
+    fn mptcp_endpoint_binding(key: OpenLineageKey, action: BackendAction) -> BackendBinding {
+        let mut binding = binding(
+            key,
+            OperationKind::MptcpEndpoint,
+            BackendPhase::Committed,
+            action,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        );
+        binding.prior_phase = Some(ContextPhase::Committed);
+        binding.operation_generation = key.backend_generation.saturating_add(2);
+        binding
+    }
+
     fn acquire_value(
         key: OpenLineageKey,
         role: WireguardRole,
@@ -6349,6 +6379,78 @@ mod tests {
         assert_ne!(first_overlay, second_overlay);
         drop(peer);
         retire_transport_fixture(&backend, key).await;
+    }
+
+    #[tokio::test]
+    async fn committed_exit_mptcp_signal_binding_is_exact_and_role_closed() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let exit_key = live_key([0x84; 16], now);
+        let (exit, exit_peer, _alive, _) =
+            committed_transport_backend(exit_key, WireguardRole::Exit);
+        let binding = mptcp_endpoint_binding(exit_key, BackendAction::AddMptcpEndpoint);
+        assert_eq!(
+            validate_mptcp_endpoint_binding(
+                &exit.state,
+                binding,
+                &exit_key.context_id,
+                &[0x71; HELPER_HANDLE_BYTES],
+                1,
+                BackendAction::AddMptcpEndpoint,
+            )
+            .map(|(_, _, role)| role),
+            Ok(ContextRole::Exit)
+        );
+        assert_eq!(
+            validated_mptcp_endpoint_mode(
+                ContextRole::Exit,
+                MptcpEndpointMode::Signal as i32,
+                false,
+            ),
+            Ok(InternalMptcpMode::Signal)
+        );
+        for (mode, backup) in [
+            (MptcpEndpointMode::Signal, true),
+            (MptcpEndpointMode::Subflow, false),
+            (MptcpEndpointMode::SignalAndSubflow, false),
+        ] {
+            assert_eq!(
+                validated_mptcp_endpoint_mode(ContextRole::Exit, mode as i32, backup),
+                Err(BackendError::Invalid)
+            );
+        }
+        assert_eq!(
+            validate_mptcp_endpoint_binding(
+                &exit.state,
+                binding,
+                &exit_key.context_id,
+                &[0x71; HELPER_HANDLE_BYTES],
+                2,
+                BackendAction::AddMptcpEndpoint,
+            ),
+            Err(BackendError::Invalid)
+        );
+        drop(exit_peer);
+        retire_transport_fixture(&exit, exit_key).await;
+
+        let relay_key = live_key([0x85; 16], now);
+        let (relay, relay_peer, _alive, _) =
+            committed_transport_backend(relay_key, WireguardRole::RelayClient);
+        assert_eq!(
+            validate_mptcp_endpoint_binding(
+                &relay.state,
+                mptcp_endpoint_binding(relay_key, BackendAction::AddMptcpEndpoint),
+                &relay_key.context_id,
+                &[0x71; HELPER_HANDLE_BYTES],
+                1,
+                BackendAction::AddMptcpEndpoint,
+            ),
+            Err(BackendError::Invalid)
+        );
+        drop(relay_peer);
+        retire_transport_fixture(&relay, relay_key).await;
     }
 
     #[tokio::test]
