@@ -6096,6 +6096,9 @@ impl DiscoveryRuntime {
         let Some(authorized_control) = self.local_relay_snapshot.clone() else {
             reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
         };
+        let Some(signed_relay_advertisement) = self.served_local_advertisement.clone() else {
+            reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
+        };
         if !self.permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
             || !native_probe_data_relay_capability_matches(
                 &authorized_control,
@@ -6172,6 +6175,7 @@ impl DiscoveryRuntime {
             request.client_signed_request().to_vec(),
             request.exit_signed_authorization().to_vec(),
             relay_exit_endpoint,
+            signed_relay_advertisement,
         ) else {
             let _ = self.helper.destroy_context(&helper_owner).await;
             reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
@@ -10552,7 +10556,6 @@ impl DiscoveryRuntime {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         };
         let local_peer = *self.service.local_peer_id();
-        let current_data_relay = self.direct_relays.get(&authenticated_data_relay);
         if request.validated_operation() != Ok(ExitForwardOperation::NativeProbeReady)
             || request.forward_id() != scope.probe_id
             || request.deadline_unix_ms() != scope.attempt_expires_at_ms
@@ -10561,15 +10564,6 @@ impl DiscoveryRuntime {
             || request.exit_peer_id() != local_peer.to_bytes()
             || data_relay.node_id.as_slice() != data_relay_node_id
             || data_relay.public_key.as_slice() != data_relay_public_key
-            || current_data_relay.is_none_or(|current| {
-                !native_probe_data_relay_capability_matches(
-                    current,
-                    data_relay,
-                    &scope,
-                    authenticated_data_relay,
-                    request.deadline_unix_ms(),
-                )
-            })
             || !self
                 .served_local_advertisement
                 .as_ref()
@@ -10586,6 +10580,60 @@ impl DiscoveryRuntime {
                 })
         {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        }
+        let current_data_relay_matches = self
+            .direct_relays
+            .get(&authenticated_data_relay)
+            .is_some_and(|current| {
+                native_probe_data_relay_capability_matches(
+                    current,
+                    data_relay,
+                    &scope,
+                    authenticated_data_relay,
+                    request.deadline_unix_ms(),
+                )
+            });
+        if !current_data_relay_matches {
+            if has_active_privacy_conflict(
+                &self.privacy_conflicts,
+                self.forwarded_exit_fail_closed_until_ms,
+                authenticated_data_relay,
+                now_ms,
+            ) {
+                reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+            }
+            let Some(capability) = native_probe_data_relay_capability_from_advertisement(
+                forward.signed_relay_advertisement(),
+                data_relay,
+                &scope,
+                authenticated_data_relay,
+                now_ms,
+            ) else {
+                reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+            };
+            if !native_probe_data_relay_capability_matches(
+                &capability,
+                data_relay,
+                &scope,
+                authenticated_data_relay,
+                request.deadline_unix_ms(),
+            ) {
+                reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+            }
+            if self
+                .direct_relays
+                .get(&authenticated_data_relay)
+                .is_some_and(|current| {
+                    current.node_id != capability.node_id
+                        || current.public_key != capability.public_key
+                        || current.peer_id != capability.peer_id
+                        || current.advertisement_sequence >= capability.advertisement_sequence
+                })
+            {
+                reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+            }
+            self.direct_relays
+                .insert(authenticated_data_relay, capability);
         }
         let Some(prepare) = native_service_prepare_request(
             &scope,
@@ -13392,6 +13440,87 @@ fn native_probe_data_relay_capability_matches(
         && capability.policy_hash.as_slice() == scope.policy_hash
         && capability.policy_expires_at_ms == scope.policy_expires_at_ms
         && capability.expires_at_ms >= required_until_ms
+}
+
+/// Reconstruct the exact data-Relay capability carried by a native Ready request.
+///
+/// The request's authenticated libp2p connection remains the authority for peer identity. The
+/// carried advertisement is accepted only as a self-contained cryptographic proof of the exact
+/// actor already committed by the signed native scope; it deliberately does not enter the normal
+/// advertisement replay, persistence, candidate, or provider-record paths.
+fn native_probe_data_relay_capability_from_advertisement(
+    encoded_advertisement: &[u8],
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    now_ms: u64,
+) -> Option<DirectRelayCapability> {
+    if !advertisement_envelope_matches_peer(encoded_advertisement, &authenticated_peer) {
+        return None;
+    }
+    let envelope = decode_canonical::<SignedEnvelope>(
+        encoded_advertisement,
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .ok()?;
+    let payload_hash = fixed_bytes::<32>(&envelope.payload_hash)?;
+    let fingerprint = advertisement_fingerprint(encoded_advertisement)?;
+    let mut replay = ReplayCache::new(1).ok()?;
+    let verified = verify_control_message::<WireAdvertisement>(
+        encoded_advertisement,
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .ok()?;
+    let advertisement = verified.message();
+    let roles = advertisement.roles.as_ref()?;
+    let capabilities = advertisement.capabilities.as_ref()?;
+    let policy = advertisement.policy.as_ref()?;
+    let network = advertisement.network.as_ref()?;
+    let policy_hash = fixed_bytes::<32>(&policy.whitelist_hash)?;
+    let node_id = *verified.sender_id();
+    let public_key = *verified.sender_public_key();
+    let advertisement_expires_at_ms = verified.expires_at_ms();
+    let maximum_capability_expiry = advertisement_expires_at_ms.min(scope.policy_expires_at_ms);
+
+    if scope.data_relay.as_ref() != Some(actor)
+        || !roles.relay
+        || network.asn == 0
+        || !native_probe_capabilities_support_scope(capabilities, scope)
+        || node_id_from_public_key(&public_key) != node_id
+        || advertisement.node_id.as_slice() != node_id
+        || advertisement.peer_id != authenticated_peer.to_bytes()
+        || advertisement.sequence_number == 0
+        || advertisement.sequence_number != actor.advertisement_sequence
+        || advertisement.expires_at_ms != advertisement_expires_at_ms
+        || advertisement_expires_at_ms != actor.advertisement_expires_at_ms
+        || advertisement_expires_at_ms <= now_ms
+        || policy.whitelist_version != scope.policy_version
+        || policy_hash.as_slice() != scope.policy_hash
+        || scope.policy_expires_at_ms <= now_ms
+        || actor.node_id.as_slice() != node_id
+        || actor.peer_id != authenticated_peer.to_bytes()
+        || actor.public_key.as_slice() != public_key
+        || actor.advertisement_payload_hash.as_slice() != payload_hash
+        || actor.capability_expires_at_ms > maximum_capability_expiry
+        || actor.capability_expires_at_ms <= now_ms
+    {
+        return None;
+    }
+
+    Some(DirectRelayCapability {
+        node_id,
+        peer_id: authenticated_peer,
+        public_key,
+        advertisement_sequence: advertisement.sequence_number,
+        advertisement_expires_at_ms,
+        advertisement_payload_hash: fingerprint.payload_hash,
+        policy_version: scope.policy_version,
+        policy_hash,
+        policy_expires_at_ms: scope.policy_expires_at_ms,
+        expires_at_ms: actor.capability_expires_at_ms,
+    })
 }
 
 #[allow(

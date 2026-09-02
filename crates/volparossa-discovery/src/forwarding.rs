@@ -69,8 +69,8 @@ pub enum ExitForwardOperation {
 /// Endpoint-bearing data-Relay request for the selected Exit's private readiness phase.
 ///
 /// The authenticated upstream connection supplies the data-Relay identity. These bytes add no
-/// authority: the Exit independently verifies both signed Permit phases and the endpoint binding
-/// before consuming its retained Permit owner.
+/// authority: the Exit independently verifies both signed Permit phases, the exact signed Relay
+/// advertisement and the endpoint binding before consuming its retained Permit owner.
 #[allow(missing_docs)]
 #[derive(Clone, PartialEq, Message)]
 pub struct NativeProbeReadyForwardRequest {
@@ -80,6 +80,8 @@ pub struct NativeProbeReadyForwardRequest {
     signed_permit: Vec<u8>,
     #[prost(message, optional, tag = "3")]
     relay_exit_endpoint: Option<NativeProbeEndpointBinding>,
+    #[prost(bytes = "vec", tag = "4")]
+    signed_relay_advertisement: Vec<u8>,
 }
 
 impl NativeProbeReadyForwardRequest {
@@ -92,11 +94,13 @@ impl NativeProbeReadyForwardRequest {
         signed_permit_request: Vec<u8>,
         signed_permit: Vec<u8>,
         relay_exit_endpoint: NativeProbeEndpointBinding,
+        signed_relay_advertisement: Vec<u8>,
     ) -> Result<Self, ForwardingRpcError> {
         let value = Self {
             signed_permit_request,
             signed_permit,
             relay_exit_endpoint: Some(relay_exit_endpoint),
+            signed_relay_advertisement,
         };
         value.validate()?;
         Ok(value)
@@ -113,6 +117,10 @@ impl NativeProbeReadyForwardRequest {
             ControlMessageType::NativeProbePermitRequest,
         )?;
         validate_signed_type(&self.signed_permit, ControlMessageType::NativeProbePermit)?;
+        validate_signed_type(
+            &self.signed_relay_advertisement,
+            ControlMessageType::NodeAdvertisement,
+        )?;
         let endpoint = self
             .relay_exit_endpoint
             .as_ref()
@@ -153,6 +161,12 @@ impl NativeProbeReadyForwardRequest {
     #[must_use]
     pub const fn relay_exit_endpoint(&self) -> Option<&NativeProbeEndpointBinding> {
         self.relay_exit_endpoint.as_ref()
+    }
+
+    /// Borrow the data Relay's exact signed advertisement committed by the Permit scope.
+    #[must_use]
+    pub fn signed_relay_advertisement(&self) -> &[u8] {
+        &self.signed_relay_advertisement
     }
 }
 
@@ -1366,6 +1380,7 @@ mod tests {
             envelope(ControlMessageType::NativeProbePermitRequest, Vec::new()),
             envelope(ControlMessageType::NativeProbePermit, Vec::new()),
             native_endpoint_binding(),
+            envelope(ControlMessageType::NodeAdvertisement, Vec::new()),
         )
         .expect("native ready frame");
         let request = ExitForwardRequest::new(
@@ -1392,6 +1407,16 @@ mod tests {
                 envelope(ControlMessageType::NativeProbePermitRequest, Vec::new()),
                 envelope(ControlMessageType::NativeProbePermit, Vec::new()),
                 invalid_binding,
+                envelope(ControlMessageType::NodeAdvertisement, Vec::new()),
+            ),
+            Err(ForwardingRpcError::InvalidFrame)
+        ));
+        assert!(matches!(
+            NativeProbeReadyForwardRequest::new(
+                envelope(ControlMessageType::NativeProbePermitRequest, Vec::new()),
+                envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+                native_endpoint_binding(),
+                envelope(ControlMessageType::NativeProbeExitReady, Vec::new()),
             ),
             Err(ForwardingRpcError::InvalidFrame)
         ));
