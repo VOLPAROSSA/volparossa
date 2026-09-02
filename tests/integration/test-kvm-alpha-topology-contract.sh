@@ -230,6 +230,10 @@ grep -F '47.163.4.2 whose appearance in an outer header is counted separately ab
 grep -F 'acceptance_id:"A11",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A12",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A13",success:$success' "$GUEST" >/dev/null
+grep -F 'refresh_a14_live_custody()' "$GUEST" >/dev/null
+grep -F -- '--transport mptcp >"$WORK/a14-refresh-connect.out"' "$GUEST" >/dev/null
+grep -F 'refresh_a14_live_custody || fail A14_LIVE_CUSTODY_REFRESH_FAILED' "$GUEST" \
+    >/dev/null
 grep -F 'systemctl kill --kill-whom=all --signal=KILL "$crash_unit"' "$GUEST" \
     >/dev/null
 grep -F 'active_control_path_records:$control_path_records' "$GUEST" >/dev/null

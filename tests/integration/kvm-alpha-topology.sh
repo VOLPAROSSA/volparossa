@@ -411,6 +411,8 @@ copy_artifacts() {
         a13-client-routes-before.json a13-client-routes-after.json \
         a13-exit-route-before.txt a13-exit-route-after.txt \
         a13-destination-route-before.txt a13-destination-route-after.txt \
+        a14-refresh-disconnect.out a14-refresh-disconnect.err \
+        a14-refresh-connect.out a14-refresh-connect.err \
         a14-owned-before.json a14-worker-custody-before.json \
         a14-worker-custody-after.json a14-owned-after-paths.txt a14-paths-before.txt \
         a14-crashes.json a14-evidence.json \
@@ -3204,6 +3206,39 @@ stop_privacy_observers() {
     return "$privacy_status"
 }
 
+refresh_a14_live_custody() {
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" disconnect \
+        >"$WORK/a14-refresh-disconnect.out" \
+        2>"$WORK/a14-refresh-disconnect.err" || return 1
+    wait_disconnected || return 1
+
+    a14_connect_status=1
+    a14_connect_attempt=0
+    a14_connect_attempt_error=$WORK/a14-refresh-connect-attempt.err
+    : >"$WORK/a14-refresh-connect.err"
+    # A disconnected preselection owner cools for 30 seconds. Establish a new route immediately
+    # before the crash inventory so earlier A08-A10 wall-clock time cannot retire the four affine
+    # Client/Relay/Exit worker namespaces or their eight systemd FD-store descriptors first.
+    while [ "$a14_connect_attempt" -lt 120 ]; do
+        set +e
+        "$binary_directory/volparossa" \
+            --control-socket "$WORK/runtime-client/control/agent.sock" connect \
+            --transport mptcp >"$WORK/a14-refresh-connect.out" \
+            2>"$a14_connect_attempt_error"
+        a14_connect_status=$?
+        set -e
+        sed -n 'p' "$a14_connect_attempt_error" \
+            >>"$WORK/a14-refresh-connect.err"
+        [ "$a14_connect_status" -ne 0 ] || break
+        a01_transient_connect_unavailable "$a14_connect_attempt_error" || break
+        sleep 1
+        a14_connect_attempt=$((a14_connect_attempt + 1))
+    done
+    rm -f -- "$a14_connect_attempt_error"
+    [ "$a14_connect_status" -eq 0 ]
+}
+
 record_a14_worker_custody_inventory() {
     a14_worker_rows=$WORK/a14-worker-custody-before.ndjson
     : >"$a14_worker_rows"
@@ -5064,13 +5099,15 @@ A13_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a13-complete
 
-PHASE=a14-forced-crash
+PHASE=a14-refresh-live-custody
 A14_REQUESTED=true
 A14_STATUS=1
+refresh_a14_live_custody || fail A14_LIVE_CUSTODY_REFRESH_FAILED
+PHASE=a14-forced-crash
 record_a14_owned_inventory || fail A14_OWNED_INVENTORY_UNAVAILABLE
-# A08 deliberately replaced and retired the native MPQUIC route with the active MPTCP route.
-# Therefore inventory the still-owned namespaces, sockets and ingress policy instead of requiring
-# stale MPQUIC-only local-control path records.
+# A14 deliberately replaced the earlier application route with a fresh active MPTCP route.
+# Therefore inventory its still-owned namespaces, sockets and ingress policy instead of requiring
+# stale MPQUIC-only local-control path records or relying on an earlier route's remaining TTL.
 jq -e '
   .network_namespace_count == 8 and
   .runtime_socket_count >= 16 and
