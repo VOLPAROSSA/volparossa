@@ -657,9 +657,39 @@ async fn run_client_udp_ingress(
                 );
                 continue;
             }
+            let activation_ms = unix_millis();
+            let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+                browser_gate = BrowserQuicIngressGate::new();
+                routes.disconnect().await;
+                state.write().await.record_policy_rejection();
+                continue;
+            };
+            let ingresses = match browser_gate.reauthorize_after_route_ready(
+                ingresses,
+                &active_policy,
+                activation_ms,
+            ) {
+                Ok(ingresses) => ingresses,
+                Err(ClientIngressUdpError::Policy(_)) => {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    routes.disconnect().await;
+                    state.write().await.record_policy_rejection();
+                    continue;
+                }
+                Err(_) => {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    routes.disconnect().await;
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_MPQUIC_DATAGRAM_REJECTED",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+            };
             for ingress in ingresses {
                 match routes
-                    .send_browser_quic_ingress(ingress, &policy, now_ms)
+                    .send_browser_quic_ingress(ingress, &active_policy, activation_ms)
                     .await
                 {
                     Ok(_) => {}

@@ -562,6 +562,67 @@ impl BrowserQuicIngressGate {
         }
     }
 
+    /// Re-authorize buffered Initial datagrams after asynchronous route establishment.
+    ///
+    /// Route construction may outlive the policy snapshot used while inspecting the QUIC
+    /// ClientHello. The inspector-owned hostname and exact kernel-observed tuple stay affine in
+    /// this gate; this transition checks them against the policy that is active when the route is
+    /// ready and refreshes every datagram's policy binding before any authorization is signed.
+    pub(crate) fn reauthorize_after_route_ready(
+        &mut self,
+        ingresses: Vec<PolicyAuthorizedUdpIngress>,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<Vec<PolicyAuthorizedUdpIngress>, ClientIngressUdpError> {
+        let (source, destination, hostname) = match &self.state {
+            BrowserQuicIngressState::Authorized {
+                source,
+                destination,
+                hostname,
+                ..
+            } => (*source, *destination, hostname.clone()),
+            BrowserQuicIngressState::Empty | BrowserQuicIngressState::Pending { .. } => {
+                return Err(ClientIngressUdpError::FlowBound);
+            }
+        };
+        if ingresses.is_empty()
+            || ingresses.iter().any(|ingress| {
+                !ingress.is_browser_quic()
+                    || ingress.source != source
+                    || ingress.destination != destination
+                    || ingress.hostname.as_deref() != Some(hostname.as_str())
+            })
+        {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        policy
+            .authorize_domain(
+                now_ms,
+                &hostname,
+                TransportProtocol::Udp,
+                destination.port(),
+            )
+            .map_err(ClientIngressUdpError::Policy)?;
+        let expires_at_ms = udp_flow_expiry(policy, now_ms)?;
+        let policy_hash = *policy.policy_hash();
+        let refreshed = ingresses
+            .into_iter()
+            .map(|mut ingress| {
+                ingress.policy_hash = policy_hash;
+                ingress.expires_at_ms = expires_at_ms;
+                ingress
+            })
+            .collect();
+        self.state = BrowserQuicIngressState::Authorized {
+            source,
+            destination,
+            hostname,
+            policy_hash,
+            expires_at_ms,
+        };
+        Ok(refreshed)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one bounded affine QUIC Initial reassembly and policy transition"
@@ -1452,7 +1513,7 @@ pub(crate) enum ClientIngressUdpError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -1467,8 +1528,9 @@ mod tests {
     use volparossa_udp::VerifiedSingleRelayPath;
 
     use super::{
-        ObservedTcpIngress, ObservedUdpIngress, PolicyAuthorizedUdpIngress,
-        authorize_tcp_destination, build_ipv4_udp_packet, parse_ipv4_udp_packet,
+        BrowserQuicIngressGate, BrowserQuicIngressState, ClientIngressUdpError, ObservedTcpIngress,
+        ObservedUdpIngress, PolicyAuthorizedUdpIngress, authorize_tcp_destination,
+        build_ipv4_udp_packet, parse_ipv4_udp_packet,
     };
 
     #[tokio::test]
@@ -1686,6 +1748,68 @@ mod tests {
             now_ms,
         )
         .expect("browser ingress")
+    }
+
+    #[test]
+    fn browser_quic_refreshes_policy_binding_after_slow_route_establishment() {
+        const INSPECTION_MS: u64 = 1_900_000_000_000;
+        const ROUTE_READY_MS: u64 = INSPECTION_MS + 61_000;
+        const HOSTNAME: &str = "destination.volparossa.test";
+        let application = SocketAddrV4::new(Ipv4Addr::new(43, 159, 1, 9), 52_000);
+        let remote = SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 443);
+        let permission =
+            ProtocolPort::new(TransportProtocol::Udp, remote.port()).expect("UDP permission");
+        let rule = DestinationRule::exact_domain(HOSTNAME, [permission]).expect("domain rule");
+        let inspected_policy =
+            verified_development_manifest(INSPECTION_MS, vec![rule.clone()]).expect("old policy");
+        let ready_policy =
+            verified_development_manifest(ROUTE_READY_MS, vec![rule]).expect("active policy");
+        let ingress = authorize_browser_quic_test_ingress(
+            application.into(),
+            remote.into(),
+            b"buffered-initial",
+            HOSTNAME,
+            &inspected_policy,
+            INSPECTION_MS,
+        );
+        assert!(ROUTE_READY_MS >= ingress.expires_at_ms);
+        let mut gate = BrowserQuicIngressGate {
+            state: BrowserQuicIngressState::Authorized {
+                source: application,
+                destination: remote,
+                hostname: HOSTNAME.to_owned(),
+                policy_hash: *inspected_policy.policy_hash(),
+                expires_at_ms: ingress.expires_at_ms,
+            },
+        };
+
+        let refreshed = gate
+            .reauthorize_after_route_ready(vec![ingress], &ready_policy, ROUTE_READY_MS)
+            .expect("exact inspected tuple re-authorized at route readiness");
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].source, application);
+        assert_eq!(refreshed[0].destination, remote);
+        assert_eq!(refreshed[0].payload, b"buffered-initial");
+        assert_eq!(refreshed[0].hostname.as_deref(), Some(HOSTNAME));
+        assert_eq!(refreshed[0].policy_hash, *ready_policy.policy_hash());
+        assert!(refreshed[0].expires_at_ms > ROUTE_READY_MS);
+        let BrowserQuicIngressState::Authorized {
+            policy_hash,
+            expires_at_ms,
+            ..
+        } = &gate.state
+        else {
+            panic!("route-ready authorization retained");
+        };
+        assert_eq!(*policy_hash, *ready_policy.policy_hash());
+        assert!(*expires_at_ms > ROUTE_READY_MS);
+
+        let denied_policy =
+            verified_development_manifest(ROUTE_READY_MS, Vec::new()).expect("denying policy");
+        assert!(matches!(
+            gate.reauthorize_after_route_ready(refreshed, &denied_policy, ROUTE_READY_MS),
+            Err(ClientIngressUdpError::Policy(_))
+        ));
     }
 
     #[test]
