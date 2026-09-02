@@ -10999,7 +10999,7 @@ impl DiscoveryRuntime {
             .exit_native_ready_attempts
             .get(&attempt_id)
             .is_some_and(|attempt| {
-                attempt.helper_owner.prepare() != &prepare
+                !native_exit_ready_prepare_matches(attempt.helper_owner.prepare(), &prepare, now_ms)
                     || attempt.candidate_set_hash != candidate_set_hash
                     || attempt.expires_at_ms != scope.attempt_expires_at_ms
                     || attempt.ready_paths.contains(&scope.candidate_ordinal)
@@ -13835,6 +13835,19 @@ fn native_service_prepare_request(
         hard_expires_at_unix,
         traversal_hints: Vec::new(),
     })
+}
+
+fn native_exit_ready_prepare_matches(
+    owner_prepare: &PrepareLeaseBatch,
+    requested_prepare: &PrepareLeaseBatch,
+    now_ms: u64,
+) -> bool {
+    if owner_prepare.setup_expires_at_unix <= now_ms / 1_000 {
+        return false;
+    }
+    let mut requested_prepare = requested_prepare.clone();
+    requested_prepare.setup_expires_at_unix = owner_prepare.setup_expires_at_unix;
+    owner_prepare == &requested_prepare
 }
 
 fn native_endpoint_binding(
@@ -17163,6 +17176,54 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn native_exit_ready_reuses_live_owner_across_setup_deadline_ticks() {
+        let now_ms = 1_000_000;
+        let scope = NativeProbePathScope {
+            attempt_id: vec![0x38; FORWARD_ID_BYTES],
+            probe_id: vec![0x39; FORWARD_ID_BYTES],
+            candidate_ordinal: 1,
+            attempt_expires_at_ms: now_ms + 300_000,
+            required_path_count: 2,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 8,
+            ..NativeProbePathScope::default()
+        };
+        let owner = native_service_prepare_request(
+            &scope,
+            ContextRole::Exit,
+            &[WireguardRole::Exit],
+            now_ms,
+        )
+        .expect("first Exit prepare");
+        let requested = native_service_prepare_request(
+            &scope,
+            ContextRole::Exit,
+            &[WireguardRole::Exit],
+            now_ms + 1_000,
+        )
+        .expect("next-path Exit prepare");
+        assert_ne!(owner.setup_expires_at_unix, requested.setup_expires_at_unix);
+        assert!(native_exit_ready_prepare_matches(
+            &owner,
+            &requested,
+            now_ms + 1_000
+        ));
+
+        let mut conflicting = requested.clone();
+        conflicting.mptcp_subflows += 1;
+        assert!(!native_exit_ready_prepare_matches(
+            &owner,
+            &conflicting,
+            now_ms + 1_000
+        ));
+        assert!(!native_exit_ready_prepare_matches(
+            &owner,
+            &requested,
+            owner.setup_expires_at_unix * 1_000
+        ));
     }
 
     #[test]
