@@ -2682,9 +2682,10 @@ a01_select_route() {
     selection_attempt=0
     selection_attempt_error="$WORK/a01-$selection_label-connect-attempt.err"
     : >"$WORK/a01-$selection_label-connect.err"
-    # A successful first A01 route deliberately leaves the preselection gate cooling for 30 s.
-    # Keep enough bounded attempts for the second independent bootstrap-loss scenario to begin.
-    while [ "$selection_attempt" -lt 45 ]; do
+    # Route teardown leaves the preselection gate cooling for 30 s, while a refreshed provider
+    # advertisement can legitimately take up to 60 s. Keep a finite two-minute recovery horizon
+    # for exact transient unavailability; protocol/correlation failures still stop immediately.
+    while [ "$selection_attempt" -lt 120 ]; do
         set +e
         "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-client/control/agent.sock" connect \

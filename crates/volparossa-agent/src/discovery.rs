@@ -5399,16 +5399,24 @@ impl DiscoveryRuntime {
                     maximum_up_mbps,
                     maximum_down_mbps,
                     signed_relay_reservation: accepted.encoded().to_vec(),
-                    signed_client_relay_request: accepted.signed_client_relay_request().to_vec(),
+                    signed_client_relay_request: Vec::new(),
                 },
             ],
         };
-        if self
+        debug_assert!(
+            !activation.leases[0].signed_client_relay_request.is_empty()
+                && activation.leases[1].signed_client_relay_request.is_empty(),
+            "only the RelayClient activation carries client-session authority"
+        );
+        if let Err(error) = self
             .helper
             .activate_lease_batch(&mut helper_owner, activation.clone())
             .await
-            .is_err()
         {
+            tracing::warn!(
+                error = %error,
+                "production Relay helper activation rejected"
+            );
             let _ = self.helper.destroy_context(&helper_owner).await;
             let _ = self
                 .relay_service
