@@ -4368,6 +4368,11 @@ impl ProductionRouteAttempt {
             .await
             .map(|established| ProductionRoute { established })
             .map_err(|failure| {
+                tracing::warn!(
+                    error = %failure.cause,
+                    cleanup_pending = failure.cleanup == CleanupStatus::Quarantined,
+                    "production route setup failed before transport activation"
+                );
                 if failure.cause == RouteSetupError::NativeRouteScopeUnavailable {
                     ProductionRouteError::NativeTransportIdentityUnavailable
                 } else {
