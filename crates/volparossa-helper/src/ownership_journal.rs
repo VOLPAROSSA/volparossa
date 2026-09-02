@@ -3735,7 +3735,7 @@ mod tests {
                 volparossa_routing::ContextRole::Client,
                 volparossa_routing::WireguardRole::Client,
                 [0, 1],
-                [0, 2],
+                [0, 4],
             ),
             (
                 volparossa_routing::ContextRole::Relay,
@@ -3753,7 +3753,7 @@ mod tests {
                 volparossa_routing::ContextRole::Exit,
                 volparossa_routing::WireguardRole::Exit,
                 [0, 4],
-                [0, 3],
+                [0, 1],
             ),
         ];
 
@@ -3776,7 +3776,7 @@ mod tests {
         assert_eq!(first.key(), (1, WireguardRole::Client as i32));
         assert_eq!(first.interface().len(), DERIVED_WIREGUARD_INTERFACE_BYTES);
         assert_eq!(first.local_address().octets()[14..], [0, 1]);
-        assert_eq!(first.peer_address().octets()[14..], [0, 2]);
+        assert_eq!(first.peer_address().octets()[14..], [0, 4]);
         assert_eq!(
             first.ownership_alias(),
             "volparossa:wireguard:ownership-v1:vpc123799507:\
