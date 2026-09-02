@@ -8717,9 +8717,18 @@ impl DiscoveryRuntime {
                 },
                 |message| identity.sign(message).ok(),
             );
-        let Ok(bundle) = finalized else {
-            let _ = self.helper.destroy_context(&helper_owner).await;
-            return None;
+        let bundle = match finalized {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    retained_native_evidence = self.recent_native_exit_evidence.len(),
+                    finalized_paths = finalize.relay_paths.len(),
+                    "production Exit finalization rejected"
+                );
+                let _ = self.helper.destroy_context(&helper_owner).await;
+                return None;
+            }
         };
         if bundle.accepted().route_context_id() != &route_context_id
             || bundle.accepted().expires_at_ms() <= now_ms
