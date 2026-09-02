@@ -60,6 +60,7 @@ const BROWSER_QUIC_AUTHORIZATION_PORT: u16 = 44_445;
 const TUNNEL_SERVER_IPV4: Ipv4Addr = Ipv4Addr::new(10, 76, 0, 1);
 const MAXIMUM_PENDING_BROWSER_QUIC_DATAGRAMS: usize = 128;
 const MAXIMUM_PENDING_BROWSER_QUIC_BYTES: usize = 256 * 1024;
+const MAXIMUM_PENDING_GENERAL_UDP_AGE: Duration = Duration::from_secs(5);
 const GENERAL_UDP_AUTH_PORT: u16 = 47_001;
 const GENERAL_UDP_AUTH_MAGIC: &[u8] = b"VOLPAROSSA-UDP-AUTH-V1\0";
 
@@ -289,6 +290,7 @@ impl ActiveProductionMpquicExitRoute {
         let mut authorization_replay = ReplayCache::new(MAXIMUM_EXIT_UDP_FLOWS)
             .map_err(|_| ProductionMpquicError::Invalid("MPQUIC UDP authorization replay"))?;
         let mut authorized_general_udp = HashMap::<ExitUdpFlowKey, AuthorizedUdpFlow>::new();
+        let mut pending_general_udp = HashMap::<ExitUdpFlowKey, PendingGeneralUdpDatagram>::new();
         let mut general_udp_replay = (self.transport_mode == TransportMode::SinglePathGeneralUdp)
             .then(|| ReplayCache::new(EXIT_FLOW_REPLAY_CAPACITY))
             .transpose()
@@ -310,6 +312,9 @@ impl ActiveProductionMpquicExitRoute {
             flows.retain(|_, flow| now.duration_since(flow.last_activity) < self.flow_idle_timeout);
             pending_browser_flows
                 .retain(|_, flow| now.duration_since(flow.last_activity) < self.flow_idle_timeout);
+            pending_general_udp.retain(|_, datagram| {
+                now.duration_since(datagram.received_at) < MAXIMUM_PENDING_GENERAL_UDP_AGE
+            });
             authorized_general_udp.retain(|_, flow| flow.ensure_active_at(current_ms).is_ok());
 
             for _ in 0..MAXIMUM_EXIT_DATAGRAMS_PER_TICK {
@@ -353,7 +358,24 @@ impl ActiveProductionMpquicExitRoute {
                                 "native UDP signed destination",
                             ));
                         }
+                        let pending = pending_general_udp.remove(&control.key);
                         authorized_general_udp.insert(control.key, flow);
+                        if let Some(pending) = pending {
+                            let authorization = authorized_general_udp.get(&control.key).ok_or(
+                                ProductionMpquicError::Invalid(
+                                    "native UDP retained signed destination",
+                                ),
+                            )?;
+                            forward_authorized_general_udp(
+                                &mut flows,
+                                &self.policy,
+                                authorization,
+                                control.key,
+                                &pending.payload,
+                                current_ms,
+                            )
+                            .await?;
+                        }
                         continue;
                     }
                 }
@@ -400,44 +422,26 @@ impl ActiveProductionMpquicExitRoute {
                     destination: datagram.destination,
                 };
                 if self.transport_mode == TransportMode::SinglePathGeneralUdp {
-                    let authorization =
-                        authorized_general_udp
-                            .get(&key)
-                            .ok_or(ProductionMpquicError::Invalid(
-                                "native UDP missing signed destination",
-                            ))?;
-                    authorization.ensure_active_at(current_ms)?;
-                    if key.destination.port() == BROWSER_QUIC_PORT
-                        || !authorization
-                            .matches_exact_ip_destination(SocketAddr::V4(key.destination))
-                    {
-                        return Err(ProductionMpquicError::Invalid(
-                            "native UDP signed destination",
-                        ));
-                    }
-                    if let Some(flow) = flows.get_mut(&key) {
-                        flow.authorize(&self.policy, current_ms, key.destination)?;
-                        flow.send(datagram.payload).await?;
+                    let Some(authorization) = authorized_general_udp.get(&key) else {
+                        // QUIC DATAGRAM delivery is unordered. Retain at most one MTU-bounded
+                        // packet for each exact tuple until its separately signed authorization
+                        // arrives; no socket is opened and no payload reaches egress first.
+                        queue_general_udp_before_authorization(
+                            &mut pending_general_udp,
+                            key,
+                            datagram.payload,
+                        );
                         continue;
-                    }
-                    self.policy
-                        .authorize_ip(
-                            current_ms,
-                            IpAddr::V4(*key.destination.ip()),
-                            TransportProtocol::Udp,
-                            key.destination.port(),
-                        )
-                        .map_err(|_| {
-                            ProductionMpquicError::Invalid(
-                                "policy-authorized native UDP destination",
-                            )
-                        })?;
-                    if flows.len() >= MAXIMUM_EXIT_UDP_FLOWS {
-                        return Err(ProductionMpquicError::Invalid("native UDP flow bound"));
-                    }
-                    let mut flow = ExitUdpFlow::connect(key.destination, None).await?;
-                    flow.send(datagram.payload).await?;
-                    flows.insert(key, flow);
+                    };
+                    forward_authorized_general_udp(
+                        &mut flows,
+                        &self.policy,
+                        authorization,
+                        key,
+                        datagram.payload,
+                        current_ms,
+                    )
+                    .await?;
                     continue;
                 }
                 if let Some(flow) = flows.get_mut(&key) {
@@ -563,6 +567,27 @@ struct ExitUdpFlowKey {
     destination: SocketAddrV4,
 }
 
+struct PendingGeneralUdpDatagram {
+    payload: Vec<u8>,
+    received_at: Instant,
+}
+
+fn queue_general_udp_before_authorization(
+    pending: &mut HashMap<ExitUdpFlowKey, PendingGeneralUdpDatagram>,
+    key: ExitUdpFlowKey,
+    payload: &[u8],
+) {
+    if payload.len() > MAXIMUM_EXIT_UDP_PAYLOAD_BYTES || pending.len() >= MAXIMUM_EXIT_UDP_FLOWS {
+        return;
+    }
+    pending
+        .entry(key)
+        .or_insert_with(|| PendingGeneralUdpDatagram {
+            payload: payload.to_vec(),
+            received_at: Instant::now(),
+        });
+}
+
 struct ExitUdpFlow {
     socket: UdpSocket,
     last_activity: Instant,
@@ -629,6 +654,43 @@ impl ExitUdpFlow {
         self.last_activity = Instant::now();
         Ok(())
     }
+}
+
+async fn forward_authorized_general_udp(
+    flows: &mut HashMap<ExitUdpFlowKey, ExitUdpFlow>,
+    policy: &VerifiedManifest,
+    authorization: &AuthorizedUdpFlow,
+    key: ExitUdpFlowKey,
+    payload: &[u8],
+    now_ms: u64,
+) -> Result<(), ProductionMpquicError> {
+    authorization.ensure_active_at(now_ms)?;
+    if key.destination.port() == BROWSER_QUIC_PORT
+        || !authorization.matches_exact_ip_destination(SocketAddr::V4(key.destination))
+    {
+        return Err(ProductionMpquicError::Invalid(
+            "native UDP signed destination",
+        ));
+    }
+    if let Some(flow) = flows.get_mut(&key) {
+        flow.authorize(policy, now_ms, key.destination)?;
+        return flow.send(payload).await;
+    }
+    policy
+        .authorize_ip(
+            now_ms,
+            IpAddr::V4(*key.destination.ip()),
+            TransportProtocol::Udp,
+            key.destination.port(),
+        )
+        .map_err(|_| ProductionMpquicError::Invalid("policy-authorized native UDP destination"))?;
+    if flows.len() >= MAXIMUM_EXIT_UDP_FLOWS {
+        return Err(ProductionMpquicError::Invalid("native UDP flow bound"));
+    }
+    let mut flow = ExitUdpFlow::connect(key.destination, None).await?;
+    flow.send(payload).await?;
+    flows.insert(key, flow);
+    Ok(())
 }
 
 struct PendingExitBrowserQuicFlow {
@@ -2870,6 +2932,152 @@ mod tests {
             complete_exit_udp_payload(&buffer, MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1),
             None
         );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression proves bounded pre-authorization retention and real UDP egress"
+    )]
+    async fn reordered_general_udp_payload_waits_for_exact_authorization() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        let receiver = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("UDP destination");
+        let destination = match receiver.local_addr().expect("UDP destination address") {
+            SocketAddr::V4(destination) => destination,
+            SocketAddr::V6(_) => unreachable!("IPv4 test destination"),
+        };
+        let permission =
+            ProtocolPort::new(TransportProtocol::Udp, destination.port()).expect("UDP permission");
+        let rule = DestinationRule::exact_ip(IpAddr::V4(*destination.ip()), [permission])
+            .expect("IP rule");
+        let policy = verified_development_manifest(NOW_MS, vec![rule]).expect("policy");
+        let fixture = SignedRouteFixture::new(1, &[Transport::UdpSinglePath], NOW_MS)
+            .expect("single-relay route");
+        let mut path_replay = ReplayCache::new(4).expect("path replay");
+        let path = VerifiedSingleRelayPath::verify(
+            fixture.exit_reservation(),
+            &fixture.relay_reservations()[0],
+            NOW_MS,
+            TimePolicy::default(),
+            &mut path_replay,
+        )
+        .expect("verified path");
+        let nonce = generate_nonce();
+        let expires_at_ms = NOW_MS + 60_000;
+        let signed = sign_control_message(
+            &UdpFlowAuthorization {
+                route_context_id: fixture.route_context_id().to_vec(),
+                flow_id: vec![23; 16],
+                client_ephemeral_id: fixture.client_session_id().to_vec(),
+                hostname: String::new(),
+                destination_ip: destination.ip().octets().to_vec(),
+                port: u32::from(destination.port()),
+                policy_hash: policy.policy_hash().to_vec(),
+                idle_timeout_ms: 30_000,
+                timestamp_ms: NOW_MS,
+                expires_at_ms,
+                nonce: nonce.to_vec(),
+            },
+            fixture.client_key(),
+            NOW_MS,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed UDP authorization");
+        let mut flow_replay = ReplayCache::new(4).expect("flow replay");
+        let authorization = UdpAuthorizationScope::new(&path, &policy)
+            .verify(&signed, NOW_MS, TimePolicy::default(), &mut flow_replay)
+            .expect("verified UDP authorization");
+        let key = ExitUdpFlowKey {
+            client: SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 52_000),
+            destination,
+        };
+        let mut pending = HashMap::new();
+
+        queue_general_udp_before_authorization(&mut pending, key, b"reordered payload");
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending
+                .remove(&ExitUdpFlowKey {
+                    client: key.client,
+                    destination: SocketAddrV4::new(
+                        Ipv4Addr::new(127, 0, 0, 2),
+                        destination.port(),
+                    ),
+                })
+                .is_none()
+        );
+        let mut receive_buffer = [0_u8; 64];
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                receiver.recv(&mut receive_buffer),
+            )
+            .await
+            .is_err()
+        );
+
+        let retained = pending.remove(&key).expect("exact retained payload");
+        let mut flows = HashMap::new();
+        forward_authorized_general_udp(
+            &mut flows,
+            &policy,
+            &authorization,
+            key,
+            &retained.payload,
+            NOW_MS,
+        )
+        .await
+        .expect("authorized egress");
+        let received =
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv(&mut receive_buffer))
+                .await
+                .expect("egress timeout")
+                .expect("egress receive");
+        assert_eq!(&receive_buffer[..received], b"reordered payload");
+    }
+
+    #[test]
+    fn pending_general_udp_is_memory_and_tuple_bounded() {
+        let destination = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18_081);
+        let mut pending = HashMap::new();
+        for index in 0..MAXIMUM_EXIT_UDP_FLOWS {
+            let port = u16::try_from(index + 1).expect("bounded source port");
+            queue_general_udp_before_authorization(
+                &mut pending,
+                ExitUdpFlowKey {
+                    client: SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), port),
+                    destination,
+                },
+                b"first",
+            );
+        }
+        let first_key = ExitUdpFlowKey {
+            client: SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 1),
+            destination,
+        };
+        queue_general_udp_before_authorization(&mut pending, first_key, b"replacement");
+        queue_general_udp_before_authorization(
+            &mut pending,
+            ExitUdpFlowKey {
+                client: SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 30_000),
+                destination,
+            },
+            b"overflow",
+        );
+        assert_eq!(pending.len(), MAXIMUM_EXIT_UDP_FLOWS);
+        assert_eq!(
+            pending.get(&first_key).expect("first tuple").payload,
+            b"first"
+        );
+
+        pending.clear();
+        let oversized = [0; MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1];
+        queue_general_udp_before_authorization(&mut pending, first_key, &oversized);
+        assert!(pending.is_empty());
     }
 
     #[test]
