@@ -19605,9 +19605,9 @@ mod tests {
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
-        reason = "one end-to-end regression retains the complete refreshed control lineage"
+        reason = "one end-to-end regression rejects a forwarded exit until its control lineage refreshes"
     )]
-    async fn production_client_preselection_accepts_same_lineage_control_refresh() {
+    async fn production_client_preselection_waits_for_exact_forwarded_control_refresh() {
         let mut fixture = fixture(RolesConfig {
             client: true,
             relay: false,
@@ -19712,7 +19712,7 @@ mod tests {
             .await;
         assert!(matches!(
             response.await.expect("terminal dispatch result"),
-            Err(ClientPreselectionError::Transport)
+            Err(ClientPreselectionError::Unavailable)
         ));
         assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 1);
     }
