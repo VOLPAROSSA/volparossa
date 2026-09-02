@@ -740,7 +740,31 @@ async fn run_client_udp_ingress(
             );
             continue;
         }
-        if Box::pin(routes.activate_udp_ingress(ingress, &policy, now_ms))
+        let activation_ms = unix_millis();
+        let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+            routes.disconnect().await;
+            state.write().await.record_policy_rejection();
+            continue;
+        };
+        let ingress = match ingress.reauthorize_ip_after_route_ready(&active_policy, activation_ms)
+        {
+            Ok(ingress) => ingress,
+            Err(ClientIngressUdpError::Policy(_)) => {
+                routes.disconnect().await;
+                state.write().await.record_policy_rejection();
+                continue;
+            }
+            Err(_) => {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_UDP_DATAGRAM_REJECTED",
+                    unix_millis(),
+                );
+                continue;
+            }
+        };
+        if Box::pin(routes.activate_udp_ingress(ingress, &active_policy, activation_ms))
             .await
             .is_err()
         {

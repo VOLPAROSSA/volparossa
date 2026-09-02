@@ -830,6 +830,32 @@ impl PolicyAuthorizedUdpIngress {
         })
     }
 
+    /// Re-authorize one exact-IP datagram after asynchronous route establishment.
+    ///
+    /// Route construction can outlive the short ingress authorization. The observed source,
+    /// destination and payload remain affine in `self`; only the active policy binding and its
+    /// bounded expiry are refreshed before the route coordinator signs them.
+    pub(crate) fn reauthorize_ip_after_route_ready(
+        mut self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<Self, ClientIngressUdpError> {
+        if self.hostname.is_some() || self.is_browser_quic() {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        policy
+            .authorize_ip(
+                now_ms,
+                IpAddr::V4(*self.destination.ip()),
+                TransportProtocol::Udp,
+                self.destination.port(),
+            )
+            .map_err(ClientIngressUdpError::Policy)?;
+        self.policy_hash = *policy.policy_hash();
+        self.expires_at_ms = udp_flow_expiry(policy, now_ms)?;
+        Ok(self)
+    }
+
     /// Return whether this policy-approved datagram must use genuine Multipath QUIC.
     #[must_use]
     pub(crate) const fn is_browser_quic(&self) -> bool {
@@ -1731,6 +1757,47 @@ mod tests {
                 .bind_next_native_datagram(changed_source, &policy, NOW_MS + 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn general_udp_refreshes_policy_binding_after_slow_route_establishment() {
+        const OBSERVED_MS: u64 = 1_900_000_000_000;
+        const ROUTE_READY_MS: u64 = OBSERVED_MS + 61_000;
+        let source = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 52_000));
+        let destination = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 18_081));
+        let permission =
+            ProtocolPort::new(TransportProtocol::Udp, destination.port()).expect("UDP permission");
+        let rule = DestinationRule::exact_ip(destination.ip(), [permission]).expect("IP rule");
+        let observed_policy =
+            verified_development_manifest(OBSERVED_MS, vec![rule.clone()]).expect("old policy");
+        let ready_policy =
+            verified_development_manifest(ROUTE_READY_MS, vec![rule]).expect("active policy");
+        let ingress = PolicyAuthorizedUdpIngress::authorize(
+            source,
+            destination,
+            b"buffered-datagram".to_vec(),
+            &observed_policy,
+            OBSERVED_MS,
+        )
+        .expect("observed ingress");
+        assert!(ROUTE_READY_MS >= ingress.expires_at_ms);
+
+        let refreshed = ingress
+            .reauthorize_ip_after_route_ready(&ready_policy, ROUTE_READY_MS)
+            .expect("exact tuple re-authorized at route readiness");
+        assert_eq!(SocketAddr::V4(refreshed.source), source);
+        assert_eq!(SocketAddr::V4(refreshed.destination), destination);
+        assert_eq!(refreshed.payload, b"buffered-datagram");
+        assert!(refreshed.hostname.is_none());
+        assert_eq!(refreshed.policy_hash, *ready_policy.policy_hash());
+        assert!(refreshed.expires_at_ms > ROUTE_READY_MS);
+
+        let denied_policy =
+            verified_development_manifest(ROUTE_READY_MS, Vec::new()).expect("denying policy");
+        assert!(matches!(
+            refreshed.reauthorize_ip_after_route_ready(&denied_policy, ROUTE_READY_MS),
+            Err(ClientIngressUdpError::Policy(_))
+        ));
     }
 
     fn authorize_browser_quic_test_ingress(
