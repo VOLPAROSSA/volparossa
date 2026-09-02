@@ -1237,7 +1237,7 @@ impl ClientRouteControl {
             if let Some(route) = route {
                 let _ = route.disconnect().await;
             }
-            let _ = orchestrator.shutdown().await;
+            orchestrator.shutdown_detached();
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Idle;
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
@@ -1265,7 +1265,7 @@ impl ClientRouteControl {
                 });
                 if active.client.send_payload(authorized.payload()).is_err() {
                     let _ = active.shutdown().await;
-                    let _ = orchestrator.shutdown().await;
+                    orchestrator.shutdown_detached();
                     let mut state = self.state.lock().await;
                     *state = ClientRouteControlState::Idle;
                     return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
@@ -1282,7 +1282,7 @@ impl ClientRouteControl {
             }
             Err(failure) => {
                 let _ = failure.route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Idle;
                 Err(ClientRouteConnectError::TransportRuntimeUnavailable)
@@ -1332,7 +1332,7 @@ impl ClientRouteControl {
             if let Some(route) = route {
                 let _ = route.disconnect().await;
             }
-            let _ = orchestrator.shutdown().await;
+            orchestrator.shutdown_detached();
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Idle;
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
@@ -1360,7 +1360,7 @@ impl ClientRouteControl {
                 });
                 if active.client.send_payload(authorized.payload()).is_err() {
                     let _ = active.shutdown().await;
-                    let _ = orchestrator.shutdown().await;
+                    orchestrator.shutdown_detached();
                     let mut state = self.state.lock().await;
                     *state = ClientRouteControlState::Idle;
                     return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
@@ -1377,7 +1377,7 @@ impl ClientRouteControl {
             }
             Err(failure) => {
                 let _ = failure.route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Idle;
                 Err(ClientRouteConnectError::TransportRuntimeUnavailable)
@@ -1832,36 +1832,36 @@ async fn admit_completed_native_route(
         {
             let Some(preflight) = mpquic_preflight else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
             };
             let now_ms = crate::unix_millis();
             let Ok(path) = verified_single_relay_udp_path(&route.established, now_ms) else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             let signal = start_native_udp_exit_session(&route, &path, discovery, now_ms).await;
             let Ok(signal) = signal else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::UdpExitSessionSignalUnavailable);
             };
             let Ok(context_handle): Result<[u8; HELPER_HANDLE_BYTES], _> =
                 route.context_handle().try_into()
             else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             let Some(authorization) = route.established.native_authorization.take() else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             let [grant] = route.established.relay_grants.as_slice() else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             let session = preflight
@@ -1877,7 +1877,7 @@ async fn admit_completed_native_route(
                 .await;
             let Ok(session) = session else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             Ok(EstablishedClientRoute {
@@ -1911,7 +1911,7 @@ async fn admit_completed_native_route(
                     }),
                     Err(failure) => {
                         let cleanup = failure.prepared.disconnect().await;
-                        let _ = orchestrator.shutdown().await;
+                        orchestrator.shutdown_detached();
                         if cleanup.is_err() {
                             Err(ClientRouteConnectError::TransportRuntimeUnavailable)
                         } else {
@@ -1925,7 +1925,7 @@ async fn admit_completed_native_route(
                         .disconnect()
                         .await
                         .map_err(|_| ProductionUdpRouteError::CleanupPending);
-                    let _ = orchestrator.shutdown().await;
+                    orchestrator.shutdown_detached();
                     Err(ClientRouteConnectError::TransportRuntimeUnavailable)
                 }
             }
@@ -1934,7 +1934,7 @@ async fn admit_completed_native_route(
             let signal = start_mptcp_exit_session(&route, discovery, crate::unix_millis()).await;
             let Ok(signal) = signal else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
             };
             match activate_committed_transport(&route, helper, Some(signal)).await {
@@ -1947,7 +1947,7 @@ async fn admit_completed_native_route(
                 }),
                 Err(error) => {
                     let _ = route.disconnect().await;
-                    let _ = orchestrator.shutdown().await;
+                    orchestrator.shutdown_detached();
                     Err(error)
                 }
             }
@@ -1955,28 +1955,28 @@ async fn admit_completed_native_route(
         Ok(mut route) if route.selected_transport() == Some(Transport::MultipathQuic) => {
             let Some(preflight) = mpquic_preflight else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
             };
             let identity = match route.committed_mpquic_identity() {
                 Ok(identity) => identity,
                 Err(error) => {
                     let _ = route.disconnect().await;
-                    let _ = orchestrator.shutdown().await;
+                    orchestrator.shutdown_detached();
                     return Err(error);
                 }
             };
             let signal = start_mpquic_exit_session(&route, discovery, crate::unix_millis()).await;
             let Ok(signal) = signal else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             let Ok(context_handle): Result<[u8; HELPER_HANDLE_BYTES], _> =
                 route.context_handle().try_into()
             else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             let active_path_ids = route.established.active_path_ids.clone();
@@ -1989,7 +1989,7 @@ async fn admit_completed_native_route(
                 .minimum_paths;
             let Some(authorization) = route.established.native_authorization.take() else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             let mut grants = route.established.relay_grants.clone();
@@ -2007,6 +2007,11 @@ async fn admit_completed_native_route(
                     MPQUIC_READY_WAIT,
                 )
                 .await;
+            if let Err(error) = &session {
+                // Production MPQUIC errors expose only bounded local/native protocol diagnostics;
+                // they never contain route credentials or traffic.
+                eprintln!("production MPQUIC Client startup failed: {error}");
+            }
             if let Ok(session) = session {
                 let health = ProductionMpquicPathHealth::new(
                     session.active_path_ids(),
@@ -2016,7 +2021,7 @@ async fn admit_completed_native_route(
                 let Ok(health) = health else {
                     let _ = session.shutdown().await;
                     let _ = route.disconnect().await;
-                    let _ = orchestrator.shutdown().await;
+                    orchestrator.shutdown_detached();
                     return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
                 };
                 Ok(EstablishedClientRoute {
@@ -2035,21 +2040,21 @@ async fn admit_completed_native_route(
                 })
             } else {
                 let _ = route.disconnect().await;
-                let _ = orchestrator.shutdown().await;
+                orchestrator.shutdown_detached();
                 Err(ClientRouteConnectError::TransportRuntimeUnavailable)
             }
         }
         Ok(route) => {
             let _ = route.disconnect().await;
-            let _ = orchestrator.shutdown().await;
+            orchestrator.shutdown_detached();
             Err(ClientRouteConnectError::NativeTransportIdentityUnavailable)
         }
         Err(ProductionRouteError::NativeTransportIdentityUnavailable) => {
-            let _ = orchestrator.shutdown().await;
+            orchestrator.shutdown_detached();
             Err(ClientRouteConnectError::NativeTransportIdentityUnavailable)
         }
         Err(_) => {
-            let _ = orchestrator.shutdown().await;
+            orchestrator.shutdown_detached();
             Err(ClientRouteConnectError::RouteAdmissionUnavailable)
         }
     }
@@ -4408,6 +4413,12 @@ impl ProductionRouteOrchestrator {
             .await
             .map_err(|_| ProductionRouteError::Unavailable)
     }
+
+    /// Let the retirement supervisor finish quarantined cleanup without delaying a failed Connect
+    /// response. The spawned owner keeps retrying exact Destroy until the helper confirms it.
+    fn shutdown_detached(self) {
+        self.manager.shutdown_detached();
+    }
 }
 
 impl ProductionRouteAttempt {
@@ -5489,6 +5500,15 @@ where
             .shutdown()
             .await
             .map_err(|()| RouteSetupError::SupervisorStopped)
+    }
+
+    /// Begin shutdown while retaining every retirement owner in a detached task.
+    fn shutdown_detached(self) {
+        drop(tokio::spawn(async move {
+            if self.shutdown().await.is_err() {
+                tracing::warn!("detached route retirement supervisor stopped unexpectedly");
+            }
+        }));
     }
 
     fn spawn_owned<F, Fut>(&self, operation: F) -> RouteSetupHandle<P>
@@ -9378,6 +9398,58 @@ mod tests {
         manager.shutdown().await.expect("clean manager shutdown");
         assert_eq!(retirement.outstanding(), 0);
         assert_eq!(retirement.quarantined(), 0);
+    }
+
+    #[tokio::test]
+    async fn detached_shutdown_returns_while_quarantined_owner_keeps_retrying() {
+        let (route, manager, shared) = established_fake_route().await;
+        let retirement = Arc::clone(manager.retirement_state());
+        shared.state.lock().expect("fake state").fail_destroy = true;
+
+        assert_eq!(route.teardown().await, RetirementOutcome::Quarantined);
+        assert_eq!(retirement.outstanding(), 1);
+        assert_eq!(retirement.quarantined(), 1);
+
+        manager.shutdown_detached();
+        assert!(retirement.worker_alive());
+        assert_eq!(retirement.outstanding(), 1);
+        assert_eq!(retirement.quarantined(), 1);
+
+        timeout(TEST_TIMEOUT, async {
+            while shared
+                .events()
+                .iter()
+                .filter(|event| event.as_str() == "local.destroy")
+                .count()
+                < 2
+            {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("detached supervisor keeps retrying permanent quarantine");
+        assert!(retirement.worker_alive());
+        assert_eq!(retirement.outstanding(), 1);
+        assert_eq!(retirement.quarantined(), 1);
+        assert!(
+            !shared
+                .events()
+                .iter()
+                .any(|event| event == "protocol.release")
+        );
+
+        shared.state.lock().expect("fake state").fail_destroy = false;
+        wait_for_event(&shared, "protocol.release").await;
+        timeout(TEST_TIMEOUT, async {
+            while retirement.worker_alive() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("detached supervisor exits after exact Destroy succeeds");
+        assert_eq!(retirement.outstanding(), 0);
+        assert_eq!(retirement.quarantined(), 0);
+        assert!(!retirement.fail_stopped());
     }
 
     #[tokio::test]
