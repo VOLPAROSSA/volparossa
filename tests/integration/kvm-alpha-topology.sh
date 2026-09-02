@@ -2821,7 +2821,11 @@ wait_bootstrap_mesh() {
     mesh_attempt=0
     while [ "$mesh_attempt" -lt 600 ]; do
         mesh_ready=yes
-        for mesh_node_required in client:2 bootstrap1:4 bootstrap2:4 \
+        # A restored bootstrap contact only needs the functional quorum used by the
+        # remaining datapath cases. Requiring every incidental direct connection
+        # made this recovery gate depend on libp2p redial timing after A01 had
+        # already proved discovery and route establishment through each contact.
+        for mesh_node_required in client:2 bootstrap1:3 bootstrap2:3 \
             relay0:3 relay1:2 relay2:2 exit:1; do
             mesh_node=${mesh_node_required%%:*}
             mesh_required=${mesh_node_required#*:}
