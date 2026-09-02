@@ -348,6 +348,7 @@ copy_artifacts() {
         agent-client.log agent-bootstrap1.log agent-bootstrap2.log \
         agent-relay0.log agent-relay1.log agent-relay2.log agent-exit.log \
         helper-bootstrap1.log helper-bootstrap2.log \
+        worker-network-diagnostics.txt \
         status-bootstrap1.txt status-bootstrap2.txt \
         roles-bootstrap1.txt roles-bootstrap2.txt \
         a01-bootstrap1-blocked.json a01-bootstrap2-blocked.json \
@@ -414,6 +415,36 @@ copy_artifacts() {
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 \
                 "$WORK/$artifact" "$output_directory/$artifact"
         fi
+    done
+}
+
+# Retain the live anonymous worker namespaces on an early datapath failure. This contains only
+# public interface, route, WireGuard-counter and nftables state; private keys are never emitted.
+capture_worker_network_diagnostics() {
+    : >"$WORK/worker-network-diagnostics.txt"
+    for diagnostic_node in client relay1 relay2 exit; do
+        diagnostic_unit=volparossa-alpha-helper@$diagnostic_node.service
+        diagnostic_cgroup=$(systemctl show --property=ControlGroup --value \
+            "$diagnostic_unit" 2>/dev/null || true)
+        case $diagnostic_cgroup in /system.slice/*) ;; *) continue ;; esac
+        diagnostic_procs=/sys/fs/cgroup$diagnostic_cgroup/cgroup.procs
+        [ -r "$diagnostic_procs" ] || continue
+        for diagnostic_pid in $(sort -n "$diagnostic_procs"); do
+            [ -r "/proc/$diagnostic_pid/cmdline" ] || continue
+            diagnostic_command=$(tr '\000' ' ' <"/proc/$diagnostic_pid/cmdline")
+            case $diagnostic_command in *--internal-worker-v3*) ;; *) continue ;; esac
+            {
+                printf 'node=%s pid=%s netns=%s\n' "$diagnostic_node" \
+                    "$diagnostic_pid" "$(stat -Lc '%d:%i' "/proc/$diagnostic_pid/ns/net")"
+                nsenter -t "$diagnostic_pid" -n ip -details -statistics link show || true
+                nsenter -t "$diagnostic_pid" -n ip -6 address show || true
+                nsenter -t "$diagnostic_pid" -n ip -6 route show table main || true
+                nsenter -t "$diagnostic_pid" -n wg show all dump || true
+                nsenter -t "$diagnostic_pid" -n nft list ruleset || true
+                nsenter -t "$diagnostic_pid" -n \
+                    cat /proc/sys/net/ipv6/conf/all/forwarding || true
+            } >>"$WORK/worker-network-diagnostics.txt" 2>&1
+        done
     done
 }
 
@@ -709,6 +740,8 @@ cleanup() {
         fi
         wait "$DESTINATION_PID" 2>/dev/null || true
     fi
+
+    capture_worker_network_diagnostics
 
     # Early A01 failures happen before capture_product_logs() is defined. Query every still-live
     # product socket here, before retiring the services, so the next functional blocker is
