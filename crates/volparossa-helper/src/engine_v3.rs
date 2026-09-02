@@ -577,6 +577,14 @@ struct LeaseRecord {
     baseline: Option<KernelCounters>,
 }
 
+fn context_owns_mptcp_path(context: &ContextRecord, path_id: u32) -> bool {
+    [WireguardRole::Client, WireguardRole::Exit]
+        .into_iter()
+        .filter(|role| context.leases.contains_key(&(path_id, *role as i32)))
+        .count()
+        == 1
+}
+
 #[derive(Clone)]
 pub(crate) struct PreparedKernelLease {
     pub(crate) path_id: u32,
@@ -4343,9 +4351,7 @@ impl HelperEngine {
             if context.phase != ContextPhase::Committed
                 || !live
                 || !matches_handle(&context.handle, context_handle)
-                || !context
-                    .leases
-                    .contains_key(&(path_id, WireguardRole::Client as i32))
+                || !context_owns_mptcp_path(context, path_id)
             {
                 return Some(execution(invalid_response(request), None));
             }
@@ -4450,9 +4456,7 @@ impl HelperEngine {
                     && context.phase == ContextPhase::Committed
                     && context_backend_lineage(context_id, context) == token.lineage()
                     && matches_handle(&context.handle, context_handle)
-                    && context
-                        .leases
-                        .contains_key(&(path_id, WireguardRole::Client as i32))
+                    && context_owns_mptcp_path(context, path_id)
                     && deadline_live(
                         expiry_now(self.inner.clock.as_ref()),
                         context.hard_expires_at_unix,
@@ -7260,7 +7264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_exact_committed_client_lease_can_mutate_mptcp_endpoint() {
+    async fn only_exact_committed_client_or_exit_lease_can_mutate_mptcp_endpoint() {
         let backend = Arc::new(FakeBackend::default());
         let clock = Arc::new(FixedClock(AtomicU64::new(100)));
         let engine = fake_engine(Arc::clone(&backend), clock);
@@ -7298,9 +7302,38 @@ mod tests {
             .await;
         assert_eq!(wrong_path.result, HelperResult::InvalidRequest as i32);
 
-        let remove = engine
+        {
+            let mut state = engine.inner.state.lock().await;
+            let context = state.contexts.get_mut(&[7; 16]).expect("route context");
+            let lease = context
+                .leases
+                .remove(&(1, WireguardRole::Client as i32))
+                .expect("committed client lease");
+            assert!(
+                context
+                    .leases
+                    .insert((1, WireguardRole::Exit as i32), lease)
+                    .is_none()
+            );
+        }
+
+        let exit_add = engine
             .execute(request(
                 42,
+                helper_request::Operation::AddMptcpEndpoint(AddMptcpEndpoint {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    mode: MptcpEndpointMode::Signal as i32,
+                    backup: false,
+                }),
+            ))
+            .await;
+        assert_eq!(exit_add.result, HelperResult::Ok as i32);
+
+        let remove = engine
+            .execute(request(
+                43,
                 helper_request::Operation::RemoveMptcpEndpoint(RemoveMptcpEndpoint {
                     route_context_id: vec![7; 16],
                     context_handle: prepared.context_handle,

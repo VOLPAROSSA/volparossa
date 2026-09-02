@@ -2410,7 +2410,7 @@ fn encode_activate_device_v3(
     Ok(payload)
 }
 
-/// Client WireGuard outer packets originate in the kernel and therefore have no trusted agent
+/// Client `WireGuard` outer packets originate in the kernel and therefore have no trusted agent
 /// socket UID. The existing ingress mark bypasses parent output steering without selecting the
 /// parent-to-ingress policy table. Non-client endpoints retain the kernel default mark.
 fn wireguard_underlay_mark(resource: &DurableWireguardResource) -> u32 {
