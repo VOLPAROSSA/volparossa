@@ -159,7 +159,7 @@ const MAX_LEDGER_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LEDGER_BYTES_PER_PEER: usize = 16 * 1024 * 1024;
 const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
 const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
-const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
+pub(crate) const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
 const AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS: u64 = 1_000;
 // Helper Destroy can legitimately remain ambiguous for its full five-second RPC bound. Retrying
 // that synchronous call on every one-second actor tick starves discovery traffic, so quarantine

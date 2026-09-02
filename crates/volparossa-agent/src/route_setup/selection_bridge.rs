@@ -5970,7 +5970,7 @@ mod tests {
             .expect("live first candidate")
             .expect("first candidate exists");
         let dispatch = awaiting
-            .into_forward_dispatch()
+            .into_forward_dispatch_for_test(minted_at_ms + 1)
             .expect("exact client-hop wrapper");
         let (control_peer, request) = dispatch.request_for_test();
         let control = candidate_set.control.as_ref().expect("control actor");
@@ -5986,11 +5986,17 @@ mod tests {
             request.validated_operation().expect("native operation"),
             volparossa_discovery::ExitForwardOperation::NativeProbePermit
         );
-        assert_eq!(request.deadline_unix_ms(), expected_expiry);
+        assert_eq!(
+            request.deadline_unix_ms(),
+            (minted_at_ms + 1)
+                .saturating_add(crate::discovery::MAX_FORWARD_OPERATION_LIFETIME_MS)
+                .min(expected_expiry)
+        );
         let envelope: SignedEnvelope =
             decode_canonical(request.canonical_request(), MAX_CONTROL_MESSAGE_SIZE)
                 .expect("signed native Permit request");
         assert_eq!(request.forward_id(), &envelope.nonce[..ID_BYTES]);
+        assert_eq!(envelope.expires_at_ms, expected_expiry);
     }
 
     #[test]
@@ -6156,12 +6162,13 @@ mod tests {
         assert_eq!(candidate_set.policy_version, 7);
         assert_eq!(candidate_set.policy_hash, POLICY_BYTES);
 
-        let expected_expiry = minted_at_ms + volparossa_protocol::MAX_NATIVE_PROBE_LIFETIME_MS;
+        let expected_expiry = (minted_at_ms + volparossa_protocol::MAX_NATIVE_PROBE_LIFETIME_MS)
+            .min(candidate_set.policy_expires_at_ms);
         let (attempt_expiry, monotonic_expiry) = owner.deadline_for_test();
         assert_eq!(attempt_expiry, expected_expiry);
         assert_eq!(
             monotonic_expiry.duration_since(minted_at),
-            Duration::from_millis(volparossa_protocol::MAX_NATIVE_PROBE_LIFETIME_MS)
+            Duration::from_millis(expected_expiry - minted_at_ms)
         );
         assert!(
             attempt_expiry > NOW_MS + 5_000,
@@ -6204,7 +6211,7 @@ mod tests {
                 .expect("live next candidate")
                 .expect("required candidate exists");
             let dispatch = awaiting
-                .into_forward_dispatch()
+                .into_forward_dispatch_for_test(minted_at_ms + 1)
                 .expect("exact client-hop wrapper");
             let (control_peer, request) = dispatch.request_for_test();
             let envelope: SignedEnvelope =
@@ -6326,7 +6333,7 @@ mod tests {
             .begin_next_for_test(minted_at_ms, minted_at)
             .expect("live attempt")
             .expect("first native candidate")
-            .into_forward_dispatch()
+            .into_forward_dispatch_for_test(minted_at_ms)
             .expect("exact Permit wrapper");
         assert_eq!(
             dispatch.request_for_test().1.deadline_unix_ms(),
