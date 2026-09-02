@@ -3075,12 +3075,20 @@ fn validate_and_allocate_preprobe_plan(
         .identity
         .advertisement_expires_at_ms
         .min(forwarded_exit.control.identity.policy_expires_at_ms);
-    let exit_expiry_ms = forwarded_exit
+    let exit_expiry_ceiling_ms = forwarded_exit
         .exit
         .identity
         .advertisement_expires_at_ms
         .min(forwarded_exit.exit.identity.policy_expires_at_ms)
         .min(forwarded_exit.control.identity.expires_at_ms);
+    let exit_expiry_ms = forwarded_exit.exit.identity.expires_at_ms;
+    if exit_expiry_ms > exit_expiry_ceiling_ms {
+        tracing::warn!(
+            stage = "exit-expiry-ceiling",
+            "prospective route admission validation rejected"
+        );
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
     let mut hard_expiry_ceiling_ms = scope.policy.expires_at_ms;
     hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(
         validate_preprobe_peer_binding(
@@ -3453,12 +3461,16 @@ impl PendingPreProbeResolve {
             .identity
             .advertisement_expires_at_ms
             .min(self.control.identity.policy_expires_at_ms);
-        let exit_expiry_ms = self
+        let exit_expiry_ceiling_ms = self
             .exit
             .identity
             .advertisement_expires_at_ms
             .min(self.exit.identity.policy_expires_at_ms)
             .min(self.control.identity.expires_at_ms);
+        let exit_expiry_ms = self.exit.identity.expires_at_ms;
+        if exit_expiry_ms > exit_expiry_ceiling_ms {
+            return Err(RouteSetupError::Invalid("exit capability expiry ceiling"));
+        }
         validate_preprobe_peer_binding(
             &self.control,
             control_expiry_ms,
