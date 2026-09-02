@@ -6315,7 +6315,7 @@ impl DiscoveryRuntime {
                 &scope,
                 local_peer,
                 now_ms,
-                request.deadline_unix_ms(),
+                scope.attempt_expires_at_ms,
             )
         else {
             reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
@@ -6696,7 +6696,10 @@ impl DiscoveryRuntime {
         cleanup_owner = Some(helper_owner);
         if prepared.authenticated_client_peer != authenticated_client_peer
             || prepared.start.encoded_start() != request.client_signed_request()
-            || prepared.start.scope().attempt_expires_at_ms != request.deadline_unix_ms()
+            || !native_rpc_deadline_is_within_authority(
+                request.deadline_unix_ms(),
+                prepared.start.scope().attempt_expires_at_ms,
+            )
         {
             reject!("NATIVE_PROBE_AUTHORIZATION_OWNER_MISMATCH");
         }
@@ -6732,7 +6735,7 @@ impl DiscoveryRuntime {
                 data_relay,
                 scope,
                 local_peer,
-                request.deadline_unix_ms(),
+                scope.attempt_expires_at_ms,
             )
         {
             reject!("NATIVE_PROBE_AUTHORIZATION_EXIT_UNAVAILABLE");
@@ -6874,7 +6877,10 @@ impl DiscoveryRuntime {
         };
         if active.authenticated_client_peer != authenticated_client_peer
             || start.encoded_start() != request.client_signed_request()
-            || start.scope().attempt_expires_at_ms != request.deadline_unix_ms()
+            || !native_rpc_deadline_is_within_authority(
+                request.deadline_unix_ms(),
+                start.scope().attempt_expires_at_ms,
+            )
             || active.endpoint.route_context_id() != &attempt_id
             || active.endpoint.path_id() != start.scope().candidate_ordinal
         {
@@ -6927,7 +6933,7 @@ impl DiscoveryRuntime {
             data_relay,
             scope,
             local_peer,
-            request.deadline_unix_ms(),
+            scope.attempt_expires_at_ms,
         ) {
             let _ = self.helper.destroy_context(&active.helper_owner).await;
             reject!("NATIVE_PROBE_RESULT_RELAY_AUTHORITY_UNAVAILABLE");
@@ -10228,7 +10234,7 @@ impl DiscoveryRuntime {
                 control,
                 &scope,
                 authenticated_control_relay,
-                request.deadline_unix_ms(),
+                scope.attempt_expires_at_ms,
                 now_ms,
             )
             || !local_native_probe_exit_actor_is_served(
@@ -10350,7 +10356,7 @@ impl DiscoveryRuntime {
                 data_relay,
                 &scope,
                 authenticated_data_relay,
-                request.deadline_unix_ms(),
+                scope.attempt_expires_at_ms,
             )
             || !local_native_probe_exit_actor_is_served(
                 &self.service,
@@ -10615,7 +10621,7 @@ impl DiscoveryRuntime {
                 data_relay,
                 &scope,
                 authenticated_data_relay,
-                request.deadline_unix_ms(),
+                scope.attempt_expires_at_ms,
             )
         {
             reject!("NATIVE_PROBE_RESULT_EXIT_RELAY_REJECTED");
@@ -10847,7 +10853,10 @@ impl DiscoveryRuntime {
             }};
         }
         let now_ms = unix_millis();
-        if request.validate().is_err() || !self.roles.exit {
+        if request.validate().is_err()
+            || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+            || !self.roles.exit
+        {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         }
         let Ok(forward) = decode_canonical::<NativeProbeReadyForwardRequest>(
@@ -10884,7 +10893,10 @@ impl DiscoveryRuntime {
         let local_peer = *self.service.local_peer_id();
         if request.validated_operation() != Ok(ExitForwardOperation::NativeProbeReady)
             || request.forward_id() != scope.probe_id
-            || request.deadline_unix_ms() != scope.attempt_expires_at_ms
+            || !native_rpc_deadline_is_within_authority(
+                request.deadline_unix_ms(),
+                scope.attempt_expires_at_ms,
+            )
             || request.control_relay_peer_id() != authenticated_data_relay.to_bytes()
             || request.exit_node_id() != self.local_node_id
             || request.exit_peer_id() != local_peer.to_bytes()
@@ -10911,7 +10923,7 @@ impl DiscoveryRuntime {
                     data_relay,
                     &scope,
                     authenticated_data_relay,
-                    request.deadline_unix_ms(),
+                    scope.attempt_expires_at_ms,
                 )
             })
             .cloned();
@@ -10940,7 +10952,7 @@ impl DiscoveryRuntime {
                 data_relay,
                 &scope,
                 authenticated_data_relay,
-                request.deadline_unix_ms(),
+                scope.attempt_expires_at_ms,
             ) {
                 reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
             }
@@ -12897,6 +12909,13 @@ fn deadline_is_bounded(deadline_unix_ms: u64, now_ms: u64) -> bool {
         && deadline_unix_ms <= now_ms.saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS)
 }
 
+fn native_rpc_deadline_is_within_authority(
+    deadline_unix_ms: u64,
+    authority_expires_at_ms: u64,
+) -> bool {
+    deadline_unix_ms <= authority_expires_at_ms
+}
+
 fn inbound_datapath_unavailable_response(
     request: &DatapathRelayRequest,
     authenticated_client_peer: Libp2pPeerId,
@@ -13010,7 +13029,10 @@ fn native_probe_ready_scope_matches(
         return false;
     };
     wrapper.request_id() == scope.probe_id
-        && wrapper.deadline_unix_ms() == scope.attempt_expires_at_ms
+        && native_rpc_deadline_is_within_authority(
+            wrapper.deadline_unix_ms(),
+            scope.attempt_expires_at_ms,
+        )
         && wrapper.relay_node_id() == data_relay.node_id
         && wrapper.relay_peer_id() == data_relay.peer_id
 }
@@ -13049,7 +13071,7 @@ fn native_probe_start_scope_matches(
             .expect("fixed nonce prefix")
     };
     wrapper.request_id() == expected_request_id
-        && wrapper.deadline_unix_ms() == expires_at_ms
+        && native_rpc_deadline_is_within_authority(wrapper.deadline_unix_ms(), expires_at_ms)
         && wrapper.relay_node_id() == data_relay.node_id
         && wrapper.relay_peer_id() == data_relay.peer_id
 }
@@ -13401,16 +13423,16 @@ fn verified_native_probe_forward_scope(
     let scope = verified.message().scope.as_ref()?;
     let control = scope.control.as_ref()?;
     let exit = scope.exit.as_ref()?;
-    inner_forward_scope_matches(
-        request,
-        verified.nonce(),
-        verified.expires_at_ms(),
-        &control.node_id,
-        &control.peer_id,
-        &exit.node_id,
-        &exit.peer_id,
-    )
-    .then(|| scope.clone())
+    (request.forward_id() == &verified.nonce()[..FORWARD_ID_BYTES]
+        && native_rpc_deadline_is_within_authority(
+            request.deadline_unix_ms(),
+            verified.expires_at_ms(),
+        )
+        && request.control_relay_node_id() == control.node_id
+        && request.control_relay_peer_id() == control.peer_id
+        && request.exit_node_id() == exit.node_id
+        && request.exit_peer_id() == exit.peer_id)
+        .then(|| scope.clone())
 }
 
 fn verified_native_probe_authorization_forward_scope(
@@ -13435,7 +13457,10 @@ fn verified_native_probe_authorization_forward_scope(
     let start_nonce = fixed_bytes::<32>(&start_envelope.nonce)?;
     let authorization_id = native_probe_authorization_request_id(start_nonce);
     (request.forward_id() == authorization_id
-        && request.deadline_unix_ms() == verified.expires_at_ms()
+        && native_rpc_deadline_is_within_authority(
+            request.deadline_unix_ms(),
+            verified.expires_at_ms(),
+        )
         && request.control_relay_node_id() == data_relay.node_id
         && request.control_relay_peer_id() == data_relay.peer_id
         && request.control_relay_public_key() == data_relay.public_key
@@ -13465,7 +13490,10 @@ fn verified_native_probe_result_forward_scope(
     .ok()?;
     let request_id = start_envelope.nonce.get(..FORWARD_ID_BYTES)?;
     (request.forward_id() == request_id
-        && request.deadline_unix_ms() == verified.expires_at_ms()
+        && native_rpc_deadline_is_within_authority(
+            request.deadline_unix_ms(),
+            verified.expires_at_ms(),
+        )
         && request.control_relay_node_id() == data_relay.node_id
         && request.control_relay_peer_id() == data_relay.peer_id
         && request.control_relay_public_key() == data_relay.public_key
@@ -13500,7 +13528,10 @@ fn verified_native_probe_ready_forward_scope(
     let data_relay = scope.data_relay.as_ref()?;
     let exit = scope.exit.as_ref()?;
     (request.forward_id() == scope.probe_id
-        && request.deadline_unix_ms() == scope.attempt_expires_at_ms
+        && native_rpc_deadline_is_within_authority(
+            request.deadline_unix_ms(),
+            scope.attempt_expires_at_ms,
+        )
         && request.control_relay_node_id() == data_relay.node_id
         && request.control_relay_peer_id() == data_relay.peer_id
         && request.control_relay_public_key() == data_relay.public_key
@@ -16246,7 +16277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_permit_forward_scope_requires_exact_signed_wrapper_lineage() {
+    async fn native_permit_forward_scope_accepts_bounded_transaction_deadline() {
         let fixture = native_permit_forward_fixture();
         let verified = verified_native_probe_forward_scope(&fixture.request, fixture.now_ms)
             .expect("exact native Permit scope");
@@ -16277,12 +16308,26 @@ mod tests {
             fixture.request.canonical_request().to_vec(),
         );
         assert!(verified_native_probe_forward_scope(&wrong_forward, fixture.now_ms).is_none());
-        let wrong_deadline = rebuild(
+        let transactional_deadline = rebuild(
             fixture.request.forward_id().to_vec(),
             fixture.request.deadline_unix_ms().saturating_sub(1),
             fixture.request.canonical_request().to_vec(),
         );
-        assert!(verified_native_probe_forward_scope(&wrong_deadline, fixture.now_ms).is_none());
+        assert!(
+            verified_native_probe_forward_scope(&transactional_deadline, fixture.now_ms)
+                == Some(fixture.scope.clone())
+        );
+        assert!(forward_request_scope_matches(
+            &transactional_deadline,
+            ExitForwardOperation::NativeProbePermit,
+            fixture.now_ms,
+        ));
+        let authority_overrun = rebuild(
+            fixture.request.forward_id().to_vec(),
+            fixture.request.deadline_unix_ms().saturating_add(1),
+            fixture.request.canonical_request().to_vec(),
+        );
+        assert!(verified_native_probe_forward_scope(&authority_overrun, fixture.now_ms).is_none());
 
         let mut envelope: SignedEnvelope = decode_canonical(
             fixture.request.canonical_request(),
@@ -16298,6 +16343,23 @@ mod tests {
             tampered,
         );
         assert!(verified_native_probe_forward_scope(&wrong_signature, fixture.now_ms).is_none());
+    }
+
+    #[test]
+    fn native_rpc_deadline_is_capped_by_signed_authority() {
+        let authority_expires_at_ms = 300_000;
+        assert!(native_rpc_deadline_is_within_authority(
+            30_000,
+            authority_expires_at_ms
+        ));
+        assert!(native_rpc_deadline_is_within_authority(
+            authority_expires_at_ms,
+            authority_expires_at_ms
+        ));
+        assert!(!native_rpc_deadline_is_within_authority(
+            authority_expires_at_ms.saturating_add(1),
+            authority_expires_at_ms
+        ));
     }
 
     #[tokio::test]
