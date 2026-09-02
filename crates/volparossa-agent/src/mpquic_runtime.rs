@@ -498,18 +498,17 @@ impl ActiveProductionMpquicExitRoute {
                 loop {
                     match flow.socket.try_recv(&mut response_buffer) {
                         Ok(length) => {
-                            if length > MAXIMUM_EXIT_UDP_PAYLOAD_BYTES {
-                                return Err(ProductionMpquicError::Invalid(
-                                    "MPQUIC Exit UDP response payload bound",
-                                ));
-                            }
+                            let Some(payload) = complete_exit_udp_payload(&response_buffer, length)
+                            else {
+                                // The extra byte is a truncation sentinel. In particular, QUIC
+                                // path-MTU probes can legitimately exceed the inner tunnel MTU;
+                                // dropping one lets endpoint PMTUD converge without terminating
+                                // the authenticated route or forwarding a truncated datagram.
+                                break;
+                            };
                             flow.authorize(&self.policy, current_ms, key.destination)?;
                             packet_id = packet_id.wrapping_add(1);
-                            reverse_packets.push(build_reverse_ipv4_udp(
-                                *key,
-                                &response_buffer[..length],
-                                packet_id,
-                            )?);
+                            reverse_packets.push(build_reverse_ipv4_udp(*key, payload, packet_id)?);
                             flow.last_activity = Instant::now();
                             if reverse_packets.len() >= MAXIMUM_EXIT_DATAGRAMS_PER_TICK {
                                 break 'flows;
@@ -544,6 +543,13 @@ impl ActiveProductionMpquicExitRoute {
         helper?;
         Ok(())
     }
+}
+
+fn complete_exit_udp_payload(buffer: &[u8], length: usize) -> Option<&[u8]> {
+    if length > MAXIMUM_EXIT_UDP_PAYLOAD_BYTES {
+        return None;
+    }
+    buffer.get(..length)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2818,6 +2824,19 @@ mod tests {
     use volparossa_test_support::verified_development_manifest;
 
     use super::*;
+
+    #[test]
+    fn exit_udp_mtu_probe_is_dropped_without_forwarding_truncated_payload() {
+        let buffer = vec![0x5a; MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1];
+        assert_eq!(
+            complete_exit_udp_payload(&buffer, MAXIMUM_EXIT_UDP_PAYLOAD_BYTES),
+            Some(&buffer[..MAXIMUM_EXIT_UDP_PAYLOAD_BYTES])
+        );
+        assert_eq!(
+            complete_exit_udp_payload(&buffer, MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1),
+            None
+        );
+    }
 
     #[test]
     fn exit_receive_waits_only_for_the_authenticated_client_path_set() {
