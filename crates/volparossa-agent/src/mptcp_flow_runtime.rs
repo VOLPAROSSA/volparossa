@@ -47,6 +47,29 @@ async fn report_exit_flow_result<T, E, F, Fut>(
     flow_completed(succeeded).await;
 }
 
+enum ExitRuntimeEvent<A, T> {
+    RouteExpired,
+    Accepted(A),
+    FlowCompleted(Result<T, tokio::task::JoinError>),
+}
+
+async fn next_exit_runtime_event<A, T: 'static>(
+    remaining: Duration,
+    accepting: bool,
+    accept: impl Future<Output = A>,
+    flows: &mut JoinSet<T>,
+) -> ExitRuntimeEvent<A, T> {
+    tokio::select! {
+        () = time::sleep(remaining) => ExitRuntimeEvent::RouteExpired,
+        accepted = accept, if accepting => ExitRuntimeEvent::Accepted(accepted),
+        completed = flows.join_next(), if !flows.is_empty() => {
+            ExitRuntimeEvent::FlowCompleted(
+                completed.expect("a non-empty exit flow set must yield a completion"),
+            )
+        }
+    }
+}
+
 /// A reusable Exit listener, TLS identity, signed-flow verifier and Internet egress owner.
 ///
 /// Construction consumes the activated TCP route and helper owner. `run` accepts only genuine
@@ -150,23 +173,20 @@ impl ProductionMptcpExitRuntime {
         let mut accepted_any = false;
         let mut failed = false;
         loop {
-            if flows.len() >= MAXIMUM_CONCURRENT_MPTCP_FLOWS {
-                if let Some(result) = flows.join_next().await {
-                    report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
-                }
-                continue;
-            }
             let remaining = expires_at_ms.saturating_sub(unix_millis());
             if remaining == 0 {
                 break;
             }
-            match time::timeout(
+            let accepting = flows.len() < MAXIMUM_CONCURRENT_MPTCP_FLOWS;
+            match next_exit_runtime_event(
                 Duration::from_millis(remaining),
+                accepting,
                 transport.listener().accept(),
+                &mut flows,
             )
             .await
             {
-                Ok(Ok((mptcp, _peer))) => {
+                ExitRuntimeEvent::Accepted(Ok((mptcp, _peer))) => {
                     accepted_any = true;
                     let tls = tls.clone();
                     let egress = Arc::clone(&egress);
@@ -189,14 +209,14 @@ impl ProductionMptcpExitRuntime {
                             .map_err(|_| ProductionMptcpExitError::Egress)
                     });
                 }
-                Ok(Err(_)) => {
+                ExitRuntimeEvent::Accepted(Err(_)) => {
                     failed = true;
                     break;
                 }
-                Err(_) => break,
-            }
-            while let Some(result) = flows.try_join_next() {
-                report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
+                ExitRuntimeEvent::FlowCompleted(result) => {
+                    report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
+                }
+                ExitRuntimeEvent::RouteExpired => break,
             }
         }
         while let Some(result) = flows.join_next().await {
@@ -464,6 +484,37 @@ fn production_tcp_limits() -> Result<TcpEgressLimits, volparossa_exit::ExitError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completed_exit_flow_is_reported_while_next_accept_waits() {
+        let mut flows = JoinSet::new();
+        flows.spawn(async { Ok::<(), ProductionMptcpExitError>(()) });
+
+        let event = time::timeout(
+            Duration::from_secs(1),
+            next_exit_runtime_event(
+                Duration::from_secs(60),
+                true,
+                std::future::pending::<()>(),
+                &mut flows,
+            ),
+        )
+        .await
+        .expect("completed flow must be observed before route expiry");
+        let ExitRuntimeEvent::FlowCompleted(result) = event else {
+            panic!("flow completion must win while the next accept is pending");
+        };
+        let mut failed = false;
+        let mut reports = Vec::new();
+        report_exit_flow_result(result, &mut failed, &mut |succeeded| {
+            reports.push(succeeded);
+            std::future::ready(())
+        })
+        .await;
+
+        assert_eq!(reports, [true]);
+        assert!(!failed);
+    }
 
     #[test]
     fn production_tcp_limits_are_bounded_and_nonzero() {
