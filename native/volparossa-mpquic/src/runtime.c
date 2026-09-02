@@ -23,6 +23,7 @@
      VMP_STATUS_METRIC_CWND | VMP_STATUS_METRIC_INFLIGHT |              \
      VMP_STATUS_METRIC_ESTIMATED_RATE |                                 \
      VMP_STATUS_METRIC_ACKED_TRANSPORT)
+#define VMP_ACTIVE_FAILOVER_GRACE_MS UINT64_C(30000)
 
 typedef struct runtime_path {
     bool used;
@@ -52,6 +53,7 @@ typedef struct runtime_session {
     uint8_t auth_secret[VMP_MAX_AUTH_SECRET];
     char tls_server_name[VMP_MAX_TLS_SERVER_NAME + 1U];
     uint64_t authorization_deadline_boottime_ms;
+    uint64_t active_failover_deadline_boottime_ms;
     size_t authorization_index;
     void *transport_session;
     runtime_path_t paths[VMP_MAX_PATHS];
@@ -899,10 +901,48 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
         *out_snapshot_count = count;
     }
     secure_zero(&assignment, sizeof(assignment));
-    if (!ready || *out_active < session->start.minimum_paths) {
+    if (!ready) {
         session->started = false;
     }
     return VMP_TRANSPORT_OK;
+}
+
+/* A route must activate with its full signed minimum. Once active, a physical
+ * Relay failure may leave one live path while the agent replaces or retires
+ * the route. Keep that already-established flow alive for one short bounded
+ * interval; explicit path removal clears `started` and cannot enter grace. */
+static bool active_path_requirement_met(vmp_runtime_t *runtime,
+                                        runtime_session_t *session,
+                                        size_t active)
+{
+    if (active >= session->start.minimum_paths) {
+        session->active_failover_deadline_boottime_ms = 0U;
+        return true;
+    }
+    if (!session->started ||
+        session->start.transport_mode !=
+            VMP_TRANSPORT_MODE_MULTIPATH_QUIC ||
+        active == 0U || path_count(session) < session->start.minimum_paths) {
+        return false;
+    }
+    uint64_t now_ms = 0U;
+    if (!read_boottime(runtime, &now_ms)) {
+        session->started = false;
+        return false;
+    }
+    if (session->active_failover_deadline_boottime_ms == 0U) {
+        if (now_ms > UINT64_MAX - VMP_ACTIVE_FAILOVER_GRACE_MS) {
+            session->started = false;
+            return false;
+        }
+        session->active_failover_deadline_boottime_ms =
+            now_ms + VMP_ACTIVE_FAILOVER_GRACE_MS;
+    }
+    if (now_ms >= session->active_failover_deadline_boottime_ms) {
+        session->started = false;
+        return false;
+    }
+    return true;
 }
 
 static bool session_authorization_matches(
@@ -1287,6 +1327,7 @@ static void dispatch_start(vmp_runtime_t *runtime,
         return;
     }
     session->started = true;
+    session->active_failover_deadline_boottime_ms = 0U;
     set_result(response, VMP_RESULT_OK, "ok");
     response->has_tunnel_assignment = true;
     memcpy(&response->tunnel_assignment, &assignment, sizeof(assignment));
@@ -1488,7 +1529,7 @@ static bool require_active(vmp_runtime_t *runtime, runtime_session_t *session,
     }
     secure_zero(&assignment, sizeof(assignment));
     if (!session->started || !ready || !has_assignment ||
-        active < session->start.minimum_paths) {
+        !active_path_requirement_met(runtime, session, active)) {
         set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
                    "required_paths_not_active");
         return false;
@@ -1736,7 +1777,7 @@ static void dispatch_status(vmp_runtime_t *runtime,
         return;
     }
     if (!session->started || !ready || !has_assignment ||
-        active < session->start.minimum_paths) {
+        !active_path_requirement_met(runtime, session, active)) {
         set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
                    "required_paths_not_active");
         return;

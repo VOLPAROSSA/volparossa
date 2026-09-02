@@ -837,6 +837,26 @@ static void test_required_multipath_and_honest_failures(void)
     assert(response.paths[1].delivery_rate_bps == UINT64_C(1640));
     assert(!response.paths[1].data_carrying);
 
+    /* A physical Relay failure may degrade one retained path after genuine
+     * two-path activation. Existing flow I/O and status remain available on
+     * the surviving path, but only for the native 30-second failover grace. */
+    mock.paths[0].state = VMP_TRANSPORT_PATH_DEGRADED;
+    response = dispatch(runtime, &send);
+    assert(response.result == VMP_RESULT_OK);
+    response = dispatch(runtime, &status);
+    assert(response.result == VMP_RESULT_OK);
+    clock.boottime_ms += UINT64_C(29999);
+    response = dispatch(runtime, &send);
+    assert(response.result == VMP_RESULT_OK);
+    ++clock.boottime_ms;
+    response = dispatch(runtime, &send);
+    assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
+
+    /* Restoring the full signed path set permits an explicit Start retry. */
+    mock.paths[0].state = VMP_TRANSPORT_PATH_ACTIVE;
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_OK);
+
     vmp_request_t remove;
     memset(&remove, 0, sizeof(remove));
     remove.api_version = VMP_API_VERSION;
