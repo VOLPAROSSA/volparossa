@@ -9598,6 +9598,7 @@ impl DiscoveryRuntime {
             .prepared_production_exit_routes
             .remove(&route_context_id)
         else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_OWNER_LOST").await;
             self.send_pending_mptcp_exit_unavailable(pending);
             return;
         };
@@ -9608,25 +9609,58 @@ impl DiscoveryRuntime {
             .map(volparossa_discovery::MptcpSessionPathProof::signed_relay_reservation)
             .collect::<Vec<_>>();
         let native_scope = route.bundle.accepted().native_route_authorization_scope();
-        let active_route = self.exit_service.as_mut().and_then(|service| {
-            service
-                .bind_tcp_route(route.bundle.accepted(), &relay_reservations, now_ms)
-                .ok()
-        });
-        let native_authorization = self.exit_service.as_mut().and_then(|service| {
-            service
-                .take_native_route_authorization(&native_scope, now_ms)
-                .ok()
-        });
-        let (Some(active_route), Some(native_authorization), Some(commit)) =
-            (active_route, native_authorization, route.commit.take())
-        else {
+        let active_route = match self.exit_service.as_mut().map(|service| {
+            service.bind_tcp_route(route.bundle.accepted(), &relay_reservations, now_ms)
+        }) {
+            Some(Ok(active)) => active,
+            Some(Err(error)) => {
+                tracing::warn!(%error, "MPTCP Exit route binding rejected");
+                log_reservation_event(state, "MPTCP_SESSION_EXIT_ROUTE_BINDING_REJECTED").await;
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+                self.send_pending_mptcp_exit_unavailable(pending);
+                return;
+            }
+            None => {
+                log_reservation_event(state, "MPTCP_SESSION_EXIT_SERVICE_LOST").await;
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+                self.send_pending_mptcp_exit_unavailable(pending);
+                return;
+            }
+        };
+        let native_authorization = match self
+            .exit_service
+            .as_mut()
+            .map(|service| service.take_native_route_authorization(&native_scope, now_ms))
+        {
+            Some(Ok(authorization)) => authorization,
+            Some(Err(error)) => {
+                tracing::warn!(%error, "MPTCP Exit native authorization rejected");
+                log_reservation_event(state, "MPTCP_SESSION_EXIT_NATIVE_AUTHORIZATION_REJECTED")
+                    .await;
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+                self.send_pending_mptcp_exit_unavailable(pending);
+                return;
+            }
+            None => {
+                log_reservation_event(state, "MPTCP_SESSION_EXIT_SERVICE_LOST").await;
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+                self.send_pending_mptcp_exit_unavailable(pending);
+                return;
+            }
+        };
+        let Some(commit) = route.commit.take() else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_COMMIT_OWNER_LOST").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
             return;
         };
         if !exact_mptcp_exit_commit(&route, &commit, &selected_path_ids) {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_COMMIT_SCOPE_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
@@ -9634,12 +9668,14 @@ impl DiscoveryRuntime {
         }
         let Some(reservation_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.reservation_id)
         else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_RESERVATION_ID_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
             return;
         };
         let Ok(certificate_der) = route_certificate_der(&native_authorization) else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_CERTIFICATE_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
@@ -9652,6 +9688,7 @@ impl DiscoveryRuntime {
             selected_path_ids,
             certificate_der,
         ) else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_SIGNAL_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
@@ -9661,6 +9698,7 @@ impl DiscoveryRuntime {
             &wire_signal,
             &native_authorization.public_identity().certificate_sha256,
         ) else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_LISTENER_SIGNAL_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
@@ -9671,6 +9709,7 @@ impl DiscoveryRuntime {
             usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
         )
         .ok() else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_SIGNAL_ENCODING_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
@@ -9683,6 +9722,7 @@ impl DiscoveryRuntime {
             .await
             .is_err()
         {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_HELPER_COMMIT_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
@@ -9692,6 +9732,7 @@ impl DiscoveryRuntime {
             ExitMptcpTransport::acquire_and_activate(&self.helper, listener_signal, context_handle)
                 .await
         else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_TRANSPORT_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
@@ -9702,6 +9743,7 @@ impl DiscoveryRuntime {
             .local_addr()
             .is_ok_and(|address| address.port() == PRODUCTION_MPTCP_EXIT_PORT)
         {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_LISTENER_ADDRESS_REJECTED").await;
             let _ = transport.shutdown(&self.helper).await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
@@ -9710,6 +9752,7 @@ impl DiscoveryRuntime {
         }
         let expires_at_ms = route.expires_at_ms;
         let Some(exit_service) = self.exit_service.as_ref() else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_SERVICE_LOST").await;
             let _ = transport.shutdown(&self.helper).await;
             self.retire_production_exit_route(route_context_id, route)
                 .await;
@@ -9760,6 +9803,7 @@ impl DiscoveryRuntime {
             .active_production_mptcp_exit_routes
             .contains_key(&route_context_id)
         {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_ACTIVE_OWNER_CONFLICT").await;
             self.retire_active_mptcp_exit_route(route_context_id, active)
                 .await;
             self.send_pending_mptcp_exit_unavailable(pending);
