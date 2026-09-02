@@ -1231,7 +1231,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   mint, but the existing hard filter rejects their output until an actual helper-backed native-path
   sampler proves dataplane address usability. A private production-owned native attempt owner now
   consumes the exact Prepared handoff from local Connect while the five-second receipts remain live
-  and mints a separate at-most-30-second endpoint-separated client/wire/verifier/data-Relay affine
+  and mints a separate at-most-five-minute endpoint-separated client/wire/verifier/data-Relay affine
   contract. It does not extend the receipts or claim usability. A separate module-private,
   non-Clone Exit wire-phase owner can retain a Permit through one production-composed server-side
   caller. That caller validates the full forwarding scope, current exact control capability and locally

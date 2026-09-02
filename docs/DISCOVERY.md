@@ -461,7 +461,7 @@ Permit stage, which grants no reservation or route authority.
 
 The production-owned child consumes Prepared evidence while its signed five-second receipts remain live,
 then discards all control-plane reachability observations and mints an independently expiring
-native attempt of at most 30 seconds. It binds an endpoint-free set of two to nine candidates—the
+native attempt of at most five minutes. It binds an endpoint-free set of two to nine candidates—the
 control Relay plus one to eight alternatives—and one affine authority per exact Relay-to-Exit path.
 This is only a client-owner, v4 wire/verifier and data-Relay affine-producer foundation. Endpoint
 visibility stays role-separated: the client sees only Relay-Client readiness, while the selected

@@ -3,7 +3,7 @@
 //! This child consumes one exact A1 handoff while its five-second signed receipts are still
 //! live, then discards every control-plane reachability observation. It retains only immutable
 //! actor, policy, transport, family and configured-capacity commitments plus the opaque original
-//! snapshot. The newly minted authority is independently bounded to thirty seconds. Nothing in
+//! snapshot. The newly minted authority is independently bounded to five minutes. Nothing in
 //! this module marks a network address usable or advances route selection.
 
 use std::{

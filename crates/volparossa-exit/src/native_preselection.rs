@@ -1282,7 +1282,7 @@ mod tests {
     use crate::ExitServiceConfig;
 
     const NOW_MS: u64 = 1_900_000_000_000;
-    const ATTEMPT_EXPIRY_MS: u64 = NOW_MS + 30_000;
+    const ATTEMPT_EXPIRY_MS: u64 = NOW_MS + MAX_NATIVE_PROBE_LIFETIME_MS;
     const PROBE_ID: [u8; ID_BYTES] = [2; ID_BYTES];
     const CHALLENGE: [u8; NONCE_BYTES] = [7; NONCE_BYTES];
     const EXIT_HELPER_RUNTIME: [u8; NODE_ID_BYTES] = [0xe1; NODE_ID_BYTES];

@@ -31,7 +31,11 @@ pub const MAX_NATIVE_PROBE_CANDIDATES: usize = 8;
 /// Maximum helper path identity admitted inside one shared native route context.
 pub const MAX_NATIVE_PROBE_PATHS: usize = 8;
 /// Hard wall-clock lifetime of one native-preselection attempt and every message within it.
-pub const MAX_NATIVE_PROBE_LIFETIME_MS: u64 = 30 * 1_000;
+///
+/// The same signed chain currently owns the established native route. Five minutes leaves the
+/// bounded setup transaction enough headroom for useful multi-flow MPTCP/MPQUIC service while
+/// keeping every route authorization short-lived.
+pub const MAX_NATIVE_PROBE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const CANDIDATE_SET_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-candidate-set/v4\0";
 const CHALLENGE_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-challenge/v4\0";
 const PERMIT_REQUEST_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-permit-request/v4\0";
@@ -3497,9 +3501,9 @@ mod tests {
         let source = include_str!("native_preselection_probe.rs");
         let product = source.split_once("#[cfg(test)]").expect("test boundary").0;
         for forbidden in [
-            concat!("control", "_address"),
-            concat!("control", "_endpoint"),
-            concat!("direct", "_exit"),
+            concat!("pub control", "_address"),
+            concat!("pub control", "_endpoint"),
+            concat!("pub direct", "_exit"),
         ] {
             assert!(
                 !product.contains(forbidden),

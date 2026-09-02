@@ -273,7 +273,7 @@ reservation, route, usability or datapath authority.
 Tags 19 through 25 define an endpoint-separated native-probe transcript and affine verification
 states. The private client owner consumes the exact Prepared handoff before its signed five-second
 receipt window closes, discards the control-plane reachability observations and mints a distinct
-attempt bounded to at most 30 seconds by policy and actor expiry. This does not extend or reinterpret
+attempt bounded to at most five minutes by policy and actor expiry. This does not extend or reinterpret
 the original receipt lifetime. One candidate set contains the control Relay plus one to eight other
 data Relays, for two to nine preselection candidates total; later route selection still admits at
 most eight paths.
