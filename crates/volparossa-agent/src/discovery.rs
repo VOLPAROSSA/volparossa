@@ -642,6 +642,7 @@ struct PendingNativeProbeReady {
 
 struct PreparedNativeProbeReady {
     authenticated_client_peer: Libp2pPeerId,
+    authorized_relay: DirectRelayCapability,
     ready: IssuedNativeProbeRelayReady,
     endpoint: RelayEndpointLease,
     helper_owner: RuntimeBoundPreparedLeaseBatch,
@@ -651,6 +652,7 @@ struct PreparedNativeProbeReady {
 struct ExitNativeReadyAttempt {
     helper_owner: RuntimeBoundPreparedLeaseBatch,
     exit_leases: Vec<ExitEndpointLease>,
+    authorized_data_relays: HashMap<u32, DirectRelayCapability>,
     ready_paths: HashSet<u32>,
     pending_activations: HashMap<u32, LeaseActivation>,
     activated: bool,
@@ -679,6 +681,7 @@ struct PendingExitNativeProbeResult {
 /// Exit dispatch.
 struct PreparedNativeProbeAuthorization {
     authenticated_client_peer: Libp2pPeerId,
+    authorized_relay: DirectRelayCapability,
     start: VerifiedNativeProbeStartForRelay,
     endpoint: RelayEndpointLease,
 }
@@ -6250,21 +6253,31 @@ impl DiscoveryRuntime {
         let Some(exit_node_id) = fixed_bytes::<32>(&exit.node_id) else {
             reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
         };
-        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+        if !self.local_relay_snapshot.as_ref().is_some_and(|current| {
+            local_relay_policy_is_current(
+                current,
+                &scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
+        }) {
             reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
-        };
-        let Some(signed_relay_advertisement) = self.served_local_advertisement.clone() else {
-            reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
-        };
-        if !self.permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
-            || !native_probe_data_relay_capability_matches(
-                &authorized_control,
+        }
+        let Some((authorized_control, signed_relay_advertisement)) =
+            local_native_probe_data_relay_authority(
+                &self.service,
                 data_relay,
                 &scope,
                 local_peer,
+                now_ms,
                 request.deadline_unix_ms(),
             )
-        {
+        else {
+            reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        if !self.permit_bound_exit_peer_is_eligible(exit_peer, now_ms) {
             reject!("NATIVE_PROBE_READY_EXIT_UNAVAILABLE");
         }
         let Ok(exit_control_address) = Multiaddr::from_str(permit.exit_control_address()) else {
@@ -6483,6 +6496,7 @@ impl DiscoveryRuntime {
         if request.request_id() != authorization_id
             || !self.retain_prepared_native_probe_authorization(
                 authenticated_client_peer,
+                prepared.authorized_relay,
                 start,
                 prepared.endpoint,
             )
@@ -6524,6 +6538,7 @@ impl DiscoveryRuntime {
     fn retain_prepared_native_probe_authorization(
         &mut self,
         authenticated_client_peer: Libp2pPeerId,
+        authorized_relay: DirectRelayCapability,
         start: VerifiedNativeProbeStartForRelay,
         endpoint: RelayEndpointLease,
     ) -> bool {
@@ -6546,6 +6561,13 @@ impl DiscoveryRuntime {
             || data_relay.node_id.as_slice() != self.local_node_id
             || data_relay.peer_id != local_peer.to_bytes()
             || data_relay.public_key.as_slice() != self.local_public_key
+            || !native_probe_data_relay_capability_matches(
+                &authorized_relay,
+                data_relay,
+                scope,
+                local_peer,
+                scope.attempt_expires_at_ms,
+            )
             || endpoint.route_context_id().as_slice() != scope.attempt_id
             || endpoint.path_id() != scope.candidate_ordinal
             || self.prepared_native_authorizations.len() >= MAX_CONCURRENT_DATAPATH_RELAY_STREAMS
@@ -6562,6 +6584,7 @@ impl DiscoveryRuntime {
             request_id,
             PreparedNativeProbeAuthorization {
                 authenticated_client_peer,
+                authorized_relay,
                 start,
                 endpoint,
             },
@@ -6647,9 +6670,19 @@ impl DiscoveryRuntime {
         let Some(exit_node_id) = fixed_bytes::<32>(&exit.node_id) else {
             reject!("NATIVE_PROBE_AUTHORIZATION_SCOPE_REJECTED");
         };
-        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+        if !self.local_relay_snapshot.as_ref().is_some_and(|current| {
+            local_relay_policy_is_current(
+                current,
+                scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
+        }) {
             reject!("NATIVE_PROBE_AUTHORIZATION_RELAY_AUTHORITY_UNAVAILABLE");
-        };
+        }
+        let authorized_control = prepared.authorized_relay.clone();
         if !self.permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
             || !native_probe_data_relay_capability_matches(
                 &authorized_control,
@@ -7439,6 +7472,7 @@ impl DiscoveryRuntime {
                 native.datapath_request_id,
                 PreparedNativeProbeReady {
                     authenticated_client_peer: native.authenticated_client_peer,
+                    authorized_relay: pending.authorized_control.clone(),
                     ready,
                     endpoint: native.endpoint,
                     helper_owner: native.helper_owner,
@@ -10080,27 +10114,23 @@ impl DiscoveryRuntime {
             || exit_node_id != self.local_node_id
             || exit_peer != local_peer
             || exit_peer == authenticated_control_relay
-            || !native_probe_control_capability_matches(
+            || !native_probe_control_capability_lineage_matches(
                 current_control,
                 control,
                 &scope,
                 authenticated_control_relay,
                 request.deadline_unix_ms(),
+                now_ms,
             )
-            || !self
-                .served_local_advertisement
-                .as_ref()
-                .is_some_and(|advertisement| {
-                    local_native_probe_exit_actor_matches(
-                        advertisement,
-                        exit,
-                        &scope,
-                        self.local_node_id,
-                        local_peer,
-                        self.local_public_key,
-                        now_ms,
-                    )
-                })
+            || !local_native_probe_exit_actor_is_served(
+                &self.service,
+                exit,
+                &scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
         {
             return None;
         }
@@ -10193,34 +10223,35 @@ impl DiscoveryRuntime {
         let data_relay_peer = Libp2pPeerId::from_bytes(request.control_relay_peer_id()).ok()?;
         let exit_node_id = fixed_bytes::<32>(request.exit_node_id())?;
         let exit_peer = Libp2pPeerId::from_bytes(request.exit_peer_id()).ok()?;
+        let attempt_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id)?;
+        let path_id = scope.candidate_ordinal;
         let local_peer = *self.service.local_peer_id();
-        let current_data_relay = self.direct_relays.get(&authenticated_data_relay)?;
+        let authorized_data_relay = self
+            .exit_native_ready_attempts
+            .get(&attempt_id)?
+            .authorized_data_relays
+            .get(&path_id)?;
         if data_relay_peer != authenticated_data_relay
-            || data_relay_public_key != current_data_relay.public_key
+            || data_relay_public_key != authorized_data_relay.public_key
             || exit_node_id != self.local_node_id
             || exit_peer != local_peer
             || exit_peer == authenticated_data_relay
             || !native_probe_data_relay_capability_matches(
-                current_data_relay,
+                authorized_data_relay,
                 data_relay,
                 &scope,
                 authenticated_data_relay,
                 request.deadline_unix_ms(),
             )
-            || !self
-                .served_local_advertisement
-                .as_ref()
-                .is_some_and(|advertisement| {
-                    local_native_probe_exit_actor_matches(
-                        advertisement,
-                        exit,
-                        &scope,
-                        self.local_node_id,
-                        local_peer,
-                        self.local_public_key,
-                        now_ms,
-                    )
-                })
+            || !local_native_probe_exit_actor_is_served(
+                &self.service,
+                exit,
+                &scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
         {
             return None;
         }
@@ -10243,8 +10274,6 @@ impl DiscoveryRuntime {
                 |message| identity.sign(message).ok(),
             )
             .ok()?;
-        let attempt_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id)?;
-        let path_id = scope.candidate_ordinal;
         let relay_endpoint = verified_chain.relay_exit_endpoint().endpoint.as_ref()?;
         let accepted_encoded = accepted.encoded().to_vec();
         let accepted_chain = accepted.authorization_chain().to_vec();
@@ -10457,18 +10486,23 @@ impl DiscoveryRuntime {
         else {
             reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
         };
+        let path_id = scope.candidate_ordinal;
         let local_peer = *self.service.local_peer_id();
-        let Some(current_data_relay) = self.direct_relays.get(&authenticated_data_relay) else {
+        let Some(authorized_data_relay) = self
+            .exit_native_ready_attempts
+            .get(&attempt_id)
+            .and_then(|attempt| attempt.authorized_data_relays.get(&path_id))
+        else {
             reject!("NATIVE_PROBE_RESULT_EXIT_RELAY_REJECTED");
         };
         if request.control_relay_peer_id() != authenticated_data_relay.to_bytes()
-            || request.control_relay_public_key() != current_data_relay.public_key
+            || request.control_relay_public_key() != authorized_data_relay.public_key
             || request.exit_node_id() != self.local_node_id
             || request.exit_peer_id() != local_peer.to_bytes()
             || exit.node_id != self.local_node_id
             || exit.peer_id != local_peer.to_bytes()
             || !native_probe_data_relay_capability_matches(
-                current_data_relay,
+                authorized_data_relay,
                 data_relay,
                 &scope,
                 authenticated_data_relay,
@@ -10487,7 +10521,6 @@ impl DiscoveryRuntime {
         let Some(attempt) = self.exit_native_ready_attempts.get_mut(&attempt_id) else {
             reject!("NATIVE_PROBE_RESULT_EXIT_OWNER_UNAVAILABLE");
         };
-        let path_id = scope.candidate_ordinal;
         if !attempt.activated
             || !attempt.ready_paths.contains(&path_id)
             || !attempt.probe_tasks.contains_key(&path_id)
@@ -10748,27 +10781,22 @@ impl DiscoveryRuntime {
             || request.exit_peer_id() != local_peer.to_bytes()
             || data_relay.node_id.as_slice() != data_relay_node_id
             || data_relay.public_key.as_slice() != data_relay_public_key
-            || !self
-                .served_local_advertisement
-                .as_ref()
-                .is_some_and(|advertisement| {
-                    local_native_probe_exit_actor_matches(
-                        advertisement,
-                        exit,
-                        &scope,
-                        self.local_node_id,
-                        local_peer,
-                        self.local_public_key,
-                        now_ms,
-                    )
-                })
+            || !local_native_probe_exit_actor_is_served(
+                &self.service,
+                exit,
+                &scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
         {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         }
-        let current_data_relay_matches = self
+        let current_data_relay = self
             .direct_relays
             .get(&authenticated_data_relay)
-            .is_some_and(|current| {
+            .filter(|current| {
                 native_probe_data_relay_capability_matches(
                     current,
                     data_relay,
@@ -10776,8 +10804,11 @@ impl DiscoveryRuntime {
                     authenticated_data_relay,
                     request.deadline_unix_ms(),
                 )
-            });
-        if !current_data_relay_matches {
+            })
+            .cloned();
+        let authorized_data_relay = if let Some(current) = current_data_relay {
+            current
+        } else {
             if has_active_privacy_conflict(
                 &self.privacy_conflicts,
                 self.forwarded_exit_fail_closed_until_ms,
@@ -10804,21 +10835,27 @@ impl DiscoveryRuntime {
             ) {
                 reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
             }
-            if self
-                .direct_relays
-                .get(&authenticated_data_relay)
-                .is_some_and(|current| {
-                    current.node_id != capability.node_id
+            let replace_cached = match self.direct_relays.get(&authenticated_data_relay) {
+                Some(current)
+                    if current.node_id != capability.node_id
                         || current.public_key != capability.public_key
                         || current.peer_id != capability.peer_id
-                        || current.advertisement_sequence >= capability.advertisement_sequence
-                })
-            {
-                reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+                        || current.policy_version != capability.policy_version
+                        || current.policy_hash != capability.policy_hash
+                        || current.policy_expires_at_ms != capability.policy_expires_at_ms
+                        || current.advertisement_sequence == capability.advertisement_sequence =>
+                {
+                    reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+                }
+                Some(current) => current.advertisement_sequence < capability.advertisement_sequence,
+                None => true,
+            };
+            if replace_cached {
+                self.direct_relays
+                    .insert(authenticated_data_relay, capability.clone());
             }
-            self.direct_relays
-                .insert(authenticated_data_relay, capability);
-        }
+            capability
+        };
         let Some(prepare) = native_service_prepare_request(
             &scope,
             ContextRole::Exit,
@@ -10863,6 +10900,9 @@ impl DiscoveryRuntime {
                 ExitNativeReadyAttempt {
                     helper_owner,
                     exit_leases: exit_batch.exit_leases().to_vec(),
+                    authorized_data_relays: HashMap::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
                     ready_paths: HashSet::with_capacity(
                         usize::try_from(scope.required_path_count).unwrap_or(0),
                     ),
@@ -10935,7 +10975,12 @@ impl DiscoveryRuntime {
         let Some(attempt) = self.exit_native_ready_attempts.get_mut(&attempt_id) else {
             reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
         };
-        if !attempt.ready_paths.insert(scope.candidate_ordinal) {
+        if attempt
+            .authorized_data_relays
+            .insert(scope.candidate_ordinal, authorized_data_relay)
+            .is_some()
+            || !attempt.ready_paths.insert(scope.candidate_ordinal)
+        {
             reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
         }
         let response = ExitForwardResponse::granted(
@@ -13652,6 +13697,52 @@ fn native_probe_control_capability_matches(
         && capability.expires_at_ms >= required_until_ms
 }
 
+/// Accept an exact control-Relay capability or a still-live predecessor of its current one.
+///
+/// A Relay may refresh its signed service advertisement while an already client-signed native
+/// attempt remains live. The authenticated connection and current discovery capability still have
+/// to name the exact same node, Peer ID, key and policy. Only a strictly newer current sequence may
+/// stand in for the old cache entry, and both the committed actor and current capability must cover
+/// the operation deadline. The old payload hash remains bound by the verified Permit request; this
+/// check never rewrites or downgrades the current discovery cache.
+fn native_probe_control_capability_lineage_matches(
+    current: &DirectRelayCapability,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    required_until_ms: u64,
+    now_ms: u64,
+) -> bool {
+    if native_probe_control_capability_matches(
+        current,
+        actor,
+        scope,
+        authenticated_peer,
+        required_until_ms,
+    ) {
+        return true;
+    }
+
+    scope.control.as_ref() == Some(actor)
+        && actor.node_id.as_slice() == current.node_id
+        && actor.peer_id == current.peer_id.to_bytes()
+        && actor.public_key.as_slice() == current.public_key
+        && actor.advertisement_sequence > 0
+        && actor.advertisement_sequence < current.advertisement_sequence
+        && fixed_bytes::<32>(&actor.advertisement_payload_hash).is_some_and(|hash| hash != [0; 32])
+        && actor.advertisement_expires_at_ms >= required_until_ms
+        && actor.capability_expires_at_ms >= required_until_ms
+        && actor.capability_expires_at_ms <= actor.advertisement_expires_at_ms
+        && actor.capability_expires_at_ms <= scope.policy_expires_at_ms
+        && current.peer_id == authenticated_peer
+        && current.policy_version == scope.policy_version
+        && current.policy_hash.as_slice() == scope.policy_hash
+        && current.policy_expires_at_ms == scope.policy_expires_at_ms
+        && current.advertisement_expires_at_ms > now_ms
+        && current.advertisement_expires_at_ms >= required_until_ms
+        && current.expires_at_ms >= required_until_ms
+}
+
 fn native_probe_data_relay_capability_matches(
     capability: &DirectRelayCapability,
     actor: &PreselectionActorBinding,
@@ -13674,6 +13765,23 @@ fn native_probe_data_relay_capability_matches(
         && capability.policy_hash.as_slice() == scope.policy_hash
         && capability.policy_expires_at_ms == scope.policy_expires_at_ms
         && capability.expires_at_ms >= required_until_ms
+}
+
+fn local_relay_policy_is_current(
+    capability: &DirectRelayCapability,
+    scope: &NativeProbePathScope,
+    local_node_id: [u8; 32],
+    local_peer_id: Libp2pPeerId,
+    local_public_key: [u8; 32],
+    now_ms: u64,
+) -> bool {
+    capability.node_id == local_node_id
+        && capability.peer_id == local_peer_id
+        && capability.public_key == local_public_key
+        && capability.policy_version == scope.policy_version
+        && capability.policy_hash.as_slice() == scope.policy_hash
+        && capability.policy_expires_at_ms == scope.policy_expires_at_ms
+        && capability.expires_at_ms > now_ms
 }
 
 /// Reconstruct the exact data-Relay capability carried by a native Ready request.
@@ -13754,6 +13862,56 @@ fn native_probe_data_relay_capability_from_advertisement(
         policy_hash,
         policy_expires_at_ms: scope.policy_expires_at_ms,
         expires_at_ms: actor.capability_expires_at_ms,
+    })
+}
+
+/// Recover the exact still-valid local Relay authority committed by a native scope.
+///
+/// Publication refresh is intentionally independent from an already signed attempt. Search the
+/// bounded served lineage and reverify every candidate instead of substituting the current local
+/// advertisement for the actor that the Permit actually names.
+fn local_native_probe_data_relay_authority(
+    service: &DiscoveryService,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    local_peer: Libp2pPeerId,
+    now_ms: u64,
+    required_until_ms: u64,
+) -> Option<(DirectRelayCapability, Vec<u8>)> {
+    service.bounded_local_advertisements().find_map(|encoded| {
+        let capability = native_probe_data_relay_capability_from_advertisement(
+            encoded, actor, scope, local_peer, now_ms,
+        )?;
+        native_probe_data_relay_capability_matches(
+            &capability,
+            actor,
+            scope,
+            local_peer,
+            required_until_ms,
+        )
+        .then(|| (capability, encoded.to_vec()))
+    })
+}
+
+fn local_native_probe_exit_actor_is_served(
+    service: &DiscoveryService,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    local_node_id: [u8; 32],
+    local_peer_id: Libp2pPeerId,
+    local_public_key: [u8; 32],
+    now_ms: u64,
+) -> bool {
+    service.bounded_local_advertisements().any(|encoded| {
+        local_native_probe_exit_actor_matches(
+            encoded,
+            actor,
+            scope,
+            local_node_id,
+            local_peer_id,
+            local_public_key,
+            now_ms,
+        )
     })
 }
 
@@ -16041,6 +16199,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_permit_accepts_live_control_actor_after_same_identity_refresh() {
+        let fixture = native_permit_forward_fixture();
+        let actor = fixture.scope.control.as_ref().expect("control actor");
+        let peer = fixture.control.peer_id;
+        let deadline = fixture.request.deadline_unix_ms();
+        let mut refreshed = fixture.control.clone();
+        refreshed.advertisement_sequence = refreshed.advertisement_sequence.saturating_add(1);
+        refreshed.advertisement_payload_hash = refreshed.advertisement_payload_hash.xor_for_test();
+
+        assert!(!native_probe_control_capability_matches(
+            &refreshed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        assert!(native_probe_control_capability_lineage_matches(
+            &refreshed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut substituted_identity = refreshed.clone();
+        substituted_identity.public_key[0] ^= 1;
+        assert!(!native_probe_control_capability_lineage_matches(
+            &substituted_identity,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut rolled_back = refreshed;
+        rolled_back.advertisement_sequence = actor.advertisement_sequence.saturating_sub(1);
+        assert!(!native_probe_control_capability_lineage_matches(
+            &rolled_back,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_ready_recovers_exact_previous_local_relay_advertisement_after_refresh() {
+        let roles = RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        };
+        let mut fixture = fixture(roles);
+        let now_ms = unix_millis();
+        let required_until_ms = now_ms.saturating_add(5_000);
+        let original = service_advertisement(
+            &fixture.runtime.identity,
+            roles,
+            &fixture.policy,
+            41,
+            [0xa1; 32],
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let original_envelope: SignedEnvelope =
+            decode_canonical(&original, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE)
+                .expect("original local Relay envelope");
+        let actor = actor_from_signed_advertisement(
+            &original,
+            &fixture.runtime.identity,
+            original_envelope
+                .expires_at_ms
+                .min(fixture.policy.expires_at_ms()),
+            now_ms,
+        );
+        let scope = NativeProbePathScope {
+            attempt_id: vec![0xb1; FORWARD_ID_BYTES],
+            probe_id: vec![0xb2; FORWARD_ID_BYTES],
+            candidate_set_hash: vec![0xb3; 32],
+            candidate_ordinal: 1,
+            data_relay: Some(actor.clone()),
+            control: None,
+            exit: None,
+            client_session_id: vec![0xb4; 32],
+            client_session_public_key: vec![0xb5; 32],
+            transport: Transport::UdpSinglePath as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: fixture.policy.manifest_version(),
+            policy_hash: fixture.policy.policy_hash().to_vec(),
+            policy_expires_at_ms: fixture.policy.expires_at_ms(),
+            challenge_hash: vec![0xb6; 32],
+            attempt_expires_at_ms: required_until_ms,
+            required_path_count: 1,
+        };
+        fixture
+            .runtime
+            .service
+            .set_local_advertisement(original.clone())
+            .expect("install original local Relay advertisement");
+
+        let replacement = service_advertisement(
+            &fixture.runtime.identity,
+            roles,
+            &fixture.policy,
+            42,
+            [0xa2; 32],
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        fixture
+            .runtime
+            .service
+            .set_local_advertisement(replacement.clone())
+            .expect("refresh local Relay advertisement");
+
+        assert!(
+            native_probe_data_relay_capability_from_advertisement(
+                &replacement,
+                &actor,
+                &scope,
+                *fixture.runtime.service.local_peer_id(),
+                now_ms,
+            )
+            .is_none(),
+            "the current advertisement must not be substituted for the signed actor"
+        );
+        let (capability, encoded) = local_native_probe_data_relay_authority(
+            &fixture.runtime.service,
+            &actor,
+            &scope,
+            *fixture.runtime.service.local_peer_id(),
+            now_ms,
+            required_until_ms,
+        )
+        .expect("exact still-valid previous Relay authority");
+        assert_eq!(encoded, original);
+        assert!(native_probe_data_relay_capability_matches(
+            &capability,
+            &actor,
+            &scope,
+            *fixture.runtime.service.local_peer_id(),
+            required_until_ms,
+        ));
+    }
+
+    #[tokio::test]
     async fn native_permit_local_exit_actor_requires_current_signed_role_and_policy() {
         let fixture = native_permit_forward_fixture();
         let runtime = &fixture.fixture.runtime;
@@ -16136,6 +16447,58 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn native_exit_accepts_exact_previous_local_advertisement_after_refresh() {
+        let mut fixture = native_permit_forward_fixture();
+        let actor = fixture.scope.exit.as_ref().expect("Exit actor").clone();
+        fixture
+            .fixture
+            .runtime
+            .service
+            .set_local_advertisement(fixture.local_advertisement.clone())
+            .expect("install original local Exit advertisement");
+        let replacement = service_advertisement(
+            &fixture.fixture.runtime.identity,
+            RolesConfig {
+                client: true,
+                relay: false,
+                exit: true,
+            },
+            &fixture.fixture.policy,
+            actor.advertisement_sequence.saturating_add(1),
+            [0x75; 32],
+            fixture.now_ms,
+            &fixture.fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        fixture
+            .fixture
+            .runtime
+            .service
+            .set_local_advertisement(replacement.clone())
+            .expect("refresh local Exit advertisement");
+        let runtime = &fixture.fixture.runtime;
+        assert!(!local_native_probe_exit_actor_matches(
+            &replacement,
+            &actor,
+            &fixture.scope,
+            runtime.local_node_id,
+            *runtime.service.local_peer_id(),
+            runtime.local_public_key,
+            fixture.now_ms,
+        ));
+        assert!(local_native_probe_exit_actor_is_served(
+            &runtime.service,
+            &actor,
+            &fixture.scope,
+            runtime.local_node_id,
+            *runtime.service.local_peer_id(),
+            runtime.local_public_key,
+            fixture.now_ms,
+        ));
+    }
+
     #[test]
     fn production_session_starts_use_prepared_route_proofs_without_advertisement_cache() {
         let source = include_str!("discovery.rs");
@@ -16224,7 +16587,7 @@ mod tests {
             .find(".request_exit_forward_upstream(&exit_peer")
             .expect("exact Permit Exit dispatch");
         assert!(permit < eligibility && eligibility < dispatch);
-        assert!(ready.contains("native_probe_data_relay_capability_matches("));
+        assert!(ready.contains("local_native_probe_data_relay_authority("));
         assert!(!ready.contains("exit_provider_peers"));
 
         let authorization = braced_item(production, "async fn begin_native_probe_authorization(");
@@ -16316,11 +16679,11 @@ mod tests {
             1,
         );
         let capability_check = caller
-            .find("native_probe_control_capability_matches(")
-            .expect("current control capability check");
+            .find("native_probe_control_capability_lineage_matches(")
+            .expect("current control capability lineage check");
         let local_advertisement_check = caller
-            .find("local_native_probe_exit_actor_matches(")
-            .expect("current local Exit advertisement check");
+            .find("local_native_probe_exit_actor_is_served(")
+            .expect("bounded local Exit advertisement check");
         let connection_bind = caller
             .find(".bind_native_probe_control_connection(")
             .expect("event connection bind");

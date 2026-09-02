@@ -1214,6 +1214,21 @@ impl DiscoveryService {
         self.local_advertisement.is_some()
     }
 
+    /// Borrows the bounded set of signed local advertisements that may still authorize an
+    /// in-flight operation, newest first.
+    ///
+    /// The first item is the advertisement currently being served. The remaining items are the
+    /// bounded, most-recently-served lineage retained by the preselection responder. These bytes
+    /// carry no authority by themselves: callers must independently verify the signature,
+    /// lifetime, policy and exact actor binding for their operation.
+    pub fn bounded_local_advertisements(&self) -> impl Iterator<Item = &[u8]> {
+        self.local_advertisement.iter().map(Vec::as_slice).chain(
+            self.preselection_responder
+                .local_advertisement_lineage()
+                .rev(),
+        )
+    }
+
     /// Requests a selected relay's current signed advertisement.
     ///
     /// Concurrent requests to one peer are deduplicated and the total number of outstanding
