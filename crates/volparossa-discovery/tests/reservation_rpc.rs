@@ -362,7 +362,7 @@ async fn native_permit_response_dials_kademlia_address_and_consumes_exact_connec
 }
 
 #[tokio::test]
-async fn execute_probe_is_transport_valid_but_production_handler_is_unavailable() {
+async fn execute_probe_reaches_the_local_relay_handler() {
     let client_key = identity::Keypair::generate_ed25519();
     let relay_key = identity::Keypair::generate_ed25519();
     let relay_peer = relay_key.public().to_peer_id();
@@ -390,69 +390,54 @@ async fn execute_probe_is_transport_valid_but_production_handler_is_unavailable(
         signed_envelope(ControlMessageType::RelayProbePermit),
     )
     .expect("canonical probe frame");
+    let expected = request.clone();
+    let client_peer = *client.local_peer_id();
     let outbound = client
         .request_datapath_relay(&relay_peer, request)
         .expect("probe request");
 
-    let response = time::timeout(TEST_TIMEOUT, async {
+    let (authenticated_client, received) = time::timeout(TEST_TIMEOUT, async {
         loop {
             tokio::select! {
                 event = next_other(&mut client) => {
-                    match event {
-                        SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
-                            request_response::Event::Message {
-                                peer,
-                                message: request_response::Message::Response {
-                                    request_id,
-                                    response,
-                                },
-                                ..
-                            },
-                        )) if request_id == outbound => {
-                            assert_eq!(peer, relay_peer);
-                            break response;
-                        }
-                        SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
-                            request_response::Event::OutboundFailure {
-                                request_id,
-                                error,
-                                ..
-                            },
-                        )) if request_id == outbound => {
+                    if let SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
+                        request_response::Event::OutboundFailure {
+                            request_id,
+                            error,
+                            ..
+                        },
+                    )) = event
+                    {
+                        if request_id == outbound {
                             panic!("probe transport failed: {error}");
                         }
-                        _ => {}
                     }
                 }
                 event = next_other(&mut relay) => {
-                    if matches!(
-                        event,
-                        SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
-                            request_response::Event::Message {
-                                message: request_response::Message::Request { .. },
-                                ..
-                            },
-                        ))
-                    ) {
-                        panic!("ExecuteProbe escaped the fail-closed discovery handler");
+                    if let SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
+                        request_response::Event::Message {
+                            peer,
+                            message: request_response::Message::Request { request, .. },
+                            ..
+                        },
+                    )) = event
+                    {
+                        break (peer, request);
                     }
                 }
             }
         }
     })
     .await
-    .expect("probe response timeout");
+    .expect("probe delivery timeout");
 
-    response.validate().expect("canonical unavailable response");
+    assert_eq!(authenticated_client, client_peer);
+    assert_eq!(received, expected);
+    received.validate().expect("canonical probe request");
     assert_eq!(
-        response.validated_operation().expect("operation"),
+        received.validated_operation().expect("operation"),
         DatapathRelayOperation::ExecuteProbe
     );
-    assert_eq!(
-        response.validated_status().expect("status"),
-        ForwardStatus::Unavailable
-    );
-    assert!(response.signed_response().is_empty());
 }
 
 async fn connect(dialer: &mut DiscoveryService, listener: &mut DiscoveryService) {

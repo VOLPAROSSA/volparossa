@@ -1727,17 +1727,6 @@ impl DiscoveryService {
                     {
                         continue;
                     }
-                    if request.validated_operation() == Ok(DatapathRelayOperation::ExecuteProbe) {
-                        if let Ok(response) = DatapathRelayResponse::unavailable(
-                            request.request_id().to_vec(),
-                            DatapathRelayOperation::ExecuteProbe,
-                            request.relay_node_id().to_vec(),
-                            request.relay_peer_id().to_vec(),
-                        ) {
-                            let _ = self.send_datapath_relay_response(channel, response);
-                        }
-                        continue;
-                    }
                     return libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
                         request_response::Event::Message {
                             peer,
