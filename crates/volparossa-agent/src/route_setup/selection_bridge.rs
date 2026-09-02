@@ -3029,6 +3029,10 @@ fn validate_and_allocate_preprobe_plan(
         || selected_at_ms != scope.now_ms
         || selected_at_ms > trusted_now_ms
     {
+        tracing::warn!(
+            stage = "plan-envelope",
+            "prospective route admission validation rejected"
+        );
         return Err(SelectionBridgeError::EvidenceBinding);
     }
     scope.validate()?;
@@ -3060,6 +3064,10 @@ fn validate_and_allocate_preprobe_plan(
         || forwarded_exit.selected.control_diversity != forwarded_exit.control_diversity
         || forwarded_exit.selected.exit_diversity != forwarded_exit.exit_diversity
     {
+        tracing::warn!(
+            stage = "forwarded-exit-binding",
+            "prospective route admission validation rejected"
+        );
         return Err(SelectionBridgeError::EvidenceBinding);
     }
     let control_expiry_ms = forwarded_exit
@@ -3074,38 +3082,74 @@ fn validate_and_allocate_preprobe_plan(
         .min(forwarded_exit.exit.identity.policy_expires_at_ms)
         .min(forwarded_exit.control.identity.expires_at_ms);
     let mut hard_expiry_ceiling_ms = scope.policy.expires_at_ms;
-    hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(validate_preprobe_peer_binding(
-        &forwarded_exit.control,
-        control_expiry_ms,
-        &scope,
-        trusted_now_ms,
-        &mut node_ids,
-        &mut peer_ids,
-        &mut public_keys,
-    )?);
+    hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(
+        validate_preprobe_peer_binding(
+            &forwarded_exit.control,
+            control_expiry_ms,
+            &scope,
+            trusted_now_ms,
+            &mut node_ids,
+            &mut peer_ids,
+            &mut public_keys,
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "control-binding",
+                error = %error,
+                "prospective route admission validation rejected"
+            );
+            error
+        })?,
+    );
     validate_preprobe_peer_evidence(
         &forwarded_exit.control_peer_evidence,
         &forwarded_exit.control_diversity,
         &scope,
         trusted_now_ms,
         &[],
-    )?;
-    hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(validate_preprobe_peer_binding(
-        &forwarded_exit.exit,
-        exit_expiry_ms,
-        &scope,
-        trusted_now_ms,
-        &mut node_ids,
-        &mut peer_ids,
-        &mut public_keys,
-    )?);
+    )
+    .map_err(|error| {
+        tracing::warn!(
+            stage = "control-evidence",
+            error = %error,
+            "prospective route admission validation rejected"
+        );
+        error
+    })?;
+    hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(
+        validate_preprobe_peer_binding(
+            &forwarded_exit.exit,
+            exit_expiry_ms,
+            &scope,
+            trusted_now_ms,
+            &mut node_ids,
+            &mut peer_ids,
+            &mut public_keys,
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "exit-binding",
+                error = %error,
+                "prospective route admission validation rejected"
+            );
+            error
+        })?,
+    );
     validate_preprobe_peer_evidence(
         &forwarded_exit.exit_peer_evidence,
         &forwarded_exit.exit_diversity,
         &scope,
         trusted_now_ms,
         &[&forwarded_exit.control_diversity],
-    )?;
+    )
+    .map_err(|error| {
+        tracing::warn!(
+            stage = "exit-evidence",
+            error = %error,
+            "prospective route admission validation rejected"
+        );
+        error
+    })?;
 
     let mut evidence_expiry_min_ms = forwarded_exit
         .control
@@ -3118,28 +3162,48 @@ fn validate_and_allocate_preprobe_plan(
         &forwarded_exit.control_diversity,
         &forwarded_exit.exit_diversity,
     ];
-    for relay in &prospective_relays {
+    for (relay_index, relay) in prospective_relays.iter().enumerate() {
         let relay_expiry_ms = relay
             .relay
             .identity
             .advertisement_expires_at_ms
             .min(relay.relay.identity.policy_expires_at_ms);
-        hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(validate_preprobe_peer_binding(
-            &relay.relay,
-            relay_expiry_ms,
-            &scope,
-            trusted_now_ms,
-            &mut node_ids,
-            &mut peer_ids,
-            &mut public_keys,
-        )?);
+        hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(
+            validate_preprobe_peer_binding(
+                &relay.relay,
+                relay_expiry_ms,
+                &scope,
+                trusted_now_ms,
+                &mut node_ids,
+                &mut peer_ids,
+                &mut public_keys,
+            )
+            .map_err(|error| {
+                tracing::warn!(
+                    stage = "relay-binding",
+                    relay_index,
+                    error = %error,
+                    "prospective route admission validation rejected"
+                );
+                error
+            })?,
+        );
         validate_preprobe_peer_evidence(
             &relay.peer_evidence,
             &relay.diversity,
             &scope,
             trusted_now_ms,
             &diversity,
-        )?;
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "relay-evidence",
+                relay_index,
+                error = %error,
+                "prospective route admission validation rejected"
+            );
+            error
+        })?;
         relay
             .proof
             .validate_preprobe_binding(
@@ -3150,7 +3214,15 @@ fn validate_and_allocate_preprobe_plan(
                 &current_requirements,
                 batch_id,
             )
-            .map_err(|_| SelectionBridgeError::EvidenceBinding)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    stage = "relay-proof",
+                    relay_index,
+                    error = %error,
+                    "prospective route admission validation rejected"
+                );
+                SelectionBridgeError::EvidenceBinding
+            })?;
         evidence_expiry_min_ms = evidence_expiry_min_ms.min(relay.relay.evidence_valid_until_ms);
         diversity.push(&relay.diversity);
     }
