@@ -944,6 +944,11 @@ async fn run_client_dns_ingress(
 }
 
 async fn stop_task<T>(task: &mut JoinHandle<T>) {
+    // One actor handle may already have been polled to completion by the runtime select above.
+    // Tokio JoinHandles are not fused and panic when polled again after yielding their result.
+    if task.is_finished() {
+        return;
+    }
     if tokio::time::timeout(Duration::from_secs(5), &mut *task)
         .await
         .is_err()
@@ -1013,7 +1018,10 @@ async fn run_maintenance(
                         "POLICY_ACTOR_REFRESH_FAILED",
                         now_ms,
                     );
-                    break;
+                    // Native route setup can keep the single discovery owner busy beyond this
+                    // maintenance call's bounded timeout. The command remains safely queued; a
+                    // transient timeout must not terminate the whole agent process.
+                    continue;
                 }
                 let mut locked = state.write().await;
                 if policy_load_failed {
@@ -1201,6 +1209,29 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_does_not_repoll_a_consumed_actor_handle() {
+        let mut task = tokio::spawn(async { 7_u8 });
+        assert_eq!((&mut task).await.expect("actor task"), 7);
+
+        stop_task(&mut task).await;
+    }
+
+    #[test]
+    fn maintenance_policy_timeout_keeps_the_actor_alive() {
+        let source = include_str!("lib.rs");
+        let refresh_failure = source
+            .split_once("if discovery.apply_policy(policy).await.is_err() {")
+            .expect("maintenance policy refresh branch")
+            .1
+            .split_once("let mut locked = state.write().await;")
+            .expect("maintenance continues with policy state")
+            .0;
+
+        assert!(refresh_failure.contains("continue;"));
+        assert!(!refresh_failure.contains("break;"));
+    }
 
     #[test]
     fn peerstore_is_created_owner_only_and_rejects_unsafe_existing_files() {
