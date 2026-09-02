@@ -473,6 +473,29 @@ capture_worker_network_diagnostics() {
     done
 }
 
+count_worker_wireguard_interfaces() {
+    diagnostic_interface_count=0
+    for diagnostic_node in client relay1 relay2 exit; do
+        diagnostic_unit=volparossa-alpha-helper@$diagnostic_node.service
+        diagnostic_cgroup=$(systemctl show --property=ControlGroup --value \
+            "$diagnostic_unit" 2>/dev/null || true)
+        case $diagnostic_cgroup in /system.slice/*) ;; *) continue ;; esac
+        diagnostic_cgroup_root=/sys/fs/cgroup$diagnostic_cgroup
+        [ -d "$diagnostic_cgroup_root" ] || continue
+        diagnostic_pids=$(find "$diagnostic_cgroup_root" -type f -name cgroup.procs \
+            -exec cat {} \; 2>/dev/null | sort -nu | tr '\n' ' ')
+        for diagnostic_pid in $diagnostic_pids; do
+            [ -r "/proc/$diagnostic_pid/ns/net" ] || continue
+            diagnostic_interfaces=$(nsenter -t "$diagnostic_pid" -n \
+                wg show interfaces 2>/dev/null || true)
+            for diagnostic_interface in $diagnostic_interfaces; do
+                diagnostic_interface_count=$((diagnostic_interface_count + 1))
+            done
+        done
+    done
+    printf '%s\n' "$diagnostic_interface_count"
+}
+
 unit_load_state() {
     systemctl show --property=LoadState --value "$1" 2>/dev/null || true
 }
@@ -2656,7 +2679,21 @@ a01_select_route() {
             --control-socket "$WORK/runtime-client/control/agent.sock" connect \
             --transport multipath-quic \
             >"$WORK/a01-$selection_label-connect.out" \
-            2>>"$WORK/a01-$selection_label-connect.err"
+            2>>"$WORK/a01-$selection_label-connect.err" &
+        selection_pid=$!
+        selection_diagnostic_attempt=0
+        while kill -0 "$selection_pid" 2>/dev/null \
+            && [ "$selection_diagnostic_attempt" -lt 100 ]; do
+            selection_interface_count=$(count_worker_wireguard_interfaces)
+            if [ "$selection_interface_count" -ge 8 ]; then
+                capture_worker_network_diagnostics \
+                    "a01-$selection_label-live-native-probe"
+                break
+            fi
+            sleep 0.1
+            selection_diagnostic_attempt=$((selection_diagnostic_attempt + 1))
+        done
+        wait "$selection_pid"
         selection_status=$?
         set -e
         [ "$selection_status" -ne 0 ] || break

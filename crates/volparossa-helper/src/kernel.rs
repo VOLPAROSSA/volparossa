@@ -16,6 +16,7 @@ use nix::setsockopt_impl;
 use nix::sockopt_impl;
 use nix::sys::socket::setsockopt;
 use thiserror::Error;
+use volparossa_routing::WireguardRole;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -131,6 +132,7 @@ const WGDEVICE_A_IFNAME: u16 = 2;
 const WGDEVICE_A_PRIVATE_KEY: u16 = 3;
 const WGDEVICE_A_FLAGS: u16 = 5;
 const WGDEVICE_A_LISTEN_PORT: u16 = 6;
+const WGDEVICE_A_FWMARK: u16 = 7;
 const WGDEVICE_A_PEERS: u16 = 8;
 const WGDEVICE_F_REPLACE_PEERS: u32 = 1;
 const WGPEER_A_PUBLIC_KEY: u16 = 1;
@@ -1283,7 +1285,7 @@ impl NamespaceKernel {
             || state.interface_name != interface
             || state.public_key != expected_device_public_key
             || state.listen_port != expected_listen_port
-            || state.firewall_mark != 0
+            || state.firewall_mark != wireguard_underlay_mark(resource)
         {
             return Err(KernelError::Malformed);
         }
@@ -2391,6 +2393,11 @@ fn encode_activate_device_v3(
     push_string_attribute(&mut device, WGDEVICE_A_IFNAME, resource.interface())?;
     push_attribute(
         &mut device,
+        WGDEVICE_A_FWMARK,
+        &wireguard_underlay_mark(resource).to_ne_bytes(),
+    )?;
+    push_attribute(
+        &mut device,
         WGDEVICE_A_FLAGS,
         &WGDEVICE_F_REPLACE_PEERS.to_ne_bytes(),
     )?;
@@ -2401,6 +2408,17 @@ fn encode_activate_device_v3(
     payload.extend_from_slice(&0_u16.to_ne_bytes());
     payload.extend_from_slice(&device);
     Ok(payload)
+}
+
+/// Client WireGuard outer packets originate in the kernel and therefore have no trusted agent
+/// socket UID. The existing ingress mark bypasses parent output steering without selecting the
+/// parent-to-ingress policy table. Non-client endpoints retain the kernel default mark.
+fn wireguard_underlay_mark(resource: &DurableWireguardResource) -> u32 {
+    if resource.key().1 == WireguardRole::Client as i32 {
+        CLIENT_INGRESS_IPV4_MARK
+    } else {
+        0
+    }
 }
 
 fn encode_prepare_key_no_peers_v3(
@@ -2995,6 +3013,9 @@ mod tests {
                 .iter()
                 .all(|(kind, _)| kind & NLA_TYPE_MASK != WGDEVICE_A_LISTEN_PORT)
         );
+        assert!(device.iter().any(|(kind, value)| {
+            *kind == WGDEVICE_A_FWMARK && *value == CLIENT_INGRESS_IPV4_MARK.to_ne_bytes()
+        }));
         let peers = device
             .iter()
             .find_map(|(kind, value)| (*kind == WGDEVICE_A_PEERS | NLA_F_NESTED).then_some(*value))
