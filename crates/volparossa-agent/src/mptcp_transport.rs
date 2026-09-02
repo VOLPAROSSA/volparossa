@@ -27,6 +27,7 @@ pub struct ClientMptcpTransport {
     signal: Option<ExitMptcpListenerSignal>,
     route_context_id: Vec<u8>,
     context_handle: Vec<u8>,
+    required_subflows: usize,
     active_paths: Vec<u32>,
     certificate_der: Option<Vec<u8>>,
 }
@@ -165,7 +166,7 @@ impl ClientMptcpTransport {
         Ok(transport)
     }
 
-    /// Adopts a committed helper descriptor and registers at least two exact selected paths.
+    /// Adopts a committed helper descriptor and registers every additional selected path.
     ///
     /// # Errors
     ///
@@ -180,9 +181,10 @@ impl ClientMptcpTransport {
         selected_paths: impl IntoIterator<Item = u32>,
     ) -> Result<Self, MptcpTransportError> {
         let paths = selected_path_ids(selected_paths)?;
+        let required_subflows = paths.len();
         let stream = adopt_client_stream(acquired)?;
-        let mut active_paths = Vec::with_capacity(paths.len());
-        for path_id in paths {
+        let mut active_paths = Vec::with_capacity(paths.len().saturating_sub(1));
+        for path_id in additional_path_ids(&paths) {
             let request = AddMptcpEndpoint {
                 route_context_id: route_context_id.clone(),
                 context_handle: context_handle.clone(),
@@ -196,7 +198,7 @@ impl ClientMptcpTransport {
             }
             active_paths.push(path_id);
         }
-        if let Err(error) = wait_for_selected_subflows(&stream, active_paths.len()).await {
+        if let Err(error) = wait_for_selected_subflows(&stream, required_subflows).await {
             rollback_paths(helper, &route_context_id, &context_handle, &active_paths).await;
             return Err(MptcpTransportError::Io(error));
         }
@@ -205,6 +207,7 @@ impl ClientMptcpTransport {
             signal: None,
             route_context_id,
             context_handle,
+            required_subflows,
             active_paths,
             certificate_der: None,
         })
@@ -243,7 +246,7 @@ impl ClientMptcpTransport {
             let acquired = helper.acquire_transport_socket(request).await?;
             adopt_client_stream(acquired)?
         };
-        wait_for_selected_subflows(&stream, self.active_paths.len()).await?;
+        wait_for_selected_subflows(&stream, self.required_subflows).await?;
         Ok(ClientMptcpFlowTransport {
             stream,
             certificate_der,
@@ -345,8 +348,8 @@ impl ExitMptcpTransport {
         let request = exit_acquire_request(&signal, context_handle.clone())?;
         let acquired = helper.acquire_transport_socket(request).await?;
         let listener = adopt_exit_listener(acquired)?;
-        let mut active_paths = Vec::with_capacity(paths.len());
-        for path_id in paths {
+        let mut active_paths = Vec::with_capacity(paths.len().saturating_sub(1));
+        for path_id in additional_path_ids(&paths) {
             let request = AddMptcpEndpoint {
                 route_context_id: signal.route_context_id.to_vec(),
                 context_handle: context_handle.clone(),
@@ -546,6 +549,13 @@ fn selected_path_ids(
     Ok(paths.into_iter().collect())
 }
 
+/// The connected/listening socket already owns the first selected path. Registering it again can
+/// create a duplicate subflow on that path and satisfy a multipath count without using the second
+/// Relay, so only the remaining paths enter the kernel path-manager endpoint set.
+fn additional_path_ids(paths: &[u32]) -> impl Iterator<Item = u32> + '_ {
+    paths.iter().copied().skip(1)
+}
+
 /// Failure to adopt or configure a helper-owned MPTCP capability.
 #[derive(Debug, Error)]
 pub enum MptcpTransportError {
@@ -603,7 +613,9 @@ mod tests {
 
     #[test]
     fn selected_paths_are_distinct_bounded_and_canonical() {
-        assert_eq!(selected_path_ids([3, 1, 3, 2]).expect("paths"), [1, 2, 3]);
+        let paths = selected_path_ids([3, 1, 3, 2]).expect("paths");
+        assert_eq!(paths, [1, 2, 3]);
+        assert_eq!(additional_path_ids(&paths).collect::<Vec<_>>(), [2, 3]);
         assert!(selected_path_ids([1]).is_err());
         assert!(selected_path_ids([1, 9]).is_err());
         assert!(selected_path_ids([0, 1]).is_err());
