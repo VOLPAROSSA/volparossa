@@ -460,7 +460,7 @@ fn requested_connect_profile(config: &Config, transport: Option<i32>) -> Option<
 
 async fn disconnect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
     Box::pin(context.routes.disconnect()).await;
-    if context.helper.cleanup_owned().await.is_ok() {
+    if context.helper.cleanup_route_contexts().await.is_ok() {
         let mut state = context.state.write().await;
         if state.clear_after_helper_cleanup(&context.config).is_err() {
             state.log(LogLevel::Error, "STATE_RESET_FAILED", unix_millis());

@@ -98,7 +98,7 @@ pub mod helper_request {
         /// Prove that one exact, expired, ambiguously dispatched Prepare left no context.
         #[prost(message, tag = "28")]
         ReconcileExpiredPrepare(ReconcileExpiredPrepare),
-        /// Destroy every resource owned by this helper runtime.
+        /// Destroy the closed resource scope owned by this helper runtime.
         #[prost(message, tag = "29")]
         CleanupOwned(CleanupOwned),
         /// Prepare a helper-owned client ingress runtime, independent of route contexts.
@@ -134,6 +134,21 @@ pub enum ContextRole {
     Relay = 2,
     /// Policy-limited exit context.
     Exit = 3,
+}
+
+/// Exact resource class selected by an authenticated cleanup request.
+///
+/// Route-only cleanup deliberately preserves the independently owned, runtime-long Client ingress
+/// capability so a disconnected agent can establish another route without restarting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum CleanupScope {
+    /// Invalid protobuf default.
+    Unspecified = 0,
+    /// Every resource owned by this helper runtime, including Client ingress.
+    AllOwnedResources = 1,
+    /// Route contexts and their transport state, preserving Client ingress.
+    RouteContextsOnly = 2,
 }
 
 /// Endpoint purpose. Zero is deliberately invalid on the wire.
@@ -633,12 +648,15 @@ pub struct RemoveMptcpEndpoint {
     pub path_id: u32,
 }
 
-/// Global cleanup authenticates with a fixed-width process-start token.
+/// Scoped cleanup authenticates with a fixed-width process-start token.
 #[derive(Clone, PartialEq, Message, Zeroize, ZeroizeOnDrop)]
 pub struct CleanupOwned {
     /// Random 32-byte cleanup token.
     #[prost(bytes = "vec", tag = "1")]
     pub cleanup_token: Vec<u8>,
+    /// Closed resource class; zero is invalid.
+    #[prost(enumeration = "CleanupScope", tag = "2")]
+    pub scope: i32,
 }
 
 /// Stable helper result. Zero is never a valid response.
@@ -1249,7 +1267,17 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
             "bind helper runtime and pre-register one Prepare intent".to_owned()
         }
         Operation::BindHelperRuntime(_) => "read helper runtime identity".to_owned(),
-        Operation::CleanupOwned(_) => "destroy all helper-owned resources".to_owned(),
+        Operation::CleanupOwned(value) => match CleanupScope::try_from(value.scope)
+            .map_err(|_| HelperProtocolError::Invalid("cleanup scope"))?
+        {
+            CleanupScope::AllOwnedResources => "destroy all helper-owned resources".to_owned(),
+            CleanupScope::RouteContextsOnly => {
+                "destroy helper-owned route contexts; preserve client ingress".to_owned()
+            }
+            CleanupScope::Unspecified => {
+                return Err(HelperProtocolError::Invalid("cleanup scope"));
+            }
+        },
     };
     output.push_str("; audit_digest=");
     for byte in &operation_digest(value)?[..8] {
@@ -1492,8 +1520,15 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 validate_closed_prepare_plan(closed_plan.context_role, &closed_plan.leases)
             })
         }
-        Operation::CleanupOwned(operation) if operation.cleanup_token.len() == 32 => Ok(()),
-        Operation::CleanupOwned(_) => Err(HelperProtocolError::Invalid("cleanup token")),
+        Operation::CleanupOwned(operation) if operation.cleanup_token.len() != 32 => {
+            Err(HelperProtocolError::Invalid("cleanup token"))
+        }
+        Operation::CleanupOwned(operation) => match CleanupScope::try_from(operation.scope).ok() {
+            Some(CleanupScope::AllOwnedResources | CleanupScope::RouteContextsOnly) => Ok(()),
+            Some(CleanupScope::Unspecified) | None => {
+                Err(HelperProtocolError::Invalid("cleanup scope"))
+            }
+        },
     }
 }
 
@@ -2265,6 +2300,7 @@ mod tests {
             request_id: vec![0x31; 16],
             operation: Some(helper_request::Operation::CleanupOwned(CleanupOwned {
                 cleanup_token: vec![0xa5; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             })),
         };
         let canonical = Zeroizing::new(request.encode_to_vec());

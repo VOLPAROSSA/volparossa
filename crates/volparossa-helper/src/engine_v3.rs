@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use volparossa_routing::{
     AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress,
-    ActivateLeaseBatch, ActivatedClientIngress, AddMptcpEndpoint, BindHelperRuntime,
+    ActivateLeaseBatch, ActivatedClientIngress, AddMptcpEndpoint, BindHelperRuntime, CleanupScope,
     ClosedPreparePlan, CommittedLease, CommittedLeaseBatch, ContextRole, DestroyClientIngress,
     DestroyedClientIngress, DestroyedContext, Empty, HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION,
     HelperRequest, HelperResponse, HelperResult, HelperRuntime, IngressAddressFamily,
@@ -1418,7 +1418,18 @@ impl HelperEngine {
                     .await
             }
             Some(helper_request::Operation::CleanupOwned(value)) => {
-                if value.cleanup_token.len() != self.inner.cleanup_token.len()
+                let scope = CleanupScope::try_from(value.scope).ok();
+                if scope.is_none() || scope == Some(CleanupScope::Unspecified) {
+                    Some(execution(
+                        response(
+                            request,
+                            HelperResult::InvalidRequest,
+                            "CLEANUP_SCOPE_INVALID",
+                            None,
+                        ),
+                        None,
+                    ))
+                } else if value.cleanup_token.len() != self.inner.cleanup_token.len()
                     || value
                         .cleanup_token
                         .ct_eq(self.inner.cleanup_token.as_slice())
@@ -1435,8 +1446,14 @@ impl HelperEngine {
                         None,
                     ))
                 } else {
-                    self.cleanup_async(request, request_id, digest, sender)
-                        .await
+                    self.cleanup_async(
+                        request,
+                        request_id,
+                        digest,
+                        scope.expect("validated cleanup scope"),
+                        sender,
+                    )
+                    .await
                 }
             }
             Some(helper_request::Operation::PrepareClientIngress(value)) => {
@@ -4569,6 +4586,7 @@ impl HelperEngine {
         request: &HelperRequest,
         request_id: [u8; 16],
         digest: [u8; 32],
+        scope: CleanupScope,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
         let identities = {
@@ -4674,7 +4692,11 @@ impl HelperEngine {
         }
         let empty = {
             let state = self.inner.state.lock().await;
-            cleanup_state_complete(&state)
+            match scope {
+                CleanupScope::AllOwnedResources => cleanup_state_complete(&state),
+                CleanupScope::RouteContextsOnly => route_cleanup_state_complete(&state),
+                CleanupScope::Unspecified => false,
+            }
         };
         Some(execution(
             if complete && empty {
@@ -5702,12 +5724,16 @@ fn orphan_pending_identities(state: &EngineState) -> Vec<([u8; 16], u64)> {
 }
 
 fn cleanup_state_complete(state: &EngineState) -> bool {
-    state.contexts.is_empty()
+    route_cleanup_state_complete(state)
         && state.ingress.is_none()
+        && state.ingress_acquire_request_ids.is_empty()
+}
+
+fn route_cleanup_state_complete(state: &EngineState) -> bool {
+    state.contexts.is_empty()
         && state.cleanup_pending.is_empty()
         && state.in_flight.is_none()
         && state.transport_acquire_request_ids.is_empty()
-        && state.ingress_acquire_request_ids.is_empty()
         && state.prepare_reconciliations.values().all(|record| {
             matches!(
                 record.phase,
@@ -7462,6 +7488,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_cleanup_preserves_active_client_ingress() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let _ = commit_client_context(&engine, &backend).await;
+        {
+            let mut state = engine.inner.state.lock().await;
+            state.ingress = Some(ClientIngressRecord {
+                client_runtime_id: [6; 16],
+                generation: 1,
+                ingress_handle: [7; HELPER_HANDLE_BYTES],
+                setup_expires_at_unix: 120,
+                hard_expires_at_unix: 900,
+                setup_expires_at_boottime_ns: 120 * NANOSECONDS_PER_SECOND,
+                hard_expires_at_boottime_ns: 900 * NANOSECONDS_PER_SECOND,
+                phase: ClientIngressPhase::Active,
+                sockets: BTreeMap::new(),
+                reply_sockets_issued: 0,
+            });
+        }
+
+        let response = engine
+            .execute(request(
+                42,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::RouteContextsOnly as i32,
+                }),
+            ))
+            .await;
+
+        assert_eq!(response.result, HelperResult::Ok as i32);
+        assert_eq!(response.diagnostic_code, "CLEANUP_COMPLETE");
+        let state = engine.inner.state.lock().await;
+        assert!(route_cleanup_state_complete(&state));
+        assert!(!cleanup_state_complete(&state));
+        let ingress = state.ingress.as_ref().expect("preserved Client ingress");
+        assert_eq!(ingress.client_runtime_id, [6; 16]);
+        assert_eq!(ingress.phase, ClientIngressPhase::Active);
+    }
+
+    #[tokio::test]
     async fn cleanup_supervisor_panic_keeps_exact_sanitized_fallback() {
         let engine = HelperEngine::with_components(
             [9; 32],
@@ -7474,6 +7542,7 @@ mod tests {
             41,
             helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
                 cleanup_token: vec![9; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             }),
         );
         let expected_digest = operation_digest(&cleanup).expect("digest").to_vec();
@@ -7609,6 +7678,7 @@ mod tests {
             106,
             helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
                 cleanup_token: vec![9; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             }),
         );
         assert_eq!(engine.execute(prune).await.result, HelperResult::Ok as i32);
@@ -7857,6 +7927,7 @@ mod tests {
             7,
             helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
                 cleanup_token: vec![9; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             }),
         );
         assert_eq!(
@@ -9218,6 +9289,7 @@ mod tests {
             66,
             helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
                 cleanup_token: vec![9; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             }),
         );
         assert_eq!(

@@ -26,13 +26,13 @@ use volparossa_linux_uapi::{
 use volparossa_routing::{
     AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
     ActivateClientIngress as ActivateClientIngressRequest, ActivateLeaseBatch, ActivatedLeaseBatch,
-    AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, ClosedPreparePlan, CommitLeaseBatch,
-    CommittedLeaseBatch, DestroyClientIngress as DestroyClientIngressRequest, DestroyContext,
-    DestroyedContext, Empty, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
-    HelperRuntime, IngressAddressFamily as WireIngressSocketFamily, IngressReplySocketReady,
-    IngressSocketAddress, IngressSocketKind as WireIngressSocketKind, IngressSocketReady,
-    IngressSocketReceipt, PrepareClientIngress as PrepareClientIngressRequest, PrepareIntent,
-    PrepareLeaseBatch, PreparedClientIngress as PreparedClientIngressResponse,
+    AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, CleanupScope, ClosedPreparePlan,
+    CommitLeaseBatch, CommittedLeaseBatch, DestroyClientIngress as DestroyClientIngressRequest,
+    DestroyContext, DestroyedContext, Empty, HELPER_PROTOCOL_VERSION, HelperRequest,
+    HelperResponse, HelperResult, HelperRuntime, IngressAddressFamily as WireIngressSocketFamily,
+    IngressReplySocketReady, IngressSocketAddress, IngressSocketKind as WireIngressSocketKind,
+    IngressSocketReady, IngressSocketReceipt, PrepareClientIngress as PrepareClientIngressRequest,
+    PrepareIntent, PrepareLeaseBatch, PreparedClientIngress as PreparedClientIngressResponse,
     PreparedIngressSocket, PreparedLeaseBatch, REQUIRED_INGRESS_SOCKETS, ReconcileExpiredPrepare,
     ReconciledExpiredPrepare, RemoveMptcpEndpoint, TransportSocketReady, descriptor_fd_binding,
     encode_request, helper_request, helper_response, operation_digest, read_response,
@@ -1297,11 +1297,25 @@ impl HelperClient {
     ///
     /// Returns an error for an unsafe token or helper transport/rejection failure.
     pub async fn cleanup_owned(&self) -> Result<(), HelperClientError> {
+        self.cleanup(CleanupScope::AllOwnedResources).await
+    }
+
+    /// Destroy every route context while retaining the runtime-long Client ingress capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe token or helper transport/rejection failure.
+    pub async fn cleanup_route_contexts(&self) -> Result<(), HelperClientError> {
+        self.cleanup(CleanupScope::RouteContextsOnly).await
+    }
+
+    async fn cleanup(&self, scope: CleanupScope) -> Result<(), HelperClientError> {
         let mut token = read_cleanup_token(&self.cleanup_token)?;
         // Ownership moves directly from one zeroizing container into another. `CleanupOwned`
         // zeroizes on Drop, including when the nested async call is never polled or is cancelled.
         let operation = helper_request::Operation::CleanupOwned(CleanupOwned {
             cleanup_token: std::mem::take(&mut *token),
+            scope: scope as i32,
         });
         self.execute_empty(operation).await
     }
@@ -2444,7 +2458,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_uses_correlated_v3_empty_outcome() {
+    async fn route_cleanup_uses_correlated_route_only_scope() {
         let directory = tempfile::tempdir().expect("tempdir");
         let socket = directory.path().join("helper.sock");
         let token_path = directory.path().join("helper.cleanup-token");
@@ -2453,11 +2467,18 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("bind");
         let server = tokio::spawn(serve_once(
             listener,
-            |operation| matches!(operation, helper_request::Operation::CleanupOwned(_)),
+            |operation| {
+                matches!(
+                    operation,
+                    helper_request::Operation::CleanupOwned(cleanup)
+                        if CleanupScope::try_from(cleanup.scope).ok()
+                            == Some(CleanupScope::RouteContextsOnly)
+                )
+            },
             helper_response::Outcome::Empty(Empty {}),
         ));
         HelperClient::new_for_test(socket, token_path, geteuid().as_raw())
-            .cleanup_owned()
+            .cleanup_route_contexts()
             .await
             .expect("cleanup");
         server.await.expect("server");
@@ -2475,12 +2496,14 @@ mod tests {
         let unpolled =
             client.execute_empty(helper_request::Operation::CleanupOwned(CleanupOwned {
                 cleanup_token: vec![0x51; CLEANUP_TOKEN_BYTES],
+                scope: CleanupScope::AllOwnedResources as i32,
             }));
         drop(unpolled);
 
         let error = client
             .execute_empty(helper_request::Operation::CleanupOwned(CleanupOwned {
                 cleanup_token: vec![0x52; CLEANUP_TOKEN_BYTES - 1],
+                scope: CleanupScope::AllOwnedResources as i32,
             }))
             .await
             .expect_err("invalid token must fail before socket I/O");

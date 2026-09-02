@@ -562,10 +562,11 @@ mod tests {
     use volparossa_linux_uapi::receive_fd_with_binding;
     use volparossa_routing::{
         AcquireIngressSocket, AcquireTransportSocket, BindHelperRuntime, CleanupOwned,
-        HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult, IngressAddressFamily,
-        IngressSocketAddress, IngressSocketKind, IngressSocketReady, TransportSocketAddress,
-        TransportSocketKind, TransportSocketReady, WireguardRole, encode_request, helper_request,
-        helper_response, ingress_fd_binding, operation_digest, read_response, transport_fd_binding,
+        CleanupScope, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
+        IngressAddressFamily, IngressSocketAddress, IngressSocketKind, IngressSocketReady,
+        TransportSocketAddress, TransportSocketKind, TransportSocketReady, WireguardRole,
+        encode_request, helper_request, helper_response, ingress_fd_binding, operation_digest,
+        read_response, transport_fd_binding,
     };
 
     use super::*;
@@ -579,6 +580,7 @@ mod tests {
             request_id: vec![3; 16],
             operation: Some(helper_request::Operation::CleanupOwned(CleanupOwned {
                 cleanup_token: vec![4; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             })),
         };
         let task = tokio::spawn(process_connection(
