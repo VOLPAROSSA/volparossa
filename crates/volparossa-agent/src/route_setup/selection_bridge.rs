@@ -256,8 +256,8 @@ impl ActorBoundRelayProof {
         let exit_diversity =
             ActorRelayDiversity::from_snapshot(exit_diversity, requirements.address_family)?;
         if setup_expires_at_ms > self.evidence_valid_until_ms
-            || hard_expires_at_ms > self.advertisement_expires_at_ms
-            || hard_expires_at_ms > identity.expires_at_ms
+            || setup_expires_at_ms > self.advertisement_expires_at_ms
+            || setup_expires_at_ms > identity.expires_at_ms
             || hard_expires_at_ms > identity.policy_expires_at_ms
             || identity.policy_version != exit.policy_version
             || identity.policy_version != control.policy_version
@@ -314,15 +314,16 @@ impl ActorBoundRelayProof {
         &self,
         capability: &DirectRelayCapability,
         policy_hash: [u8; 32],
-        required_expiry_ms: u64,
+        setup_required_expiry_ms: u64,
+        route_required_expiry_ms: u64,
     ) -> bool {
         self.relay
             .identity
-            .direct_lineage_matches(capability, required_expiry_ms)
+            .direct_lineage_matches(capability, setup_required_expiry_ms)
             && capability.policy_hash == policy_hash
-            && capability.advertisement_expires_at_ms >= required_expiry_ms
-            && capability.policy_expires_at_ms >= required_expiry_ms
-            && capability.expires_at_ms >= required_expiry_ms
+            && capability.advertisement_expires_at_ms >= setup_required_expiry_ms
+            && capability.expires_at_ms >= setup_required_expiry_ms
+            && capability.policy_expires_at_ms >= route_required_expiry_ms
     }
 
     pub(super) fn relay_intent(&self, path_id: u32) -> RelayPathIntent {
@@ -1739,6 +1740,37 @@ impl AwaitingClientNativeProbeResult {
     }
 }
 
+fn established_route_hard_expiry(
+    plan: &ProspectiveRoutePlan,
+    now_ms: u64,
+    route_hard_lifetime: Duration,
+) -> Result<u64, ClientNativeProbeError> {
+    // Discovery capabilities and freshness evidence authorize setup only. Once every actor has
+    // accepted the reservation, its signed policy and reservation bound the live route; otherwise
+    // an advertisement nearing refresh would tear down an already-authorized data path.
+    let actor_policy_ceiling_ms = std::iter::once(&plan.forwarded_exit.control.identity)
+        .chain(std::iter::once(&plan.forwarded_exit.exit.identity))
+        .chain(
+            plan.prospective_relays
+                .iter()
+                .map(|relay| &relay.relay.identity),
+        )
+        .map(|identity| identity.policy_expires_at_ms)
+        .min()
+        .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+    now_ms
+        .checked_add(
+            u64::try_from(route_hard_lifetime.as_millis())
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+        )
+        .map(|expires_at_ms| {
+            expires_at_ms
+                .min(plan.scope.policy.expires_at_ms)
+                .min(actor_policy_ceiling_ms)
+        })
+        .ok_or(ClientNativeProbeError::HelperCorrelation)
+}
+
 impl CompletedClientNativeProbe {
     /// Borrow the exact committed sampler owner for terminal confirmed destruction.
     pub(crate) fn runtime_owner(
@@ -1862,29 +1894,8 @@ impl CompletedClientNativeProbe {
             )
             .ok_or(ClientNativeProbeError::HelperCorrelation)?
             .min(plan.earliest_evidence_expiry_ms);
-        let actor_hard_ceiling_ms = std::iter::once(&plan.forwarded_exit.control.identity)
-            .chain(std::iter::once(&plan.forwarded_exit.exit.identity))
-            .chain(
-                plan.prospective_relays
-                    .iter()
-                    .map(|relay| &relay.relay.identity),
-            )
-            .map(|identity| {
-                identity
-                    .advertisement_expires_at_ms
-                    .min(identity.policy_expires_at_ms)
-                    .min(identity.expires_at_ms)
-            })
-            .min()
-            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
-        let hard_expires_at_ms = now_ms
-            .checked_add(
-                u64::try_from(self.batch.route_hard_lifetime.as_millis())
-                    .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
-            )
-            .ok_or(ClientNativeProbeError::HelperCorrelation)?
-            .min(plan.scope.policy.expires_at_ms)
-            .min(actor_hard_ceiling_ms);
+        let hard_expires_at_ms =
+            established_route_hard_expiry(&plan, now_ms, self.batch.route_hard_lifetime)?;
         if hard_expires_at_ms < setup_ceiling_ms {
             tracing::warn!(
                 stage = "expiry-order",
@@ -3022,10 +3033,7 @@ fn validate_preprobe_peer_binding(
     {
         return Err(SelectionBridgeError::EvidenceBinding);
     }
-    Ok(identity
-        .advertisement_expires_at_ms
-        .min(identity.expires_at_ms)
-        .min(identity.policy_expires_at_ms))
+    Ok(identity.policy_expires_at_ms)
 }
 
 fn validate_preprobe_peer_evidence(
@@ -3602,10 +3610,7 @@ impl PreProbeContinuation {
             .into_iter()
             .chain(self.paths.iter().map(|path| &path.relay.relay))
         {
-            hard_expiry_ms = hard_expiry_ms
-                .min(binding.identity.advertisement_expires_at_ms)
-                .min(binding.identity.expires_at_ms)
-                .min(binding.identity.policy_expires_at_ms);
+            hard_expiry_ms = hard_expiry_ms.min(binding.identity.policy_expires_at_ms);
             evidence_expiry_ms = evidence_expiry_ms.min(binding.evidence_valid_until_ms);
         }
         if evidence_expiry_ms != self.earliest_evidence_expiry_ms
@@ -6630,6 +6635,26 @@ mod tests {
             NOW_MS + 50_000
         );
         assert_eq!(plan.earliest_evidence_expiry_ms, NOW_MS + 40_000);
+    }
+
+    #[test]
+    fn established_route_outlives_consumed_setup_authority() {
+        let mut plan = prospective_plan();
+        plan.earliest_evidence_expiry_ms = NOW_MS + 30_000;
+        assert_eq!(plan.earliest_evidence_expiry_ms, NOW_MS + 30_000);
+        plan.forwarded_exit
+            .control
+            .identity
+            .advertisement_expires_at_ms = NOW_MS + 40_000;
+        plan.forwarded_exit.control.identity.expires_at_ms = NOW_MS + 40_000;
+
+        let hard_expiry = established_route_hard_expiry(&plan, NOW_MS, Duration::from_secs(60))
+            .expect("policy-bounded route lifetime");
+
+        assert_eq!(hard_expiry, NOW_MS + 60_000);
+        assert!(hard_expiry > plan.earliest_evidence_expiry_ms);
+        assert!(hard_expiry > plan.forwarded_exit.control.identity.expires_at_ms);
+        assert!(hard_expiry <= plan.scope.policy.expires_at_ms);
     }
 
     fn prospective_plan() -> ProspectiveRoutePlan {

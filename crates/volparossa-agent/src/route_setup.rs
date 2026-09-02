@@ -2781,6 +2781,10 @@ impl RouteSetupRequest {
             exit_diversity,
             evidence_batch_id,
         } = forwarded_exit;
+        let setup_expires_at_ms = parameters
+            .setup_expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(RouteSetupError::Invalid("setup expiry"))?;
         if control_diversity.conflicts_with(&exit_diversity) {
             return Err(RouteSetupError::Invalid("control exit diversity"));
         }
@@ -2793,21 +2797,17 @@ impl RouteSetupRequest {
             || control.identity.policy_hash != parameters.policy_hash
             || exit.policy_hash != parameters.policy_hash
             || control.identity.policy_expires_at_ms != exit.policy_expires_at_ms
-            || control.identity.advertisement_expires_at_ms < parameters.expires_at_ms
-            || exit.advertisement_expires_at_ms < parameters.expires_at_ms
+            || control.identity.advertisement_expires_at_ms < setup_expires_at_ms
+            || exit.advertisement_expires_at_ms < setup_expires_at_ms
             || control.identity.policy_expires_at_ms < parameters.expires_at_ms
             || exit.policy_expires_at_ms < parameters.expires_at_ms
-            || control.identity.expires_at_ms < parameters.expires_at_ms
-            || exit.expires_at_ms < parameters.expires_at_ms
+            || control.identity.expires_at_ms < setup_expires_at_ms
+            || exit.expires_at_ms < setup_expires_at_ms
         {
             return Err(RouteSetupError::Invalid("selected forwarded exit evidence"));
         }
 
         let mut paths = Vec::with_capacity(prospective_relays.len());
-        let setup_expires_at_ms = parameters
-            .setup_expires_at_unix
-            .checked_mul(1_000)
-            .ok_or(RouteSetupError::Invalid("setup expiry"))?;
         for (index, binding) in prospective_relays.into_iter().enumerate() {
             let ProspectiveRouteRelay { path_id, proof } = binding;
             proof.validate_request_binding(
@@ -3075,7 +3075,7 @@ impl RouteSetupAuthorities {
     fn validate(&self, request: &RouteSetupRequest) -> Result<(), RouteSetupError> {
         let forwarded = ProspectiveForwardedExit::from_capabilities(&self.control, &self.exit)
             .map_err(|_| RouteSetupError::Capability)?;
-        let required_expiry = request.parameters.expires_at_ms;
+        let route_required_expiry = request.parameters.expires_at_ms;
         let setup_required_expiry = request
             .parameters
             .setup_expires_at_unix
@@ -3092,7 +3092,7 @@ impl RouteSetupAuthorities {
             || !request
                 .control
                 .identity
-                .direct_lineage_matches(&self.control, required_expiry)
+                .direct_lineage_matches(&self.control, setup_required_expiry)
             || selected_exit != request.exit
             || forwarded.exit.expires_at_ms < request.exit.expires_at_ms
             || self.control.policy_hash != request.parameters.policy_hash
@@ -3100,12 +3100,12 @@ impl RouteSetupAuthorities {
         {
             return Err(RouteSetupError::Capability);
         }
-        if self.control.expires_at_ms < required_expiry
+        if self.control.expires_at_ms < setup_required_expiry
             || self.exit.expires_at_ms < setup_required_expiry
-            || self.control.advertisement_expires_at_ms < required_expiry
-            || self.exit.exit_advertisement_expires_at_ms < required_expiry
-            || self.control.policy_expires_at_ms < required_expiry
-            || self.exit.policy_expires_at_ms < required_expiry
+            || self.control.advertisement_expires_at_ms < setup_required_expiry
+            || self.exit.exit_advertisement_expires_at_ms < setup_required_expiry
+            || self.control.policy_expires_at_ms < route_required_expiry
+            || self.exit.policy_expires_at_ms < route_required_expiry
         {
             return Err(RouteSetupError::Capability);
         }
@@ -3120,7 +3120,8 @@ impl RouteSetupAuthorities {
             if !path.proof.capability_matches(
                 capability,
                 request.parameters.policy_hash,
-                required_expiry,
+                setup_required_expiry,
+                route_required_expiry,
             ) || !nodes.insert(capability.node_id)
                 || !peers.insert(capability.peer_id.to_bytes())
                 || !public_keys.insert(capability.public_key)
