@@ -52,7 +52,7 @@ pub enum PreselectionDispatchError {
     /// The canonical request cannot yield the required target and address family.
     #[error("invalid preselection transport request")]
     Request,
-    /// No unique current authenticated connection proves the requested native family.
+    /// No exact current authenticated event connection proves the requested native family.
     #[error("preselection transport provenance is unavailable")]
     Provenance,
     /// A response arrival does not belong to this exact dispatch.
@@ -80,8 +80,8 @@ pub struct ClientPreselectionDispatch {
 
 /// Prefer an immediate exact lineage, but permit request-response to establish the authenticated
 /// connection when the selected Relay is not connected at dispatch time. The latter is still
-/// fail-closed at response binding: the sealed response connection must then be the unique live
-/// direct connection with the request-derived native family.
+/// fail-closed at response binding: the sealed response must arrive on an exact live direct
+/// connection with the request-derived native family.
 enum ClientConnectionWitness {
     PreSend(ConnectionWitness),
     BindResponse(IpFamily),
@@ -555,7 +555,7 @@ impl DiscoveryService {
     /// Returns a detail-free error for an occupied single-dispatch slot, disabled client role,
     /// invalid request binding, unavailable wall or monotonic time, an expired effective deadline,
     /// or an invalid request-derived target. Missing pre-send provenance is not itself terminal:
-    /// response binding still requires unique direct connection provenance.
+    /// response binding still requires the exact authenticated event connection and native family.
     pub fn dispatch_preselection_observation(
         &mut self,
         request: ClientPreselectionObservationRequest,
@@ -635,7 +635,7 @@ impl DiscoveryService {
     /// # Errors
     ///
     /// Returns a detail-free error for a service-instance, peer, or request mismatch, an invalid
-    /// monotonic arrival time, or a stale, ambiguous, closed, changed, or otherwise unavailable
+    /// monotonic arrival time, or a stale, closed, changed, or otherwise unavailable exact
     /// connection proof. A dispatch from another service cannot affect this service's slot. Once
     /// this service recognizes its own exact active dispatch, however, every sealed response is a
     /// terminal outcome and releases the slot before arrival correlation, time, or provenance is
@@ -769,7 +769,7 @@ impl DiscoveryService {
                 .swarm
                 .behaviour()
                 .connection_provenance
-                .unique_witness(expected_peer_id, family)
+                .exact_witness(expected_peer_id, event_connection, family)
                 .ok_or(PreselectionDispatchError::Provenance)?,
         };
         let observation = self
@@ -830,7 +830,7 @@ impl DiscoveryService {
     /// Returns a detail-free error for an occupied upstream slot, disabled relay role, invalid
     /// request/local-control binding, unavailable wall or monotonic time, an expired effective
     /// deadline, or invalid request/local-control binding. Missing pre-send provenance is allowed;
-    /// response binding still requires unique direct Exit-connection provenance.
+    /// response binding still requires exact direct Exit-connection provenance.
     pub fn dispatch_preselection_observation_upstream(
         &mut self,
         request: UpstreamPreselectionObservationRequest,
@@ -929,7 +929,7 @@ impl DiscoveryService {
     /// # Errors
     ///
     /// Returns a detail-free error for a service-instance, peer, or request mismatch, an invalid
-    /// monotonic arrival time, or a stale, ambiguous, closed, changed, or otherwise unavailable
+    /// monotonic arrival time, or a stale, closed, changed, or otherwise unavailable exact
     /// exit-connection proof. Exact correlation consumes the upstream slot before later time or
     /// provenance checks.
     pub fn bind_preselection_observation_upstream_response(
@@ -1068,7 +1068,7 @@ impl DiscoveryService {
                 .swarm
                 .behaviour()
                 .connection_provenance
-                .unique_witness(expected_peer_id, family)
+                .exact_witness(expected_peer_id, event_connection, family)
                 .ok_or(PreselectionDispatchError::Provenance)?,
         };
         let observation = self
@@ -1292,7 +1292,7 @@ mod tests {
     };
 
     use crate::{
-        BehaviourEvent, DiscoveryEvent, DiscoveryProtocolRoles,
+        BehaviourEvent, DiscoveryEvent, DiscoveryProtocolRoles, PreselectionResponderReject,
         preselection_wire::{
             ClientPreselectionObservationCodec, UpstreamPreselectionObservationCodec,
             client_preselection_observation_behaviour, upstream_preselection_observation_behaviour,
@@ -2255,7 +2255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn family_and_total_connection_count_gate_response_binding() {
+    async fn family_and_exact_event_connection_gate_response_binding() {
         let created_at_ms = now_ms();
         let relay_key = identity::Keypair::generate_ed25519();
         let relay = actor(&relay_key, 14, created_at_ms);
@@ -2310,17 +2310,17 @@ mod tests {
             .expect("dispatch can retain response-time binding");
         let request_id = dispatch.request_id;
         let sent_at = dispatch.sent_at;
-        assert!(matches!(
-            multiple.bind_preselection_observation_response_at(
+        let transport = multiple
+            .bind_preselection_observation_response_at(
                 dispatch,
                 peer,
                 ConnectionId::new_unchecked(CONNECTION),
                 request_id,
                 sent_at,
                 now_ms(),
-            ),
-            Err(PreselectionDispatchError::Provenance)
-        ));
+            )
+            .expect("sealed response binds its exact authenticated connection");
+        drop(transport);
     }
 
     #[tokio::test]
@@ -3209,7 +3209,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_change_close_and_new_sibling_each_invalidate_dispatch() {
+    async fn connection_change_and_close_invalidate_but_exact_sibling_does_not() {
         let (mut changed_service, _, relay, peer, old) = direct_context();
         let dispatch = dispatch_direct(&mut changed_service, relay);
         let request_id = dispatch.request_id;
@@ -3251,17 +3251,17 @@ mod tests {
         let arrived_at = dispatch.sent_at;
         let sibling = dialer("/ip4/8.8.8.8/tcp/443");
         established(&mut sibling_service, peer, CONNECTION + 1, &sibling, 1);
-        assert!(matches!(
-            sibling_service.bind_preselection_observation_response_at(
+        let transport = sibling_service
+            .bind_preselection_observation_response_at(
                 dispatch,
                 peer,
                 ConnectionId::new_unchecked(CONNECTION),
                 request_id,
                 arrived_at,
                 now_ms(),
-            ),
-            Err(PreselectionDispatchError::Provenance)
-        ));
+            )
+            .expect("new sibling does not replace the exact response connection");
+        drop(transport);
     }
 
     #[tokio::test]
@@ -3547,6 +3547,7 @@ mod tests {
         let policy = crate::LocalPreselectionPolicy::new(1, [9; 32], created_at_ms + 60_000)
             .expect("shaped policy");
         let mut signer = |message: &[u8]| exit_key.sign(message).ok()?.try_into().ok();
+        let mut rejected = false;
 
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -3556,7 +3557,13 @@ mod tests {
                         exit_public_key,
                         &mut signer,
                     ) => {
-                        assert!(matches!(event, DiscoveryEvent::Other(_)));
+                        match event {
+                            DiscoveryEvent::PreselectionResponderRejected(
+                                PreselectionResponderReject::UpstreamAuthority
+                            ) => rejected = true,
+                            DiscoveryEvent::Other(_) => {}
+                            _ => panic!("responder emitted an unexpected public event"),
+                        }
                     }
                     event = next_other(&mut relay) => {
                         match event {
@@ -3567,7 +3574,10 @@ mod tests {
                                         ..
                                     },
                                 ),
-                            ) if request_id == outbound => break,
+                            ) if request_id == outbound => {
+                                assert!(rejected, "authority rejection must be observable");
+                                break;
+                            }
                             SwarmEvent::Behaviour(
                                 BehaviourEvent::PreselectionObservationUpstream(
                                     request_response::Event::Message {

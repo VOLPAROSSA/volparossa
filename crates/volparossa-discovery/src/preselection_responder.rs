@@ -82,7 +82,7 @@ pub enum DirectPreselectionResponderError {
     /// The exact current local advertisement, policy, or signing identity is unavailable.
     #[error("direct preselection responder authority is unavailable")]
     Authority,
-    /// No unique current authenticated connection proves the request's native family.
+    /// No exact current authenticated event connection proves the request's native family.
     #[error("direct preselection responder provenance is unavailable")]
     Provenance(PreselectionProvenanceReject),
     /// The exact request was already admitted inside the retained tombstone window.
@@ -551,7 +551,7 @@ impl DiscoveryService {
     /// # Errors
     ///
     /// Returns a detail-free error for a non-request event, disabled role, malformed or stale
-    /// request, local authority mismatch, ambiguous/stale connection lineage, replay or bounded
+    /// request, local authority mismatch, stale exact connection lineage, replay or bounded
     /// resource exhaustion, invalid signature, unavailable time, or a closed response channel.
     fn respond_direct_preselection_observation_event<F>(
         &mut self,
@@ -662,7 +662,7 @@ impl DiscoveryService {
 
         let provenance = &self.swarm.behaviour().connection_provenance;
         let witness = provenance
-            .unique_witness(authenticated_peer, family)
+            .exact_witness(authenticated_peer, connection_id, family)
             .ok_or_else(|| {
                 DirectPreselectionResponderError::Provenance(
                     provenance.diagnose_preselection_reject(
@@ -850,7 +850,7 @@ impl DiscoveryService {
 
         let provenance = &self.swarm.behaviour().connection_provenance;
         let witness = provenance
-            .unique_witness(authenticated_relay, family)
+            .exact_witness(authenticated_relay, connection_id, family)
             .ok_or_else(|| {
                 UpstreamPreselectionResponderError::Provenance(
                     provenance.diagnose_preselection_reject(
@@ -3185,7 +3185,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_family_uniqueness_and_event_connection_are_exact() {
+    async fn connection_family_and_event_connection_are_exact_with_parallel_connections() {
         let mut fixture = fixture().await;
         let wrong_family = rejection(
             fixture.service.prepare_direct_preselection_response_at(
@@ -3234,8 +3234,9 @@ mod tests {
             &dialer("/ip4/9.9.9.9/tcp/443"),
             1,
         );
-        let ambiguous = rejection(
-            fixture.service.prepare_direct_preselection_response_at(
+        fixture
+            .service
+            .prepare_direct_preselection_response_at(
                 fixture.client_peer,
                 ConnectionId::new_unchecked(CONNECTION),
                 &request(fixture.actor.clone(), 28, ObservationAddressFamily::Ipv4),
@@ -3244,15 +3245,8 @@ mod tests {
                 |message| sign_with_key(&fixture.relay_key, message),
                 NOW_MS + 100,
                 Instant::now(),
-            ),
-            "ambiguous authenticated peer lineage",
-        );
-        assert_eq!(
-            ambiguous,
-            DirectPreselectionResponderError::Provenance(
-                PreselectionProvenanceReject::MultipleSiblingConnections
             )
-        );
+            .expect("request event binds its exact authenticated connection");
     }
 
     #[tokio::test]

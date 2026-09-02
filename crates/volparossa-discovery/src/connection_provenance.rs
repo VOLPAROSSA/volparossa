@@ -97,7 +97,7 @@ struct ConnectionRecord {
     prefix: Option<NativeNetworkPrefix>,
 }
 
-/// Affine proof that exactly one connection to one peer had the requested native family.
+/// Affine proof that one exact authenticated connection had the requested native family.
 #[must_use = "a connection witness must be consumed by its registry"]
 pub(super) struct ConnectionWitness {
     peer_id: PeerId,
@@ -369,6 +369,31 @@ impl ConnectionRegistry {
         })
     }
 
+    fn exact_witness(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        family: IpFamily,
+    ) -> Option<ConnectionWitness> {
+        if self.poisoned {
+            return None;
+        }
+        let record = self.records.get(&connection_id)?;
+        let prefix = record.prefix.as_ref()?;
+        if record.peer_id != peer_id
+            || prefix.normalized.family() != family
+            || !prefix.is_consistent()
+        {
+            return None;
+        }
+        Some(ConnectionWitness {
+            peer_id,
+            connection_id,
+            generation: record.generation,
+            prefix: prefix.for_witness(),
+        })
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "the affine witness must be consumed exactly once at the binding boundary"
@@ -385,13 +410,7 @@ impl ConnectionRegistry {
             generation: witness_generation,
             prefix: witness_prefix,
         } = witness;
-        let peer_connections = self
-            .records
-            .values()
-            .filter(|record| record.peer_id == expected_peer_id)
-            .count();
         if self.poisoned
-            || peer_connections != 1
             || witness_peer_id != expected_peer_id
             || witness_connection_id != expected_connection_id
         {
@@ -424,17 +443,10 @@ impl ConnectionRegistry {
         if self.poisoned {
             return PreselectionProvenanceReject::RegistryPoisoned;
         }
-        let mut records = self
-            .records
-            .iter()
-            .filter(|(_, record)| record.peer_id == peer_id);
-        let Some((connection_id, record)) = records.next() else {
+        let Some(record) = self.records.get(&expected_connection_id) else {
             return PreselectionProvenanceReject::ExactConnectionMissing;
         };
-        if records.next().is_some() {
-            return PreselectionProvenanceReject::MultipleSiblingConnections;
-        }
-        if *connection_id != expected_connection_id {
+        if record.peer_id != peer_id {
             return PreselectionProvenanceReject::ExactConnectionMissing;
         }
         let Some(prefix) = record.prefix.as_ref() else {
@@ -526,6 +538,15 @@ impl ConnectionProvenanceBehaviour {
         family: IpFamily,
     ) -> Option<ConnectionWitness> {
         self.registry.unique_witness(peer_id, family)
+    }
+
+    pub(super) fn exact_witness(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        family: IpFamily,
+    ) -> Option<ConnectionWitness> {
+        self.registry.exact_witness(peer_id, connection_id, family)
     }
 
     pub(super) fn bind(
@@ -1095,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_rechecks_current_native_prefix_and_total_connection_count() {
+    fn bind_rechecks_current_native_prefix_but_retains_exact_connection_with_sibling() {
         let peer = PeerId::random();
         let public = dialer("/ip4/1.1.1.8/tcp/443");
         let invalid = dialer("/ip4/10.0.0.8/tcp/443");
@@ -1126,7 +1147,7 @@ mod tests {
         assert!(
             added_sibling
                 .bind(stale_unique, peer, ConnectionId::new_unchecked(1))
-                .is_none()
+                .is_some()
         );
     }
 
