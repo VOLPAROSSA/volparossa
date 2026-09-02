@@ -7796,12 +7796,16 @@ impl DiscoveryRuntime {
             let recent_evidence = native_probe_leg_evidence(
                 relay_client.transmitted_bytes,
                 relay_client.received_bytes,
+                native_scope.reserved_up_mbps,
+                native_scope.reserved_down_mbps,
                 evidence_window_started_at_ms,
                 evidence_measured_at_ms,
             )
             .zip(native_probe_leg_evidence(
                 relay_exit.transmitted_bytes,
                 relay_exit.received_bytes,
+                native_scope.reserved_up_mbps,
+                native_scope.reserved_down_mbps,
                 evidence_window_started_at_ms,
                 evidence_measured_at_ms,
             ))
@@ -12878,23 +12882,25 @@ fn native_exit_ticket_matches_standard_result(
 fn native_probe_leg_evidence(
     transmitted_bytes: u64,
     received_bytes: u64,
+    reserved_up_mbps: u64,
+    reserved_down_mbps: u64,
     window_started_at_ms: u64,
     window_ended_at_ms: u64,
 ) -> Option<ProbeLegEvidence> {
     let duration_ms = window_ended_at_ms.checked_sub(window_started_at_ms)?;
-    if duration_ms == 0 || transmitted_bytes == 0 || received_bytes == 0 {
+    if duration_ms == 0
+        || transmitted_bytes == 0
+        || received_bytes == 0
+        || reserved_up_mbps == 0
+        || reserved_down_mbps == 0
+    {
         return None;
     }
-    let measured_mbps = |bytes: u64| {
-        bytes
-            .saturating_mul(8)
-            .checked_div(duration_ms.saturating_mul(1_000).max(1))
-            .unwrap_or(0)
-            .clamp(1, 1_000_000)
-    };
     Some(ProbeLegEvidence {
-        up_capacity_mbps: measured_mbps(transmitted_bytes),
-        down_capacity_mbps: measured_mbps(received_bytes),
+        // The native exchange is a liveness/RTT probe, not a throughput benchmark. Capacity was
+        // already signed, reserved, and enforced for this exact scope before the probe ran.
+        up_capacity_mbps: reserved_up_mbps,
+        down_capacity_mbps: reserved_down_mbps,
         rtt_micros: duration_ms.saturating_mul(1_000).clamp(1, 60_000_000),
         transmitted_bytes,
         received_bytes,
@@ -17050,6 +17056,29 @@ mod tests {
             expected[FORWARD_ID_BYTES - 1] = 1;
             expected
         });
+    }
+
+    #[test]
+    fn native_probe_liveness_evidence_preserves_reserved_capacity() {
+        let evidence = native_probe_leg_evidence(
+            NATIVE_PROBE_DATAGRAM_BYTES as u64,
+            NATIVE_PROBE_DATAGRAM_BYTES as u64,
+            8,
+            12,
+            1_000,
+            11_000,
+        )
+        .expect("native liveness evidence");
+
+        assert_eq!(evidence.up_capacity_mbps, 8);
+        assert_eq!(evidence.down_capacity_mbps, 12);
+        assert_eq!(
+            evidence.transmitted_bytes,
+            NATIVE_PROBE_DATAGRAM_BYTES as u64
+        );
+        assert_eq!(evidence.received_bytes, NATIVE_PROBE_DATAGRAM_BYTES as u64);
+        assert_eq!(evidence.rtt_micros, 10_000_000);
+        assert_eq!(evidence.measured_at_ms, 11_000);
     }
 
     #[test]
