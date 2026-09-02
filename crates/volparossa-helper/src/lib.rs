@@ -57,11 +57,23 @@ pub const INTERNAL_WORKER_V3_ARGUMENT: &str = worker_v3::INTERNAL_WORKER_V3_ARGU
 pub const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str =
     worker_v3::INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT;
 
+/// Fixed private selector for cleanup after one exact functional worker generation was reaped.
+#[doc(hidden)]
+pub const INTERNAL_DEAD_WORKER_REAPER_ARGUMENT: &str =
+    worker_v3::INTERNAL_DEAD_WORKER_REAPER_ARGUMENT;
+
 /// Runs the isolated worker-v3 child entry after its parent-authentication checks.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_worker_v3_entry() -> bool {
     worker_v3::run_internal_worker_v3_entry()
+}
+
+/// Runs the fixed dead-worker namespace cleanup child entry.
+#[doc(hidden)]
+#[must_use]
+pub fn run_internal_dead_worker_reaper_entry() -> bool {
+    worker_v3::run_internal_dead_worker_reaper_entry()
 }
 
 /// Runs one fixed production-image worker bootstrap and proves bounded retirement.

@@ -859,6 +859,52 @@ pub(super) fn observe_pristine_relay_fence(
     }
 }
 
+/// Remove the exact context-owned Relay table after its worker generation was reaped.
+///
+/// The dead worker can no longer supply its affine active-policy journal. Recovery therefore
+/// accepts only the two complete states that worker can leave behind: the exact restrictive
+/// baseline or the exact active object cardinality under the context-bound table userdata. The
+/// mutation deletes that one table by its observed handle and succeeds only after a fresh stable
+/// observation proves the target namespace completely empty.
+pub(super) fn cleanup_dead_worker_relay_fence(
+    namespace: RelayFenceNamespaceAuthority,
+    identity: &RelayFenceIdentity,
+    deadline: HardDeadline,
+) -> Result<RetiredRelayFence, RelayFenceError> {
+    namespace.verify()?;
+    let observed = observe_stable_ruleset(deadline)?;
+    if observed.snapshot.is_empty() {
+        return Ok(RetiredRelayFence {
+            generation: observed.generation,
+            namespace,
+        });
+    }
+    let table_handle = observed.snapshot.exact_dead_worker_table_handle(identity)?;
+    let expected_generation = observed
+        .generation
+        .checked_add(1)
+        .ok_or(RelayFenceError::UnexpectedGeneration)?;
+    let mutation_deadline = deadline.before_tail(RECONCILIATION_TAIL)?;
+    let transaction = encode_dead_worker_table_cleanup(observed.generation, table_handle)?;
+    let client = MutationClient::connect(mutation_deadline)?;
+    let sent = client.send(&transaction, mutation_deadline);
+    if sent.is_ok() {
+        let _ = client.receive_acknowledgements(&transaction, mutation_deadline);
+    }
+    let reconciled = observe_stable_ruleset(deadline)?;
+    if reconciled.generation == expected_generation && reconciled.snapshot.is_empty() {
+        Ok(RetiredRelayFence {
+            generation: reconciled.generation,
+            namespace,
+        })
+    } else {
+        Err(match sent {
+            Err(MutationSendFailure::NotSent(source)) => source,
+            Ok(()) | Err(MutationSendFailure::PossiblySent(_)) => RelayFenceError::Indeterminate,
+        })
+    }
+}
+
 /// Atomically create and read back the context-bound policy-drop baseline.
 pub(super) fn create_relay_fence_baseline(
     pristine: PristineRelayFence,
@@ -1760,6 +1806,46 @@ impl RulesetSnapshot {
         })
     }
 
+    fn exact_dead_worker_table_handle(
+        &self,
+        identity: &RelayFenceIdentity,
+    ) -> Result<u64, RelayFenceError> {
+        if let Ok(restricted) = self.exact_restricted_observation(identity) {
+            return Ok(restricted.handles.table);
+        }
+        let baseline = self.exact_baseline_handles(identity, 2, 3)?;
+        let [set] = self.sets.as_slice() else {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        };
+        let [element] = self.set_elements.as_slice() else {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        };
+        let [up, down, terminal] = self.rules.as_slice() else {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        };
+        if set.family != NFPROTO_INET
+            || set.table != identity.table_name
+            || set.name != LIVE_SET_NAME
+            || set.handle == 0
+            || element.family != NFPROTO_INET
+            || element.table != identity.table_name
+            || element.set != LIVE_SET_NAME
+            || element.key != LIVE_SET_KEY
+            || [up, down, terminal].iter().any(|rule| {
+                rule.family != NFPROTO_INET
+                    || rule.table != identity.table_name
+                    || rule.chain != FORWARD_CHAIN_NAME
+                    || rule.handle == 0
+            })
+            || up.handle == down.handle
+            || up.handle == terminal.handle
+            || down.handle == terminal.handle
+        {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        }
+        Ok(baseline.table)
+    }
+
     fn exact_active_observation(
         &self,
         specification: &RelayFenceSpec,
@@ -2248,6 +2334,32 @@ fn encode_retire_baseline_transaction(
         NFTA_TABLE_HANDLE,
         &journal.handles.table.to_be_bytes(),
     )?;
+    transaction.push(NFT_MSG_DELTABLE, NLM_F_REQUEST | NLM_F_ACK, 2, &delete)?;
+    transaction.push(
+        NFNL_MSG_BATCH_END,
+        NLM_F_REQUEST,
+        3,
+        &encode_batch_boundary_payload(None)?,
+    )?;
+    transaction.finish(3, 1)
+}
+
+fn encode_dead_worker_table_cleanup(
+    generation: u32,
+    table_handle: u64,
+) -> Result<MutationTransaction, RelayFenceError> {
+    if table_handle == 0 {
+        return Err(RelayFenceError::UnexpectedPolicy);
+    }
+    let mut transaction = MutationTransaction::new();
+    transaction.push(
+        NFNL_MSG_BATCH_BEGIN,
+        NLM_F_REQUEST,
+        1,
+        &encode_batch_boundary_payload(Some(generation))?,
+    )?;
+    let mut delete = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(&mut delete, NFTA_TABLE_HANDLE, &table_handle.to_be_bytes())?;
     transaction.push(NFT_MSG_DELTABLE, NLM_F_REQUEST | NLM_F_ACK, 2, &delete)?;
     transaction.push(
         NFNL_MSG_BATCH_END,

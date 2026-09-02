@@ -97,6 +97,9 @@ use super::{
     DurablePrepareTerminalSettlement, ReapedWorkerRestartCustody, ShutdownStatus,
     WorkerCoordinator, WorkerGenerationOwnership, WorkerGenerationReap, WorkerLifecycleAdmission,
     WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
+    dead_worker_reaper::{
+        DeadWorkerCleanupPlan, DeadWorkerNamespaceReaper, ProductionDeadWorkerNamespaceReaper,
+    },
 };
 
 const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 64;
@@ -142,6 +145,7 @@ pub(crate) fn functional_alpha_lease_backend(
         ingress_state: Mutex::new(None),
         trusted_agent_uid,
         durable_ownership: Some(durable_ownership),
+        dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
     })
 }
 
@@ -162,6 +166,7 @@ struct FunctionalAlphaLeaseBackend {
     /// Always present in production. `None` exists only for narrow unit fixtures which never
     /// execute Prepare.
     durable_ownership: Option<DurableOwnershipPrepareHandle>,
+    dead_worker_reaper: Arc<dyn DeadWorkerNamespaceReaper>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1431,17 +1436,6 @@ impl FunctionalAlphaLeaseBackend {
             }
         }
 
-        if lock_state(&self.state).get(&key).is_some_and(|entry| {
-            entry.durable.as_ref().is_some_and(|custody| {
-                matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
-            }) && entry.child_cleanup.is_none()
-        }) {
-            // Exact child cleanup did not complete. Keep the worker and all recovery authority
-            // available for a later same-runtime Destroy retry; process death is not namespace
-            // cleanup evidence while PID 1 still owns the published namespace descriptor.
-            return false;
-        }
-
         let worker = {
             let mut state = lock_state(&self.state);
             let Ok(entry) = exact_entry_mut(&mut state, key) else {
@@ -1491,6 +1485,71 @@ impl FunctionalAlphaLeaseBackend {
                     return false;
                 }
             }
+        }
+
+        let dead_worker_cleanup = {
+            let mut state = lock_state(&self.state);
+            let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                return false;
+            };
+            let required = entry.durable.as_ref().is_some_and(|custody| {
+                matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+            }) && entry.child_cleanup.is_none();
+            if required {
+                // A missing Destroy response is no longer terminal once the exact generation is
+                // proven absent. At that point only the retained namespace pair can execute and
+                // prove cleanup; keeping MayOwn forever would pin the dead namespace forever.
+                if entry.worker.is_some()
+                    || entry.recovery.is_some()
+                    || entry.worker_cleanup.is_none()
+                {
+                    return false;
+                }
+                let Ok(plan) = DeadWorkerCleanupPlan::new(
+                    key.context_id,
+                    entry.context_role,
+                    entry.prepare.clone(),
+                ) else {
+                    return false;
+                };
+                let Some(restart_custody) = entry.restart_custody.take() else {
+                    return false;
+                };
+                Some((restart_custody, plan))
+            } else {
+                None
+            }
+        };
+        if let Some((restart_custody, plan)) = dead_worker_cleanup {
+            let cleanup = self.dead_worker_reaper.cleanup(
+                &plan,
+                restart_custody.borrowed_network_namespace(),
+                deadline,
+            );
+            let mut state = lock_state(&self.state);
+            let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                std::process::abort();
+            };
+            if entry.restart_custody.replace(restart_custody).is_some() {
+                std::process::abort();
+            }
+            let Ok(proof) = cleanup else {
+                return false;
+            };
+            if !proof.matches_context(key.context_id) || entry.child_cleanup.is_some() {
+                std::process::abort();
+            }
+            entry.child_cleanup = Some(ExactChildCleanupConfirmed { key });
+        }
+
+        if lock_state(&self.state).get(&key).is_some_and(|entry| {
+            entry.durable.as_ref().is_some_and(|custody| {
+                matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+            }) && entry.child_cleanup.is_none()
+        }) {
+            // Neither the ordinary child nor the post-reap namespace reaper proved exact cleanup.
+            // Retain every remaining affine owner for a bounded later retry.
+            return false;
         }
 
         let parent_absent = {
@@ -5512,6 +5571,7 @@ mod tests {
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         }
     }
 
@@ -5573,6 +5633,7 @@ mod tests {
                 ingress_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
+                dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
             },
             peer,
             alive,
@@ -5884,6 +5945,7 @@ mod tests {
                 ingress_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
+                dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
             }),
             peer,
             alive,
@@ -7285,6 +7347,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the source-order regression audits one indivisible cleanup transaction"
+    )]
     fn production_clean_settlement_order_is_fail_closed() {
         let source = include_str!("functional_backend.rs");
         let cleanup_start = source
@@ -7298,9 +7364,6 @@ mod tests {
         let child_cleanup_classified = source[..cleanup_start]
             .rfind("classify_exact_child_cleanup(entry, key, execution.as_ref().ok())")
             .expect("phase/birth-classified child cleanup authority");
-        let retain_without_child_cleanup = source[..cleanup_start]
-            .rfind("// Exact child cleanup did not complete.")
-            .expect("unproven child cleanup retention");
         let exact_worker_reap = source[..cleanup_start]
             .rfind("WorkerGenerationReap::Confirmed(proof) =>")
             .expect("exact worker-generation reap");
@@ -7310,6 +7373,15 @@ mod tests {
         let worker_reap_recorded = source[..cleanup_start]
             .rfind("entry.worker_cleanup.replace(proof)")
             .expect("affine worker reap evidence retention");
+        let dead_worker_reaper = source[..cleanup_start]
+            .rfind("self.dead_worker_reaper.cleanup(")
+            .expect("exact post-reap namespace cleanup");
+        let reaper_cleanup_recorded = source[..cleanup_start]
+            .rfind("entry.child_cleanup = Some(ExactChildCleanupConfirmed { key });")
+            .expect("post-reap namespace cleanup authority");
+        let retain_without_child_cleanup = source[..cleanup_start]
+            .rfind("// Neither the ordinary child nor the post-reap namespace reaper")
+            .expect("unproven child cleanup retention");
         let kernel_absent = source[..cleanup_start]
             .rfind("if !parent_absent")
             .expect("kernel absence gate");
@@ -7323,11 +7395,13 @@ mod tests {
             .rfind("self.settle_durable_cleanup(key, parent, deadline).await")
             .expect("durable cleanup call");
         assert!(
-            child_cleanup_classified < retain_without_child_cleanup
-                && retain_without_child_cleanup < exact_worker_reap
+            child_cleanup_classified < exact_worker_reap
                 && exact_worker_reap < live_recovery_consumed
                 && live_recovery_consumed < worker_reap_recorded
-                && worker_reap_recorded < kernel_absent
+                && worker_reap_recorded < dead_worker_reaper
+                && dead_worker_reaper < reaper_cleanup_recorded
+                && reaper_cleanup_recorded < retain_without_child_cleanup
+                && retain_without_child_cleanup < kernel_absent
                 && kernel_absent < all_cleanup_evidence
                 && all_cleanup_evidence < parent_absence
                 && parent_absence < durable_call
@@ -10387,6 +10461,7 @@ mod tests {
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         };
 
         let expected_worker = ExpectedUnixCredentials::new(
@@ -10615,6 +10690,7 @@ mod tests {
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         };
 
         let expected_worker = ExpectedUnixCredentials::new(
@@ -10886,6 +10962,7 @@ mod tests {
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         };
 
         let cleanup_deadline =
@@ -11000,6 +11077,7 @@ mod tests {
             ingress_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: Some(handle),
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         };
 
         assert_eq!(

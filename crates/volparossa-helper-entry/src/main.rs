@@ -3,8 +3,9 @@
 use std::{ffi::OsString, process::ExitCode};
 
 use volparossa_helper::{
-    INTERNAL_WORKER_V3_ARGUMENT, INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT,
-    WorkerV3LiveProofFailureStage, run_internal_worker_v3_entry,
+    INTERNAL_DEAD_WORKER_REAPER_ARGUMENT, INTERNAL_WORKER_V3_ARGUMENT,
+    INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT, WorkerV3LiveProofFailureStage,
+    run_internal_dead_worker_reaper_entry, run_internal_worker_v3_entry,
     run_internal_worker_v3_live_proof_staged, run_production_server,
 };
 use volparossa_linux_uapi::take_systemd_listen_fd_set_once;
@@ -39,6 +40,7 @@ enum Invocation {
     Production,
     InternalWorkerV3,
     InternalWorkerV3LiveProof,
+    InternalDeadWorkerReaper,
 }
 
 fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, ()> {
@@ -49,6 +51,9 @@ fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         }
         (Some(argument), None) if argument == INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT => {
             Ok(Invocation::InternalWorkerV3LiveProof)
+        }
+        (Some(argument), None) if argument == INTERNAL_DEAD_WORKER_REAPER_ARGUMENT => {
+            Ok(Invocation::InternalDeadWorkerReaper)
         }
         (None, None) => Ok(Invocation::Production),
         _ => Err(()),
@@ -78,6 +83,13 @@ fn main() -> ExitCode {
                     eprintln!("{record}");
                     ExitCode::FAILURE
                 }
+            }
+        }
+        Ok(Invocation::InternalDeadWorkerReaper) => {
+            if run_internal_dead_worker_reaper_entry() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
             }
         }
         Ok(Invocation::Production) => run_production(),
@@ -191,6 +203,10 @@ mod tests {
         assert_eq!(
             parse_invocation([INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT.into()]),
             Ok(Invocation::InternalWorkerV3LiveProof)
+        );
+        assert_eq!(
+            parse_invocation([INTERNAL_DEAD_WORKER_REAPER_ARGUMENT.into()]),
+            Ok(Invocation::InternalDeadWorkerReaper)
         );
         assert_eq!(
             parse_invocation([

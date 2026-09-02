@@ -108,10 +108,14 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSec
 use zeroize::Zeroizing;
 
 mod client_ingress_policy;
+mod dead_worker_reaper;
 mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
 mod relay_fence;
+pub(crate) use dead_worker_reaper::{
+    INTERNAL_DEAD_WORKER_REAPER_ARGUMENT, run_internal_dead_worker_reaper_entry,
+};
 pub(crate) use functional_backend::{
     ExactSameRuntimeCleanupProof, ExactSameRuntimeManagerAbsenceProof,
     functional_alpha_lease_backend,
