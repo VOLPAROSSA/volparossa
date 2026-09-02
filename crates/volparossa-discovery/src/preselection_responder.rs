@@ -712,6 +712,10 @@ impl DiscoveryService {
             .forwarded_control
             .as_ref()
             .ok_or(UpstreamPreselectionResponderError::Request)?;
+        let exit = typed
+            .actor
+            .as_ref()
+            .ok_or(UpstreamPreselectionResponderError::Request)?;
         if role != PreselectionObservationRole::Exit
             || typed.created_at_ms > now_ms
             || now_ms >= typed.expires_at_ms
@@ -721,14 +725,15 @@ impl DiscoveryService {
         {
             return Err(UpstreamPreselectionResponderError::Request);
         }
-        let authority = self.local_exit_authority(
+        let authority = self.local_exit_authority_for_actor(
             policy,
             signer_public_key,
             scope,
             control.capability_expires_at_ms,
+            exit,
             now_ms,
         )?;
-        if typed.actor.as_ref() != Some(&authority.actor)
+        if exit != &authority.actor
             || scope.policy_version != policy.version
             || scope.policy_hash.as_slice() != policy.hash
             || scope.policy_expires_at_ms != policy.expires_at_ms
@@ -838,28 +843,47 @@ impl DiscoveryService {
             .ok_or(DirectPreselectionResponderError::Authority)
     }
 
-    fn local_exit_authority(
+    fn local_exit_authority_for_actor(
         &self,
         policy: LocalPreselectionPolicy,
         signer_public_key: [u8; 32],
         scope: &PreselectionObservationScope,
         control_capability_expires_at_ms: u64,
+        expected: &PreselectionActorBinding,
         now_ms: u64,
     ) -> Result<LocalPreselectionAuthority, UpstreamPreselectionResponderError> {
-        let mut authority = self
-            .local_preselection_authority(
-                policy,
-                signer_public_key,
-                scope,
-                now_ms,
-                LocalResponderRole::Exit,
-            )
-            .ok_or(UpstreamPreselectionResponderError::Authority)?;
-        authority.actor.capability_expires_at_ms = authority
-            .actor
-            .capability_expires_at_ms
-            .min(control_capability_expires_at_ms);
-        Ok(authority)
+        let constrain = |mut authority: LocalPreselectionAuthority| {
+            authority.actor.capability_expires_at_ms = authority
+                .actor
+                .capability_expires_at_ms
+                .min(control_capability_expires_at_ms);
+            (authority.actor == *expected).then_some(authority)
+        };
+        self.local_preselection_authority(
+            policy,
+            signer_public_key,
+            scope,
+            now_ms,
+            LocalResponderRole::Exit,
+        )
+        .and_then(&constrain)
+        .or_else(|| {
+            self.preselection_responder
+                .local_advertisement_lineage()
+                .rev()
+                .find_map(|encoded| {
+                    self.local_preselection_authority_from_encoded(
+                        encoded,
+                        policy,
+                        signer_public_key,
+                        scope,
+                        now_ms,
+                        LocalResponderRole::Exit,
+                    )
+                    .and_then(&constrain)
+                })
+        })
+        .ok_or(UpstreamPreselectionResponderError::Authority)
     }
 
     fn local_preselection_authority(
@@ -2968,6 +2992,69 @@ mod tests {
             "unserved same-identity actor",
         );
         assert_eq!(error, DirectPreselectionResponderError::Authority);
+    }
+
+    #[tokio::test]
+    async fn exact_previously_served_exit_actor_survives_bounded_advertisement_refresh() {
+        let mut fixture = upstream_fixture().await;
+        let previously_served = fixture.exit_actor.clone();
+        let mut replacement = exit_advertisement(&fixture.exit_key, fixture.exit_public_key);
+        replacement.sequence_number = replacement.sequence_number.saturating_add(1);
+        let replacement = sign_control_message_with(
+            &replacement,
+            fixture.exit_public_key,
+            NOW_MS,
+            ADVERTISEMENT_EXPIRY_MS,
+            [94; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&fixture.exit_key, message),
+        )
+        .expect("signed replacement Exit advertisement");
+        fixture
+            .service
+            .set_local_advertisement(replacement)
+            .expect("install replacement Exit advertisement");
+
+        fixture
+            .service
+            .prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &upstream_request(
+                    previously_served.clone(),
+                    fixture.control_actor.clone(),
+                    94,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            )
+            .expect("exact still-valid served Exit actor");
+
+        let mut never_served = previously_served;
+        never_served.advertisement_sequence = never_served.advertisement_sequence.saturating_sub(1);
+        let error = upstream_rejection(
+            fixture.service.prepare_upstream_preselection_response_at(
+                fixture.relay_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                &upstream_request(
+                    never_served,
+                    fixture.control_actor,
+                    95,
+                    ObservationAddressFamily::Ipv4,
+                ),
+                fixture.policy,
+                fixture.exit_public_key,
+                |message| sign_with_key(&fixture.exit_key, message),
+                NOW_MS + 100,
+                Instant::now(),
+            ),
+            "unserved same-identity Exit actor",
+        );
+        assert_eq!(error, UpstreamPreselectionResponderError::Authority);
     }
 
     #[tokio::test]
