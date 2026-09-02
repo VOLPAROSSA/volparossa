@@ -2672,6 +2672,7 @@ a01_select_route() {
     selection_label=$1
     selection_status=1
     selection_attempt=0
+    selection_attempt_error="$WORK/a01-$selection_label-connect-attempt.err"
     : >"$WORK/a01-$selection_label-connect.err"
     while [ "$selection_attempt" -lt 30 ]; do
         set +e
@@ -2679,7 +2680,7 @@ a01_select_route() {
             --control-socket "$WORK/runtime-client/control/agent.sock" connect \
             --transport multipath-quic \
             >"$WORK/a01-$selection_label-connect.out" \
-            2>>"$WORK/a01-$selection_label-connect.err" &
+            2>"$selection_attempt_error" &
         selection_pid=$!
         selection_diagnostic_attempt=0
         while kill -0 "$selection_pid" 2>/dev/null \
@@ -2696,15 +2697,17 @@ a01_select_route() {
         wait "$selection_pid"
         selection_status=$?
         set -e
+        sed -n 'p' "$selection_attempt_error" \
+            >>"$WORK/a01-$selection_label-connect.err"
         [ "$selection_status" -ne 0 ] || break
         grep -F 'PRESELECTION_UNAVAILABLE' \
-            "$WORK/a01-$selection_label-connect.err" >/dev/null || break
+            "$selection_attempt_error" >/dev/null || break
         sleep 1
         selection_attempt=$((selection_attempt + 1))
     done
     if [ "$selection_status" -ne 0 ]; then
-        if tail -n 1 "$WORK/a01-$selection_label-connect.err" \
-            | grep -F 'NATIVE_PROBE_START_UNAVAILABLE' >/dev/null; then
+        if grep -F 'NATIVE_PROBE_START_UNAVAILABLE' \
+            "$selection_attempt_error" >/dev/null; then
             capture_worker_network_diagnostics "a01-$selection_label-native-probe-failure"
         fi
         return 1
