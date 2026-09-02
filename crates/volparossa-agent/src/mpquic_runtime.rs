@@ -294,6 +294,7 @@ impl ActiveProductionMpquicExitRoute {
             .transpose()
             .map_err(|_| ProductionMpquicError::Invalid("native UDP replay bound"))?;
         let mut packet_id = 0_u16;
+        let mut awaiting_client = true;
         let mut response_buffer = vec![0_u8; MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1];
         let mut poll = interval(EXIT_DATAGRAM_POLL_INTERVAL);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -312,10 +313,17 @@ impl ActiveProductionMpquicExitRoute {
             authorized_general_udp.retain(|_, flow| flow.ensure_active_at(current_ms).is_ok());
 
             for _ in 0..MAXIMUM_EXIT_DATAGRAMS_PER_TICK {
-                let Some(packet) =
-                    receive_inner_ip(&self.client, self.route_context_id, self.masque_context_id)
-                        .await?
-                else {
+                let (connected, packet) = receive_exit_inner_ip(
+                    &self.client,
+                    self.route_context_id,
+                    self.masque_context_id,
+                    awaiting_client,
+                )
+                .await?;
+                if connected {
+                    awaiting_client = false;
+                }
+                let Some(packet) = packet else {
                     break;
                 };
                 if self.transport_mode == TransportMode::SinglePathGeneralUdp {
@@ -2445,6 +2453,43 @@ async fn receive_inner_ip<C: MultipathNativeControl>(
     Ok(received.map(|mut datagram| std::mem::take(&mut datagram.inner_ip_packet)))
 }
 
+/// Poll an Exit listener while its authenticated Client association is still being established.
+///
+/// Listener readiness deliberately precedes the readiness signal sent back to the Client. Native
+/// therefore reports `InsufficientPaths` during that bounded hand-off window; it is an empty poll,
+/// not a terminal route failure. Every other rejection remains fail closed.
+async fn receive_exit_inner_ip(
+    control: &NativeClient,
+    route_context_id: [u8; 16],
+    masque_context_id: u64,
+    awaiting_client: bool,
+) -> Result<(bool, Option<Vec<u8>>), ProductionMpquicError> {
+    let received = control
+        .receive_datagram(ReceiveDatagram {
+            route_context_id: route_context_id.to_vec(),
+            masque_context_id,
+        })
+        .await;
+    exit_receive_result(received, awaiting_client)
+}
+
+fn exit_receive_result(
+    received: Result<Option<ReceivedDatagram>, NativeClientError>,
+    awaiting_client: bool,
+) -> Result<(bool, Option<Vec<u8>>), ProductionMpquicError> {
+    match received {
+        Ok(received) => Ok((
+            true,
+            received.map(|mut datagram| std::mem::take(&mut datagram.inner_ip_packet)),
+        )),
+        Err(NativeClientError::Rejected {
+            result: NativeResultCode::InsufficientPaths,
+            ..
+        }) if awaiting_client => Ok((false, None)),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn setup_native_session<C: MultipathNativeControl>(
     control: &C,
     start: &StartSession,
@@ -2773,6 +2818,50 @@ mod tests {
     use volparossa_test_support::verified_development_manifest;
 
     use super::*;
+
+    #[test]
+    fn exit_receive_waits_only_for_the_authenticated_client_path_set() {
+        let pending = exit_receive_result(
+            Err(NativeClientError::Rejected {
+                result: NativeResultCode::InsufficientPaths,
+                diagnostic_code: "exit_session_not_connected".to_owned(),
+            }),
+            true,
+        )
+        .unwrap();
+        assert_eq!(pending, (false, None));
+        assert_eq!(exit_receive_result(Ok(None), true).unwrap(), (true, None));
+
+        let terminal = exit_receive_result(
+            Err(NativeClientError::Rejected {
+                result: NativeResultCode::Transport,
+                diagnostic_code: "native_transport_failed".to_owned(),
+            }),
+            true,
+        );
+        assert!(matches!(
+            terminal,
+            Err(ProductionMpquicError::Native(NativeClientError::Rejected {
+                result: NativeResultCode::Transport,
+                ..
+            }))
+        ));
+
+        let disconnected = exit_receive_result(
+            Err(NativeClientError::Rejected {
+                result: NativeResultCode::InsufficientPaths,
+                diagnostic_code: "exit_session_not_connected".to_owned(),
+            }),
+            false,
+        );
+        assert!(matches!(
+            disconnected,
+            Err(ProductionMpquicError::Native(NativeClientError::Rejected {
+                result: NativeResultCode::InsufficientPaths,
+                ..
+            }))
+        ));
+    }
 
     #[derive(Clone)]
     struct FakeNative {
