@@ -8077,6 +8077,7 @@ mod tests {
             issued_at_ms: now_ms + 1,
             expires_at_ms,
             nonce: permit_nonce.to_vec(),
+            exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
         };
         let signed_permit = sign_control_message(
             &permit,

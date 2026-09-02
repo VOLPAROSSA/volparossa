@@ -43,6 +43,8 @@ const EXIT_RESULT_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-exit-result/v4\
 const PREPARED_LEASE_COMMITMENT_DOMAIN: &[u8] = b"volparossa/native-probe-prepared-lease/v4\0";
 /// Largest canonical bundle accepted by the Exit authorization provider.
 pub const MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE: usize = 32 * 1024;
+/// Largest identity-bound Exit control multiaddress carried by one native Permit.
+pub const MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES: usize = 1_024;
 
 /// Exact endpoint-free candidate set consumed from one A1 prepared-evidence handoff.
 #[allow(missing_docs)]
@@ -125,7 +127,11 @@ pub struct NativeProbePermitRequest {
     pub nonce: Vec<u8>,
 }
 
-/// Exit-signed endpoint-free authorization for one exact request.
+/// Exit-signed dataplane-endpoint-free authorization for one exact request.
+///
+/// `exit_control_address` is one bounded control-plane multiaddress cryptographically bound to the
+/// Exit identity. It is transported opaquely through the client and consumed only by the selected
+/// data Relay when it dispatches the Ready RPC.
 #[allow(missing_docs)]
 #[derive(Clone, PartialEq, Message)]
 pub struct NativeProbePermit {
@@ -139,6 +145,8 @@ pub struct NativeProbePermit {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "5")]
     pub nonce: Vec<u8>,
+    #[prost(string, tag = "6")]
+    pub exit_control_address: String,
 }
 
 /// One helper-prepared endpoint bound to a non-secret helper runtime and shared route context.
@@ -463,7 +471,8 @@ impl VerifiedNativeProbeResult {
 }
 
 impl VerifiedNativeProbePermit {
-    /// Borrow the exact path scope after both endpoint-free signatures and bindings passed.
+    /// Borrow the exact path scope after both dataplane-endpoint-free signatures and bindings
+    /// passed.
     ///
     /// # Panics
     ///
@@ -476,6 +485,12 @@ impl VerifiedNativeProbePermit {
             .scope
             .as_ref()
             .expect("verified native Permit always carries a scope")
+    }
+
+    /// Borrow the signed, identity-bound Exit control multiaddress for the selected data Relay.
+    #[must_use]
+    pub fn exit_control_address(&self) -> &str {
+        &self.permit.message().exit_control_address
     }
 }
 
@@ -960,6 +975,14 @@ impl ControlPayload for NativeProbePermit {
         let scope = required_scope(self.scope.as_ref())?;
         validate_phase_lifetime(self.issued_at_ms, self.expires_at_ms, scope)?;
         require_nonzero::<NONCE_LENGTH>(&self.nonce, "native permit nonce")?;
+        if self.exit_control_address.is_empty()
+            || self.exit_control_address.len() > MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES
+            || !self.exit_control_address.is_ascii()
+        {
+            return Err(ProtocolError::InvalidField(
+                "native permit Exit control address",
+            ));
+        }
         Ok(())
     }
 
@@ -2349,6 +2372,7 @@ mod tests {
                 issued_at_ms: NOW + 1,
                 expires_at_ms: EXPIRY,
                 nonce: vec![11; 32],
+                exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
             };
             sign(&permit, &self.exit, NOW + 1, EXPIRY, [11; 32])
         }
@@ -2657,9 +2681,12 @@ mod tests {
             replay.is_empty(),
             "cross-binding failure must roll back both entries"
         );
-        assert!(
+        let verified =
             verify_native_probe_permit(request.clone(), permit.clone(), NOW + 2, &mut replay)
-                .is_ok()
+                .expect("exact Permit");
+        assert_eq!(
+            verified.exit_control_address(),
+            "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit"
         );
         assert!(matches!(
             verify_native_probe_permit(request, permit, NOW + 2, &mut replay),
@@ -2821,6 +2848,7 @@ mod tests {
             issued_at_ms: NOW,
             expires_at_ms: EXPIRY,
             nonce: vec![25; 32],
+            exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
         };
         let early_permit = sign(&early_permit, &fixture.exit, NOW, EXPIRY, [25; 32]);
         let mut early_exit_replay = ReplayCache::new(16).expect("replay");
@@ -2845,6 +2873,7 @@ mod tests {
             issued_at_ms: NOW + 20,
             expires_at_ms: EXPIRY,
             nonce: vec![26; 32],
+            exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
         };
         let late_permit = sign(&late_permit, &fixture.exit, NOW + 20, EXPIRY, [26; 32]);
         let early_ready = NativeProbeRelayReady {

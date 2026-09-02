@@ -1696,6 +1696,7 @@ mod dispatch_tests {
             issued_at_ms: now_ms,
             expires_at_ms,
             nonce: vec![9; KEY_BYTES],
+            exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
         };
         let signed_permit = sign_control_message(
             &permit,

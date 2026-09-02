@@ -85,20 +85,20 @@ use volparossa_protocol::{
     ClientSessionCapability, ControlPayload, ExitCapacityHold, ExitCapacityHoldRequest,
     ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
     ExitReservationFinalizeRequest, IssuedNativeProbeRelayReady, MAX_CONTROL_PAYLOAD_SIZE,
-    MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding, NativeProbeForwardingProof,
-    NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermitRequest,
-    NativeProbeRelayLocalProofs, NativeProbeStart, NativeRouteCredentialDelivery,
-    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, ObservationNetworkPrefix,
-    PreselectionActorBinding, ProbeLegEvidence, RelayAuthorization, RelayProbePermit,
-    RelayProbePermitRequest, RelayProbeResult, RelayReservation, RelayReservationRequest,
-    ReplayCache, SignedEnvelope, TimePolicy, Transport, VerifiedNativeProbePermit,
-    VerifiedNativeProbeStartForRelay, decode_canonical, encode_canonical,
-    exit_confirmation_envelope_hash, generate_nonce, native_probe_prepared_lease_commitment,
-    node_id_from_public_key, sign_control_message_with, sign_native_probe_relay_ready_with,
-    sign_native_probe_relay_result_with, verify_control_message,
-    verify_native_probe_authorization_chain, verify_native_probe_exit_ready,
-    verify_native_probe_exit_result_for_relay, verify_native_probe_permit,
-    verify_native_probe_start_for_relay, verify_relay_reservation,
+    MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES, MAX_NATIVE_PROBE_LIFETIME_MS,
+    NativeProbeEndpointBinding, NativeProbeForwardingProof, NativeProbeLeaseProof,
+    NativeProbePathScope, NativeProbePermitRequest, NativeProbeRelayLocalProofs, NativeProbeStart,
+    NativeRouteCredentialDelivery, NodeAdvertisement as WireAdvertisement,
+    ObservationAddressFamily, ObservationNetworkPrefix, PreselectionActorBinding, ProbeLegEvidence,
+    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
+    RelayReservation, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
+    VerifiedNativeProbePermit, VerifiedNativeProbeStartForRelay, decode_canonical,
+    encode_canonical, exit_confirmation_envelope_hash, generate_nonce,
+    native_probe_prepared_lease_commitment, node_id_from_public_key, sign_control_message_with,
+    sign_native_probe_relay_ready_with, sign_native_probe_relay_result_with,
+    verify_control_message, verify_native_probe_authorization_chain,
+    verify_native_probe_exit_ready, verify_native_probe_exit_result_for_relay,
+    verify_native_probe_permit, verify_native_probe_start_for_relay, verify_relay_reservation,
 };
 use volparossa_quic::NativeClient;
 use volparossa_relay::{AcceptedRelayReservation, RelayService, RelayServiceConfig};
@@ -6107,6 +6107,20 @@ impl DiscoveryRuntime {
         {
             reject!("NATIVE_PROBE_READY_EXIT_UNAVAILABLE");
         }
+        let Ok(exit_control_address) = Multiaddr::from_str(permit.exit_control_address()) else {
+            reject!("NATIVE_PROBE_READY_EXIT_ADDRESS_REJECTED");
+        };
+        let Ok(exit_peerlink) = PeerLink::new(exit_peer, exit_control_address.clone()) else {
+            reject!("NATIVE_PROBE_READY_EXIT_ADDRESS_REJECTED");
+        };
+        if exit_peerlink.dial_address() != exit_control_address
+            || self
+                .service
+                .add_known_peer(exit_peer, &exit_control_address)
+                .is_err()
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_ADDRESS_REJECTED");
+        }
         let Some(mut prepare) = native_service_prepare_request(
             &scope,
             ContextRole::Relay,
@@ -9869,6 +9883,8 @@ impl DiscoveryRuntime {
         let exit_node_id = fixed_bytes::<32>(request.exit_node_id())?;
         let exit_peer = Libp2pPeerId::from_bytes(request.exit_peer_id()).ok()?;
         let local_peer = *self.service.local_peer_id();
+        let exit_control_address =
+            identity_bound_exit_control_address(&self.control_addresses, &scope, local_peer)?;
         let current_control = self.direct_relays.get(&authenticated_control_relay)?;
         if control_relay_peer != authenticated_control_relay
             || control_relay_public_key != current_control.public_key
@@ -9916,6 +9932,7 @@ impl DiscoveryRuntime {
                 request.canonical_request(),
                 &control_relay_node_id,
                 &authenticated_control_peer,
+                &exit_control_address,
                 now_ms,
                 self.local_public_key,
                 |message| identity.sign(message).ok(),
@@ -14232,6 +14249,28 @@ fn multiaddr_ip(address: &Multiaddr) -> Option<IpAddr> {
         Protocol::Ip4(address) => Some(IpAddr::V4(address)),
         Protocol::Ip6(address) => Some(IpAddr::V6(address)),
         _ => None,
+    })
+}
+
+fn identity_bound_exit_control_address(
+    control_addresses: &BTreeSet<String>,
+    scope: &NativeProbePathScope,
+    exit_peer: Libp2pPeerId,
+) -> Option<String> {
+    let family = ObservationAddressFamily::try_from(scope.address_family).ok()?;
+    control_addresses.iter().find_map(|text| {
+        let address = Multiaddr::from_str(text).ok()?;
+        let address_matches_family = matches!(
+            (family, multiaddr_ip(&address)),
+            (ObservationAddressFamily::Ipv4, Some(IpAddr::V4(_)))
+                | (ObservationAddressFamily::Ipv6, Some(IpAddr::V6(_)))
+        );
+        if !address_matches_family {
+            return None;
+        }
+        let peerlink = PeerLink::new(exit_peer, address).ok()?;
+        let identity_bound = peerlink.dial_address().to_string();
+        (identity_bound.len() <= MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES).then_some(identity_bound)
     })
 }
 

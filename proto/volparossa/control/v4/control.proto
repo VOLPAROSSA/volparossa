@@ -226,8 +226,9 @@ message NativeProbePathScope {
   uint32 required_path_count = 17;
 }
 
-// Permit exchange is endpoint-free and binds one exact attempt, candidate set,
-// ordinal, data Relay, forwarded Exit, policy, family, transport and expiry.
+// Permit exchange is dataplane-endpoint-free and binds one exact attempt, candidate set,
+// ordinal, data Relay, forwarded Exit, policy, family, transport and expiry. The Exit control
+// address is identity-bound and is consumed only by the selected data Relay for the Ready RPC.
 message NativeProbePermitRequest {
   NativeProbePathScope scope = 1;
   uint64 created_at_ms = 2;
@@ -241,6 +242,7 @@ message NativeProbePermit {
   uint64 issued_at_ms = 3;
   uint64 expires_at_ms = 4;
   bytes nonce = 5;
+  string exit_control_address = 6;
 }
 
 // prepared_lease_commitment contains a secret random 256-bit helper lease

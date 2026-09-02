@@ -484,6 +484,7 @@ impl ExitService {
         encoded_request: &[u8],
         authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
         authenticated_control_relay_peer_id: &[u8],
+        exit_control_address: &str,
         now_ms: u64,
         local_public_key: [u8; NODE_ID_BYTES],
         signer: F,
@@ -519,6 +520,7 @@ impl ExitService {
             encoded_request.to_vec(),
             authenticated_control_relay_node_id,
             authenticated_control_relay_peer_id,
+            exit_control_address,
             now_ms,
             local_public_key,
             signer,
@@ -882,7 +884,7 @@ impl ExitService {
         Ok(response)
     }
 
-    /// Verify one exact client request and mint one affine endpoint-free Exit permit.
+    /// Verify one exact client request and mint one affine dataplane-endpoint-free Exit permit.
     ///
     /// The caller-supplied authenticated channel identity must match the signed control Relay.
     /// Enabled-role, current exact policy, Exit identity, every actor's node/key/Peer-ID binding
@@ -897,6 +899,7 @@ impl ExitService {
         signed_request: Vec<u8>,
         authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
         authenticated_control_relay_peer_id: &[u8],
+        exit_control_address: &str,
         now_ms: u64,
         local_public_key: [u8; NODE_ID_BYTES],
         signer: F,
@@ -943,6 +946,7 @@ impl ExitService {
                 issued_at_ms: now_ms,
                 expires_at_ms,
                 nonce: nonce.to_vec(),
+                exit_control_address: exit_control_address.to_owned(),
             };
             let signed_permit = sign_control_message_with(
                 &permit,
@@ -1282,6 +1286,7 @@ mod tests {
     const PROBE_ID: [u8; ID_BYTES] = [2; ID_BYTES];
     const CHALLENGE: [u8; NONCE_BYTES] = [7; NONCE_BYTES];
     const EXIT_HELPER_RUNTIME: [u8; NODE_ID_BYTES] = [0xe1; NODE_ID_BYTES];
+    const EXIT_CONTROL_ADDRESS: &str = "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit";
 
     struct Fixture {
         service: ExitService,
@@ -1404,6 +1409,7 @@ mod tests {
                 self.signed_request.clone(),
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 now_ms,
                 public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -1940,6 +1946,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 exit_public_key,
                 |message| {
@@ -1977,6 +1984,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> { panic!("an identical retry must bypass signing") },
@@ -2001,6 +2009,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 exit_public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -2012,6 +2021,7 @@ mod tests {
                 &request,
                 &[0xf1; NODE_ID_BYTES],
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> { panic!("foreign control node must not sign") },
@@ -2023,6 +2033,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &[0xf2; 38],
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> { panic!("foreign control Peer ID must not sign") },
@@ -2036,6 +2047,7 @@ mod tests {
                 &substituted,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -2064,6 +2076,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 exit_public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -2076,6 +2089,7 @@ mod tests {
                 b"not a canonical envelope",
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -2113,6 +2127,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 fixture.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -2133,6 +2148,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &[0xf1; NODE_ID_BYTES],
                 &fixture.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -2148,6 +2164,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &[0xf2; 38],
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -2171,6 +2188,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 public_key,
                 |_message| None,
@@ -2356,6 +2374,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 fixture.exit_public_key(),
                 |_message| -> Option<[u8; 64]> { panic!("replay must reject before signing") },
@@ -2373,6 +2392,7 @@ mod tests {
                 expired.signed_request.clone(),
                 &expired.control_node_id(),
                 &expired.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 ATTEMPT_EXPIRY_MS,
                 expired.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -2406,6 +2426,7 @@ mod tests {
                 substituted.signed_request.clone(),
                 &substituted.control_node_id(),
                 &substituted.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 substituted.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -2440,6 +2461,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 fixture.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
