@@ -1,11 +1,12 @@
 //! Production adoption of helper-owned MPTCP transport capabilities.
 
-use std::{collections::BTreeSet, io, net::SocketAddr};
+use std::{collections::BTreeSet, io, net::SocketAddr, time::Duration};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::time::{Instant, sleep_until};
 use volparossa_discovery::ExitMptcpSessionSignal as DiscoveryExitMptcpSessionSignal;
-use volparossa_mptcp::{MptcpListener, MptcpStream};
+use volparossa_mptcp::{MptcpInfo, MptcpListener, MptcpStream};
 use volparossa_routing::{
     AcquireTransportSocket, AddMptcpEndpoint, MptcpEndpointMode, RemoveMptcpEndpoint,
     TransportSocketAddress, TransportSocketKind, WireguardRole,
@@ -17,6 +18,8 @@ use crate::helper::{AcquiredTransportSocket, HelperClient, HelperClientError};
 /// Route-local Exit listener port shared by the authenticated readiness signal and helper request.
 pub(crate) const PRODUCTION_MPTCP_EXIT_PORT: u16 = 44_443;
 const MAXIMUM_EXIT_CERTIFICATE_DER_BYTES: usize = 64 * 1_024;
+const CLIENT_SUBFLOW_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const CLIENT_SUBFLOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// A genuinely negotiated client MPTCP stream plus the exact helper-owned selected paths.
 pub struct ClientMptcpTransport {
@@ -167,7 +170,8 @@ impl ClientMptcpTransport {
     /// # Errors
     ///
     /// Returns an error for invalid capability metadata, fewer than two paths, a helper endpoint
-    /// refusal, or a descriptor that is not a genuinely negotiated MPTCP stream.
+    /// refusal, or when the genuine MPTCP stream does not activate every selected subflow before
+    /// the fixed readiness deadline.
     pub async fn activate(
         helper: &HelperClient,
         acquired: AcquiredTransportSocket,
@@ -192,7 +196,10 @@ impl ClientMptcpTransport {
             }
             active_paths.push(path_id);
         }
-        stream.require_negotiated()?;
+        if let Err(error) = wait_for_selected_subflows(&stream, active_paths.len()).await {
+            rollback_paths(helper, &route_context_id, &context_handle, &active_paths).await;
+            return Err(MptcpTransportError::Io(error));
+        }
         Ok(Self {
             initial_stream: Some(stream),
             signal: None,
@@ -236,7 +243,7 @@ impl ClientMptcpTransport {
             let acquired = helper.acquire_transport_socket(request).await?;
             adopt_client_stream(acquired)?
         };
-        stream.require_negotiated()?;
+        wait_for_selected_subflows(&stream, self.active_paths.len()).await?;
         Ok(ClientMptcpFlowTransport {
             stream,
             certificate_der,
@@ -256,6 +263,58 @@ impl ClientMptcpTransport {
             &self.active_paths,
         )
         .await
+    }
+}
+
+async fn wait_for_selected_subflows(
+    stream: &MptcpStream,
+    required_subflows: usize,
+) -> io::Result<MptcpInfo> {
+    wait_for_selected_subflows_with(
+        || stream.negotiation_info(),
+        required_subflows,
+        CLIENT_SUBFLOW_READY_TIMEOUT,
+    )
+    .await
+}
+
+async fn wait_for_selected_subflows_with<F>(
+    mut observe: F,
+    required_subflows: usize,
+    timeout: Duration,
+) -> io::Result<MptcpInfo>
+where
+    F: FnMut() -> io::Result<MptcpInfo>,
+{
+    let required_subflows = u8::try_from(required_subflows)
+        .ok()
+        .filter(|required| *required >= 2)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "selected MPTCP subflow count is outside the supported range",
+            )
+        })?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        let info = observe()?;
+        if !info.is_negotiated() {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "kernel did not negotiate MPTCP without fallback",
+            ));
+        }
+        if info.total_subflows >= required_subflows {
+            return Ok(info);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "selected MPTCP subflows were not active before the readiness deadline",
+            ));
+        }
+        sleep_until((now + CLIENT_SUBFLOW_READY_POLL_INTERVAL).min(deadline)).await;
     }
 }
 
@@ -510,6 +569,37 @@ pub enum MptcpTransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mptcp_info(total_subflows: u8, fallback: bool) -> MptcpInfo {
+        MptcpInfo {
+            fallback,
+            remote_key_received: true,
+            additional_subflows: total_subflows.saturating_sub(1),
+            total_subflows,
+            bytes_sent: 0,
+            bytes_received: 0,
+            bytes_retransmitted: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn client_readiness_waits_for_every_selected_subflow_and_rejects_fallback() {
+        let mut observations = [mptcp_info(1, false), mptcp_info(2, false)].into_iter();
+        let ready = wait_for_selected_subflows_with(
+            || Ok(observations.next().expect("bounded observation")),
+            2,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("second selected subflow becomes active");
+        assert_eq!(ready.total_subflows, 2);
+
+        let fallback =
+            wait_for_selected_subflows_with(|| Ok(mptcp_info(2, true)), 2, Duration::from_secs(1))
+                .await
+                .expect_err("ordinary TCP fallback must remain unavailable");
+        assert_eq!(fallback.kind(), io::ErrorKind::ConnectionAborted);
+    }
 
     #[test]
     fn selected_paths_are_distinct_bounded_and_canonical() {
