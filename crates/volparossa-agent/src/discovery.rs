@@ -161,6 +161,10 @@ const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
 const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
 const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
 const AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS: u64 = 1_000;
+// Helper Destroy can legitimately remain ambiguous for its full five-second RPC bound. Retrying
+// that synchronous call on every one-second actor tick starves discovery traffic, so quarantine
+// the affine owner and retry slowly while the helper's durable reaper also converges cleanup.
+const HELPER_CLEANUP_RETRY_BACKOFF_MS: u64 = 60_000;
 const PROVIDER_OBSERVATION_TTL_MS: u64 = 120_000;
 const CLIENT_PRESELECTION_TIMEOUT: Duration = Duration::from_secs(TUNNEL_SETUP_TIMEOUT_SECONDS);
 
@@ -660,6 +664,7 @@ struct ExitNativeReadyAttempt {
     pending_results: HashMap<u32, PendingExitNativeProbeResult>,
     candidate_set_hash: [u8; 32],
     expires_at_ms: u64,
+    cleanup_not_before_ms: u64,
 }
 
 struct PendingExitNativeProbeResult {
@@ -804,6 +809,11 @@ struct PreparedProductionRelayRoute {
     committed_signal: Option<Vec<u8>>,
     usable: bool,
     expires_at_ms: u64,
+    cleanup_not_before_ms: u64,
+}
+
+fn helper_cleanup_due(expires_at_ms: u64, cleanup_not_before_ms: u64, now_ms: u64) -> bool {
+    now_ms == u64::MAX || (expires_at_ms <= now_ms && cleanup_not_before_ms <= now_ms)
 }
 
 struct PendingUdpSessionStart {
@@ -876,6 +886,7 @@ struct PreparedProductionExitRoute {
     commit: Option<CommitLeaseBatch>,
     mpquic_preflight: Option<ProductionMpquicExitPreflight>,
     expires_at_ms: u64,
+    cleanup_not_before_ms: u64,
 }
 
 /// A genuine helper-owned Exit MPTCP listener retained with its reservation and TLS identity.
@@ -891,6 +902,7 @@ pub(crate) struct ActiveProductionMptcpExitRoute {
     runtime_started: bool,
     reservation_id: [u8; FORWARD_ID_BYTES],
     expires_at_ms: u64,
+    cleanup_not_before_ms: u64,
 }
 
 struct MptcpExitRuntimeCompletionEvent {
@@ -5479,6 +5491,7 @@ impl DiscoveryRuntime {
                 committed_start: None,
                 committed_signal: None,
                 usable: true,
+                cleanup_not_before_ms: 0,
             },
         );
         let _ = self.service.send_datapath_relay_response(channel, response);
@@ -8043,6 +8056,8 @@ impl DiscoveryRuntime {
                 .and_then(|service| service.release(route.accepted.reservation_id()).ok());
             true
         } else {
+            route.cleanup_not_before_ms =
+                unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
             let previous = self
                 .prepared_production_relay_routes
                 .insert(route_context_id, route);
@@ -8158,12 +8173,13 @@ impl DiscoveryRuntime {
             .exit_native_ready_attempts
             .iter()
             .filter_map(|(attempt_id, attempt)| {
-                (attempt.expires_at_ms <= now_ms).then_some(*attempt_id)
+                helper_cleanup_due(attempt.expires_at_ms, attempt.cleanup_not_before_ms, now_ms)
+                    .then_some(*attempt_id)
             })
             .collect::<Vec<_>>();
         let mut destroyed = 0;
         for attempt_id in expired {
-            let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) else {
+            let Some(mut attempt) = self.exit_native_ready_attempts.remove(&attempt_id) else {
                 continue;
             };
             if self
@@ -8174,6 +8190,8 @@ impl DiscoveryRuntime {
             {
                 destroyed += 1;
             } else {
+                attempt.cleanup_not_before_ms =
+                    unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
                 let previous = self.exit_native_ready_attempts.insert(attempt_id, attempt);
                 debug_assert!(previous.is_none(), "expired Exit attempt was removed above");
             }
@@ -8186,17 +8204,19 @@ impl DiscoveryRuntime {
             .prepared_production_relay_routes
             .iter()
             .filter_map(|(route_context_id, route)| {
-                (route.expires_at_ms <= now_ms).then_some(*route_context_id)
+                helper_cleanup_due(route.expires_at_ms, route.cleanup_not_before_ms, now_ms)
+                    .then_some(*route_context_id)
             })
             .collect::<Vec<_>>();
         let mut destroyed = 0;
         for route_context_id in expired {
-            let Some(route) = self
+            let Some(mut route) = self
                 .prepared_production_relay_routes
                 .remove(&route_context_id)
             else {
                 continue;
             };
+            route.usable = false;
             if self
                 .helper
                 .destroy_context(&route.helper_owner)
@@ -8209,6 +8229,8 @@ impl DiscoveryRuntime {
                     .and_then(|service| service.release(route.accepted.reservation_id()).ok());
                 destroyed += 1;
             } else {
+                route.cleanup_not_before_ms =
+                    unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
                 let previous = self
                     .prepared_production_relay_routes
                     .insert(route_context_id, route);
@@ -8223,12 +8245,13 @@ impl DiscoveryRuntime {
             .prepared_production_exit_routes
             .iter()
             .filter_map(|(route_context_id, route)| {
-                (route.expires_at_ms <= now_ms).then_some(*route_context_id)
+                helper_cleanup_due(route.expires_at_ms, route.cleanup_not_before_ms, now_ms)
+                    .then_some(*route_context_id)
             })
             .collect::<Vec<_>>();
         let mut destroyed = 0;
         for route_context_id in expired {
-            let Some(route) = self
+            let Some(mut route) = self
                 .prepared_production_exit_routes
                 .remove(&route_context_id)
             else {
@@ -8246,6 +8269,8 @@ impl DiscoveryRuntime {
                     .and_then(|service| service.release(route.bundle.reservation_id()).ok());
                 destroyed += 1;
             } else {
+                route.cleanup_not_before_ms =
+                    unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
                 let previous = self
                     .prepared_production_exit_routes
                     .insert(route_context_id, route);
@@ -8298,7 +8323,8 @@ impl DiscoveryRuntime {
             .active_production_mptcp_exit_routes
             .iter()
             .filter_map(|(route_context_id, route)| {
-                (route.expires_at_ms <= now_ms && !route.runtime_started)
+                (helper_cleanup_due(route.expires_at_ms, route.cleanup_not_before_ms, now_ms)
+                    && !route.runtime_started)
                     .then_some(*route_context_id)
             })
             .collect::<Vec<_>>();
@@ -8821,6 +8847,7 @@ impl DiscoveryRuntime {
                 pending_activations: HashMap::new(),
                 commit: None,
                 mpquic_preflight,
+                cleanup_not_before_ms: 0,
             },
         );
         debug_assert!(previous.is_none(), "production Exit route checked vacant");
@@ -9679,6 +9706,7 @@ impl DiscoveryRuntime {
                     runtime_started: false,
                     reservation_id,
                     expires_at_ms: 0,
+                    cleanup_not_before_ms: 0,
                 };
                 self.active_production_mptcp_exit_routes
                     .insert(route_context_id, active);
@@ -9695,6 +9723,7 @@ impl DiscoveryRuntime {
             runtime_started: false,
             reservation_id,
             expires_at_ms,
+            cleanup_not_before_ms: 0,
         };
         if self
             .active_production_mptcp_exit_routes
@@ -9949,6 +9978,8 @@ impl DiscoveryRuntime {
                     active.cleanup = Some(cleanup);
                     active.runtime_started = false;
                     active.expires_at_ms = 0;
+                    active.cleanup_not_before_ms =
+                        unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
                     self.active_production_mptcp_exit_routes
                         .insert(event.route_context_id, active);
                     state.write().await.log(
@@ -10029,6 +10060,8 @@ impl DiscoveryRuntime {
                 .and_then(|service| service.release(route.bundle.reservation_id()).ok());
             true
         } else {
+            route.cleanup_not_before_ms =
+                unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
             let previous = self
                 .prepared_production_exit_routes
                 .insert(route_context_id, route);
@@ -10065,6 +10098,8 @@ impl DiscoveryRuntime {
                 .and_then(|service| service.release(&route.reservation_id).ok());
             true
         } else {
+            route.cleanup_not_before_ms =
+                unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
             let previous = self
                 .active_production_mptcp_exit_routes
                 .insert(route_context_id, route);
@@ -10917,6 +10952,7 @@ impl DiscoveryRuntime {
                     ),
                     candidate_set_hash,
                     expires_at_ms: scope.attempt_expires_at_ms,
+                    cleanup_not_before_ms: 0,
                 },
             );
             debug_assert!(
@@ -15371,6 +15407,58 @@ mod tests {
             }
         }
         panic!("closing brace");
+    }
+
+    #[test]
+    fn ambiguous_helper_cleanup_is_quarantined_between_bounded_retries() {
+        let expired_at_ms = 1_000_u64;
+        let failed_at_ms = 2_000_u64;
+        let retry_at_ms = failed_at_ms.saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+
+        assert!(helper_cleanup_due(expired_at_ms, 0, failed_at_ms));
+        assert!(!helper_cleanup_due(
+            expired_at_ms,
+            retry_at_ms,
+            failed_at_ms.saturating_add(1),
+        ));
+        assert!(!helper_cleanup_due(
+            expired_at_ms,
+            retry_at_ms,
+            retry_at_ms.saturating_sub(1),
+        ));
+        assert!(helper_cleanup_due(expired_at_ms, retry_at_ms, retry_at_ms,));
+        assert!(helper_cleanup_due(expired_at_ms, u64::MAX, u64::MAX,));
+
+        let source = include_str!("discovery.rs");
+        let runtime_impl = braced_item(source, "impl DiscoveryRuntime {");
+        let relay_cleanup = braced_item(
+            runtime_impl,
+            "async fn destroy_expired_production_relay_routes(",
+        );
+        let quarantine = relay_cleanup
+            .find("route.usable = false;")
+            .expect("expired Relay is quarantined");
+        let destroy = relay_cleanup
+            .find(".destroy_context(&route.helper_owner)")
+            .expect("helper Destroy attempt");
+        let retry = relay_cleanup
+            .find("HELPER_CLEANUP_RETRY_BACKOFF_MS")
+            .expect("bounded retry deadline");
+        let reinsert = relay_cleanup
+            .find(".insert(route_context_id, route)")
+            .expect("affine owner retained");
+        assert!(quarantine < destroy);
+        assert!(destroy < retry);
+        assert!(retry < reinsert);
+
+        for cleanup in [
+            "async fn destroy_expired_exit_native_attempts(",
+            "async fn destroy_expired_production_relay_routes(",
+            "async fn destroy_expired_production_exit_routes(",
+            "async fn destroy_expired_active_mptcp_exit_routes(",
+        ] {
+            assert!(braced_item(runtime_impl, cleanup).contains("helper_cleanup_due("));
+        }
     }
 
     #[test]
