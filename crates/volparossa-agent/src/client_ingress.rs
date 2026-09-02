@@ -372,6 +372,34 @@ pub(crate) struct PolicyAuthorizedTcpIngress {
 }
 
 impl PolicyAuthorizedTcpIngress {
+    /// Re-authorize the exact inspected hostname and kernel-observed tuple once route setup is
+    /// complete. Building a production route can outlive the short ingress binding; the buffered
+    /// application stream remains affine, but its policy snapshot must be current before signing.
+    pub(crate) fn reauthorize_after_route_ready(
+        mut self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<Self, ClientIngressTcpError> {
+        if let Some(hostname) = self.hostname.as_deref() {
+            policy
+                .authorize_domain(
+                    now_ms,
+                    hostname,
+                    TransportProtocol::Tcp,
+                    self.destination.port(),
+                )
+                .map_err(ClientIngressTcpError::Policy)?;
+            self.policy_hash = *policy.policy_hash();
+            self.expires_at_ms = tcp_flow_expiry(policy, now_ms)?;
+        } else {
+            let (policy_hash, expires_at_ms) =
+                authorize_tcp_destination(self.destination, policy, now_ms)?;
+            self.policy_hash = policy_hash;
+            self.expires_at_ms = expires_at_ms;
+        }
+        Ok(self)
+    }
+
     /// Recheck the immutable policy binding immediately before signing `OPEN_TCP`.
     pub(crate) fn into_route_parts(
         self,
@@ -1609,6 +1637,65 @@ mod tests {
         let (mut stream, retained_destination, hostname) = authorized
             .into_route_parts(&policy, NOW_MS)
             .expect("retained policy binding");
+        sender.await.expect("sender task");
+        let mut retained_client_hello = vec![0; expected_client_hello.len()];
+        stream
+            .read_exact(&mut retained_client_hello)
+            .await
+            .expect("unconsumed ClientHello");
+
+        assert_eq!(retained_destination, destination);
+        assert_eq!(hostname.as_deref(), Some(HOSTNAME));
+        assert_eq!(retained_client_hello, expected_client_hello);
+    }
+
+    #[tokio::test]
+    async fn tcp_ingress_refreshes_policy_binding_after_slow_route_establishment() {
+        const OBSERVED_MS: u64 = 1_900_000_000_000;
+        const ROUTE_READY_MS: u64 = OBSERVED_MS + 61_000;
+        const HOSTNAME: &str = "destination.volparossa.test";
+        let destination = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 18_443));
+        let permission =
+            ProtocolPort::new(TransportProtocol::Tcp, destination.port()).expect("TCP permission");
+        let rule = DestinationRule::exact_domain(HOSTNAME, [permission]).expect("domain rule");
+        let observed_policy =
+            verified_development_manifest(OBSERVED_MS, vec![rule.clone()]).expect("old policy");
+        let ready_policy =
+            verified_development_manifest(ROUTE_READY_MS, vec![rule]).expect("active policy");
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("test listener");
+        let listener_address = listener.local_addr().expect("listener address");
+        let client_hello = tls_client_hello(HOSTNAME);
+        let expected_client_hello = client_hello.clone();
+        let sender = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(listener_address)
+                .await
+                .expect("test connection");
+            stream
+                .write_all(&client_hello)
+                .await
+                .expect("ClientHello write");
+        });
+        let (stream, _) = listener.accept().await.expect("accepted test stream");
+        let ingress = ObservedTcpIngress {
+            stream,
+            destination,
+        }
+        .authorize(&observed_policy, OBSERVED_MS)
+        .await
+        .expect("initial visible-SNI authorization");
+        assert!(ROUTE_READY_MS >= ingress.expires_at_ms);
+
+        let ingress = ingress
+            .reauthorize_after_route_ready(&ready_policy, ROUTE_READY_MS)
+            .expect("exact inspected binding re-authorized at route readiness");
+        assert_eq!(ingress.policy_hash, *ready_policy.policy_hash());
+        assert!(ingress.expires_at_ms > ROUTE_READY_MS);
+        let (mut stream, retained_destination, hostname) = ingress
+            .into_route_parts(&ready_policy, ROUTE_READY_MS)
+            .expect("refreshed policy binding");
         sender.await.expect("sender task");
         let mut retained_client_hello = vec![0; expected_client_hello.len()];
         stream

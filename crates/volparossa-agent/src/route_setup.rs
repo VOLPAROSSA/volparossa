@@ -1062,6 +1062,8 @@ impl ClientRouteControl {
         now_ms: u64,
     ) -> Result<(), ClientRouteConnectError> {
         let (application, destination, hostname) = ingress
+            .reauthorize_after_route_ready(policy, now_ms)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
             .into_route_parts(policy, now_ms)
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
         let destination_scope =
