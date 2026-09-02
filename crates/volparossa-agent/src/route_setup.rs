@@ -6266,8 +6266,10 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         for grant in &grants {
             self.ensure_live(clock, cancellation, deadline)?;
             let now_ms = clock.unix_millis();
-            let expires_at_ms =
-                bounded_phase_expiry(now_ms, self.request.parameters.expires_at_ms)?;
+            // ConfirmRelay still crosses the request-bounded control-to-Exit forwarding
+            // capability. Its wrapper may authorize the long reservation, but must itself remain
+            // inside the short setup/hold authority just like every earlier Exit setup phase.
+            let expires_at_ms = bounded_phase_expiry(now_ms, intent.hold_expires_at_ms)?;
             let signed_confirmation = self
                 .prepared
                 .as_mut()
@@ -10456,7 +10458,14 @@ mod tests {
         reason = "the full phase-order test also proves one signed frame across exact retries"
     )]
     async fn v4_phase_order_uses_real_probes_noncontiguous_subset_and_exact_retry_bytes() {
-        let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let mut fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let forwarding_expiry_ms = NOW_MS + 20_000;
+        fixture
+            .transaction
+            .transaction
+            .authorities
+            .exit
+            .expires_at_ms = forwarding_expiry_ms;
         {
             fixture
                 .shared
@@ -10530,6 +10539,17 @@ mod tests {
                 .expect("finalize frames");
             assert_eq!(frames.len(), 3);
             assert!(frames.windows(2).all(|pair| pair[0] == pair[1]));
+            let confirmations = state
+                .exit_frames
+                .get(&(ExitForwardOperation::ConfirmRelay as i32))
+                .expect("confirmation frames");
+            assert_eq!(confirmations.len(), 3);
+            assert!(
+                confirmations
+                    .iter()
+                    .all(|frame| frame.deadline_unix_ms() == forwarding_expiry_ms),
+                "Exit confirmations must not outlive short forwarding authority"
+            );
             let [activation] = state.activation_batches.as_slice() else {
                 panic!("one exact activation batch");
             };
