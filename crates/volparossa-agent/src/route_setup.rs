@@ -2175,12 +2175,18 @@ async fn complete_client_native_probe(
         let _ = helper.destroy_context(&*awaiting.runtime_owner_mut()).await;
         return Err(ClientRouteConnectError::NativeHelperCommitUnavailable);
     };
-    let Ok(completed) =
-        Box::pin(awaiting.accept_committed_and_dispatch(committed, discovery)).await
-    else {
-        let _ = helper.cleanup_owned().await;
-        return Err(ClientRouteConnectError::NativeProofUnavailable);
-    };
+    let completed =
+        match Box::pin(awaiting.accept_committed_and_dispatch(committed, discovery)).await {
+            Ok(completed) => completed,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "native terminal Start/result exact-set failed"
+                );
+                let _ = helper.cleanup_owned().await;
+                return Err(ClientRouteConnectError::NativeProofUnavailable);
+            }
+        };
     let owner = completed
         .runtime_owner()
         .map_err(|_| ClientRouteConnectError::NativeProofUnavailable)?;

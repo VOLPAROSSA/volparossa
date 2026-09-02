@@ -1084,7 +1084,13 @@ impl NativeRelayStartDispatch {
         let response = discovery
             .request_datapath_relay(relay_peer, request)
             .await
-            .map_err(map_relay_transport)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    error = ?error,
+                    "native terminal Start transport failed"
+                );
+                map_relay_transport(error)
+            })?;
         response
             .validate()
             .map_err(|_| NativePreselectionError::InvalidRelayDispatch)?;

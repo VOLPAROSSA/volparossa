@@ -689,6 +689,7 @@ struct PendingNativeProbeAuthorization {
 
 struct ActiveNativeRelayProbe {
     authenticated_client_peer: Libp2pPeerId,
+    authorized_relay: DirectRelayCapability,
     endpoint: RelayEndpointLease,
     helper_owner: RuntimeBoundPreparedLeaseBatch,
 }
@@ -6595,7 +6596,7 @@ impl DiscoveryRuntime {
     ) {
         macro_rules! reject {
             ($code:literal) => {{
-                log_relay_forward_admission(Some(state), $code);
+                log_reservation_event(state, $code).await;
                 self.send_native_datapath_unavailable(
                     request,
                     DatapathRelayOperation::NativeProbeStart,
@@ -6689,12 +6690,8 @@ impl DiscoveryRuntime {
             let _ = self.helper.destroy_context(&active.helper_owner).await;
             reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
         };
-        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
-            let _ = self.helper.destroy_context(&active.helper_owner).await;
-            reject!("NATIVE_PROBE_RESULT_RELAY_AUTHORITY_UNAVAILABLE");
-        };
         if !native_probe_data_relay_capability_matches(
-            &authorized_control,
+            &active.authorized_relay,
             data_relay,
             scope,
             local_peer,
@@ -6761,7 +6758,7 @@ impl DiscoveryRuntime {
                 expected_exit_peer: exit_peer,
                 operation: ExitForwardOperation::NativeProbeResult,
                 expected_exit_node_id: Some(exit_node_id),
-                authorized_control,
+                authorized_control: active.authorized_relay.clone(),
                 authorized_exit: None,
                 canonical_request,
                 operation_expires_at_ms: request.deadline_unix_ms(),
@@ -7422,6 +7419,7 @@ impl DiscoveryRuntime {
                         {
                             entry.insert(ActiveNativeRelayProbe {
                                 authenticated_client_peer: pending.key.authenticated_client_peer,
+                                authorized_relay: pending.authorized_control.clone(),
                                 endpoint,
                                 helper_owner: native.helper_owner,
                             });

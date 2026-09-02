@@ -1638,7 +1638,15 @@ impl AwaitingClientNativeProbeResult {
             let discovery = discovery.clone();
             dispatches.spawn(async move {
                 let dispatch = path.awaiting.into_relay_start_dispatch()?;
-                let (awaiting, signed_relay_result) = dispatch.execute(&discovery).await?;
+                let result = dispatch.execute(&discovery).await;
+                if let Err(error) = &result {
+                    tracing::warn!(
+                        path_id = path.path_id,
+                        error = %error,
+                        "native terminal Start dispatch failed"
+                    );
+                }
+                let (awaiting, signed_relay_result) = result?;
                 Ok::<_, native_preselection::NativePreselectionError>((
                     path.path_id,
                     path.prepared_lease_commitment,
