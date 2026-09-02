@@ -223,6 +223,10 @@ grep -F 'relay1_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
 grep -F 'after_marker.relay2_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
 grep -F 'def is_ipv4_multicast(address):' "$GUEST" >/dev/null
 grep -F 'not is_ipv4_multicast(destination)' "$GUEST" >/dev/null
+grep -F 'topology_control_public = {' "$GUEST" >/dev/null
+grep -F 'allowed = topology_control_public | {' "$GUEST" >/dev/null
+grep -F '47.163.4.2 whose appearance in an outer header is counted separately above' "$GUEST" \
+    >/dev/null
 grep -F 'acceptance_id:"A11",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A12",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A13",success:$success' "$GUEST" >/dev/null

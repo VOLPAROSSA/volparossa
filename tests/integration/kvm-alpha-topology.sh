@@ -2183,13 +2183,22 @@ while running and time.monotonic() < deadline:
                 } == {"43.159.1.1", "45.161.2.1"}:
                     counters["relay2_wireguard_data_datagrams"] += 1
             elif role in {"relay1", "relay2"}:
+                # The Relay underlay also carries the fixed discovery topology. These public
+                # addresses are control-plane peers, not the forbidden Internet destination
+                # 47.163.4.2 whose appearance in an outer header is counted separately above.
+                topology_control_public = {
+                    "40.156.1.1",
+                    "41.157.2.1",
+                    "42.158.0.1",
+                    "43.159.1.1",
+                    "44.160.1.1",
+                    "45.161.2.1",
+                    "46.162.3.1",
+                }
                 if role == "relay1":
                     client_interface, exit_interface = "r1c", "r1x"
                     relay_public = "44.160.1.1"
-                    allowed = {
-                        "43.159.1.1",
-                        "44.160.1.1",
-                        "46.162.3.1",
+                    allowed = topology_control_public | {
                         "10.241.11.1",
                         "10.241.11.2",
                         "10.241.21.1",
@@ -2198,10 +2207,7 @@ while running and time.monotonic() < deadline:
                 else:
                     client_interface, exit_interface = "r2c", "r2x"
                     relay_public = "45.161.2.1"
-                    allowed = {
-                        "43.159.1.1",
-                        "45.161.2.1",
-                        "46.162.3.1",
+                    allowed = topology_control_public | {
                         "10.241.12.1",
                         "10.241.12.2",
                         "10.241.22.1",
