@@ -429,17 +429,38 @@ capture_worker_network_diagnostics() {
         case $diagnostic_cgroup in /system.slice/*) ;; *) continue ;; esac
         diagnostic_procs=/sys/fs/cgroup$diagnostic_cgroup/cgroup.procs
         [ -r "$diagnostic_procs" ] || continue
+        printf 'unit=%s cgroup=%s pids=%s\n' "$diagnostic_unit" \
+            "$diagnostic_cgroup" "$(tr '\n' ',' <"$diagnostic_procs")" \
+            >>"$WORK/worker-network-diagnostics.txt"
         for diagnostic_pid in $(sort -n "$diagnostic_procs"); do
             [ -r "/proc/$diagnostic_pid/cmdline" ] || continue
             diagnostic_command=$(tr '\000' ' ' <"/proc/$diagnostic_pid/cmdline")
-            case $diagnostic_command in *--internal-worker-v3*) ;; *) continue ;; esac
             {
-                printf 'node=%s pid=%s netns=%s\n' "$diagnostic_node" \
-                    "$diagnostic_pid" "$(stat -Lc '%d:%i' "/proc/$diagnostic_pid/ns/net")"
+                printf 'node=%s pid=%s netns=%s command=%s\n' "$diagnostic_node" \
+                    "$diagnostic_pid" "$(stat -Lc '%d:%i' "/proc/$diagnostic_pid/ns/net")" \
+                    "$diagnostic_command"
                 nsenter -t "$diagnostic_pid" -n ip -details -statistics link show || true
                 nsenter -t "$diagnostic_pid" -n ip -6 address show || true
                 nsenter -t "$diagnostic_pid" -n ip -6 route show table main || true
-                nsenter -t "$diagnostic_pid" -n wg show all dump || true
+                diagnostic_interfaces=$(nsenter -t "$diagnostic_pid" -n \
+                    wg show interfaces 2>/dev/null || true)
+                for diagnostic_interface in $diagnostic_interfaces; do
+                    printf 'wireguard-interface=%s\n' "$diagnostic_interface"
+                    nsenter -t "$diagnostic_pid" -n wg show "$diagnostic_interface" \
+                        public-key || true
+                    nsenter -t "$diagnostic_pid" -n wg show "$diagnostic_interface" \
+                        listen-port || true
+                    nsenter -t "$diagnostic_pid" -n wg show "$diagnostic_interface" \
+                        peers || true
+                    nsenter -t "$diagnostic_pid" -n wg show "$diagnostic_interface" \
+                        endpoints || true
+                    nsenter -t "$diagnostic_pid" -n wg show "$diagnostic_interface" \
+                        allowed-ips || true
+                    nsenter -t "$diagnostic_pid" -n wg show "$diagnostic_interface" \
+                        latest-handshakes || true
+                    nsenter -t "$diagnostic_pid" -n wg show "$diagnostic_interface" \
+                        transfer || true
+                done
                 nsenter -t "$diagnostic_pid" -n nft list ruleset || true
                 nsenter -t "$diagnostic_pid" -n \
                     cat /proc/sys/net/ipv6/conf/all/forwarding || true
