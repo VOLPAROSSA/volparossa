@@ -46,7 +46,7 @@ const SETUP_TTL_SECONDS: u64 = 30;
 const HARD_TTL_SECONDS: u64 = 15 * 60;
 const RESPONSE_CACHE_SECONDS: u64 = 30;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
-const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAINTENANCE_REAP_DOMAIN: &[u8] = b"VOLPAROSSA helper-v3 maintenance reap v1";
 
 /// Stateful authenticated helper-v3 dispatcher.

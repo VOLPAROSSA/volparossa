@@ -138,7 +138,7 @@ pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-work
 
 #[cfg(test)]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
+const CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 const LIVE_FDSTORE_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINATION_POLL_INTERVAL: Duration = Duration::from_millis(5);

@@ -46,7 +46,7 @@ use crate::{
     worker_sandbox::PinnedWorkerNetworkNamespace,
 };
 
-const WORKER_IPC_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_IPC_TIMEOUT: Duration = Duration::from_secs(10);
 const MPTCP_CONNECT_TIMEOUT_MILLISECONDS: u16 = 5_000;
 const MPTCP_LISTEN_BACKLOG: i32 = 128;
 const MAX_CREDENTIAL_BINDING_BYTES: usize = 256;

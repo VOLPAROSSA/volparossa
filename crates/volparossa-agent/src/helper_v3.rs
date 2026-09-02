@@ -39,7 +39,7 @@ use volparossa_routing::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
+const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 const CLEANUP_TOKEN_BYTES: usize = 32;
 
 /// One route-namespace descriptor plus the exact validated helper metadata that binds it.
