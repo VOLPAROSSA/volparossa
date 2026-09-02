@@ -3722,6 +3722,7 @@ struct IssuedProbe<Q, P> {
     path_id: u32,
     request: Q,
     permit: P,
+    expires_at_ms: u64,
 }
 
 struct SelectedProbe<P> {
@@ -5720,6 +5721,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                 path_id: relay_intent.path_id,
                 request: probe_request,
                 permit,
+                expires_at_ms,
             });
         }
 
@@ -5731,8 +5733,9 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                 .authorities
                 .relay_for_path(issued_probe.path_id)
                 .ok_or(RouteSetupError::Capability)?;
-            let expires_at_ms =
-                bounded_phase_expiry(clock.unix_millis(), intent.hold_expires_at_ms)?;
+            // The outer datapath wrapper is part of the exact signed-request scope. Reuse the
+            // expiry signed into this probe request instead of deriving a later value.
+            let expires_at_ms = issued_probe.expires_at_ms;
             let rpc = datapath_request(
                 relay,
                 DatapathRelayOperation::ExecuteProbe,
