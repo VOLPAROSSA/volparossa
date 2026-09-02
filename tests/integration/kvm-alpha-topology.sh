@@ -411,7 +411,8 @@ copy_artifacts() {
         a13-client-routes-before.json a13-client-routes-after.json \
         a13-exit-route-before.txt a13-exit-route-after.txt \
         a13-destination-route-before.txt a13-destination-route-after.txt \
-        a14-owned-before.json a14-owned-after-paths.txt a14-paths-before.txt \
+        a14-owned-before.json a14-worker-custody-before.json \
+        a14-worker-custody-after.json a14-owned-after-paths.txt a14-paths-before.txt \
         a14-crashes.json a14-evidence.json \
         host-state-before.json host-state-after.json a15-evidence.json; do
         if [ -f "$WORK/$artifact" ] && [ ! -L "$WORK/$artifact" ]; then
@@ -848,6 +849,9 @@ cleanup() {
     remaining_mptcp_endpoints=0
     remaining_mpquic_paths=0
     remaining_nftables_rules=0
+    remaining_worker_network_namespaces=0
+    remaining_worker_namespace_references=0
+    remaining_helper_fdstore_descriptors=0
     if [ "$A14_REQUESTED" = true ] \
         && ! measure_a14_remaining_network_objects; then
         remaining_links=1
@@ -855,6 +859,9 @@ cleanup() {
         remaining_mptcp_endpoints=1
         remaining_mpquic_paths=1
         remaining_nftables_rules=1
+        remaining_worker_network_namespaces=1
+        remaining_worker_namespace_references=1
+        remaining_helper_fdstore_descriptors=1
         original_status=1
         OBSERVED_BLOCKER=A14_REMAINING_INVENTORY_UNAVAILABLE
     fi
@@ -913,7 +920,9 @@ cleanup() {
     REMAINING_OWNED_OBJECTS=$((REMAINING_NAMESPACES + REMAINING_UNITS \
         + remaining_runtime_sockets + remaining_links + remaining_routes \
         + remaining_mptcp_endpoints + remaining_mpquic_paths \
-        + remaining_nftables_rules + host_leaks))
+        + remaining_nftables_rules + remaining_worker_network_namespaces \
+        + remaining_worker_namespace_references \
+        + remaining_helper_fdstore_descriptors + host_leaks))
 
     if [ "$A14_REQUESTED" = true ]; then
         a14_success=false
@@ -935,9 +944,13 @@ cleanup() {
         a14_crashes=null
         [ ! -s "$WORK/a14-crashes.json" ] \
             || a14_crashes=$(cat "$WORK/a14-crashes.json")
+        a14_worker_after=null
+        [ ! -s "$WORK/a14-worker-custody-after.json" ] \
+            || a14_worker_after=$(cat "$WORK/a14-worker-custody-after.json")
         jq -S -c -n \
             --argjson before "$a14_before" \
             --argjson crashes "$a14_crashes" \
+            --argjson worker_after "$a14_worker_after" \
             --slurpfile host "$WORK/a15-evidence.json" \
             --argjson success "$a14_success" \
             --argjson namespaces "$REMAINING_NAMESPACES" \
@@ -948,14 +961,21 @@ cleanup() {
             --argjson mptcp "$remaining_mptcp_endpoints" \
             --argjson mpquic "$remaining_mpquic_paths" \
             --argjson nft "$remaining_nftables_rules" \
+            --argjson worker_namespaces "$remaining_worker_network_namespaces" \
+            --argjson worker_references "$remaining_worker_namespace_references" \
+            --argjson fdstore "$remaining_helper_fdstore_descriptors" \
             --argjson remaining "$REMAINING_OWNED_OBJECTS" \
             '{schema_version:1,acceptance_id:"A14",success:$success,
               forced_crashes:$crashes,owned_before:$before,
-              cleanup:{remaining_owned_objects:$remaining,
+              cleanup:{worker_custody_after:$worker_after,
+                remaining_owned_objects:$remaining,
                 remaining_namespaces:$namespaces,remaining_units:$units,
                 remaining_runtime_sockets:$sockets,remaining_links:$links,
                 remaining_routes:$routes,remaining_mptcp_endpoints:$mptcp,
-                remaining_mpquic_paths:$mpquic,remaining_nftables_rules:$nft},
+                remaining_mpquic_paths:$mpquic,remaining_nftables_rules:$nft,
+                remaining_worker_network_namespaces:$worker_namespaces,
+                remaining_worker_namespace_references:$worker_references,
+                remaining_helper_fdstore_descriptors:$fdstore},
               verification_basis:{all_product_networking_namespace_owned:true,
                 owned_namespace_mounts_absent:($namespaces == 0),
                 guest_root_state_exactly_restored:$host[0].unchanged}}' \
@@ -3175,7 +3195,156 @@ stop_privacy_observers() {
     return "$privacy_status"
 }
 
+record_a14_worker_custody_inventory() {
+    a14_worker_rows=$WORK/a14-worker-custody-before.ndjson
+    : >"$a14_worker_rows"
+    a14_fdstore_descriptors=0
+    for a14_node_namespace in client:"$CLIENT" bootstrap1:"$B1" bootstrap2:"$B2" \
+        relay0:"$R0" relay1:"$R1" relay2:"$R2" exit:"$EXIT_NODE"; do
+        a14_node=${a14_node_namespace%%:*}
+        a14_outer_namespace=${a14_node_namespace#*:}
+        a14_unit=volparossa-alpha-helper@$a14_node.service
+        a14_cgroup=$(systemctl show --property=ControlGroup --value "$a14_unit") \
+            || return 1
+        case $a14_cgroup in /system.slice/*) ;; *) return 1 ;; esac
+        a14_cgroup_root=/sys/fs/cgroup$a14_cgroup
+        [ -d "$a14_cgroup_root" ] || return 1
+        a14_fdstore=$(systemctl show --property=NFileDescriptorStore --value \
+            "$a14_unit") || return 1
+        case $a14_fdstore in ''|*[!0-9]*) return 1 ;; esac
+        a14_fdstore_descriptors=$((a14_fdstore_descriptors + a14_fdstore))
+        a14_outer_identity=$(stat -Lc '%d:%i' "/run/netns/$a14_outer_namespace") \
+            || return 1
+        a14_worker_pids=$(find "$a14_cgroup_root" -type f -name cgroup.procs \
+            -exec cat {} \; 2>/dev/null | sort -nu | tr '\n' ' ')
+        for a14_worker_pid in $a14_worker_pids; do
+            [ -r "/proc/$a14_worker_pid/cmdline" ] || continue
+            a14_command=$(tr '\000' ' ' <"/proc/$a14_worker_pid/cmdline")
+            case $a14_command in *'--internal-worker-v3'*) ;; *) continue ;; esac
+            a14_worker_identity=$(stat -Lc '%d:%i' "/proc/$a14_worker_pid/ns/net") \
+                || return 1
+            [ "$a14_worker_identity" != "$a14_outer_identity" ] || return 1
+            a14_worker_device=${a14_worker_identity%%:*}
+            a14_worker_inode=${a14_worker_identity#*:}
+            case $a14_worker_device:$a14_worker_inode in
+                :*|*:|*[!0-9:]*) return 1 ;;
+            esac
+            jq -S -c -n --arg node "$a14_node" \
+                --arg unit "$a14_unit" --argjson pid "$a14_worker_pid" \
+                --argjson device "$a14_worker_device" \
+                --argjson inode "$a14_worker_inode" \
+                '{node:$node,helper_unit:$unit,worker_pid_before:$pid,
+                  network_namespace_device:$device,network_namespace_inode:$inode}' \
+                >>"$a14_worker_rows" || return 1
+        done
+    done
+    jq -S -c -s --argjson fdstore "$a14_fdstore_descriptors" '
+      . as $workers
+      | ($workers | unique_by([.network_namespace_device,
+          .network_namespace_inode])) as $namespaces
+      | {schema_version:1,worker_process_count:($workers | length),
+         worker_network_namespace_count:($namespaces | length),
+         helper_fdstore_descriptors:$fdstore,
+         worker_network_namespaces:$namespaces}' "$a14_worker_rows" \
+        >"$WORK/a14-worker-custody-before.json" || return 1
+    rm -f -- "$a14_worker_rows"
+}
+
+scan_a14_worker_namespace_references() {
+    python3 - "$WORK/a14-worker-custody-before.json" \
+        "$WORK/a14-worker-custody-after.json" <<'PYTHON'
+import json
+import os
+import sys
+
+source_path, output_path = sys.argv[1:]
+with open(source_path, encoding="ascii") as source:
+    inventory = json.load(source)
+targets = inventory.get("worker_network_namespaces")
+if not isinstance(targets, list) or not targets or len(targets) > 128:
+    raise SystemExit("invalid A14 worker namespace inventory")
+
+by_identity = {}
+for target in targets:
+    device = target.get("network_namespace_device")
+    inode = target.get("network_namespace_inode")
+    if not isinstance(device, int) or device <= 0 or not isinstance(inode, int) or inode <= 0:
+        raise SystemExit("invalid A14 worker namespace identity")
+    identity = (device, inode)
+    if identity in by_identity:
+        raise SystemExit("duplicate A14 worker namespace identity")
+    by_identity[identity] = {**target, "references_after": []}
+
+for process in os.scandir("/proc"):
+    if not process.name.isdecimal():
+        continue
+    pid = int(process.name)
+    observations = [(f"/proc/{pid}/ns/net", "process-network-namespace", None)]
+    try:
+        descriptors = os.scandir(f"/proc/{pid}/fd")
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        descriptors = ()
+    try:
+        for descriptor in descriptors:
+            if descriptor.name.isdecimal():
+                observations.append(
+                    (descriptor.path, "open-descriptor", int(descriptor.name))
+                )
+    finally:
+        close = getattr(descriptors, "close", None)
+        if close is not None:
+            close()
+    for path, kind, descriptor in observations:
+        try:
+            status = os.stat(path)
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        target = by_identity.get((status.st_dev, status.st_ino))
+        if target is None:
+            continue
+        reference = {"pid": pid, "kind": kind}
+        if descriptor is not None:
+            reference["descriptor"] = descriptor
+        target["references_after"].append(reference)
+
+remaining = list(by_identity.values())
+remaining.sort(
+    key=lambda item: (
+        item["network_namespace_device"], item["network_namespace_inode"]
+    )
+)
+reference_count = sum(len(item["references_after"]) for item in remaining)
+if reference_count > 4096:
+    raise SystemExit("A14 worker namespace reference inventory is oversized")
+result = {
+    "schema_version": 1,
+    "worker_network_namespaces": remaining,
+    "referenced_namespace_count": sum(
+        bool(item["references_after"]) for item in remaining
+    ),
+    "remaining_reference_count": reference_count,
+}
+with open(output_path, "x", encoding="ascii") as output:
+    json.dump(result, output, sort_keys=True, separators=(",", ":"))
+    output.write("\n")
+PYTHON
+}
+
+remaining_a14_helper_fdstore_descriptors() {
+    a14_remaining_fdstore=0
+    for a14_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
+        a14_unit=volparossa-alpha-helper@$a14_node.service
+        [ "$(unit_load_state "$a14_unit")" != not-found ] || continue
+        a14_count=$(systemctl show --property=NFileDescriptorStore --value \
+            "$a14_unit") || return 1
+        case $a14_count in ''|*[!0-9]*) return 1 ;; esac
+        a14_remaining_fdstore=$((a14_remaining_fdstore + a14_count))
+    done
+    printf '%s\n' "$a14_remaining_fdstore"
+}
+
 record_a14_owned_inventory() {
+    record_a14_worker_custody_inventory || return 1
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-client/control/agent.sock" paths \
         >"$WORK/a14-paths-before.txt" || return 1
@@ -3220,6 +3389,7 @@ record_a14_owned_inventory() {
         --argjson namespace_count "$a14_namespace_count" \
         --argjson runtime_sockets "$a14_socket_count" \
         --argjson control_path_records "$a14_control_path_records" \
+        --slurpfile worker_custody "$WORK/a14-worker-custody-before.json" \
         --slurpfile client "$WORK/a14-owned-client.json" \
         --slurpfile bootstrap1 "$WORK/a14-owned-bootstrap1.json" \
         --slurpfile bootstrap2 "$WORK/a14-owned-bootstrap2.json" \
@@ -3231,6 +3401,7 @@ record_a14_owned_inventory() {
         '{schema_version:1,network_namespace_count:$namespace_count,
           runtime_socket_count:$runtime_sockets,
           active_control_path_records:$control_path_records,
+          helper_worker_custody:$worker_custody[0],
           namespaces:[$client[0],$bootstrap1[0],$bootstrap2[0],$relay0[0],
             $relay1[0],$relay2[0],$exit_node[0],$destination[0]]}' \
         >"$WORK/a14-owned-before.json"
@@ -3276,6 +3447,17 @@ measure_a14_remaining_network_objects() {
         fi
         rm -f -- "$remaining_paths_file"
     done
+    scan_a14_worker_namespace_references || return 1
+    remaining_worker_network_namespaces=$(jq -er '.referenced_namespace_count' \
+        "$WORK/a14-worker-custody-after.json") || return 1
+    remaining_worker_namespace_references=$(jq -er '.remaining_reference_count' \
+        "$WORK/a14-worker-custody-after.json") || return 1
+    case $remaining_worker_network_namespaces:$remaining_worker_namespace_references in
+        :*|*:|*[!0-9:]*) return 1 ;;
+    esac
+    remaining_helper_fdstore_descriptors=$(remaining_a14_helper_fdstore_descriptors) \
+        || return 1
+    case $remaining_helper_fdstore_descriptors in ''|*[!0-9]*) return 1 ;; esac
 }
 
 force_crash_unit() {
@@ -4883,6 +5065,11 @@ record_a14_owned_inventory || fail A14_OWNED_INVENTORY_UNAVAILABLE
 jq -e '
   .network_namespace_count == 8 and
   .runtime_socket_count >= 16 and
+  .helper_worker_custody.worker_process_count >= 4 and
+  .helper_worker_custody.worker_network_namespace_count ==
+    .helper_worker_custody.worker_process_count and
+  .helper_worker_custody.helper_fdstore_descriptors >=
+    (.helper_worker_custody.worker_network_namespace_count * 2) and
   ([.namespaces[] | select(.nftables_rules > 0)] | length) >= 1
 ' "$WORK/a14-owned-before.json" >/dev/null \
     || fail A14_OWNED_INVENTORY_INCOMPLETE

@@ -257,6 +257,13 @@ jobs:
             (.a13_no_direct_client_exit.evidence.direct_physical_routes | length) == 0 and
             .a14_forced_crash_cleanup.succeeded == true and
             .a14_forced_crash_cleanup.evidence.success == true and
+            .a14_forced_crash_cleanup.evidence.owned_before.helper_worker_custody.worker_network_namespace_count >= 4 and
+            .a14_forced_crash_cleanup.evidence.owned_before.helper_worker_custody.helper_fdstore_descriptors >= 8 and
+            .a14_forced_crash_cleanup.evidence.cleanup.worker_custody_after.referenced_namespace_count == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.worker_custody_after.remaining_reference_count == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.remaining_worker_network_namespaces == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.remaining_worker_namespace_references == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.remaining_helper_fdstore_descriptors == 0 and
             .a14_forced_crash_cleanup.evidence.cleanup.remaining_owned_objects == 0 and
             .a15_host_state_unchanged.succeeded == true and
             .a15_host_state_unchanged.evidence.success == true and

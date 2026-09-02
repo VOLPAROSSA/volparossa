@@ -229,6 +229,15 @@ grep -F 'acceptance_id:"A13",success:$success' "$GUEST" >/dev/null
 grep -F 'systemctl kill --kill-whom=all --signal=KILL "$crash_unit"' "$GUEST" \
     >/dev/null
 grep -F 'active_control_path_records:$control_path_records' "$GUEST" >/dev/null
+grep -F 'record_a14_worker_custody_inventory()' "$GUEST" >/dev/null
+grep -F 'scan_a14_worker_namespace_references()' "$GUEST" >/dev/null
+grep -F 'remaining_a14_helper_fdstore_descriptors()' "$GUEST" >/dev/null
+grep -F '.helper_worker_custody.worker_process_count >= 4' "$GUEST" >/dev/null
+grep -F '.helper_worker_custody.helper_fdstore_descriptors >=' "$GUEST" >/dev/null
+grep -F 'cleanup:{worker_custody_after:$worker_after' "$GUEST" >/dev/null
+grep -F 'remaining_worker_network_namespaces:$worker_namespaces' "$GUEST" >/dev/null
+grep -F 'remaining_worker_namespace_references:$worker_references' "$GUEST" >/dev/null
+grep -F 'remaining_helper_fdstore_descriptors:$fdstore' "$GUEST" >/dev/null
 grep -F '([.namespaces[] | select(.nftables_rules > 0)] | length) >= 1' "$GUEST" \
     >/dev/null
 if grep -F '.active_mpquic_path_records >= 2' "$GUEST" >/dev/null; then
@@ -240,6 +249,10 @@ grep -F 'capture_host_state "$WORK/host-state-before.json"' "$GUEST" >/dev/null
 grep -F 'capture_host_state "$WORK/host-state-after.json"' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A15",success:$unchanged' "$GUEST" >/dev/null
 grep -F '.a14_forced_crash_cleanup.evidence.cleanup.remaining_owned_objects == 0' \
+    "$WORKFLOW" >/dev/null
+grep -F '.a14_forced_crash_cleanup.evidence.cleanup.worker_custody_after.referenced_namespace_count == 0' \
+    "$WORKFLOW" >/dev/null
+grep -F '.a14_forced_crash_cleanup.evidence.cleanup.remaining_helper_fdstore_descriptors == 0' \
     "$WORKFLOW" >/dev/null
 grep -F '.a15_host_state_unchanged.evidence.before_sha256 ==' "$WORKFLOW" \
     >/dev/null
