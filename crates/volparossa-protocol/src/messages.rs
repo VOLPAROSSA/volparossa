@@ -1799,7 +1799,7 @@ fn validate_ascii_text(
     Ok(())
 }
 
-fn validate_rate(rate: u64, field: &'static str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_rate(rate: u64, field: &'static str) -> Result<(), ProtocolError> {
     if rate == 0 || rate > MAX_RATE_MBPS {
         return Err(ProtocolError::InvalidField(field));
     }

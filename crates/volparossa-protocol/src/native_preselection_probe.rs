@@ -13,6 +13,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::envelope::fixed_array;
+use crate::messages::validate_rate;
 use crate::{
     ControlMessageType, ControlPayload, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
     ObservationAddressFamily, ObservationNetworkPrefix, PROTOCOL_VERSION, PreselectionActorBinding,
@@ -115,6 +116,12 @@ pub struct NativeProbePathScope {
     /// Exact number of native paths that must complete inside this attempt.
     #[prost(uint32, tag = "17")]
     pub required_path_count: u32,
+    /// Client-requested upload capacity reserved for this exact path.
+    #[prost(uint64, tag = "18")]
+    pub reserved_up_mbps: u64,
+    /// Client-requested download capacity reserved for this exact path.
+    #[prost(uint64, tag = "19")]
+    pub reserved_down_mbps: u64,
 }
 
 /// Ephemeral-client-signed endpoint-free request for one Exit permit.
@@ -829,6 +836,8 @@ impl NativeProbePathScope {
         require_nonzero::<ID_LENGTH>(&self.probe_id, "native scope probe_id")?;
         require_nonzero::<KEY_LENGTH>(&self.candidate_set_hash, "native scope set hash")?;
         require_nonzero::<KEY_LENGTH>(&self.challenge_hash, "native scope challenge hash")?;
+        validate_rate(self.reserved_up_mbps, "native scope reserved_up_mbps")?;
+        validate_rate(self.reserved_down_mbps, "native scope reserved_down_mbps")?;
         if !(1..=u32::try_from(MAX_NATIVE_PROBE_PATHS).unwrap_or(u32::MAX))
             .contains(&self.candidate_ordinal)
             || !(1..=u32::try_from(MAX_NATIVE_PROBE_PATHS).unwrap_or(u32::MAX))
@@ -2347,6 +2356,8 @@ mod tests {
                 challenge_hash: native_probe_challenge_hash(&challenge).to_vec(),
                 attempt_expires_at_ms: EXPIRY,
                 required_path_count: 2,
+                reserved_up_mbps: 10,
+                reserved_down_mbps: 20,
             };
             Self {
                 client,
@@ -2664,6 +2675,28 @@ mod tests {
         bounded_ordinal.candidate_ordinal = 9;
         bounded_ordinal.data_relay = Some(ninth_alternative);
         assert!(bounded_ordinal.validate().is_err());
+    }
+
+    #[test]
+    fn native_path_scope_requires_protocol_bounded_reserved_capacity() {
+        let fixture = Fixture::new();
+        assert!(fixture.scope.validate().is_ok());
+
+        let mut zero_upload = fixture.scope.clone();
+        zero_upload.reserved_up_mbps = 0;
+        assert!(zero_upload.validate().is_err());
+
+        let mut zero_download = fixture.scope.clone();
+        zero_download.reserved_down_mbps = 0;
+        assert!(zero_download.validate().is_err());
+
+        let mut excessive_upload = fixture.scope.clone();
+        excessive_upload.reserved_up_mbps = u64::MAX;
+        assert!(excessive_upload.validate().is_err());
+
+        let mut excessive_download = fixture.scope;
+        excessive_download.reserved_down_mbps = u64::MAX;
+        assert!(excessive_download.validate().is_err());
     }
 
     #[test]

@@ -16238,6 +16238,8 @@ mod tests {
             challenge_hash: vec![0x34; 32],
             attempt_expires_at_ms: request_expires_at_ms,
             required_path_count: 1,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
         };
         let nonce = [0x35; 32];
         let permit_request = NativeProbePermitRequest {
@@ -16562,6 +16564,8 @@ mod tests {
             challenge_hash: vec![0xb6; 32],
             attempt_expires_at_ms: required_until_ms,
             required_path_count: 1,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
         };
         fixture
             .runtime
@@ -17019,6 +17023,8 @@ mod tests {
             candidate_ordinal: 2,
             attempt_expires_at_ms: now_ms.saturating_add(300_000),
             required_path_count: 3,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
             ..NativeProbePathScope::default()
         };
         let relay = native_service_prepare_request(

@@ -281,10 +281,12 @@ impl NativeAttemptDeadline {
 pub(super) fn begin_native_preselection(
     prepared: PreparedPreselectionEvidence,
     selected_data_relays: &[NativeDataRelayIdentity],
+    reserved_capacity: Bandwidth,
 ) -> Result<NativePreselectionAttemptOwner, NativePreselectionError> {
     begin_native_preselection_at(
         prepared,
         selected_data_relays,
+        reserved_capacity,
         crate::unix_millis(),
         Instant::now(),
         &mut OsRng,
@@ -294,6 +296,7 @@ pub(super) fn begin_native_preselection(
 fn begin_native_preselection_at<R>(
     prepared: PreparedPreselectionEvidence,
     selected_data_relays: &[NativeDataRelayIdentity],
+    reserved_capacity: Bandwidth,
     trusted_now_ms: u64,
     trusted_now: Instant,
     rng: &mut R,
@@ -311,6 +314,17 @@ where
     let required_path_count = selected_data_relays.len();
     if !(1..=MAX_NATIVE_PROBE_PATHS).contains(&required_path_count)
         || required_path_count > relays.len()
+        || reserved_capacity.validate().is_err()
+        || reserved_capacity.up_mbps == 0
+        || reserved_capacity.down_mbps == 0
+        || !exit
+            .preselection_capacity_ceiling
+            .satisfies(reserved_capacity)
+        || relays.iter().take(required_path_count).any(|relay| {
+            !relay
+                .preselection_capacity_ceiling
+                .satisfies(reserved_capacity)
+        })
         || matches!(
             volparossa_protocol::Transport::try_from(candidate_set.transport),
             Ok(volparossa_protocol::Transport::UdpSinglePath) if required_path_count != 1
@@ -336,6 +350,7 @@ where
         relays,
         &exit,
         required_path_count,
+        reserved_capacity,
         deadline,
         rng,
     )?;
@@ -476,6 +491,7 @@ fn mint_path_authorities<R>(
     relays: Vec<NativeCandidateProjection>,
     exit: &NativeCandidateProjection,
     required_path_count: usize,
+    reserved_capacity: Bandwidth,
     deadline: NativeAttemptDeadline,
     rng: &mut R,
 ) -> Result<VecDeque<PendingNativeProbeAuthority>, NativePreselectionError>
@@ -516,6 +532,8 @@ where
             attempt_expires_at_ms: deadline.expires_at_ms,
             required_path_count: u32::try_from(required_path_count)
                 .map_err(|_| NativePreselectionError::InvalidCandidateSet)?,
+            reserved_up_mbps: u64::from(reserved_capacity.up_mbps),
+            reserved_down_mbps: u64::from(reserved_capacity.down_mbps),
         };
         let request = NativeProbePermitRequest {
             scope: Some(scope),
@@ -568,11 +586,19 @@ where
 pub(super) fn begin_native_preselection_for_test(
     prepared: PreparedPreselectionEvidence,
     required_path_count: usize,
+    reserved_capacity: Bandwidth,
     trusted_now_ms: u64,
     trusted_now: Instant,
 ) -> Result<NativePreselectionAttemptOwner, NativePreselectionError> {
     let selected = selected_data_relay_identities(&prepared, required_path_count)?;
-    begin_native_preselection_at(prepared, &selected, trusted_now_ms, trusted_now, &mut OsRng)
+    begin_native_preselection_at(
+        prepared,
+        &selected,
+        reserved_capacity,
+        trusted_now_ms,
+        trusted_now,
+        &mut OsRng,
+    )
 }
 
 #[cfg(test)]
@@ -1760,6 +1786,8 @@ mod dispatch_tests {
             challenge_hash: native_probe_challenge_hash(&[12; KEY_BYTES]).to_vec(),
             attempt_expires_at_ms: expires_at_ms,
             required_path_count: 2,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
         };
         let request = NativeProbePermitRequest {
             scope: Some(scope.clone()),

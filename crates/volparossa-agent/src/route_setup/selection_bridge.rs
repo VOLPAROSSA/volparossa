@@ -1146,8 +1146,13 @@ pub(crate) async fn begin_client_native_preselection(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let reserved_capacity = route_plan.scope.minimum_capacity;
     ClientNativeProbeBatchOwner {
-        owner: native_preselection::begin_native_preselection(prepared, &selected_data_relays)?,
+        owner: native_preselection::begin_native_preselection(
+            prepared,
+            &selected_data_relays,
+            reserved_capacity,
+        )?,
         route_plan: Some(route_plan),
         route_hard_lifetime: admission.hard_lifetime,
         replay: volparossa_protocol::ReplayCache::new(replay_capacity)?,
@@ -6166,6 +6171,7 @@ mod tests {
         let mut owner = native_preselection::begin_native_preselection_for_test(
             prepared,
             2,
+            Bandwidth::new(8, 12).expect("reserved capacity"),
             minted_at_ms,
             minted_at,
         )
@@ -6218,6 +6224,8 @@ mod tests {
             let scope = request.scope.expect("path scope");
             assert_eq!(scope.candidate_ordinal, ordinal);
             assert_eq!(scope.attempt_expires_at_ms, expected_expiry);
+            assert_eq!(scope.reserved_up_mbps, 8);
+            assert_eq!(scope.reserved_down_mbps, 12);
             assert_eq!(request.expires_at_ms, expected_expiry);
             assert!(probe_ids.insert(scope.probe_id));
             assert!(session_ids.insert(scope.client_session_id));
@@ -6286,6 +6294,7 @@ mod tests {
             native_preselection::begin_native_preselection_for_test(
                 expired,
                 2,
+                Bandwidth::new(8, 12).expect("reserved capacity"),
                 NOW_MS + 5_000,
                 Instant::now(),
             ),
@@ -6331,6 +6340,7 @@ mod tests {
         let mut owner = native_preselection::begin_native_preselection_for_test(
             prepared,
             2,
+            Bandwidth::new(8, 12).expect("reserved capacity"),
             minted_at_ms,
             minted_at,
         )
