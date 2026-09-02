@@ -120,7 +120,6 @@ const STAGE_ACTIVATE_INGRESS: u8 = 12;
 const STAGE_DESTROY_INGRESS: u8 = 13;
 const STAGE_ACQUIRE_INGRESS_REPLY: u8 = 14;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 1;
-const NATIVE_PROBE_AUTHORIZED_RATE_MBPS: u64 = 1;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
@@ -4304,8 +4303,8 @@ fn verify_native_exit_authorization_scope(
         || message.client_session_id != scope.client_session_id
         || message.client_session_public_key != scope.client_session_public_key
         || message.allowed_transports.as_slice() != [scope.transport]
-        || message.maximum_up_mbps != NATIVE_PROBE_AUTHORIZED_RATE_MBPS
-        || message.maximum_down_mbps != NATIVE_PROBE_AUTHORIZED_RATE_MBPS
+        || message.maximum_up_mbps != scope.reserved_up_mbps
+        || message.maximum_down_mbps != scope.reserved_down_mbps
         || message.client_wireguard_public_key != client_endpoint.public_key
         || message.exit_wireguard_endpoint.as_ref() != Some(exit_endpoint)
         || message.policy_hash != scope.policy_hash
@@ -4460,6 +4459,10 @@ fn verified_native_start_scope(
         && exit.public_key.as_slice() == authorization.sender_public_key()
         && relay_message.path_id == scope.candidate_ordinal
         && relay_message.allowed_transports.as_slice() == [scope.transport]
+        && relay_message.maximum_up_mbps == scope.reserved_up_mbps
+        && relay_message.maximum_down_mbps == scope.reserved_down_mbps
+        && authorization_message.maximum_up_mbps == scope.reserved_up_mbps
+        && authorization_message.maximum_down_mbps == scope.reserved_down_mbps
         && relay_message.policy_hash == scope.policy_hash
         && relay_message.created_at_ms == start_message.started_at_ms
         && relay_message.expires_at_ms == start_message.expires_at_ms
@@ -8118,6 +8121,8 @@ mod tests {
             challenge_hash: vec![0x85; 32],
             attempt_expires_at_ms: expires_at_ms,
             required_path_count: 1,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
         };
         let client_binding = NativeProbeEndpointBinding {
             helper_runtime_id: vec![0x86; 32],
@@ -8280,8 +8285,8 @@ mod tests {
             exit_node_id: exit.node_id.clone(),
             client_session_id: scope.client_session_id.clone(),
             allowed_transports: vec![scope.transport],
-            maximum_up_mbps: NATIVE_PROBE_AUTHORIZED_RATE_MBPS,
-            maximum_down_mbps: NATIVE_PROBE_AUTHORIZED_RATE_MBPS,
+            maximum_up_mbps: scope.reserved_up_mbps,
+            maximum_down_mbps: scope.reserved_down_mbps,
             client_wireguard_public_key: client_endpoint.public_key,
             exit_wireguard_endpoint: Some(exit_endpoint),
             policy_hash: scope.policy_hash.clone(),
@@ -8484,6 +8489,8 @@ mod tests {
             challenge_hash: vec![0x75; 32],
             attempt_expires_at_ms: expires_at_ms,
             required_path_count: 2,
+            reserved_up_mbps: relay.maximum_up_mbps,
+            reserved_down_mbps: relay.maximum_down_mbps,
         };
         let mut start = NativeProbeStart {
             permit_hash: vec![0x76; 32],

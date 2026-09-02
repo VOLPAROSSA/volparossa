@@ -34,7 +34,6 @@ use super::{AcceptedNativeProbePermit, ExitError, ExitService, NODE_ID_BYTES, wi
 
 const ID_BYTES: usize = 16;
 const NONCE_BYTES: usize = 32;
-const NATIVE_PROBE_BANDWIDTH_MBPS: u32 = 1;
 
 /// Exit-signed standard path authorization produced from one exact native Start chain.
 #[derive(Clone)]
@@ -801,6 +800,13 @@ impl ExitService {
             .as_ref()
             .ok_or(ExitError::InvalidGrant("native Exit endpoint"))?;
         let transport = native_core_transport(scope.transport)?;
+        let reserved_bandwidth = Bandwidth::new(
+            u32::try_from(scope.reserved_up_mbps)
+                .map_err(|_| ExitError::InvalidGrant("native probe upload rate"))?,
+            u32::try_from(scope.reserved_down_mbps)
+                .map_err(|_| ExitError::InvalidGrant("native probe download rate"))?,
+        )
+        .map_err(|_| ExitError::InvalidGrant("native probe bandwidth"))?;
         let authorization = RelayAuthorization {
             reservation_id: reservation_id.to_vec(),
             route_context_id: capability_id.to_vec(),
@@ -809,8 +815,8 @@ impl ExitService {
             exit_node_id: exit.node_id.to_vec(),
             client_session_id: scope.client_session_id.clone(),
             allowed_transports: vec![scope.transport],
-            maximum_up_mbps: u64::from(NATIVE_PROBE_BANDWIDTH_MBPS),
-            maximum_down_mbps: u64::from(NATIVE_PROBE_BANDWIDTH_MBPS),
+            maximum_up_mbps: scope.reserved_up_mbps,
+            maximum_down_mbps: scope.reserved_down_mbps,
             client_wireguard_public_key: client_endpoint.public_key.clone(),
             exit_wireguard_endpoint: Some(exit_endpoint.clone()),
             policy_hash: scope.policy_hash.clone(),
@@ -834,8 +840,7 @@ impl ExitService {
             client_ephemeral_id: super::text_id::<ClientEphemeralId>(&scope.client_session_id)?,
             role: ServiceRole::Exit,
             allowed_transports: vec![transport],
-            bandwidth: Bandwidth::new(NATIVE_PROBE_BANDWIDTH_MBPS, NATIVE_PROBE_BANDWIDTH_MBPS)
-                .map_err(|_| ExitError::InvalidGrant("native probe bandwidth"))?,
+            bandwidth: reserved_bandwidth,
             maximum_paths: u8::try_from(volparossa_protocol::MAX_NATIVE_PROBE_PATHS)
                 .map_err(|_| ExitError::InvalidGrant("native path limit"))?,
             created_at: super::unix_seconds(authorization.created_at_ms),
@@ -1488,6 +1493,8 @@ mod tests {
             challenge_hash: native_probe_challenge_hash(&CHALLENGE).to_vec(),
             attempt_expires_at_ms: ATTEMPT_EXPIRY_MS,
             required_path_count: 2,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
         }
     }
 
@@ -1928,6 +1935,30 @@ mod tests {
             exit_authorization.encoded()
         );
         assert_eq!(exit_grant.message().client_wireguard_public_key, [0xc3; 32]);
+        assert_eq!(
+            exit_grant.message().maximum_up_mbps,
+            fixture.scope.reserved_up_mbps
+        );
+        assert_eq!(
+            exit_grant.message().maximum_down_mbps,
+            fixture.scope.reserved_down_mbps
+        );
+        assert_eq!(
+            relay_grant.message().maximum_up_mbps,
+            fixture.scope.reserved_up_mbps
+        );
+        assert_eq!(
+            relay_grant.message().maximum_down_mbps,
+            fixture.scope.reserved_down_mbps
+        );
+        assert_eq!(
+            fixture
+                .service
+                .available(NOW_MS + 5)
+                .expect("Exit capacity")
+                .bandwidth,
+            Bandwidth::new(92, 88).expect("remaining signed capacity")
+        );
         assert!(relay_service.take_native_probe_start(&PROBE_ID).is_some());
     }
 

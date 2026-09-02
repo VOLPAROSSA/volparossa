@@ -257,7 +257,7 @@ impl RelayService {
     ///
     /// The Start has already been verified against this Relay's affine Ready owner. This method
     /// independently verifies the Exit signature, exact probe scope, prepared Client/Relay/Exit
-    /// endpoints, process boot incarnation and one-megabit probe-only capacity grant. The supplied
+    /// endpoints, process boot incarnation and exact client-signed capacity grant. The supplied
     /// typed Relay helper lease must reproduce both endpoints committed before Start. Capacity and
     /// the Start owner are retained before signed bytes can leave the service.
     ///
@@ -413,8 +413,8 @@ impl RelayService {
             || authorization.exit_node_id != exit.node_id
             || authorization.client_session_id != scope.client_session_id
             || authorization.allowed_transports.as_slice() != [scope.transport]
-            || authorization.maximum_up_mbps != 1
-            || authorization.maximum_down_mbps != 1
+            || authorization.maximum_up_mbps != scope.reserved_up_mbps
+            || authorization.maximum_down_mbps != scope.reserved_down_mbps
             || authorization.client_wireguard_public_key != client_endpoint.public_key().as_bytes()
             || authorization.exit_wireguard_endpoint.as_ref() != Some(expected_exit)
             || authorization.policy_hash != scope.policy_hash
