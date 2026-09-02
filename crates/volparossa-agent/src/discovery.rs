@@ -12045,7 +12045,11 @@ impl DiscoveryRuntime {
             && capability.control_relay_node_id == control.node_id
             && capability.control_relay_peer_id == control.peer_id
             && capability.control_relay_public_key == control.public_key
-            && capability.control_relay_advertisement_sequence != 0
+            && capability.control_relay_advertisement_sequence == control.advertisement_sequence
+            && capability.control_relay_advertisement_expires_at_ms
+                == control.advertisement_expires_at_ms
+            && capability.control_relay_advertisement_payload_hash
+                == control.advertisement_payload_hash
             && capability.control_relay_advertisement_expires_at_ms > captured_at_ms
             && capability.exit_node_id == exact.wire_node_id
             && capability.exit_peer_id == exact.peer_id
@@ -19948,8 +19952,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_snapshot_rejects_external_hash_drift_and_retains_affine_control_provenance() {
-        for mutation in 0_u8..5 {
+    async fn route_snapshot_rejects_external_and_forwarded_control_provenance_drift() {
+        for mutation in 0_u8..7 {
             let mut fixture = fixture(RolesConfig::default());
             let now_ms = unix_millis();
             let (control, exit_peer) = install_valid_snapshot_route(&mut fixture, now_ms).await;
@@ -20021,16 +20025,35 @@ mod tests {
                     accepted.fingerprint.payload_hash =
                         accepted.fingerprint.payload_hash.xor_for_test();
                 }
+                5 => {
+                    let forwarded = fixture
+                        .runtime
+                        .forwarded_exits
+                        .get_mut(&forwarded_key)
+                        .expect("forwarded capability");
+                    forwarded.control_relay_advertisement_sequence = forwarded
+                        .control_relay_advertisement_sequence
+                        .saturating_add(1);
+                }
+                6 => {
+                    let forwarded = fixture
+                        .runtime
+                        .forwarded_exits
+                        .get_mut(&forwarded_key)
+                        .expect("forwarded capability");
+                    forwarded.control_relay_advertisement_expires_at_ms = forwarded
+                        .control_relay_advertisement_expires_at_ms
+                        .saturating_add(1_000);
+                }
                 _ => unreachable!(),
             }
 
             let drifted = route_snapshot_at(&mut fixture, 10, now_ms)
                 .await
                 .expect("hash drift is filtered, not surfaced");
-            assert_eq!(
+            assert!(
                 drifted.forwarded_exits().is_empty(),
-                mutation != 2,
-                "a verified forwarded capability retains its original control-advertisement provenance across a same-lineage refresh"
+                "forwarded control-advertisement drift must remain unavailable: mutation {mutation}"
             );
             let control_present = drifted
                 .direct_relays()

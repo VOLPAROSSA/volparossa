@@ -456,7 +456,12 @@ fn forwarded_binding_is_valid(
         && capability.control_relay_node_id == control_capability.node_id
         && capability.control_relay_peer_id == control_capability.peer_id
         && capability.control_relay_public_key == control_capability.public_key
-        && capability.control_relay_advertisement_sequence != 0
+        && capability.control_relay_advertisement_sequence
+            == control_capability.advertisement_sequence
+        && capability.control_relay_advertisement_expires_at_ms
+            == control_capability.advertisement_expires_at_ms
+        && capability.control_relay_advertisement_payload_hash
+            == control_capability.advertisement_payload_hash
         && capability.control_relay_advertisement_expires_at_ms > sampled_at_ms
         && capability.policy_version == snapshot.policy.version()
         && capability.policy_hash == snapshot.policy.hash()
@@ -1765,6 +1770,21 @@ mod tests {
         synchronize_only_forwarded_control(&mut snapshot, control_index);
 
         let original_exit = snapshot.forwarded_exits[0].clone();
+        snapshot.forwarded_exits[0]
+            .capability
+            .control_relay_advertisement_sequence = snapshot.forwarded_exits[0]
+            .capability
+            .control_relay_advertisement_sequence
+            .saturating_add(1);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "forwarded exit bound to stale control advertisement",
+        );
+        snapshot.forwarded_exits[0] = original_exit.clone();
         snapshot.forwarded_exits[0].capability.exit_public_key[0] ^= 1;
         snapshot = reject_before_entropy(
             snapshot,
