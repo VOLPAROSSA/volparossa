@@ -6007,6 +6007,7 @@ mod tests {
         fail_prepare_capacity: AtomicBool,
         fail_probe_cleanup: AtomicBool,
         fail_acquire_cleanup: AtomicBool,
+        fail_next_acquire_kernel: AtomicBool,
         panic_prepare_factory: AtomicBool,
         panic_prepare_poll: AtomicBool,
         substitute_prepare_generation: AtomicBool,
@@ -6231,6 +6232,8 @@ mod tests {
                     Err(error)
                 } else if self.fail_acquire_cleanup.load(Ordering::Acquire) {
                     Err(BackendError::CleanupIncomplete)
+                } else if self.fail_next_acquire_kernel.swap(false, Ordering::AcqRel) {
+                    Err(BackendError::Kernel)
                 } else {
                     StdUnixStream::pair()
                         .map_err(|_| BackendError::Kernel)
@@ -7696,6 +7699,54 @@ mod tests {
         assert!(execution.response.outcome.is_none());
         assert!(execution.descriptor.is_none());
         assert!(engine.inner.state.lock().await.contexts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn definite_acquire_kernel_failure_preserves_committed_context_for_next_flow() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+        let acquire = |request_byte| {
+            request(
+                request_byte,
+                helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                    descriptor_kind: volparossa_routing::TransportSocketKind::MptcpListener as i32,
+                    expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                    expected_remote: None,
+                }),
+            )
+        };
+
+        backend
+            .fail_next_acquire_kernel
+            .store(true, Ordering::Release);
+        let first = engine.execute_with_descriptor(acquire(31)).await;
+        assert_eq!(first.response.result, HelperResult::Kernel as i32);
+        assert!(first.descriptor.is_none());
+        {
+            let state = engine.inner.state.lock().await;
+            assert_eq!(
+                state.contexts.get(&[7; 16]).map(|context| context.phase),
+                Some(ContextPhase::Committed)
+            );
+            assert!(state.in_flight.is_none());
+            assert!(state.cleanup_pending.is_empty());
+        }
+
+        let second = engine.execute_with_descriptor(acquire(32)).await;
+        assert_eq!(second.response.result, HelperResult::Ok as i32);
+        assert!(second.descriptor.is_some());
+        assert_eq!(backend.transport_calls.load(Ordering::Acquire), 1);
+        let state = engine.inner.state.lock().await;
+        assert_eq!(
+            state.contexts.get(&[7; 16]).map(|context| context.phase),
+            Some(ContextPhase::Committed)
+        );
     }
 
     #[tokio::test]

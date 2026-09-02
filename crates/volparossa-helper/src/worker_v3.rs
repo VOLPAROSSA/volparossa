@@ -8524,11 +8524,18 @@ impl WorkerSupervisor {
                         .as_ref()
                         .ok_or(WorkerV3Error::Authentication)?;
                     let descriptor = execution.descriptor.take().ok_or(WorkerV3Error::Invalid)?;
-                    execution.descriptor = Some(validate_adopted_transport_socket(
-                        expected_namespace,
-                        acquire,
-                        descriptor,
-                    )?);
+                    match validate_adopted_transport_socket(expected_namespace, acquire, descriptor)
+                    {
+                        Ok(descriptor) => execution.descriptor = Some(descriptor),
+                        Err(_) => {
+                            // The authenticated child completed a phase-preserving Acquire and
+                            // transferred the only descriptor into this owner. Rejection drops
+                            // that descriptor, so no socket custody remains uncertain and the
+                            // committed route must stay available for a later independent flow.
+                            execution.response.result = InternalWorkerResult::Kernel as i32;
+                            execution.response.outcome = None;
+                        }
+                    }
                 }
                 Some(internal_worker_request::Operation::AcquireClientIngressSocket(acquire))
                     if execution.response.result == InternalWorkerResult::Ok as i32 =>
