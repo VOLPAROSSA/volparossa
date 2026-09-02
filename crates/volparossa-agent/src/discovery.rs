@@ -3472,6 +3472,21 @@ impl DiscoveryRuntime {
         pending: &PendingClientForward,
         outcome: Result<ExitForwardResponse, OutboundReservationError>,
     ) {
+        let response_bytes = outcome.as_ref().ok().map_or(0, |response| {
+            encode_canonical(
+                response,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .map_or(
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                |encoded| encoded.len(),
+            )
+        });
+        let reserved_bytes = completed_ledger_reservation_bytes(
+            pending.canonical_request.len(),
+            response_bytes,
+            pending.reserved_bytes,
+        );
         let previous = self.completed_client_forwards.insert(
             pending.key,
             CompletedClientForward {
@@ -3480,7 +3495,7 @@ impl DiscoveryRuntime {
                 operation: pending.operation,
                 outcome,
                 expires_at_ms: pending.operation_expires_at_ms,
-                reserved_bytes: pending.reserved_bytes,
+                reserved_bytes,
             },
         );
         debug_assert!(previous.is_none(), "logical client result already cached");
@@ -3491,13 +3506,28 @@ impl DiscoveryRuntime {
         pending: &PendingDatapath,
         outcome: Result<DatapathRelayResponse, OutboundReservationError>,
     ) {
+        let response_bytes = outcome.as_ref().ok().map_or(0, |response| {
+            encode_canonical(
+                response,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .map_or(
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                |encoded| encoded.len(),
+            )
+        });
+        let reserved_bytes = completed_ledger_reservation_bytes(
+            pending.canonical_request.len(),
+            response_bytes,
+            pending.reserved_bytes,
+        );
         let previous = self.completed_datapath.insert(
             pending.key,
             CompletedDatapath {
                 canonical_request: pending.canonical_request.clone(),
                 outcome,
                 expires_at_ms: pending.operation_expires_at_ms,
-                reserved_bytes: pending.reserved_bytes,
+                reserved_bytes,
             },
         );
         debug_assert!(previous.is_none(), "logical datapath result already cached");
@@ -7727,6 +7757,21 @@ impl DiscoveryRuntime {
         pending: &PendingRelayForward,
         response: Option<ExitForwardResponse>,
     ) {
+        let response_bytes = response.as_ref().map_or(0, |response| {
+            encode_canonical(
+                response,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .map_or(
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                |encoded| encoded.len(),
+            )
+        });
+        let reserved_bytes = completed_ledger_reservation_bytes(
+            pending.canonical_request.len(),
+            response_bytes,
+            pending.reserved_bytes,
+        );
         let previous = self.completed_relay_forwards.insert(
             pending.key,
             CompletedRelayForward {
@@ -7735,7 +7780,7 @@ impl DiscoveryRuntime {
                 operation: pending.operation,
                 response,
                 expires_at_ms: pending.operation_expires_at_ms,
-                reserved_bytes: pending.reserved_bytes,
+                reserved_bytes,
             },
         );
         debug_assert!(previous.is_none(), "logical relay result already cached");
@@ -11590,13 +11635,18 @@ impl DiscoveryRuntime {
             .collect::<Vec<_>>();
         for key in retry_keys {
             if let Some(entry) = self.retry_datapath.remove(&key) {
+                let reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
                 self.completed_datapath.insert(
                     key,
                     CompletedDatapath {
                         canonical_request: entry.canonical_request,
                         outcome: Err(OutboundReservationError::InvalidResponse),
                         expires_at_ms: entry.expires_at_ms,
-                        reserved_bytes: entry.reserved_bytes,
+                        reserved_bytes,
                     },
                 );
             }
@@ -11604,6 +11654,11 @@ impl DiscoveryRuntime {
         for (key, entry) in &mut self.completed_datapath {
             if key.relay_peer == peer {
                 entry.outcome = Err(OutboundReservationError::InvalidResponse);
+                entry.reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
             }
         }
     }
@@ -11694,6 +11749,11 @@ impl DiscoveryRuntime {
             .collect::<Vec<_>>();
         for key in retry_client_keys {
             if let Some(entry) = self.retry_client_forwards.remove(&key) {
+                let reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
                 self.completed_client_forwards.insert(
                     key,
                     CompletedClientForward {
@@ -11702,7 +11762,7 @@ impl DiscoveryRuntime {
                         operation: entry.operation.expect("client retry operation"),
                         outcome: Err(OutboundReservationError::InvalidResponse),
                         expires_at_ms: entry.expires_at_ms,
-                        reserved_bytes: entry.reserved_bytes,
+                        reserved_bytes,
                     },
                 );
             }
@@ -11722,6 +11782,11 @@ impl DiscoveryRuntime {
             .collect::<Vec<_>>();
         for key in retry_relay_keys {
             if let Some(entry) = self.retry_relay_forwards.remove(&key) {
+                let reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
                 self.completed_relay_forwards.insert(
                     key,
                     CompletedRelayForward {
@@ -11730,7 +11795,7 @@ impl DiscoveryRuntime {
                         operation: entry.operation.expect("relay retry operation"),
                         response: None,
                         expires_at_ms: entry.expires_at_ms,
-                        reserved_bytes: entry.reserved_bytes,
+                        reserved_bytes,
                     },
                 );
             }
@@ -11741,6 +11806,11 @@ impl DiscoveryRuntime {
                 exit_peer: entry.target_peer,
             }) {
                 entry.outcome = Err(OutboundReservationError::InvalidResponse);
+                entry.reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
             }
         }
         for entry in self.completed_relay_forwards.values_mut() {
@@ -11749,6 +11819,11 @@ impl DiscoveryRuntime {
                 exit_peer: entry.target_peer,
             }) {
                 entry.response = None;
+                entry.reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
             }
         }
         removed_expiry
@@ -12384,6 +12459,22 @@ fn ledger_reservation_bytes(canonical_request_bytes: usize) -> Option<usize> {
     canonical_request_bytes
         .checked_add(usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?)
         .filter(|reserved| *reserved <= MAX_LEDGER_BYTES_PER_PEER)
+}
+
+/// Replace a pending worst-case response reservation with the bytes actually retained.
+///
+/// A completed ledger entry stores its canonical request and, at most, one canonical response.
+/// Keep the original reservation if an impossible overflow or oversized encoded response is
+/// observed so accounting always remains conservative.
+fn completed_ledger_reservation_bytes(
+    canonical_request_bytes: usize,
+    canonical_response_bytes: usize,
+    pending_reserved_bytes: usize,
+) -> usize {
+    canonical_request_bytes
+        .checked_add(canonical_response_bytes)
+        .filter(|completed| *completed <= pending_reserved_bytes)
+        .unwrap_or(pending_reserved_bytes)
 }
 
 fn native_exit_ticket_matches_standard_result(
@@ -17452,6 +17543,143 @@ mod tests {
         assert!(peer_entries > 0);
         assert!(per_peer.runtime.ledger_reserved_bytes_for_peer(peer) <= MAX_LEDGER_BYTES_PER_PEER);
         assert!(!per_peer.runtime.ledger_can_reserve(peer, reserved));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one regression covers all three completed route-ledger families"
+    )]
+    #[tokio::test]
+    async fn completed_route_ledgers_charge_only_bytes_they_retain() {
+        let mut fixture = fixture(RolesConfig::default());
+        let now_ms = unix_millis();
+        let expires_at_ms = now_ms.saturating_add(20_000);
+        let relay_identity = Identity::generate();
+        let relay = direct_capability(&relay_identity, &fixture.policy, 1, expires_at_ms);
+        let exit_identity = Identity::generate();
+        let exit_peer = exit_identity.peer_id().to_owned();
+        let exit_public_key = exit_identity
+            .ed25519_public_key_bytes()
+            .expect("exit public key");
+        let exit_node_id = node_id_from_public_key(&exit_public_key);
+        let frame_limit = usize::try_from(MAX_FORWARDING_FRAME_BYTES).expect("frame bound");
+
+        let client_request = vec![0x11; 97];
+        let client_reserved = ledger_reservation_bytes(client_request.len()).expect("reservation");
+        let client_key = ClientForwardKey {
+            control_relay_peer: relay.peer_id,
+            forward_id: [0x12; FORWARD_ID_BYTES],
+        };
+        let client_pending = PendingClientForward {
+            key: client_key,
+            expected_exit_peer: exit_peer,
+            operation: ExitForwardOperation::FetchExitAdvertisement,
+            expected_exit_node_id: Some(exit_node_id),
+            authorized_control: relay.clone(),
+            authorized_exit: None,
+            canonical_request: client_request.clone(),
+            operation_expires_at_ms: expires_at_ms,
+            attempt_deadline: Instant::now() + Duration::from_secs(5),
+            dispatch_attempts: 1,
+            reserved_bytes: client_reserved,
+            waiters: Vec::new(),
+        };
+        fixture.runtime.cache_client_result(
+            &client_pending,
+            Err(OutboundReservationError::InvalidResponse),
+        );
+        assert_eq!(
+            fixture.runtime.completed_client_forwards[&client_key].reserved_bytes,
+            client_request.len()
+        );
+
+        let datapath_request = vec![0x21; 113];
+        let datapath_reserved =
+            ledger_reservation_bytes(datapath_request.len()).expect("reservation");
+        let datapath_key = DatapathKey {
+            relay_peer: relay.peer_id,
+            request_id: [0x22; FORWARD_ID_BYTES],
+        };
+        let datapath_pending = PendingDatapath {
+            key: datapath_key,
+            operation: DatapathRelayOperation::NativeProbeReady,
+            relay_node_id: relay.node_id,
+            authorized_relay: relay.clone(),
+            canonical_request: datapath_request.clone(),
+            operation_expires_at_ms: expires_at_ms,
+            attempt_deadline: Instant::now() + Duration::from_secs(5),
+            dispatch_attempts: 1,
+            reserved_bytes: datapath_reserved,
+            waiters: Vec::new(),
+        };
+        let datapath_response = DatapathRelayResponse::unavailable(
+            datapath_key.request_id.to_vec(),
+            DatapathRelayOperation::NativeProbeReady,
+            relay.node_id.to_vec(),
+            relay.peer_id.to_bytes(),
+        )
+        .expect("Unavailable datapath response");
+        let datapath_response_bytes = encode_canonical(&datapath_response, frame_limit)
+            .expect("canonical datapath response")
+            .len();
+        fixture
+            .runtime
+            .cache_datapath_result(&datapath_pending, Ok(datapath_response));
+        assert_eq!(
+            fixture.runtime.completed_datapath[&datapath_key].reserved_bytes,
+            datapath_request.len() + datapath_response_bytes
+        );
+
+        let client_identity = Identity::generate();
+        let relay_request = vec![0x31; 131];
+        let relay_reserved = ledger_reservation_bytes(relay_request.len()).expect("reservation");
+        let relay_key = RelayForwardKey {
+            authenticated_client_peer: client_identity.peer_id().to_owned(),
+            forward_id: [0x32; FORWARD_ID_BYTES],
+        };
+        let relay_pending = PendingRelayForward {
+            key: relay_key,
+            expected_exit_peer: exit_peer,
+            operation: ExitForwardOperation::FetchExitAdvertisement,
+            expected_exit_node_id: Some(exit_node_id),
+            authorized_control: relay,
+            authorized_exit: None,
+            canonical_request: relay_request.clone(),
+            operation_expires_at_ms: expires_at_ms,
+            attempt_deadline: Instant::now() + Duration::from_secs(5),
+            dispatch_attempts: 1,
+            reserved_bytes: relay_reserved,
+            client_channels: Vec::new(),
+            native_ready: None,
+            native_authorization: None,
+            native_result: None,
+            udp_session: None,
+            mptcp_session: None,
+            mpquic_session: None,
+        };
+        let relay_response = ExitForwardResponse::unavailable(
+            relay_key.forward_id.to_vec(),
+            ExitForwardOperation::FetchExitAdvertisement,
+            exit_node_id.to_vec(),
+            exit_peer.to_bytes(),
+        )
+        .expect("Unavailable relay response");
+        let relay_response_bytes = encode_canonical(&relay_response, frame_limit)
+            .expect("canonical relay response")
+            .len();
+        fixture
+            .runtime
+            .cache_relay_result(&relay_pending, Some(relay_response));
+        assert_eq!(
+            fixture.runtime.completed_relay_forwards[&relay_key].reserved_bytes,
+            relay_request.len() + relay_response_bytes
+        );
+
+        assert_eq!(
+            completed_ledger_reservation_bytes(usize::MAX, 1, relay_reserved),
+            relay_reserved,
+            "overflow must retain the conservative pending reservation"
+        );
     }
 
     #[tokio::test]
