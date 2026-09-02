@@ -11569,7 +11569,7 @@ impl DiscoveryRuntime {
                 {
                     0
                 } else {
-                    accepted.expires_at_ms.min(*request_deadline_ms).min(
+                    accepted.expires_at_ms.min(
                         control
                             .as_ref()
                             .map_or(0, |capability| capability.expires_at_ms),
@@ -18212,6 +18212,41 @@ mod tests {
                 exit_peer,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn forwarded_exit_capability_outlives_completed_fetch_operation() {
+        let mut fixture = fixture(RolesConfig::default());
+        let control_identity = Identity::generate();
+        let exit_identity = Identity::generate();
+        let exit_peer = exit_identity.peer_id().to_owned();
+        let now_ms = unix_millis();
+        let request_deadline_ms = now_ms.saturating_add(20_000);
+        let control = install_control(&mut fixture, &control_identity, now_ms);
+        let accepted = ingest_forwarded_snapshot_exit(
+            &mut fixture,
+            &control,
+            &exit_identity,
+            1,
+            [162; 32],
+            now_ms,
+        )
+        .await
+        .expect("forwarded Exit advertisement");
+        let capability = fixture
+            .runtime
+            .forwarded_exits
+            .get(&ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            })
+            .expect("committed forwarded Exit capability");
+
+        assert_eq!(
+            capability.expires_at_ms,
+            accepted.expires_at_ms.min(control.expires_at_ms)
+        );
+        assert!(capability.expires_at_ms > request_deadline_ms);
     }
 
     #[tokio::test]
