@@ -1629,7 +1629,10 @@ counters = (
 )
 sockets = {}
 for interface in interfaces:
-    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    # Linux loops transmitted frames only through the ETH_P_ALL packet tap. The parser below
+    # still admits IPv4 exclusively; using ETH_P_IP here silently observed ingress only and made
+    # the directional Client/Exit evidence report zero for a successfully completed datapath.
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
     capture.bind((interface, 0))
     capture.setblocking(False)
     sockets[capture] = interface
@@ -1765,7 +1768,7 @@ counters = (
 )
 sockets = {}
 for interface in interfaces:
-    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
     capture.bind((interface, 0))
     capture.setblocking(False)
     sockets[capture] = interface
@@ -1923,7 +1926,7 @@ counters = (
 )
 sockets = {}
 for interface in interfaces:
-    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
     capture.bind((interface, 0))
     capture.setblocking(False)
     sockets[capture] = interface
@@ -2084,7 +2087,7 @@ counters = {
 }
 sockets = {}
 for interface in interfaces:
-    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
     capture.bind((interface, 0))
     capture.setblocking(False)
     sockets[capture] = interface
