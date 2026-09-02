@@ -319,6 +319,17 @@ impl ActiveProductionMpquicRoute {
                 .record_replacement(unhealthy_path_id, warm_path_id, now)
                 .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
         } else {
+            // A live browser flow may finish over the surviving native path during its bounded
+            // failover grace. Do not turn physical degradation into an explicit RemovePath while
+            // that would cross the route's immutable minimum: native and signed flow expiry still
+            // close the degraded association, and no new route can start below its full minimum.
+            if retain_degraded_path_for_active_browser_flow(
+                self.session.active_path_ids().len(),
+                self.session.minimum_paths(),
+                self.browser_flows.len(),
+            ) {
+                return Ok(ClientPathMaintenance::Unchanged);
+            }
             self.session
                 .remove_active_path(unhealthy_path_id, now_ms, MPQUIC_READY_WAIT)
                 .await
@@ -339,6 +350,14 @@ impl ActiveProductionMpquicRoute {
         }
         Ok(ClientPathMaintenance::Reconfigured)
     }
+}
+
+const fn retain_degraded_path_for_active_browser_flow(
+    active_paths: usize,
+    minimum_paths: usize,
+    browser_flows: usize,
+) -> bool {
+    browser_flows != 0 && active_paths.saturating_sub(1) < minimum_paths
 }
 
 impl CommittedMpquicRouteIdentity {
@@ -7083,6 +7102,13 @@ mod tests {
     const NOW_MS: u64 = 1_700_000_000_000;
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
+
+    #[test]
+    fn active_browser_flow_defers_only_minimum_crossing_path_removal() {
+        assert!(retain_degraded_path_for_active_browser_flow(2, 2, 1));
+        assert!(!retain_degraded_path_for_active_browser_flow(2, 2, 0));
+        assert!(!retain_degraded_path_for_active_browser_flow(3, 2, 1));
+    }
 
     fn native_path_status(path_id: u32, data_carrying: bool) -> NativePathStatus {
         NativePathStatus {

@@ -764,6 +764,10 @@ static void test_required_multipath_and_honest_failures(void)
 
     vmp_request_t start =
         start_request(0x11U, 7U, VMP_TRANSPORT_MODE_MULTIPATH_QUIC, 2U);
+    /* Keep route authority distinct from the active-flow failover boundary
+     * exercised below. */
+    start.body.start_session.expires_at_ms =
+        TEST_NOW_MS + UINT64_C(120000);
     vmp_response_t response = dispatch(runtime, &start);
     assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
     assert(mock.create_calls == 0U);
@@ -839,13 +843,13 @@ static void test_required_multipath_and_honest_failures(void)
 
     /* A physical Relay failure may degrade one retained path after genuine
      * two-path activation. Existing flow I/O and status remain available on
-     * the surviving path, but only for the native 30-second failover grace. */
+     * the surviving path, but only for the native 60-second failover grace. */
     mock.paths[0].state = VMP_TRANSPORT_PATH_DEGRADED;
     response = dispatch(runtime, &send);
     assert(response.result == VMP_RESULT_OK);
     response = dispatch(runtime, &status);
     assert(response.result == VMP_RESULT_OK);
-    clock.boottime_ms += UINT64_C(29999);
+    clock.boottime_ms += UINT64_C(59999);
     response = dispatch(runtime, &send);
     assert(response.result == VMP_RESULT_OK);
     ++clock.boottime_ms;

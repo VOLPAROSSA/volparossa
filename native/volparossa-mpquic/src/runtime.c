@@ -23,7 +23,7 @@
      VMP_STATUS_METRIC_CWND | VMP_STATUS_METRIC_INFLIGHT |              \
      VMP_STATUS_METRIC_ESTIMATED_RATE |                                 \
      VMP_STATUS_METRIC_ACKED_TRANSPORT)
-#define VMP_ACTIVE_FAILOVER_GRACE_MS UINT64_C(30000)
+#define VMP_ACTIVE_FAILOVER_GRACE_MS UINT64_C(60000)
 
 typedef struct runtime_path {
     bool used;
