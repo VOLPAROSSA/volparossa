@@ -2014,29 +2014,29 @@ impl ProductionMpquicSession {
         .await
     }
 
-    /// Poll one reverse browser-QUIC datagram from the exact signed destination.
+    /// Poll one reverse browser-QUIC datagram and bind it to one exact retained flow.
     ///
     /// # Errors
     ///
-    /// Returns an error when native cannot poll the association or a returned datagram is not one
-    /// complete UDP datagram from the same policy-pinned tuple.
-    pub async fn receive_browser_quic(
+    /// Returns an error when native cannot poll the association or a returned datagram is not a
+    /// complete UDP datagram. A well-formed packet outside every retained signed tuple is dropped.
+    pub async fn receive_browser_quic<'a>(
         &self,
-        flow: &AuthorizedUdpFlow,
+        flows: impl IntoIterator<Item = (&'a AuthorizedUdpFlow, SocketAddrV4)>,
         now_ms: u64,
-    ) -> Result<Option<Vec<u8>>, ProductionMpquicError> {
-        flow.ensure_active_at(now_ms)?;
-        if flow.route_context_id() != &self.route_context_id {
+    ) -> Result<Option<(usize, Vec<u8>)>, ProductionMpquicError> {
+        if self.transport_mode != TransportMode::MultipathQuic {
             return Err(ProductionMpquicError::Invalid(
-                "browser QUIC flow route context",
+                "browser QUIC transport mode",
             ));
         }
         let packet =
             receive_inner_ip(&self.client, self.route_context_id, self.masque_context_id).await?;
-        if let Some(packet) = packet.as_deref() {
-            validate_browser_quic_packet(flow, self.route_context_id, packet, now_ms, false)?;
-        }
-        Ok(packet)
+        let Some(packet) = packet else {
+            return Ok(None);
+        };
+        matching_browser_quic_response_flow(flows, self.route_context_id, &packet, now_ms)
+            .map(|index| index.map(|index| (index, packet)))
     }
 
     /// Submit one policy-signed general-UDP flow over native single-path CONNECT-IP.
@@ -2668,6 +2668,25 @@ fn validate_browser_quic_packet(
     Ok(())
 }
 
+fn matching_browser_quic_response_flow<'a>(
+    flows: impl IntoIterator<Item = (&'a AuthorizedUdpFlow, SocketAddrV4)>,
+    route_context_id: [u8; 16],
+    packet: &[u8],
+    now_ms: u64,
+) -> Result<Option<usize>, ProductionMpquicError> {
+    let (source, destination) = udp_packet_tuple(packet)?;
+    Ok(flows
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, (flow, tunnel_destination))| {
+            (flow.ensure_active_at(now_ms).is_ok()
+                && flow.route_context_id() == &route_context_id
+                && flow.matches_exact_ip_destination(source)
+                && destination == SocketAddr::V4(tunnel_destination))
+            .then_some(index)
+        }))
+}
+
 fn udp_packet_tuple(packet: &[u8]) -> Result<(SocketAddr, SocketAddr), ProductionMpquicError> {
     let Some(version) = packet.first().map(|byte| byte >> 4) else {
         return Err(ProductionMpquicError::Invalid("browser QUIC IP packet"));
@@ -2828,12 +2847,15 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::{UnixListener, UnixStream},
     };
-    use volparossa_policy::{DestinationRule, ProtocolPort};
+    use volparossa_policy::{DestinationRule, ProtocolPort, VerifiedManifest};
+    use volparossa_protocol::{
+        TimePolicy, Transport, UdpFlowAuthorization, generate_nonce, sign_control_message,
+    };
     use volparossa_quic::{
         NATIVE_API_VERSION, NativeProcessIdentity, NativeRequest, NativeResponse, Preflight,
         encode_response, native_request, read_request, request_sha256,
     };
-    use volparossa_test_support::verified_development_manifest;
+    use volparossa_test_support::{SignedRouteFixture, verified_development_manifest};
 
     use super::*;
 
@@ -3082,6 +3104,91 @@ mod tests {
         assert_eq!(
             udp_ipv4_checksum(*flow.destination.ip(), *flow.client.ip(), &packet[20..]),
             0
+        );
+    }
+
+    fn browser_flow(
+        fixture: &SignedRouteFixture,
+        policy: &VerifiedManifest,
+        destination: SocketAddrV4,
+        flow_id: u8,
+        now_ms: u64,
+    ) -> AuthorizedUdpFlow {
+        let nonce = generate_nonce();
+        let expires_at_ms = now_ms + 60_000;
+        let signed = sign_control_message(
+            &UdpFlowAuthorization {
+                route_context_id: fixture.route_context_id().to_vec(),
+                flow_id: vec![flow_id; 16],
+                client_ephemeral_id: fixture.client_session_id().to_vec(),
+                hostname: "destination.volparossa.test".to_owned(),
+                destination_ip: destination.ip().octets().to_vec(),
+                port: u32::from(destination.port()),
+                policy_hash: policy.policy_hash().to_vec(),
+                idle_timeout_ms: 30_000,
+                timestamp_ms: now_ms,
+                expires_at_ms,
+                nonce: nonce.to_vec(),
+            },
+            fixture.client_key(),
+            now_ms,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .unwrap();
+        let mut replay = ReplayCache::new(1).unwrap();
+        UdpAuthorizationScope::new_multipath(
+            *fixture.route_context_id(),
+            fixture.client_session_id(),
+            expires_at_ms,
+            policy,
+        )
+        .unwrap()
+        .verify(&signed, now_ms, TimePolicy::default(), &mut replay)
+        .unwrap()
+    }
+
+    #[test]
+    fn browser_reverse_packets_select_the_exact_retained_application_flow() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        let destination = SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 443);
+        let permission = ProtocolPort::new(TransportProtocol::Udp, 443).unwrap();
+        let policy = verified_development_manifest(
+            NOW_MS,
+            vec![
+                DestinationRule::exact_domain("destination.volparossa.test", [permission]).unwrap(),
+            ],
+        )
+        .unwrap();
+        let fixture = SignedRouteFixture::new(2, &[Transport::MultipathQuic], NOW_MS).unwrap();
+        let first = browser_flow(&fixture, &policy, destination, 1, NOW_MS);
+        let second = browser_flow(&fixture, &policy, destination, 2, NOW_MS);
+        let first_client = SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 52_006);
+        let second_client = SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 52_007);
+        let flows = [(&first, first_client), (&second, second_client)];
+
+        let late_first = build_ipv4_udp(destination, first_client, b"late-a06", 1).unwrap();
+        assert_eq!(
+            matching_browser_quic_response_flow(
+                flows,
+                *fixture.route_context_id(),
+                &late_first,
+                NOW_MS,
+            )
+            .unwrap(),
+            Some(0)
+        );
+        let current_second = build_ipv4_udp(destination, second_client, b"a07", 2).unwrap();
+        assert_eq!(
+            matching_browser_quic_response_flow(
+                flows,
+                *fixture.route_context_id(),
+                &current_second,
+                NOW_MS,
+            )
+            .unwrap(),
+            Some(1)
         );
     }
 

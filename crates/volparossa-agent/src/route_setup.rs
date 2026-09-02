@@ -123,6 +123,7 @@ const MAXIMUM_RESERVATION_LIFETIME_MS: u64 = 15 * 60 * 1_000;
 const MAXIMUM_PHASE_LIFETIME_MS: u64 = 30 * 1_000;
 const MAXIMUM_REPLAY_CAPACITY: usize = 65_536;
 const MAXIMUM_RETIREMENT_OWNERS: usize = 64;
+const MAXIMUM_CLIENT_BROWSER_QUIC_FLOWS: usize = 256;
 const ID_BYTES: usize = 16;
 const CLIENT_SINGLE_RELAY_UDP_PORT: u16 = 40_001;
 const MAXIMUM_TCP_STREAM_CHUNK_BYTES: usize = 64 * 1_024;
@@ -181,7 +182,7 @@ struct ActiveProductionMpquicRoute {
     session: ProductionMpquicSession,
     identity: CommittedMpquicRouteIdentity,
     health: ProductionMpquicPathHealth,
-    browser_flow: Option<BrowserQuicFlowBinding>,
+    browser_flows: Vec<BrowserQuicFlowBinding>,
 }
 
 #[derive(Clone, Copy)]
@@ -1468,22 +1469,24 @@ impl ClientRouteControl {
             .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
         let (tunnel_source, maximum_packet_bytes) = mpquic_tunnel_packet_scope(&active.session)?;
 
-        if active
-            .browser_flow
-            .as_ref()
-            .is_some_and(|binding| !binding.matches_ingress_tuple(&ingress))
-        {
-            active.browser_flow = None;
-        }
-
-        let (packet, pending_binding) = if let Some(binding) = active.browser_flow.as_ref() {
+        active
+            .browser_flows
+            .retain(|binding| binding.is_live(policy, now_ms));
+        let existing = active
+            .browser_flows
+            .iter()
+            .position(|binding| binding.matches_ingress_tuple(&ingress));
+        let (packet, pending_binding) = if let Some(index) = existing {
             (
-                binding
+                active.browser_flows[index]
                     .bind_next(&ingress, policy, maximum_packet_bytes, now_ms)
                     .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?,
                 None,
             )
         } else {
+            if active.browser_flows.len() >= MAXIMUM_CLIENT_BROWSER_QUIC_FLOWS {
+                return Err(ClientRouteConnectError::UdpIngressUnavailable);
+            }
             let protocol = route
                 .established
                 .owner
@@ -1512,10 +1515,6 @@ impl ClientRouteControl {
             (packet, Some(binding))
         };
 
-        let flow = pending_binding
-            .as_ref()
-            .or(active.browser_flow.as_ref())
-            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
         if let Some(pending) = pending_binding.as_ref() {
             active
                 .session
@@ -1527,19 +1526,26 @@ impl ClientRouteControl {
                 )
                 .await
                 .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            active
+                .session
+                .send_browser_quic(pending.flow(), packet, now_ms)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        } else {
+            let index = existing.ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            active
+                .session
+                .send_browser_quic(active.browser_flows[index].flow(), packet, now_ms)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
         }
-        active
-            .session
-            .send_browser_quic(flow.flow(), packet, now_ms)
-            .await
-            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-        if let Some(binding) = pending_binding {
-            active.browser_flow = Some(binding);
-        }
-        active
-            .browser_flow
-            .as_mut()
-            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+        let index = if let Some(binding) = pending_binding {
+            active.browser_flows.push(binding);
+            active.browser_flows.len() - 1
+        } else {
+            existing.ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+        };
+        active.browser_flows[index]
             .record_sent(now_ms)
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
         let paths = active.path_summaries().await?;
@@ -1561,17 +1567,30 @@ impl ClientRouteControl {
         let ClientTransportState::Mpquic(active) = &mut established.transport else {
             return Ok(None);
         };
-        let Some(flow) = active.browser_flow.as_mut() else {
+        active
+            .browser_flows
+            .retain(|binding| binding.is_live(policy, now_ms));
+        if active.browser_flows.is_empty() {
             return Ok(None);
-        };
-        let packet = active
+        }
+        let received = active
             .session
-            .receive_browser_quic(flow.flow(), now_ms)
+            .receive_browser_quic(
+                active
+                    .browser_flows
+                    .iter()
+                    .map(BrowserQuicFlowBinding::receive_scope),
+                now_ms,
+            )
             .await
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-        let Some(packet) = packet else {
+        let Some((index, packet)) = received else {
             return Ok(None);
         };
+        let flow = active
+            .browser_flows
+            .get_mut(index)
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
         let application = flow.application();
         let remote = flow.remote();
         let payload = flow
@@ -1597,7 +1616,7 @@ impl ClientRouteControl {
             ClientRouteControlState::Established(established)
                 if matches!(
                     &established.transport,
-                    ClientTransportState::Mpquic(active) if active.browser_flow.is_some()
+                    ClientTransportState::Mpquic(active) if !active.browser_flows.is_empty()
                 )
         )
     }
@@ -2030,7 +2049,7 @@ async fn admit_completed_native_route(
                             session,
                             identity,
                             health,
-                            browser_flow: None,
+                            browser_flows: Vec::new(),
                         },
                     )),
                     tcp_flow: None,

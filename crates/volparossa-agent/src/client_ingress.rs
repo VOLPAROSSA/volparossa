@@ -1219,11 +1219,24 @@ impl BrowserQuicFlowBinding {
         self.remote
     }
 
+    /// Borrow the signed destination and exact tunnel return tuple used to demultiplex replies.
+    pub(crate) fn receive_scope(&self) -> (&AuthorizedUdpFlow, SocketAddrV4) {
+        (
+            &self.flow,
+            SocketAddrV4::new(self.tunnel_source, self.application.port()),
+        )
+    }
+
     /// Return whether one freshly inspected datagram belongs to this retained application flow.
     pub(crate) fn matches_ingress_tuple(&self, ingress: &PolicyAuthorizedUdpIngress) -> bool {
         ingress.is_browser_quic()
             && ingress.source == self.application
             && ingress.destination == self.remote
+    }
+
+    /// Return whether this exact policy and signed flow binding can still carry data.
+    pub(crate) fn is_live(&self, policy: &VerifiedManifest, now_ms: u64) -> bool {
+        self.ensure_live(policy, now_ms).is_ok()
     }
 
     fn ensure_live(
