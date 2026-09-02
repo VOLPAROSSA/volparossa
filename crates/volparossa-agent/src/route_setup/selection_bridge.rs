@@ -1728,15 +1728,18 @@ impl CompletedClientNativeProbe {
         mut self,
         client_native_instance_id: [u8; 32],
     ) -> Result<PreparedNativeRouteAdmission, ClientNativeProbeError> {
-        let mut plan = self
-            .batch
-            .route_plan
-            .take()
-            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        let mut plan = self.batch.route_plan.take().ok_or_else(|| {
+            tracing::warn!(
+                stage = "missing-route-plan",
+                "native route admission rejected"
+            );
+            ClientNativeProbeError::HelperCorrelation
+        })?;
         if !self.sampler_destroyed
             || self.batch.committed_owner.is_some()
             || plan.native_proof_state != NativeProofState::Required
         {
+            tracing::warn!(stage = "sampler-state", "native route admission rejected");
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
         let proven_relays = self
@@ -1769,6 +1772,13 @@ impl CompletedClientNativeProbe {
             || proven_relays != expected_relays
             || !actors_match
         {
+            tracing::warn!(
+                stage = "actor-set",
+                proven_relays = proven_relays.len(),
+                expected_relays = expected_relays.len(),
+                actors_match,
+                "native route admission rejected"
+            );
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
         let first_proof = self
@@ -1777,6 +1787,7 @@ impl CompletedClientNativeProbe {
             .first()
             .ok_or(ClientNativeProbeError::HelperCorrelation)?;
         if client_native_instance_id == [0; 32] {
+            tracing::warn!(stage = "native-instance", "native route admission rejected");
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
         let client_helper_runtime_id = *first_proof.client_helper_runtime_id();
@@ -1788,6 +1799,7 @@ impl CompletedClientNativeProbe {
                     .exit_helper_runtime_id()
                     .is_same_signed_attempt(&exit_helper_runtime_id)
         }) {
+            tracing::warn!(stage = "helper-runtime", "native route admission rejected");
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
         plan.native_proof_state = NativeProofState::Satisfied;
@@ -1823,6 +1835,12 @@ impl CompletedClientNativeProbe {
             .min(plan.scope.policy.expires_at_ms)
             .min(actor_hard_ceiling_ms);
         if hard_expires_at_ms < setup_ceiling_ms {
+            tracing::warn!(
+                stage = "expiry-order",
+                hard_expires_at_ms,
+                setup_ceiling_ms,
+                "native route admission rejected"
+            );
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
         let limits = RouteSetupLimits::new(
@@ -1840,13 +1858,27 @@ impl CompletedClientNativeProbe {
             limits,
             MAXIMUM_REPLAY_CAPACITY,
         )
-        .map_err(|_| ClientNativeProbeError::HelperCorrelation)?
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "consume-plan",
+                error = %error,
+                "native route admission rejected"
+            );
+            ClientNativeProbeError::HelperCorrelation
+        })?
         .bind_client_native_route_scope(ClientNativeRouteScope {
             masque_context_id: generate_masque_context_id()
                 .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
             client_native_instance_id,
         })
-        .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "bind-native-scope",
+                error = %error,
+                "native route admission rejected"
+            );
+            ClientNativeProbeError::HelperCorrelation
+        })?;
         Ok(PreparedNativeRouteAdmission {
             continuation,
             remote_retirement: RemoteNativeSamplerRetirement::ConfirmedByTerminalResults,
