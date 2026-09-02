@@ -4995,6 +4995,7 @@ impl DiscoveryRuntime {
     ) {
         macro_rules! reject {
             ($code:literal) => {{
+                tracing::warn!(rejection = $code, "production Relay ExecuteProbe rejected");
                 log_relay_forward_admission(Some(state), $code);
                 self.send_native_datapath_unavailable(
                     request,
@@ -5006,18 +5007,32 @@ impl DiscoveryRuntime {
         }
         let now_ms = unix_millis();
         let local_peer = *self.service.local_peer_id();
-        if request.validate().is_err()
-            || !datapath_request_scope_matches(
-                request,
-                DatapathRelayOperation::ExecuteProbe,
-                now_ms,
-            )
-            || authenticated_client_peer == local_peer
-            || !self.roles.relay
-            || self.relay_service.is_none()
-            || request.relay_node_id() != self.local_node_id
-            || request.relay_peer_id() != local_peer.to_bytes()
+        let request_valid = request.validate().is_ok();
+        let scope_matches =
+            datapath_request_scope_matches(request, DatapathRelayOperation::ExecuteProbe, now_ms);
+        let remote_client = authenticated_client_peer != local_peer;
+        let relay_role = self.roles.relay;
+        let relay_service = self.relay_service.is_some();
+        let relay_node_matches = request.relay_node_id() == self.local_node_id;
+        let relay_peer_matches = request.relay_peer_id() == local_peer.to_bytes();
+        if !request_valid
+            || !scope_matches
+            || !remote_client
+            || !relay_role
+            || !relay_service
+            || !relay_node_matches
+            || !relay_peer_matches
         {
+            tracing::warn!(
+                request_valid,
+                scope_matches,
+                remote_client,
+                relay_role,
+                relay_service,
+                relay_node_matches,
+                relay_peer_matches,
+                "production Relay ExecuteProbe scope diagnostics"
+            );
             reject!("PRODUCTION_RELAY_PROBE_SCOPE_REJECTED");
         }
         let Ok(mut replay) = ReplayCache::new(1) else {
@@ -5034,6 +5049,64 @@ impl DiscoveryRuntime {
         let permit = verified_permit.into_message();
         self.recent_native_relay_evidence
             .retain(|evidence| evidence.expires_at_ms > now_ms);
+        let matching_client = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.authenticated_client_peer == authenticated_client_peer)
+            .count();
+        let matching_data_relay = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| {
+                evidence
+                    .scope
+                    .data_relay
+                    .as_ref()
+                    .is_some_and(|data_relay| {
+                        data_relay.node_id == permit.relay_node_id
+                            && data_relay.peer_id == permit.relay_peer_id
+                    })
+            })
+            .count();
+        let matching_control = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| {
+                evidence.scope.control.as_ref().is_some_and(|control| {
+                    control.node_id == permit.control_relay_node_id
+                        && control.peer_id == permit.control_relay_peer_id
+                })
+            })
+            .count();
+        let matching_exit = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| {
+                evidence.scope.exit.as_ref().is_some_and(|exit| {
+                    exit.node_id == permit.exit_node_id && exit.peer_id == permit.exit_peer_id
+                })
+            })
+            .count();
+        let matching_policy = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.scope.policy_hash == permit.policy_hash)
+            .count();
+        let matching_transport = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.scope.transport == permit.transport)
+            .count();
+        let matching_family = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.scope.address_family == permit.address_family)
+            .count();
+        let matching_expiry = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.expires_at_ms <= evidence.scope.attempt_expires_at_ms)
+            .count();
         let Some(index) = self
             .recent_native_relay_evidence
             .iter()
@@ -5060,6 +5133,18 @@ impl DiscoveryRuntime {
                     && evidence.expires_at_ms <= evidence.scope.attempt_expires_at_ms
             })
         else {
+            tracing::warn!(
+                retained = self.recent_native_relay_evidence.len(),
+                matching_client,
+                matching_data_relay,
+                matching_control,
+                matching_exit,
+                matching_policy,
+                matching_transport,
+                matching_family,
+                matching_expiry,
+                "production Relay ExecuteProbe native evidence diagnostics"
+            );
             reject!("PRODUCTION_RELAY_PROBE_NATIVE_EVIDENCE_UNAVAILABLE");
         };
         let evidence = self.recent_native_relay_evidence.remove(index);
