@@ -13794,7 +13794,10 @@ fn native_service_prepare_request(
     {
         return None;
     }
-    let expires_at_unix = scope.attempt_expires_at_ms / 1_000;
+    let now_unix = now_ms / 1_000;
+    let hard_expires_at_unix = scope.attempt_expires_at_ms / 1_000;
+    let setup_expires_at_unix =
+        hard_expires_at_unix.min(now_unix.checked_add(TUNNEL_SETUP_TIMEOUT_SECONDS)?);
     let leases = match role {
         ContextRole::Relay => lease_roles
             .iter()
@@ -13816,14 +13819,14 @@ fn native_service_prepare_request(
         ContextRole::Relay => 1,
         ContextRole::Unspecified | ContextRole::Client => return None,
     };
-    (expires_at_unix > unix_seconds()).then(|| PrepareLeaseBatch {
+    (setup_expires_at_unix > now_unix).then(|| PrepareLeaseBatch {
         route_context_id: scope.attempt_id.clone(),
         role: role as i32,
         mptcp_accepted_addrs: local_path_count,
         mptcp_subflows: local_path_count,
         leases,
-        setup_expires_at_unix: expires_at_unix,
-        hard_expires_at_unix: expires_at_unix,
+        setup_expires_at_unix,
+        hard_expires_at_unix,
         traversal_hints: Vec::new(),
     })
 }
@@ -17014,7 +17017,7 @@ mod tests {
             attempt_id: vec![0x36; FORWARD_ID_BYTES],
             probe_id: vec![0x37; FORWARD_ID_BYTES],
             candidate_ordinal: 2,
-            attempt_expires_at_ms: now_ms.saturating_add(60_000),
+            attempt_expires_at_ms: now_ms.saturating_add(300_000),
             required_path_count: 3,
             ..NativeProbePathScope::default()
         };
@@ -17029,6 +17032,12 @@ mod tests {
         assert_eq!(relay.role, ContextRole::Relay as i32);
         assert_eq!(relay.leases.len(), 2);
         assert!(relay.leases.iter().all(|lease| lease.path_id == 2));
+        assert_eq!(relay.setup_expires_at_unix, now_ms / 1_000 + 30);
+        assert_eq!(
+            relay.hard_expires_at_unix,
+            scope.attempt_expires_at_ms / 1_000
+        );
+        assert!(relay.setup_expires_at_unix < relay.hard_expires_at_unix);
 
         let exit = native_service_prepare_request(
             &scope,
@@ -17038,6 +17047,8 @@ mod tests {
         )
         .expect("exit prepare plan");
         assert_eq!(exit.leases.len(), 3);
+        assert_eq!(exit.setup_expires_at_unix, relay.setup_expires_at_unix);
+        assert_eq!(exit.hard_expires_at_unix, relay.hard_expires_at_unix);
         assert_eq!(
             exit.leases
                 .iter()
