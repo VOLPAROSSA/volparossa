@@ -1680,6 +1680,14 @@ static void test_exit_multipath_listener_lifecycle(void)
     assert(mock.exit_start_calls == 0U &&
            mock.exit_retained_paths == 1U);
 
+    /* The daemon pumps between separately descriptor-bound requests. A
+     * partially collected listener set has no started transport to pump and
+     * must remain eligible for its remaining listeners. */
+    mock.pump_fails = true;
+    assert(vmp_runtime_pump(runtime) == VMP_SERVER_OK);
+    assert(mock.pump_calls == 0U);
+    mock.pump_fails = false;
+
     vmp_request_t second = first;
     second.body.start_exit_session.path_id = 2U;
     second.body.start_exit_session.listener_ip[11] = 2U;
@@ -1692,6 +1700,8 @@ static void test_exit_multipath_listener_lifecycle(void)
     assert(strcmp(response.diagnostic_code, "exit_listeners_ready") == 0);
     assert(mock.exit_create_calls == 1U && mock.exit_add_calls == 2U);
     assert(mock.exit_start_calls == 1U && mock.exit_retained_paths == 2U);
+    assert(vmp_runtime_pump(runtime) == VMP_SERVER_OK);
+    assert(mock.pump_calls == 1U);
 
     uint8_t packet[20] = {0x45U};
     packet[3] = (uint8_t)sizeof(packet);

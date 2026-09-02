@@ -9273,12 +9273,18 @@ impl DiscoveryRuntime {
             now_ms,
         )
         .await;
-        let Ok((active, signal)) = result else {
-            let _ = self
-                .exit_service
-                .as_mut()
-                .and_then(|service| service.release(route.bundle.reservation_id()).ok());
-            return None;
+        let (active, signal) = match result {
+            Ok(started) => started,
+            Err(error) => {
+                // The error contains only fixed local validation text or the native process's
+                // bounded protocol diagnostic code; it never contains route secrets or traffic.
+                eprintln!("production MPQUIC Exit startup failed: {error}");
+                let _ = self
+                    .exit_service
+                    .as_mut()
+                    .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+                return None;
+            }
         };
         let encoded = encode_canonical(
             &signal,

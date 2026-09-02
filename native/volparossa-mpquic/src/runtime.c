@@ -1178,6 +1178,7 @@ vmp_server_error_t vmp_runtime_pump(void *context)
         runtime_exit_session_t *exit_session =
             &runtime->exit_sessions[index];
         if (!exit_session->used || exit_session->failed ||
+            !exit_session->started ||
             exit_session->transport_session == NULL) {
             continue;
         }
