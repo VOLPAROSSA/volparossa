@@ -4961,12 +4961,12 @@ impl DiscoveryRuntime {
                         return;
                     }
                     Ok(DatapathRelayOperation::NativeProbeAuthorize) => {
-                        self.begin_native_probe_start_authorization(
+                        Box::pin(self.begin_native_probe_start_authorization(
                             authenticated_client_peer,
                             &request,
                             channel,
                             state,
-                        )
+                        ))
                         .await;
                         return;
                     }

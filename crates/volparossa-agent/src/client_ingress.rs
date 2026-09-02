@@ -648,7 +648,7 @@ impl BrowserQuicIngressGate {
     /// Re-authorize buffered Initial datagrams after asynchronous route establishment.
     ///
     /// Route construction may outlive the policy snapshot used while inspecting the QUIC
-    /// ClientHello. The inspector-owned hostname and exact kernel-observed tuple stay affine in
+    /// `ClientHello`. The inspector-owned hostname and exact kernel-observed tuple stay affine in
     /// this gate; this transition checks them against the policy that is active when the route is
     /// ready and refreshes every datagram's policy binding before any authorization is signed.
     pub(crate) fn reauthorize_after_route_ready(
