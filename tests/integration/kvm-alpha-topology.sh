@@ -2678,6 +2678,25 @@ wait_fresh_advertisement() {
     return 1
 }
 
+wait_relay_exit_advertisement() {
+    ready_relay=$1
+    ready_output="$WORK/a01-$ready_relay-exit-peers.txt"
+    ready_attempt=0
+    while [ "$ready_attempt" -lt 600 ]; do
+        if "$binary_directory/volparossa" \
+            --control-socket "$WORK/runtime-$ready_relay/control/agent.sock" peers \
+            >"$ready_output" 2>/dev/null \
+            && awk -F '\t' -v peer="$EXIT_PEER" \
+                '$1 == peer && $2 == "roles=0b100" { found = 1 }
+                 END { exit(found ? 0 : 1) }' "$ready_output"; then
+            return 0
+        fi
+        sleep 0.1
+        ready_attempt=$((ready_attempt + 1))
+    done
+    return 1
+}
+
 wait_disconnected() {
     idle_attempt=0
     while [ "$idle_attempt" -lt 300 ]; do
@@ -2878,6 +2897,8 @@ block_bootstrap_contact "$B1" || fail A01_BOOTSTRAP1_ISOLATION_FAILED
 restart_advertiser relay2 || fail A01_RELAY2_RESTART_FAILED
 a01_b1_sequence_after=$(wait_fresh_advertisement "$R2_PEER" \
     "$a01_b1_sequence_before") || fail A01_BOOTSTRAP1_ADVERTISEMENT_STALLED
+wait_relay_exit_advertisement relay2 \
+    || fail A01_RELAY2_EXIT_ADVERTISEMENT_UNAVAILABLE
 capture_link_bytes "$B2" b2r2 \
     "$WORK/a01-bootstrap1-remaining-link-after.json" \
     || fail A01_REMAINING_CONTACT_COUNTER_UNAVAILABLE
@@ -2898,6 +2919,8 @@ block_bootstrap_contact "$B2" || fail A01_BOOTSTRAP2_ISOLATION_FAILED
 restart_advertiser relay1 || fail A01_RELAY1_RESTART_FAILED
 a01_b2_sequence_after=$(wait_fresh_advertisement "$R1_PEER" \
     "$a01_b2_sequence_before") || fail A01_BOOTSTRAP2_ADVERTISEMENT_STALLED
+wait_relay_exit_advertisement relay1 \
+    || fail A01_RELAY1_EXIT_ADVERTISEMENT_UNAVAILABLE
 capture_link_bytes "$B1" b1r1 \
     "$WORK/a01-bootstrap2-remaining-link-after.json" \
     || fail A01_REMAINING_CONTACT_COUNTER_UNAVAILABLE
