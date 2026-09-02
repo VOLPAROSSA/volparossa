@@ -1966,6 +1966,12 @@ impl DiscoveryRuntime {
                     unix_millis(),
                 );
             }
+            DiscoveryEvent::PreselectionResponderRejected(reject) => {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, reject.event_code(), unix_millis());
+            }
             _ => {
                 state.write().await.log(
                     LogLevel::Error,
@@ -4420,7 +4426,18 @@ impl DiscoveryRuntime {
                     request_response::OutboundFailure::UnsupportedProtocols => {
                         "PRESELECTION_OUTBOUND_PROTOCOL_UNSUPPORTED"
                     }
-                    request_response::OutboundFailure::Io(_) => "PRESELECTION_OUTBOUND_IO_FAILED",
+                    request_response::OutboundFailure::Io(error) => match error.kind() {
+                        std::io::ErrorKind::UnexpectedEof => {
+                            "PRESELECTION_OUTBOUND_IO_UNEXPECTED_EOF"
+                        }
+                        std::io::ErrorKind::InvalidData => "PRESELECTION_OUTBOUND_IO_INVALID_DATA",
+                        std::io::ErrorKind::ConnectionReset => {
+                            "PRESELECTION_OUTBOUND_IO_CONNECTION_RESET"
+                        }
+                        std::io::ErrorKind::BrokenPipe => "PRESELECTION_OUTBOUND_IO_BROKEN_PIPE",
+                        std::io::ErrorKind::TimedOut => "PRESELECTION_OUTBOUND_IO_TIMED_OUT",
+                        _ => "PRESELECTION_OUTBOUND_IO_OTHER",
+                    },
                 };
                 let owned = self.handle_client_preselection_outbound_failure(peer, request_id);
                 state.write().await.log(

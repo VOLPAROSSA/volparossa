@@ -19,7 +19,9 @@ use libp2p::{
 use volparossa_core::{IpFamily, ObservedNetworkPrefix};
 use volparossa_protocol::{ObservationAddressFamily, ObservationNetworkPrefix};
 
-use crate::{MAX_ESTABLISHED_CONNECTIONS, MAX_ESTABLISHED_CONNECTIONS_PER_PEER};
+use crate::{
+    MAX_ESTABLISHED_CONNECTIONS, MAX_ESTABLISHED_CONNECTIONS_PER_PEER, PreselectionProvenanceReject,
+};
 
 /// Impossible output of the passive connection-provenance behaviour.
 pub enum ConnectionProvenanceEvent {}
@@ -413,6 +415,37 @@ impl ConnectionRegistry {
         })
     }
 
+    fn diagnose_preselection_reject(
+        &self,
+        peer_id: PeerId,
+        family: IpFamily,
+        expected_connection_id: ConnectionId,
+    ) -> PreselectionProvenanceReject {
+        if self.poisoned {
+            return PreselectionProvenanceReject::RegistryPoisoned;
+        }
+        let mut records = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.peer_id == peer_id);
+        let Some((connection_id, record)) = records.next() else {
+            return PreselectionProvenanceReject::ExactConnectionMissing;
+        };
+        if records.next().is_some() {
+            return PreselectionProvenanceReject::MultipleSiblingConnections;
+        }
+        if *connection_id != expected_connection_id {
+            return PreselectionProvenanceReject::ExactConnectionMissing;
+        }
+        let Some(prefix) = record.prefix.as_ref() else {
+            return PreselectionProvenanceReject::FamilyPrefix;
+        };
+        if !prefix.is_consistent() || prefix.normalized.family() != family {
+            return PreselectionProvenanceReject::FamilyPrefix;
+        }
+        PreselectionProvenanceReject::BindGeneration
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "ownership is the affine one-response authority; borrowing would permit reuse"
@@ -503,6 +536,16 @@ impl ConnectionProvenanceBehaviour {
     ) -> Option<BoundConnectionObservation> {
         self.registry
             .bind(witness, expected_peer_id, expected_connection_id)
+    }
+
+    pub(super) fn diagnose_preselection_reject(
+        &self,
+        peer_id: PeerId,
+        family: IpFamily,
+        expected_connection_id: ConnectionId,
+    ) -> PreselectionProvenanceReject {
+        self.registry
+            .diagnose_preselection_reject(peer_id, family, expected_connection_id)
     }
 
     pub(super) fn bind_native_probe_control(

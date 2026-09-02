@@ -437,6 +437,136 @@ pub enum BehaviourEvent {
     DatapathRelay(request_response::Event<DatapathRelayRequest, DatapathRelayResponse>),
 }
 
+/// Detail-free reason exact authenticated connection provenance could not be bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "variant names are the complete privacy-neutral diagnostic contract"
+)]
+#[non_exhaustive]
+pub enum PreselectionProvenanceReject {
+    RegistryPoisoned,
+    ExactConnectionMissing,
+    MultipleSiblingConnections,
+    FamilyPrefix,
+    BindGeneration,
+}
+
+/// Detail-free class emitted when an owned preselection responder rejects a request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "variant names are the complete privacy-neutral diagnostic contract"
+)]
+#[non_exhaustive]
+pub enum PreselectionResponderReject {
+    DirectRole,
+    DirectRequest,
+    DirectAuthority,
+    DirectProvenance(PreselectionProvenanceReject),
+    DirectReplay,
+    DirectResourceLimit,
+    DirectTime,
+    DirectSigning,
+    DirectResponseChannel,
+    ForwardedRequest,
+    ForwardedAuthority,
+    ForwardedTransaction,
+    ForwardedProof,
+    ForwardedReplay,
+    ForwardedResourceLimit,
+    ForwardedTime,
+    ForwardedSigning,
+    ForwardedResponseChannel,
+    ForwardedUpstreamTransport,
+    UpstreamRole,
+    UpstreamRequest,
+    UpstreamAuthority,
+    UpstreamProvenance(PreselectionProvenanceReject),
+    UpstreamReplay,
+    UpstreamResourceLimit,
+    UpstreamTime,
+    UpstreamSigning,
+    UpstreamResponseChannel,
+}
+
+impl PreselectionResponderReject {
+    /// Stable privacy-neutral event code. No peer, address, request, or payload detail is exposed.
+    #[must_use]
+    pub const fn event_code(self) -> &'static str {
+        match self {
+            Self::DirectRole => "PRESELECTION_RESPONDER_DIRECT_ROLE_REJECTED",
+            Self::DirectRequest => "PRESELECTION_RESPONDER_DIRECT_REQUEST_REJECTED",
+            Self::DirectAuthority => "PRESELECTION_RESPONDER_DIRECT_AUTHORITY_REJECTED",
+            Self::DirectProvenance(PreselectionProvenanceReject::RegistryPoisoned) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_REGISTRY_POISONED"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::ExactConnectionMissing) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_CONNECTION_MISSING"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::MultipleSiblingConnections) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_MULTIPLE_CONNECTIONS"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::FamilyPrefix) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_FAMILY_PREFIX"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::BindGeneration) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_BIND_GENERATION"
+            }
+            Self::DirectReplay => "PRESELECTION_RESPONDER_DIRECT_REPLAY_REJECTED",
+            Self::DirectResourceLimit => "PRESELECTION_RESPONDER_DIRECT_RESOURCE_LIMIT_REJECTED",
+            Self::DirectTime => "PRESELECTION_RESPONDER_DIRECT_TIME_REJECTED",
+            Self::DirectSigning => "PRESELECTION_RESPONDER_DIRECT_SIGNING_REJECTED",
+            Self::DirectResponseChannel => {
+                "PRESELECTION_RESPONDER_DIRECT_RESPONSE_CHANNEL_REJECTED"
+            }
+            Self::ForwardedRequest => "PRESELECTION_RESPONDER_FORWARDED_REQUEST_REJECTED",
+            Self::ForwardedAuthority => "PRESELECTION_RESPONDER_FORWARDED_AUTHORITY_REJECTED",
+            Self::ForwardedTransaction => "PRESELECTION_RESPONDER_FORWARDED_TRANSACTION_REJECTED",
+            Self::ForwardedProof => "PRESELECTION_RESPONDER_FORWARDED_PROOF_REJECTED",
+            Self::ForwardedReplay => "PRESELECTION_RESPONDER_FORWARDED_REPLAY_REJECTED",
+            Self::ForwardedResourceLimit => {
+                "PRESELECTION_RESPONDER_FORWARDED_RESOURCE_LIMIT_REJECTED"
+            }
+            Self::ForwardedTime => "PRESELECTION_RESPONDER_FORWARDED_TIME_REJECTED",
+            Self::ForwardedSigning => "PRESELECTION_RESPONDER_FORWARDED_SIGNING_REJECTED",
+            Self::ForwardedResponseChannel => {
+                "PRESELECTION_RESPONDER_FORWARDED_RESPONSE_CHANNEL_REJECTED"
+            }
+            Self::ForwardedUpstreamTransport => {
+                "PRESELECTION_RESPONDER_FORWARDED_UPSTREAM_TRANSPORT_REJECTED"
+            }
+            Self::UpstreamRole => "PRESELECTION_RESPONDER_UPSTREAM_ROLE_REJECTED",
+            Self::UpstreamRequest => "PRESELECTION_RESPONDER_UPSTREAM_REQUEST_REJECTED",
+            Self::UpstreamAuthority => "PRESELECTION_RESPONDER_UPSTREAM_AUTHORITY_REJECTED",
+            Self::UpstreamProvenance(PreselectionProvenanceReject::RegistryPoisoned) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_REGISTRY_POISONED"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::ExactConnectionMissing) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_CONNECTION_MISSING"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::MultipleSiblingConnections) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_MULTIPLE_CONNECTIONS"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::FamilyPrefix) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_FAMILY_PREFIX"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::BindGeneration) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_BIND_GENERATION"
+            }
+            Self::UpstreamReplay => "PRESELECTION_RESPONDER_UPSTREAM_REPLAY_REJECTED",
+            Self::UpstreamResourceLimit => {
+                "PRESELECTION_RESPONDER_UPSTREAM_RESOURCE_LIMIT_REJECTED"
+            }
+            Self::UpstreamTime => "PRESELECTION_RESPONDER_UPSTREAM_TIME_REJECTED",
+            Self::UpstreamSigning => "PRESELECTION_RESPONDER_UPSTREAM_SIGNING_REJECTED",
+            Self::UpstreamResponseChannel => {
+                "PRESELECTION_RESPONDER_UPSTREAM_RESPONSE_CHANNEL_REJECTED"
+            }
+        }
+    }
+}
+
 /// Sanitized public discovery event.
 ///
 /// Preselection request messages remain entirely service-owned. Responses for the exact active
@@ -450,6 +580,8 @@ pub enum DiscoveryEvent {
     ClientPreselectionResponse(ClientPreselectionResponseArrival),
     /// Service-sealed response to an outbound relay-to-exit observation request.
     UpstreamPreselectionResponse(UpstreamPreselectionResponseArrival),
+    /// Detail-free reason an owned preselection request was rejected before response handoff.
+    PreselectionResponderRejected(PreselectionResponderReject),
     /// Any event other than a preselection request or response message.
     Other(libp2p::swarm::SwarmEvent<BehaviourEvent>),
 }

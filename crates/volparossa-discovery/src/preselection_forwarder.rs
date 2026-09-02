@@ -327,22 +327,24 @@ impl DiscoveryService {
         request_id: OutboundRequestId,
         response: UpstreamPreselectionObservationResponse,
         signer: F,
-    ) -> bool
+    ) -> Result<bool, ForwardedPreselectionError>
     where
         F: FnOnce(&[u8]) -> Option<[u8; 64]>,
     {
         if !self.forwarded_preselection_owns_upstream_event(peer, request_id) {
-            return false;
+            return Ok(false);
         }
-        let Ok(arrival) =
-            self.seal_upstream_preselection_response(peer, connection_id, request_id, response)
-        else {
-            self.cancel_pending_forwarded_preselection();
-            return true;
-        };
-        let Some(pending) = self.preselection_forwarder.pending.take() else {
-            return true;
-        };
+        let arrival = self
+            .seal_upstream_preselection_response(peer, connection_id, request_id, response)
+            .map_err(|_| {
+                self.cancel_pending_forwarded_preselection();
+                ForwardedPreselectionError::Proof
+            })?;
+        let pending = self
+            .preselection_forwarder
+            .pending
+            .take()
+            .ok_or(ForwardedPreselectionError::Transaction)?;
         let PendingForwardedPreselection {
             transaction,
             deadline,
@@ -354,11 +356,9 @@ impl DiscoveryService {
             downstream_connection,
             downstream_request_id: _,
         } = pending;
-        let Ok((context, transport, response)) =
-            self.bind_preselection_observation_upstream_response_with_context(transaction, arrival)
-        else {
-            return true;
-        };
+        let (context, transport, response) = self
+            .bind_preselection_observation_upstream_response_with_context(transaction, arrival)
+            .map_err(|_| ForwardedPreselectionError::Proof)?;
         let completion = ForwardingCompletion {
             deadline,
             policy,
@@ -367,9 +367,8 @@ impl DiscoveryService {
             downstream_peer,
             downstream_connection,
         };
-        let _ =
-            self.finish_forwarded_preselection(completion, context, transport, response, signer);
-        true
+        self.finish_forwarded_preselection(completion, context, transport, response, signer)?;
+        Ok(true)
     }
 
     pub(super) fn handle_forwarded_preselection_upstream_failure(
