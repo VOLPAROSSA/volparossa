@@ -368,6 +368,8 @@ copy_artifacts() {
         helper-units.json a02-client.json a02-client.err a02-client-fallback-route.txt \
         a02-client-capture.json a02-client-capture.log a02-client-capture.err \
         a02-exit-capture.json a02-exit-capture.log a02-exit-capture.err \
+        a02-first-failed-client-capture.json \
+        a02-first-failed-exit-capture.json \
         a02-evidence.json \
         a03-single-client.json a03-single-client.err \
         a03-single-client-capture.json a03-single-exit-capture.json \
@@ -447,6 +449,10 @@ capture_worker_network_diagnostics() {
                 nsenter -t "$diagnostic_pid" -n ip -details -statistics link show || true
                 nsenter -t "$diagnostic_pid" -n ip -6 address show || true
                 nsenter -t "$diagnostic_pid" -n ip -6 route show table main || true
+                nsenter -t "$diagnostic_pid" -n ip -details mptcp endpoint show || true
+                nsenter -t "$diagnostic_pid" -n ip mptcp limits show || true
+                nsenter -t "$diagnostic_pid" -n ss -M -ltn || true
+                nsenter -t "$diagnostic_pid" -n ss -M -tin || true
                 diagnostic_interfaces=$(nsenter -t "$diagnostic_pid" -n \
                     wg show interfaces 2>/dev/null || true)
                 for diagnostic_interface in $diagnostic_interfaces; do
@@ -3502,6 +3508,19 @@ PYTHON
     done
     if ! stop_observers; then
         A02_STATUS=1
+    fi
+    if [ "$A02_STATUS" -ne 0 ] && [ "$attempt" -eq 0 ]; then
+        capture_worker_network_diagnostics a02-first-flow-failure
+        if [ -s "$client_capture" ] \
+            && jq -e . "$client_capture" >/dev/null 2>&1; then
+            install -o root -g root -m 0600 "$client_capture" \
+                "$WORK/a02-first-failed-client-capture.json"
+        fi
+        if [ -s "$exit_capture" ] \
+            && jq -e . "$exit_capture" >/dev/null 2>&1; then
+            install -o root -g root -m 0600 "$exit_capture" \
+                "$WORK/a02-first-failed-exit-capture.json"
+        fi
     fi
     for evidence_file in "$WORK/a02-client.json" "$destination_evidence" \
         "$client_capture" "$exit_capture"; do
