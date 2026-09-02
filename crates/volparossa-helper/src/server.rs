@@ -1,7 +1,8 @@
 //! Authenticated root-owned Unix socket server.
 
 use std::{
-    io, os::unix::net::UnixListener as StdUnixListener, path::Path, sync::Arc, time::Duration,
+    future::Future, io, os::unix::net::UnixListener as StdUnixListener, path::Path, sync::Arc,
+    time::Duration,
 };
 
 use nix::unistd::Gid;
@@ -13,7 +14,7 @@ use tokio::{
     signal::unix::{SignalKind, signal},
     sync::Semaphore,
     task::JoinSet,
-    time::{MissedTickBehavior, interval, timeout},
+    time::{Instant, MissedTickBehavior, interval, timeout},
 };
 use volparossa_linux_uapi::{SystemdListenFdSet, send_fd_with_binding};
 use volparossa_routing::{
@@ -42,6 +43,7 @@ const MAX_CONNECTIONS: usize = 32;
 const MAX_REQUESTS_PER_CONNECTION: usize = 16;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const EXPIRY_REAP_INTERVAL: Duration = Duration::from_secs(1);
+const EXPIRY_REAP_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 const OWNERSHIP_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const OWNERSHIP_SHUTDOWN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -323,19 +325,44 @@ async fn run_server(server: ProductionServer) -> Result<(), ServerError> {
     combine_server_completion(service_result, complete, ownership_complete)
 }
 
-async fn run_expiry_reaper(engine: HelperEngine, mut stopped: tokio::sync::oneshot::Receiver<()>) {
-    let mut ticks = interval(EXPIRY_REAP_INTERVAL);
+async fn run_expiry_reaper(engine: HelperEngine, stopped: tokio::sync::oneshot::Receiver<()>) {
+    run_expiry_reaper_loop(
+        move || {
+            let engine = engine.clone();
+            async move { engine.reap_expired_cleanup().await }
+        },
+        stopped,
+        EXPIRY_REAP_INTERVAL,
+        EXPIRY_REAP_FAILURE_BACKOFF,
+    )
+    .await;
+}
+
+async fn run_expiry_reaper_loop<Reap, ReapFuture>(
+    mut reap: Reap,
+    mut stopped: tokio::sync::oneshot::Receiver<()>,
+    reap_interval: Duration,
+    failure_backoff: Duration,
+) where
+    Reap: FnMut() -> ReapFuture,
+    ReapFuture: Future<Output = bool>,
+{
+    let mut ticks = interval(reap_interval);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
     ticks.tick().await;
     loop {
         tokio::select! {
             _ = &mut stopped => return,
             _ = ticks.tick() => {
-                if !engine.reap_expired_cleanup().await {
+                if !reap().await {
                     tracing::warn!(
                         diagnostic_code = "EXPIRY_REAP_INCOMPLETE",
                         "helper expiry cleanup remains quarantined"
                     );
+                    // A failed attempt may consume the whole backend deadline. Discard the
+                    // interval ticks missed during that attempt and leave the operation gate free
+                    // for foreground helper requests until one bounded retry becomes due.
+                    ticks.reset_at(Instant::now() + failure_backoff);
                 }
             }
         }
@@ -554,7 +581,10 @@ mod tests {
         io::{Read, Write},
         os::fd::OwnedFd,
         os::unix::net::UnixStream as StdUnixStream,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
@@ -1043,6 +1073,39 @@ mod tests {
         timeout(Duration::from_secs(1), driver)
             .await
             .expect("expiry driver stop deadline")
+            .expect("expiry driver join");
+    }
+
+    #[tokio::test]
+    async fn failed_expiry_reap_discards_missed_ticks_and_shutdown_interrupts_backoff() {
+        assert_eq!(EXPIRY_REAP_FAILURE_BACKOFF, Duration::from_secs(60));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&attempts);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let driver = tokio::spawn(run_expiry_reaper_loop(
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(false)
+            },
+            stopped,
+            Duration::from_millis(1),
+            EXPIRY_REAP_FAILURE_BACKOFF,
+        ));
+
+        timeout(Duration::from_secs(1), async {
+            while attempts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first expiry attempt");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        stop.send(()).expect("expiry stop receiver");
+        timeout(Duration::from_secs(1), driver)
+            .await
+            .expect("backoff interrupted by shutdown")
             .expect("expiry driver join");
     }
 
