@@ -106,7 +106,9 @@ use crate::{
         HelperClient, HelperClientError, PrepareLeaseBatchFailure, PrepareReconciliationAuthority,
         RuntimeBoundPreparedLeaseBatch,
     },
-    mpquic_runtime::{ProductionMpquicPreflight, ProductionMpquicSession},
+    mpquic_runtime::{
+        MINIMUM_MPQUIC_TUNNEL_MTU, ProductionMpquicPreflight, ProductionMpquicSession,
+    },
     mptcp_flow_runtime::{ActiveProductionMptcpClientFlow, activate_production_mptcp_client_flow},
     mptcp_transport::{ClientMptcpTransport, ExitMptcpListenerSignal, PRODUCTION_MPTCP_EXIT_PORT},
     paths::DEFAULT_MPQUIC_SOCKET,
@@ -1635,14 +1637,21 @@ fn mpquic_tunnel_packet_scope(
         .try_into()
         .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
     let assigned_ipv4 = Ipv4Addr::from(assigned_ipv4);
-    let maximum_packet_bytes = usize::try_from(session.assignment().mtu)
-        .ok()
-        .filter(|mtu| *mtu >= 28 && u16::try_from(*mtu).is_ok())
-        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let maximum_packet_bytes = maximum_mpquic_tunnel_packet_bytes(session.assignment().mtu)?;
     if assigned_ipv4.is_unspecified() || assigned_ipv4.is_multicast() {
         return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
     }
     Ok((assigned_ipv4, maximum_packet_bytes))
+}
+
+fn maximum_mpquic_tunnel_packet_bytes(
+    assignment_mtu: u32,
+) -> Result<usize, ClientRouteConnectError> {
+    usize::try_from(assignment_mtu)
+        .ok()
+        .filter(|mtu| *mtu >= 28 && u16::try_from(*mtu).is_ok())
+        .map(|mtu| mtu.min(MINIMUM_MPQUIC_TUNNEL_MTU))
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)
 }
 
 fn client_open_tcp_material(
@@ -6919,6 +6928,19 @@ mod tests {
             delivery_rate_bps: 8_000_000,
             data_carrying,
         }
+    }
+
+    #[test]
+    fn browser_mpquic_packet_scope_never_exceeds_exit_parser_limit() {
+        assert_eq!(
+            maximum_mpquic_tunnel_packet_bytes(1_420),
+            Ok(MINIMUM_MPQUIC_TUNNEL_MTU)
+        );
+        assert_eq!(maximum_mpquic_tunnel_packet_bytes(1_200), Ok(1_200));
+        assert_eq!(
+            maximum_mpquic_tunnel_packet_bytes(27),
+            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        );
     }
 
     #[test]

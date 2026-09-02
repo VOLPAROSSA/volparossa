@@ -49,7 +49,7 @@ const MAXIMUM_EXIT_UDP_FLOWS: usize = 256;
 const MAXIMUM_EXIT_DATAGRAMS_PER_TICK: usize = 64;
 const MAXIMUM_EXIT_FLOW_IDLE: Duration = Duration::from_secs(10 * 60);
 const EXIT_FLOW_REPLAY_CAPACITY: usize = 4_096;
-const MINIMUM_MPQUIC_TUNNEL_MTU: usize = 1_280;
+pub(crate) const MINIMUM_MPQUIC_TUNNEL_MTU: usize = 1_280;
 const MAXIMUM_EXIT_UDP_PAYLOAD_BYTES: usize = MINIMUM_MPQUIC_TUNNEL_MTU - 20 - 8;
 const MPQUIC_TUNNEL_IPV4_PREFIX: [u8; 3] = [10, 76, 0];
 /// Fixed protected-overlay listener port for every path of one MPQUIC Exit association.
