@@ -2672,6 +2672,10 @@ wait_disconnected() {
     return 1
 }
 
+a01_transient_connect_unavailable() {
+    grep -Eq '^Error: agent rejected request: (PRESELECTION_UNAVAILABLE|NATIVE_PERMIT_UNAVAILABLE|NATIVE_RELAY_READY_UNAVAILABLE|NATIVE_PROBE_START_UNAVAILABLE|ROUTE_ADMISSION_UNAVAILABLE) \(Unavailable\)$' "$1"
+}
+
 a01_select_route() {
     selection_label=$1
     selection_status=1
@@ -2706,8 +2710,7 @@ a01_select_route() {
         sed -n 'p' "$selection_attempt_error" \
             >>"$WORK/a01-$selection_label-connect.err"
         [ "$selection_status" -ne 0 ] || break
-        grep -F 'PRESELECTION_UNAVAILABLE' \
-            "$selection_attempt_error" >/dev/null || break
+        a01_transient_connect_unavailable "$selection_attempt_error" || break
         sleep 1
         selection_attempt=$((selection_attempt + 1))
     done
