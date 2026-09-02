@@ -20826,6 +20826,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one provenance-drift matrix exercises every fail-closed mutation"
+    )]
     async fn route_snapshot_rejects_external_and_forwarded_control_provenance_drift() {
         for mutation in 0_u8..7 {
             let mut fixture = fixture(RolesConfig::default());
