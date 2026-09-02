@@ -1,17 +1,18 @@
 //! Concurrent TLS 1.3 and signed `OPEN_TCP` flows over committed MPTCP routes.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, io, sync::Arc, time::Duration};
 
 use pem::parse;
 use rustls::RootCertStore;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{net::TcpStream, task::JoinSet, time};
+use tokio::{io::AsyncWrite, net::TcpStream, task::JoinSet, time};
 use volparossa_exit::{
     ActiveTcpEgressRoute, ActiveTcpRoute, ExitNativeRouteAuthorization, ExitService,
     TcpEgressLimits,
 };
+use volparossa_mptcp::MptcpInfo;
 use volparossa_tcp_proxy::{
     StreamTransferLimits, StreamTransferStats, Tls13MptcpClient, Tls13MptcpServer,
     Tls13MptcpStream, VerifiedMptcpRoute, proxy_bidirectional, write_open_tcp,
@@ -19,7 +20,7 @@ use volparossa_tcp_proxy::{
 
 use crate::{
     helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
-    mptcp_transport::{ClientMptcpFlowTransport, ExitMptcpTransport},
+    mptcp_transport::{ClientMptcpFlowTransport, ExitMptcpTransport, wait_for_selected_subflows},
     udp_exit_provider::route_certificate_der,
     unix_millis,
 };
@@ -401,7 +402,7 @@ pub(crate) async fn activate_production_mptcp_client_flow(
     signed_open_tcp: &[u8],
     now_ms: u64,
 ) -> Result<ActiveProductionMptcpClientFlow, ProductionMptcpClientFailure> {
-    let (mptcp, certificate_der) = transport.into_tls_parts();
+    let (mptcp, certificate_der, required_subflows) = transport.into_tls_parts();
     if expected_certificate_sha256.len() != 32
         || Sha256::digest(&certificate_der).as_slice() != expected_certificate_sha256
     {
@@ -433,15 +434,36 @@ pub(crate) async fn activate_production_mptcp_client_flow(
             ProductionMptcpClientError::Tls,
         ));
     };
-    if write_open_tcp(&mut stream, signed_open_tcp, OPEN_TCP_TIMEOUT)
-        .await
-        .is_err()
+    if let Err(cause) = prime_open_tcp_and_wait_for_subflows(
+        &mut stream,
+        signed_open_tcp,
+        required_subflows,
+        Tls13MptcpStream::negotiation_info,
+    )
+    .await
     {
-        return Err(ProductionMptcpClientFailure::new(
-            ProductionMptcpClientError::OpenTcp,
-        ));
+        return Err(ProductionMptcpClientFailure::new(cause));
     }
     Ok(ActiveProductionMptcpClientFlow { stream })
+}
+
+async fn prime_open_tcp_and_wait_for_subflows<W, F>(
+    stream: &mut W,
+    signed_open_tcp: &[u8],
+    required_subflows: usize,
+    mut observe: F,
+) -> Result<(), ProductionMptcpClientError>
+where
+    W: AsyncWrite + Unpin,
+    F: FnMut(&W) -> io::Result<MptcpInfo>,
+{
+    write_open_tcp(stream, signed_open_tcp, OPEN_TCP_TIMEOUT)
+        .await
+        .map_err(|_| ProductionMptcpClientError::OpenTcp)?;
+    wait_for_selected_subflows(|| observe(&*stream), required_subflows)
+        .await
+        .map_err(|_| ProductionMptcpClientError::Multipath)?;
+    Ok(())
 }
 
 #[must_use = "failed MPTCP client activation must be handled"]
@@ -467,6 +489,8 @@ pub(crate) enum ProductionMptcpClientError {
     Tls,
     #[error("signed OPEN_TCP transmission failed")]
     OpenTcp,
+    #[error("every selected MPTCP subflow did not become active")]
+    Multipath,
     #[error("bounded application stream proxy failed")]
     Stream,
 }
@@ -484,6 +508,34 @@ fn production_tcp_limits() -> Result<TcpEgressLimits, volparossa_exit::ExitError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn open_tcp_primes_the_connection_before_the_multipath_barrier() {
+        let signed_open_tcp = b"bounded-signed-open-tcp";
+        let mut written = Vec::new();
+        let mut observations = 0_u8;
+
+        prime_open_tcp_and_wait_for_subflows(&mut written, signed_open_tcp, 2, |primed| {
+            assert!(
+                primed.ends_with(signed_open_tcp),
+                "OPEN_TCP must be flushed before subflow readiness is observed"
+            );
+            observations = observations.saturating_add(1);
+            Ok(MptcpInfo {
+                fallback: false,
+                remote_key_received: true,
+                additional_subflows: observations.saturating_sub(1),
+                total_subflows: observations.min(2),
+                bytes_sent: 0,
+                bytes_received: 0,
+                bytes_retransmitted: 0,
+            })
+        })
+        .await
+        .expect("TLS control traffic can prime the second selected subflow");
+
+        assert_eq!(observations, 2);
+    }
 
     #[tokio::test]
     async fn completed_exit_flow_is_reported_while_next_accept_waits() {

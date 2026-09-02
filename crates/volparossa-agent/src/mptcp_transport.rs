@@ -37,11 +37,12 @@ pub struct ClientMptcpTransport {
 pub(crate) struct ClientMptcpFlowTransport {
     stream: MptcpStream,
     certificate_der: Vec<u8>,
+    required_subflows: usize,
 }
 
 impl ClientMptcpFlowTransport {
-    pub(crate) fn into_tls_parts(self) -> (MptcpStream, Vec<u8>) {
-        (self.stream, self.certificate_der)
+    pub(crate) fn into_tls_parts(self) -> (MptcpStream, Vec<u8>, usize) {
+        (self.stream, self.certificate_der, self.required_subflows)
     }
 }
 
@@ -171,8 +172,8 @@ impl ClientMptcpTransport {
     /// # Errors
     ///
     /// Returns an error for invalid capability metadata, fewer than two paths, a helper endpoint
-    /// refusal, or when the genuine MPTCP stream does not activate every selected subflow before
-    /// the fixed readiness deadline.
+    /// refusal, or a descriptor that is not a genuinely negotiated MPTCP stream. Exact selected
+    /// subflow readiness is checked after TLS and `OPEN_TCP` have primed each application flow.
     pub async fn activate(
         helper: &HelperClient,
         acquired: AcquiredTransportSocket,
@@ -197,10 +198,6 @@ impl ClientMptcpTransport {
                 return Err(MptcpTransportError::Helper(error));
             }
             active_paths.push(path_id);
-        }
-        if let Err(error) = wait_for_selected_subflows(&stream, required_subflows).await {
-            rollback_paths(helper, &route_context_id, &context_handle, &active_paths).await;
-            return Err(MptcpTransportError::Io(error));
         }
         Ok(Self {
             initial_stream: Some(stream),
@@ -246,10 +243,10 @@ impl ClientMptcpTransport {
             let acquired = helper.acquire_transport_socket(request).await?;
             adopt_client_stream(acquired)?
         };
-        wait_for_selected_subflows(&stream, self.required_subflows).await?;
         Ok(ClientMptcpFlowTransport {
             stream,
             certificate_der,
+            required_subflows: self.required_subflows,
         })
     }
 
@@ -269,16 +266,14 @@ impl ClientMptcpTransport {
     }
 }
 
-async fn wait_for_selected_subflows(
-    stream: &MptcpStream,
+pub(crate) async fn wait_for_selected_subflows<F>(
+    observe: F,
     required_subflows: usize,
-) -> io::Result<MptcpInfo> {
-    wait_for_selected_subflows_with(
-        || stream.negotiation_info(),
-        required_subflows,
-        CLIENT_SUBFLOW_READY_TIMEOUT,
-    )
-    .await
+) -> io::Result<MptcpInfo>
+where
+    F: FnMut() -> io::Result<MptcpInfo>,
+{
+    wait_for_selected_subflows_with(observe, required_subflows, CLIENT_SUBFLOW_READY_TIMEOUT).await
 }
 
 async fn wait_for_selected_subflows_with<F>(

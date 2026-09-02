@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 
 pub use netlink::MptcpNetlinkClient;
 pub use socket::{MptcpListener, MptcpStream, connect, listen, probe_kernel_support};
-pub use volparossa_linux_uapi::MptcpInfo;
+pub use volparossa_linux_uapi::{MptcpInfo, mptcp_info};
 
 /// Upper bound imposed by the v1 protocol and configuration.
 pub const MAX_PATHS: u8 = 8;
