@@ -14,10 +14,10 @@ use volparossa_protocol::{
     ClientSessionCapability, ControlMessageType, ControlPayload, ExitCapacityHold,
     ExitCapacityHoldRequest, ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
     ExitReservationFinalizeRequest, FinalizedRelayPath, MAX_CONTROL_MESSAGE_SIZE,
-    MAX_CONTROL_PAYLOAD_SIZE, MAX_MASQUE_CONTEXT_ID, NATIVE_ROUTE_AUTH_BEARER_LENGTH,
-    NativeRouteCredentialDelivery, NativeRouteCredentialError, NativeRouteCredentialScope,
-    NativeRouteIdentity, OpenTcp, ProbeAddressFamily, ProbeLegEvidence, ProtocolError,
-    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
+    MAX_CONTROL_PAYLOAD_SIZE, MAX_MASQUE_CONTEXT_ID, MAX_NATIVE_PROBE_LIFETIME_MS,
+    NATIVE_ROUTE_AUTH_BEARER_LENGTH, NativeRouteCredentialDelivery, NativeRouteCredentialError,
+    NativeRouteCredentialScope, NativeRouteIdentity, OpenTcp, ProbeAddressFamily, ProbeLegEvidence,
+    ProtocolError, RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
     RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
     UdpFlowAuthorization, WireguardEndpoint, decode_canonical, exit_confirmation_envelope_hash,
     finalized_reservation_bundle_hash, generate_nonce, native_route_auth_commitment,
@@ -1949,7 +1949,8 @@ fn same_probe_result(result: &RelayProbeResult, permit: &VerifiedProbePermit) ->
         && result.policy_hash == expected.policy_hash
         && result.transport == expected.transport
         && result.address_family == expected.address_family
-        && result.measured_at_ms >= expected.created_at_ms
+        && expected.created_at_ms.saturating_sub(result.measured_at_ms)
+            <= MAX_NATIVE_PROBE_LIFETIME_MS
         && result.expires_at_ms <= expected.expires_at_ms
 }
 
@@ -2116,12 +2117,13 @@ mod tests {
     use volparossa_protocol::{
         ClientSessionCapability, ControlMessageType, ExitCapacityHold, ExitCapacityHoldRequest,
         ExitConfirmationReceipt, ExitReservation, ExitReservationFinalizeRequest,
-        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NATIVE_ROUTE_AUTH_BEARER_LENGTH,
-        NativeRouteIdentity, OpenTcp, PROTOCOL_VERSION, ProbeAddressFamily, ProbeLegEvidence,
-        RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
-        ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
-        exit_confirmation_envelope_hash, generate_nonce, native_route_auth_commitment,
-        node_id_from_public_key, sign_control_message, verify_control_message,
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, MAX_NATIVE_PROBE_LIFETIME_MS,
+        NATIVE_ROUTE_AUTH_BEARER_LENGTH, NativeRouteIdentity, OpenTcp, PROTOCOL_VERSION,
+        ProbeAddressFamily, ProbeLegEvidence, RelayAuthorization, RelayProbePermit,
+        RelayProbePermitRequest, RelayProbeResult, ReplayCache, SignedEnvelope, TimePolicy,
+        Transport, decode_canonical, encode_canonical, exit_confirmation_envelope_hash,
+        generate_nonce, native_route_auth_commitment, node_id_from_public_key,
+        sign_control_message, verify_control_message,
     };
     use volparossa_wireguard::{
         ClientEndpointLease, EndpointRole, HelperContextHandle, HelperLeaseHandle,
@@ -2131,7 +2133,7 @@ mod tests {
     use super::{
         CoordinatorError, ExitReservationIntent, RelayPathIntent, ReservationCoordinator,
         SignedExitFinalizeRequest, VerifiedExitCapacityHold, VerifiedRelayGrant,
-        VerifiedRelayProbe, generate_native_route_bearer, wire_endpoint,
+        VerifiedRelayProbe, generate_native_route_bearer, same_probe_result, wire_endpoint,
     };
 
     const NOW: u64 = 1_700_000_000_000;
@@ -2460,6 +2462,24 @@ mod tests {
         coordinator
             .verify_probe_result(verified_permit, signed_result, NOW)
             .unwrap()
+    }
+
+    #[test]
+    fn probe_result_accepts_fresh_premeasurement_and_rejects_stale_premeasurement() {
+        let mut coordinator = ReservationCoordinator::new(8).unwrap();
+        let fixture = held_fixture(&mut coordinator, 19);
+        let probe = verified_probe_for(&mut coordinator, &fixture, 1, 23);
+        let mut result = probe.result.clone();
+
+        result.measured_at_ms = probe
+            .permit
+            .permit
+            .created_at_ms
+            .saturating_sub(MAX_NATIVE_PROBE_LIFETIME_MS);
+        assert!(same_probe_result(&result, &probe.permit));
+
+        result.measured_at_ms = result.measured_at_ms.saturating_sub(1);
+        assert!(!same_probe_result(&result, &probe.permit));
     }
 
     fn client_endpoint(route_context_id: [u8; 16], path_id: u32) -> Option<ClientEndpointLease> {
