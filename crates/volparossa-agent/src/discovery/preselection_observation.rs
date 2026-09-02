@@ -123,7 +123,11 @@ const REPLAY_CAPACITY: usize = 40;
         reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
-const REQUEST_LIFETIME_MS: u64 = 5_000;
+// This is the signed evidence lifetime, not the wire RPC timeout. Discovery still caps each
+// request-response dispatch at PRESELECTION_OBSERVATION_REQUEST_TIMEOUT (five seconds). Retaining
+// the one-shot challenge for two minutes leaves bounded room for the native sampler plus the
+// production route transaction without making a replay reusable.
+const REQUEST_LIFETIME_MS: u64 = 120_000;
 #[cfg_attr(
     not(test),
     allow(
@@ -986,7 +990,6 @@ struct RequestBinding<'a> {
     policy: super::RouteCandidatePolicySnapshot,
     challenge: [u8; CHALLENGE_LENGTH],
     created_at_ms: u64,
-    attempt_deadline_ms: u64,
 }
 
 #[cfg_attr(
@@ -2641,6 +2644,9 @@ fn prepare_request(
     } = *preparation;
     let subjects = &snapshot.preselection_subjects;
     let policy = snapshot.policy;
+    if created_at_ms >= attempt_deadline_ms {
+        return Err(PreselectionAttemptError::InvalidTime);
+    }
     let subject = subjects
         .entries
         .get(plan.subject)
@@ -2663,7 +2669,6 @@ fn prepare_request(
         policy,
         challenge: plan.challenge,
         created_at_ms,
-        attempt_deadline_ms,
     })?;
     let expires_at_mono = prepared_at_mono
         .checked_add(Duration::from_millis(REQUEST_LIFETIME_MS))
@@ -2709,12 +2714,10 @@ fn request_for_subject(
         policy,
         challenge,
         created_at_ms,
-        attempt_deadline_ms,
     } = *binding;
     let expires_at_ms = created_at_ms
         .checked_add(REQUEST_LIFETIME_MS)
         .ok_or(PreselectionAttemptError::InvalidTime)?
-        .min(attempt_deadline_ms)
         .min(subject.advertisement_expires_at_ms)
         .min(subject.capability_expires_at_ms)
         .min(subject.local_discovery_authority_expires_at_ms)
@@ -5403,7 +5406,7 @@ mod tests {
             "const MAXIMUM_TOMBSTONES: usize = 36;",
             "const MAXIMUM_BATCH_TOMBSTONES: usize = 4;",
             "const REPLAY_CAPACITY: usize = 40;",
-            "const REQUEST_LIFETIME_MS: u64 = 5_000;",
+            "const REQUEST_LIFETIME_MS: u64 = 120_000;",
             "const ATTEMPT_LIFETIME_MS: u64 = 30_000;",
             "const TOMBSTONE_LIFETIME_MS: u64 = 120_000;",
             "const TOMBSTONE_LIFETIME: Duration = Duration::from_secs(120);",

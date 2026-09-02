@@ -30,8 +30,12 @@ pub const MAX_PRESELECTION_REQUEST_SIZE: usize = 4 * 1024;
 pub const MAX_PRESELECTION_RECEIPT_SIZE: usize = 4 * 1024;
 /// Maximum exact canonical signed forwarded preselection attestation size.
 pub const MAX_FORWARDED_ATTESTATION_SIZE: usize = 8 * 1024;
-const MAX_CHALLENGE_LIFETIME_MS: u64 = 5 * 1_000;
-const MAX_OBSERVATION_LIFETIME_MS: u64 = 60 * 1_000;
+// The request-response stream remains capped independently at five seconds. The signed one-shot
+// challenge must, however, remain usable by the affine native sampler and the subsequent bounded
+// production route setup. Both phases can take thirty seconds on the supported KVM topology.
+const MAX_CHALLENGE_LIFETIME_MS: u64 = 120 * 1_000;
+// Receipt and forwarded-attestation evidence share the same bounded route-setup headroom.
+const MAX_OBSERVATION_LIFETIME_MS: u64 = 120 * 1_000;
 const REQUEST_HASH_DOMAIN: &[u8] = b"volparossa/preselection-observation-request/v4\0";
 const RECEIPT_HASH_DOMAIN: &[u8] = b"volparossa/preselection-observation-receipt/v4\0";
 

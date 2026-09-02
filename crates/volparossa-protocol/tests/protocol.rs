@@ -772,10 +772,17 @@ fn forwarded_success_commits_both_and_replays_outer() {
 #[test]
 fn preselection_receipt_and_wrapper_lifetimes_are_exact() {
     let relay_key = key(116);
-    let actor = preselection_actor(&relay_key, 117, NOW + 120_000, NOW + 120_000);
+    let actor = preselection_actor(&relay_key, 117, NOW + 180_000, NOW + 180_000);
     let mut request = preselection_request(PreselectionObservationRole::Relay, actor, None, 118);
-    request.scope.as_mut().unwrap().policy_expires_at_ms = NOW + 120_000;
+    request.scope.as_mut().unwrap().policy_expires_at_ms = NOW + 180_000;
+    request.expires_at_ms = NOW + 120_000;
     request.validate().unwrap();
+    let mut overlong_request = request.clone();
+    overlong_request.expires_at_ms += 1;
+    assert!(matches!(
+        overlong_request.validate(),
+        Err(ProtocolError::InvalidLifetime)
+    ));
     let receipt = PreselectionObservationReceipt {
         request_hash: preselection_observation_request_hash(&encode_preselection_request(&request))
             .unwrap()
@@ -783,8 +790,8 @@ fn preselection_receipt_and_wrapper_lifetimes_are_exact() {
         challenge: request.challenge.clone(),
         actor: request.actor.clone(),
         scope: request.scope.clone(),
-        observed_at_ms: NOW + 10_000,
-        valid_until_ms: NOW + 70_000,
+        observed_at_ms: NOW,
+        valid_until_ms: NOW + 120_000,
         nonce: vec![119; 32],
     };
     let signed = sign_control_message(
@@ -823,11 +830,7 @@ fn preselection_receipt_and_wrapper_lifetimes_are_exact() {
 
     let (request, _, signed_outer, control_key, _) = forwarded_preselection_fixture();
     let (mut outer, mut attestation) = decode_forwarded_attestation(&signed_outer);
-    assert_eq!(
-        attestation.valid_until_ms - attestation.observed_at_ms,
-        60_000
-    );
-    attestation.valid_until_ms += 1;
+    attestation.valid_until_ms = attestation.observed_at_ms + 120_001;
     outer.expires_at_ms = attestation.valid_until_ms;
     let overlong = resign_attestation(outer, &attestation, &control_key);
     let mut cache = ReplayCache::new(8).unwrap();

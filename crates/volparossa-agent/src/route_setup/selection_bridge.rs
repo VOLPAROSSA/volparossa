@@ -105,7 +105,10 @@ impl VerifiedExitHelperRuntimeId {
     }
 }
 
-const MAXIMUM_EVIDENCE_AGE_MS: u64 = 60_000;
+// A completed A1 observation feeds a bounded thirty-second native sampler followed by a bounded
+// thirty-second production setup. Keep enough signed-evidence headroom for both phases even when
+// the preceding preselection transaction used most of its own thirty-second deadline.
+const MAXIMUM_EVIDENCE_AGE_MS: u64 = 120_000;
 const NATIVE_PROBE_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Eq, PartialEq)]
