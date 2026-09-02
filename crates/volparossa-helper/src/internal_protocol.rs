@@ -284,6 +284,8 @@ pub(crate) struct AddMptcpEndpoint {
     pub(crate) mode: i32,
     #[prost(bool, tag = "4")]
     pub(crate) backup: bool,
+    #[prost(uint32, tag = "5")]
+    pub(crate) listener_port: u32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1088,6 +1090,9 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
             if mode == InternalMptcpMode::Unspecified {
                 return Err(InternalProtocolError::Invalid);
             }
+            if u16::try_from(operation.listener_port).is_err() {
+                return Err(InternalProtocolError::Invalid);
+            }
             Ok(())
         }
         Operation::RemoveMptcpEndpoint(operation) => {
@@ -1669,6 +1674,7 @@ mod tests {
                 path_id: 1,
                 mode: InternalMptcpMode::Subflow as i32,
                 backup: false,
+                listener_port: 0,
             }),
             internal_worker_request::Operation::RemoveMptcpEndpoint(RemoveMptcpEndpoint {
                 route_context_id: vec![1; 16],
@@ -1981,6 +1987,7 @@ mod tests {
                     path_id,
                     mode: InternalMptcpMode::Subflow as i32,
                     backup: false,
+                    listener_port: 0,
                 },
             ))
         };
@@ -2047,6 +2054,7 @@ mod tests {
                 path_id: 1,
                 mode: InternalMptcpMode::Unspecified as i32,
                 backup: false,
+                listener_port: 0,
             },
         ));
         assert!(encode_request(&add).is_err());
@@ -2126,6 +2134,7 @@ mod tests {
                 path_id: 1,
                 mode: InternalMptcpMode::Subflow as i32,
                 backup: false,
+                listener_port: 0,
             },
         ));
         let mismatched = correlated_response(

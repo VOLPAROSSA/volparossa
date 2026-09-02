@@ -632,6 +632,9 @@ pub struct AddMptcpEndpoint {
     /// Backup-only path.
     #[prost(bool, tag = "5")]
     pub backup: bool,
+    /// TCP listener port for an Exit address-only signal; zero for every other endpoint.
+    #[prost(uint32, tag = "6")]
+    pub listener_port: u32,
 }
 
 /// Remove one exactly owned MPTCP endpoint.
@@ -1400,6 +1403,9 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 .map_err(|_| HelperProtocolError::Invalid("MPTCP mode"))?;
             if mode == MptcpEndpointMode::Unspecified {
                 return Err(HelperProtocolError::Invalid("MPTCP mode"));
+            }
+            if u16::try_from(operation.listener_port).is_err() {
+                return Err(HelperProtocolError::Invalid("MPTCP listener port"));
             }
             Ok(())
         }

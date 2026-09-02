@@ -96,6 +96,8 @@ pub struct MptcpEndpoint {
     pub if_index: u32,
     /// Kernel path-manager flags.
     pub flags: EndpointFlags,
+    /// Optional TCP listener port carried only by an address-only `SIGNAL` endpoint.
+    pub listener_port: Option<u16>,
 }
 
 impl MptcpEndpoint {
@@ -143,6 +145,13 @@ impl MptcpEndpoint {
         if behaviours == 0 || flags & !allowed != 0 {
             return Err(MptcpError::Invalid(
                 "endpoint flags are outside the closed signal/subflow/backup set".into(),
+            ));
+        }
+        if self.listener_port.is_some_and(|port| port == 0)
+            || (self.listener_port.is_some() && self.flags != EndpointFlags::SIGNAL)
+        {
+            return Err(MptcpError::Invalid(
+                "endpoint listener port requires an address-only signal endpoint".into(),
             ));
         }
         Ok(())
@@ -1111,6 +1120,21 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_listener_port_requires_an_address_only_signal() {
+        let mut endpoint = selected_endpoint(2).with_flags(EndpointFlags::SIGNAL);
+        endpoint.listener_port = Some(44_443);
+        endpoint.validate().expect("signal listener endpoint");
+
+        endpoint.flags = EndpointFlags::SIGNAL | EndpointFlags::SUBFLOW;
+        assert!(endpoint.validate().is_err());
+        endpoint.flags = EndpointFlags::SUBFLOW;
+        assert!(endpoint.validate().is_err());
+        endpoint.flags = EndpointFlags::SIGNAL;
+        endpoint.listener_port = Some(0);
+        assert!(endpoint.validate().is_err());
+    }
+
+    #[test]
     fn endpoint_requires_structured_overlay_address_and_signed_linux_ifindex() {
         let valid = selected_endpoint(1);
         valid.validate().expect("client overlay endpoint");
@@ -1638,6 +1662,7 @@ mod tests {
                         .parse()
                         .expect("numeric Exit path ifindex"),
                     flags: EndpointFlags::SIGNAL,
+                    listener_port: None,
                 },
             )
             .await
@@ -1703,6 +1728,7 @@ mod tests {
                         address,
                         if_index,
                         flags: EndpointFlags::SUBFLOW,
+                        listener_port: None,
                     },
                 )
                 .await
@@ -1923,6 +1949,7 @@ mod tests {
             address: overlay_address(id, 1),
             if_index: u32::from(id) + 20,
             flags: EndpointFlags::SUBFLOW,
+            listener_port: None,
         }
     }
 

@@ -2729,6 +2729,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             address: proof.local_overlay_address,
             if_index: proof.ifindex,
             flags: EndpointFlags::empty(),
+            listener_port: None,
         })
     }
 
@@ -2745,8 +2746,13 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         let Ok(mode) = InternalMptcpMode::try_from(operation.mode) else {
             return InternalWorkerResult::Invalid;
         };
-        let flags = match mptcp_endpoint_flags(self.role, mode, operation.backup) {
-            Ok(flags) => flags,
+        let (flags, listener_port) = match mptcp_endpoint_flags(
+            self.role,
+            mode,
+            operation.backup,
+            operation.listener_port,
+        ) {
+            Ok(value) => value,
             Err(result) => return result,
         };
         let mut endpoint = match self.committed_mptcp_endpoint(operation.path_id) {
@@ -2754,6 +2760,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             Err(result) => return result,
         };
         endpoint.flags = flags;
+        endpoint.listener_port = listener_port;
         let Some(manager) = self.mptcp.as_ref() else {
             return InternalWorkerResult::Invalid;
         };
@@ -2983,7 +2990,8 @@ fn mptcp_endpoint_flags(
     role: RoutingContextRole,
     mode: InternalMptcpMode,
     backup: bool,
-) -> Result<EndpointFlags, InternalWorkerResult> {
+    listener_port: u32,
+) -> Result<(EndpointFlags, Option<u16>), InternalWorkerResult> {
     let mut flags = match (role, mode, backup) {
         (RoutingContextRole::Client, InternalMptcpMode::Signal, _)
         | (RoutingContextRole::Exit, InternalMptcpMode::Signal, false) => EndpointFlags::SIGNAL,
@@ -3003,7 +3011,21 @@ fn mptcp_endpoint_flags(
     if backup {
         flags.insert(EndpointFlags::BACKUP);
     }
-    Ok(flags)
+    let requires_listener_port =
+        role == RoutingContextRole::Exit && mode == InternalMptcpMode::Signal && !backup;
+    let listener_port = if requires_listener_port {
+        Some(
+            u16::try_from(listener_port)
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or(InternalWorkerResult::Invalid)?,
+        )
+    } else if listener_port == 0 {
+        None
+    } else {
+        return Err(InternalWorkerResult::Invalid);
+    };
+    Ok((flags, listener_port))
 }
 
 fn validate_worker_prepare(
@@ -14335,8 +14357,22 @@ mod tests {
     #[test]
     fn exit_mptcp_endpoint_flags_admit_only_nonbackup_signal() {
         assert_eq!(
-            mptcp_endpoint_flags(RoutingContextRole::Exit, InternalMptcpMode::Signal, false,),
-            Ok(EndpointFlags::SIGNAL)
+            mptcp_endpoint_flags(
+                RoutingContextRole::Exit,
+                InternalMptcpMode::Signal,
+                false,
+                44_443,
+            ),
+            Ok((EndpointFlags::SIGNAL, Some(44_443)))
+        );
+        assert_eq!(
+            mptcp_endpoint_flags(
+                RoutingContextRole::Exit,
+                InternalMptcpMode::Signal,
+                false,
+                0,
+            ),
+            Err(InternalWorkerResult::Invalid)
         );
         for (mode, backup) in [
             (InternalMptcpMode::Signal, true),
@@ -14345,16 +14381,35 @@ mod tests {
             (InternalMptcpMode::Unspecified, false),
         ] {
             assert_eq!(
-                mptcp_endpoint_flags(RoutingContextRole::Exit, mode, backup),
+                mptcp_endpoint_flags(RoutingContextRole::Exit, mode, backup, 44_443),
                 Err(InternalWorkerResult::Invalid)
             );
         }
         assert_eq!(
-            mptcp_endpoint_flags(RoutingContextRole::Client, InternalMptcpMode::Subflow, true,),
-            Ok(EndpointFlags::SUBFLOW | EndpointFlags::BACKUP)
+            mptcp_endpoint_flags(
+                RoutingContextRole::Client,
+                InternalMptcpMode::Subflow,
+                true,
+                0,
+            ),
+            Ok((EndpointFlags::SUBFLOW | EndpointFlags::BACKUP, None))
         );
         assert_eq!(
-            mptcp_endpoint_flags(RoutingContextRole::Relay, InternalMptcpMode::Signal, false,),
+            mptcp_endpoint_flags(
+                RoutingContextRole::Client,
+                InternalMptcpMode::Subflow,
+                false,
+                44_443,
+            ),
+            Err(InternalWorkerResult::Invalid)
+        );
+        assert_eq!(
+            mptcp_endpoint_flags(
+                RoutingContextRole::Relay,
+                InternalMptcpMode::Signal,
+                false,
+                0,
+            ),
             Err(InternalWorkerResult::Invalid)
         );
     }

@@ -7279,6 +7279,7 @@ mod tests {
                     path_id: 1,
                     mode: MptcpEndpointMode::Subflow as i32,
                     backup: false,
+                    listener_port: 0,
                 }),
             ))
             .await;
@@ -7297,6 +7298,7 @@ mod tests {
                     path_id: 2,
                     mode: MptcpEndpointMode::Subflow as i32,
                     backup: false,
+                    listener_port: 0,
                 }),
             ))
             .await;
@@ -7326,6 +7328,7 @@ mod tests {
                     path_id: 1,
                     mode: MptcpEndpointMode::Signal as i32,
                     backup: false,
+                    listener_port: 44_443,
                 }),
             ))
             .await;

@@ -339,6 +339,7 @@ impl ExitMptcpTransport {
                 path_id,
                 mode: MptcpEndpointMode::Signal as i32,
                 backup: false,
+                listener_port: u32::from(signal.port()),
             };
             if let Err(error) = helper.add_mptcp_endpoint(request).await {
                 rollback_paths(

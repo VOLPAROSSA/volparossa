@@ -1238,7 +1238,12 @@ impl FunctionalAlphaLeaseBackend {
             value.path_id,
             BackendAction::AddMptcpEndpoint,
         )?;
-        let mode = validated_mptcp_endpoint_mode(context_role, value.mode, value.backup)?;
+        let mode = validated_mptcp_endpoint_mode(
+            context_role,
+            value.mode,
+            value.backup,
+            value.listener_port,
+        )?;
         let deadline = prepare_deadline(binding)?;
         let request = worker_request(
             worker_attempt_request_id(key, STAGE_ADD_MPTCP_ENDPOINT, binding),
@@ -1247,6 +1252,7 @@ impl FunctionalAlphaLeaseBackend {
                 path_id: value.path_id,
                 mode: mode as i32,
                 backup: value.backup,
+                listener_port: value.listener_port,
             }),
         );
         let execution = self
@@ -3378,11 +3384,20 @@ fn validated_mptcp_endpoint_mode(
     context_role: ContextRole,
     mode: i32,
     backup: bool,
+    listener_port: u32,
 ) -> Result<InternalMptcpMode, BackendError> {
     let mode = MptcpEndpointMode::try_from(mode).map_err(|_| BackendError::Invalid)?;
+    let requires_listener_port =
+        context_role == ContextRole::Exit && mode == MptcpEndpointMode::Signal && !backup;
+    let listener_port_is_valid = if requires_listener_port {
+        u16::try_from(listener_port).is_ok_and(|port| port != 0)
+    } else {
+        listener_port == 0
+    };
     if mode == MptcpEndpointMode::Unspecified
         || matches!(context_role, ContextRole::Unspecified | ContextRole::Relay)
         || (context_role == ContextRole::Exit && (mode != MptcpEndpointMode::Signal || backup))
+        || !listener_port_is_valid
     {
         return Err(BackendError::Invalid);
     }
@@ -6470,8 +6485,18 @@ mod tests {
                 ContextRole::Exit,
                 MptcpEndpointMode::Signal as i32,
                 false,
+                44_443,
             ),
             Ok(InternalMptcpMode::Signal)
+        );
+        assert_eq!(
+            validated_mptcp_endpoint_mode(
+                ContextRole::Exit,
+                MptcpEndpointMode::Signal as i32,
+                false,
+                0,
+            ),
+            Err(BackendError::Invalid)
         );
         for (mode, backup) in [
             (MptcpEndpointMode::Signal, true),
@@ -6479,10 +6504,19 @@ mod tests {
             (MptcpEndpointMode::SignalAndSubflow, false),
         ] {
             assert_eq!(
-                validated_mptcp_endpoint_mode(ContextRole::Exit, mode as i32, backup),
+                validated_mptcp_endpoint_mode(ContextRole::Exit, mode as i32, backup, 44_443),
                 Err(BackendError::Invalid)
             );
         }
+        assert_eq!(
+            validated_mptcp_endpoint_mode(
+                ContextRole::Client,
+                MptcpEndpointMode::Subflow as i32,
+                false,
+                44_443,
+            ),
+            Err(BackendError::Invalid)
+        );
         assert_eq!(
             validate_mptcp_endpoint_binding(
                 &exit.state,
