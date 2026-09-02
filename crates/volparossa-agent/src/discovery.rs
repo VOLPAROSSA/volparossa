@@ -10234,7 +10234,7 @@ impl DiscoveryRuntime {
                 control,
                 &scope,
                 authenticated_control_relay,
-                scope.attempt_expires_at_ms,
+                request.deadline_unix_ms(),
                 now_ms,
             )
             || !local_native_probe_exit_actor_is_served(
@@ -13879,20 +13879,19 @@ fn native_probe_control_capability_matches(
         && capability.expires_at_ms >= required_until_ms
 }
 
-/// Accept an exact control-Relay capability or a still-live predecessor of its current one.
+/// Accept an exact control-Relay capability or an asynchronously observed same-identity version.
 ///
-/// A Relay may refresh its signed service advertisement while an already client-signed native
-/// attempt remains live. The authenticated connection and current discovery capability still have
-/// to name the exact same node, Peer ID, key and policy. Only a strictly newer current sequence may
-/// stand in for the old cache entry, and both the committed actor and current capability must cover
-/// the operation deadline. The old payload hash remains bound by the verified Permit request; this
-/// check never rewrites or downgrades the current discovery cache.
+/// The Client and Exit can receive consecutive signed Relay advertisements in either order. The
+/// actor committed by the verified Permit scope must cover the complete attempt. The Exit's own
+/// view is used only to prove that the authenticated forwarding peer still serves the same policy
+/// through this bounded RPC. An equal sequence still requires exact payload and expiry equality, so
+/// a contradictory same-version advertisement cannot be substituted.
 fn native_probe_control_capability_lineage_matches(
     current: &DirectRelayCapability,
     actor: &PreselectionActorBinding,
     scope: &NativeProbePathScope,
     authenticated_peer: Libp2pPeerId,
-    required_until_ms: u64,
+    operation_deadline_ms: u64,
     now_ms: u64,
 ) -> bool {
     if native_probe_control_capability_matches(
@@ -13900,7 +13899,7 @@ fn native_probe_control_capability_lineage_matches(
         actor,
         scope,
         authenticated_peer,
-        required_until_ms,
+        operation_deadline_ms,
     ) {
         return true;
     }
@@ -13910,10 +13909,10 @@ fn native_probe_control_capability_lineage_matches(
         && actor.peer_id == current.peer_id.to_bytes()
         && actor.public_key.as_slice() == current.public_key
         && actor.advertisement_sequence > 0
-        && actor.advertisement_sequence < current.advertisement_sequence
+        && actor.advertisement_sequence != current.advertisement_sequence
         && fixed_bytes::<32>(&actor.advertisement_payload_hash).is_some_and(|hash| hash != [0; 32])
-        && actor.advertisement_expires_at_ms >= required_until_ms
-        && actor.capability_expires_at_ms >= required_until_ms
+        && actor.advertisement_expires_at_ms >= scope.attempt_expires_at_ms
+        && actor.capability_expires_at_ms >= scope.attempt_expires_at_ms
         && actor.capability_expires_at_ms <= actor.advertisement_expires_at_ms
         && actor.capability_expires_at_ms <= scope.policy_expires_at_ms
         && current.peer_id == authenticated_peer
@@ -13921,8 +13920,8 @@ fn native_probe_control_capability_lineage_matches(
         && current.policy_hash.as_slice() == scope.policy_hash
         && current.policy_expires_at_ms == scope.policy_expires_at_ms
         && current.advertisement_expires_at_ms > now_ms
-        && current.advertisement_expires_at_ms >= required_until_ms
-        && current.expires_at_ms >= required_until_ms
+        && current.advertisement_expires_at_ms >= operation_deadline_ms
+        && current.expires_at_ms >= operation_deadline_ms
 }
 
 fn native_probe_data_relay_capability_matches(
@@ -16466,7 +16465,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_permit_accepts_live_control_actor_after_same_identity_refresh() {
+    async fn native_permit_accepts_async_same_identity_control_views() {
         let fixture = native_permit_forward_fixture();
         let actor = fixture.scope.control.as_ref().expect("control actor");
         let peer = fixture.control.peer_id;
@@ -16502,12 +16501,51 @@ mod tests {
             fixture.now_ms,
         ));
 
-        let mut rolled_back = refreshed;
-        rolled_back.advertisement_sequence = actor.advertisement_sequence.saturating_sub(1);
-        assert!(!native_probe_control_capability_lineage_matches(
-            &rolled_back,
+        let mut lagging = fixture.control.clone();
+        lagging.advertisement_sequence = actor.advertisement_sequence.saturating_sub(1);
+        lagging.advertisement_payload_hash = lagging.advertisement_payload_hash.xor_for_test();
+        lagging.advertisement_expires_at_ms = deadline.saturating_add(1_000);
+        lagging.expires_at_ms = deadline.saturating_add(1_000);
+        let mut long_attempt = fixture.scope.clone();
+        long_attempt.attempt_expires_at_ms = actor.capability_expires_at_ms;
+        assert!(native_probe_control_capability_lineage_matches(
+            &lagging,
             actor,
-            &fixture.scope,
+            &long_attempt,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut actor_lifetime_overrun = long_attempt.clone();
+        actor_lifetime_overrun.attempt_expires_at_ms =
+            actor.capability_expires_at_ms.saturating_add(1);
+        assert!(!native_probe_control_capability_lineage_matches(
+            &lagging,
+            actor,
+            &actor_lifetime_overrun,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut stale_for_operation = lagging.clone();
+        stale_for_operation.expires_at_ms = deadline.saturating_sub(1);
+        assert!(!native_probe_control_capability_lineage_matches(
+            &stale_for_operation,
+            actor,
+            &long_attempt,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut contradictory_same_sequence = lagging;
+        contradictory_same_sequence.advertisement_sequence = actor.advertisement_sequence;
+        assert!(!native_probe_control_capability_lineage_matches(
+            &contradictory_same_sequence,
+            actor,
+            &long_attempt,
             peer,
             deadline,
             fixture.now_ms,
