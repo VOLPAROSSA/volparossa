@@ -6262,6 +6262,79 @@ mod tests {
     }
 
     #[test]
+    fn native_permit_deadline_does_not_outlive_forwarding_authority() {
+        let (snapshot, _) = snapshot_fixture();
+        let original = snapshot
+            .forwarded_exits()
+            .first()
+            .expect("one forwarded Exit")
+            .clone();
+        let forwarding_expires_at_ms = NOW_MS + 20_000;
+        let mut capability = original.capability().clone();
+        capability.expires_at_ms = forwarding_expires_at_ms;
+        let bounded_snapshot = RouteCandidateSnapshot::for_test(
+            snapshot.captured_at_ms(),
+            snapshot.policy(),
+            snapshot.direct_relays().to_vec(),
+            vec![ForwardedExitCandidateSnapshot::for_test(
+                original.advertisement().clone(),
+                original.control().clone(),
+                capability,
+            )],
+        );
+        let completed = preselection_freshness_attempt(
+            bounded_snapshot,
+            exact_preselection_freshness_records(),
+            ProtocolTransport::TcpMptcp,
+            ObservationAddressFamily::Ipv4,
+            EVIDENCE_BATCH_BYTES,
+            Bandwidth::new(80, 80).expect("configured ceiling"),
+        );
+        let Ok((prepared, _gate)) = prepare_preselection_evidence_at(completed, NOW_MS + 500)
+        else {
+            panic!("exact A1 proofs must prepare opaque evidence");
+        };
+        let minted_at_ms = NOW_MS + 4_999;
+        let minted_at = Instant::now();
+        let mut owner = native_preselection::begin_native_preselection_for_test(
+            prepared,
+            2,
+            minted_at_ms,
+            minted_at,
+        )
+        .expect("remaining forwarding authority must mint native owner");
+
+        assert!(
+            owner
+                .candidate_set_for_test()
+                .exit
+                .as_ref()
+                .expect("selected Exit")
+                .capability_expires_at_ms
+                > forwarding_expires_at_ms,
+            "canonical route identity must retain its independent signed lifetime"
+        );
+        let (attempt_expiry, monotonic_expiry) = owner.deadline_for_test();
+        assert_eq!(attempt_expiry, forwarding_expires_at_ms);
+        assert_eq!(
+            monotonic_expiry.duration_since(minted_at),
+            Duration::from_millis(forwarding_expires_at_ms - minted_at_ms)
+        );
+        assert!(attempt_expiry > NOW_MS + 5_000);
+
+        let dispatch = owner
+            .begin_next_for_test(minted_at_ms, minted_at)
+            .expect("live attempt")
+            .expect("first native candidate")
+            .into_forward_dispatch()
+            .expect("exact Permit wrapper");
+        assert_eq!(
+            dispatch.request_for_test().1.deadline_unix_ms(),
+            forwarding_expires_at_ms
+        );
+    }
+
+    #[test]
     fn preselection_fresh_join_rejects_every_shape_family_time_and_capacity_substitution() {
         for case in 0_u8..14 {
             let (snapshot, _) = snapshot_fixture();

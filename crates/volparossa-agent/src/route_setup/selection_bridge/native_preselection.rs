@@ -215,6 +215,7 @@ struct NativeAttemptInputs {
     candidate_set: NativeProbeCandidateSet,
     relays: Vec<NativeCandidateProjection>,
     exit: NativeCandidateProjection,
+    forwarding_authority_expires_at_ms: u64,
 }
 
 /// Exact selected data-Relay identity and order supplied by route planning.
@@ -292,6 +293,7 @@ where
         candidate_set,
         relays,
         exit,
+        forwarding_authority_expires_at_ms,
     } = consume_prepared_handoff(prepared, selected_data_relays, trusted_now_ms)?;
     let required_path_count = selected_data_relays.len();
     if !(1..=MAX_NATIVE_PROBE_PATHS).contains(&required_path_count)
@@ -310,7 +312,12 @@ where
     {
         return Err(NativePreselectionError::InvalidCandidateSet);
     }
-    let deadline = native_attempt_deadline(&candidate_set, trusted_now_ms, trusted_now)?;
+    let deadline = native_attempt_deadline(
+        &candidate_set,
+        forwarding_authority_expires_at_ms,
+        trusted_now_ms,
+        trusted_now,
+    )?;
     let pending = mint_path_authorities(
         &candidate_set,
         relays,
@@ -344,6 +351,10 @@ fn consume_prepared_handoff(
     {
         return Err(NativePreselectionError::InvalidPreparedEvidence);
     }
+    let [forwarded_exit] = snapshot.forwarded_exits() else {
+        return Err(NativePreselectionError::InvalidPreparedEvidence);
+    };
+    let forwarding_authority_expires_at_ms = forwarded_exit.capability().expires_at_ms;
     let FreshEvidenceBatch {
         batch_id,
         mut entries,
@@ -410,11 +421,13 @@ fn consume_prepared_handoff(
         candidate_set,
         relays,
         exit,
+        forwarding_authority_expires_at_ms,
     })
 }
 
 fn native_attempt_deadline(
     candidate_set: &NativeProbeCandidateSet,
+    forwarding_authority_expires_at_ms: u64,
     trusted_now_ms: u64,
     trusted_now: Instant,
 ) -> Result<NativeAttemptDeadline, NativePreselectionError> {
@@ -429,7 +442,8 @@ fn native_attempt_deadline(
         .checked_add(MAX_NATIVE_PROBE_LIFETIME_MS)
         .ok_or(NativePreselectionError::InvalidDeadline)?
         .min(candidate_set.policy_expires_at_ms)
-        .min(actor_expiry);
+        .min(actor_expiry)
+        .min(forwarding_authority_expires_at_ms);
     let lifetime_ms = expires_at_ms
         .checked_sub(trusted_now_ms)
         .filter(|lifetime| *lifetime != 0)
