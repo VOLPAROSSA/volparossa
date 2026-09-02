@@ -4706,20 +4706,19 @@ impl DiscoveryRuntime {
                 control_relay_peer: *preferred_peer,
                 exit_peer,
             };
-            if self
-                .automatic_exit_fetches
-                .get(&preferred_key)
-                .is_none_or(|expiry| *expiry <= now_ms)
-                && !self
-                    .automatic_exit_fetch_attempts
-                    .iter()
-                    .any(|pending| pending.key == preferred_key)
+            if let Some(control) = controls
+                .iter()
+                .find(|control| control.peer_id == *preferred_peer && control.peer_id != exit_peer)
             {
-                if let Some(control) = controls.iter().find(|control| {
-                    control.peer_id == *preferred_peer && control.peer_id != exit_peer
-                }) {
-                    return Some(control.clone());
-                }
+                let available = self
+                    .automatic_exit_fetches
+                    .get(&preferred_key)
+                    .is_none_or(|expiry| *expiry <= now_ms)
+                    && !self
+                        .automatic_exit_fetch_attempts
+                        .iter()
+                        .any(|pending| pending.key == preferred_key);
+                return available.then(|| control.clone());
             }
         }
 
@@ -11702,8 +11701,8 @@ impl DiscoveryRuntime {
                         expires_at_ms: capability_expiry_ms,
                     },
                 );
-                if self.preferred_exit_controls.contains_key(&exit_peer)
-                    || self.preferred_exit_controls.len() < MAX_EXIT_PROVIDER_PEERS
+                if !self.preferred_exit_controls.contains_key(&exit_peer)
+                    && self.preferred_exit_controls.len() < MAX_EXIT_PROVIDER_PEERS
                 {
                     self.preferred_exit_controls
                         .insert(exit_peer, control_relay_peer);
@@ -18058,7 +18057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_exit_fetch_prefers_the_last_successful_control_lineage() {
+    async fn automatic_exit_fetch_keeps_current_control_until_it_is_invalid() {
         let mut fixture = fixture(RolesConfig::default());
         let now_ms = unix_millis();
         let deadline = now_ms.saturating_add(25_000);
@@ -18109,7 +18108,7 @@ mod tests {
                 .runtime
                 .ingest_advertisement(
                     exit_peer,
-                    advertisement,
+                    advertisement.clone(),
                     forwarded_provenance(&preferred, &exit, deadline),
                     &fixture.state,
                 )
@@ -18121,11 +18120,44 @@ mod tests {
             Some(&preferred.peer_id)
         );
 
+        let alternate = controls[0].clone();
+        assert!(
+            fixture
+                .runtime
+                .ingest_advertisement(
+                    exit_peer,
+                    advertisement,
+                    forwarded_provenance(&alternate, &exit, deadline),
+                    &fixture.state,
+                )
+                .await
+                .is_some()
+        );
+        assert_eq!(
+            fixture.runtime.preferred_exit_controls.get(&exit_peer),
+            Some(&preferred.peer_id)
+        );
+
         // Simulate expiry of only the request-bounded local forwarding capability. The hint is
-        // non-authoritative: scheduling still creates a fresh bounded fetch through a current
-        // direct Relay capability.
+        // non-authoritative, but a still-current fetch suppression must not rotate the Exit onto
+        // another control lineage while the preferred Relay itself remains current.
         fixture.runtime.forwarded_exits.clear();
-        fixture.runtime.automatic_exit_fetches.clear();
+        let preferred_key = ForwardedExitKey {
+            control_relay_peer: preferred.peer_id,
+            exit_peer,
+        };
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(preferred_key, deadline);
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
+
+        // Once that exact suppression expires, scheduling refreshes the same current control.
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(preferred_key, now_ms);
         fixture.runtime.schedule_exit_advertisement_fetches();
 
         assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
