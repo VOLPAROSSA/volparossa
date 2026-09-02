@@ -944,19 +944,20 @@ impl ArmedNativeProbe {
         self.relay_ready.scope()
     }
 
-    /// Consume readiness and bind the helper-prepared Client endpoint into one signed start.
-    pub(super) fn start(
+    /// Consume readiness and bind the helper-prepared Client endpoint at one batch start barrier.
+    pub(super) fn start_at(
         self,
         client_endpoint: NativeProbeEndpointBinding,
+        started_at_ms: u64,
+        started_at: Instant,
     ) -> Result<AwaitingNativeResult, NativePreselectionError> {
-        let now_ms = crate::unix_millis();
-        self.deadline.ensure_live(now_ms, Instant::now())?;
+        self.deadline.ensure_live(started_at_ms, started_at)?;
         let response_deadline_ms = self.relay_ready.expires_at_ms();
         let issued_start = sign_native_probe_start(
             self.relay_ready,
             client_endpoint,
             &self.session_key,
-            now_ms,
+            started_at_ms,
             self.start_nonce,
         )?;
         Ok(AwaitingNativeResult {
@@ -1472,56 +1473,26 @@ mod dispatch_tests {
             volparossa_protocol::ControlMessageType::NativeProbePermit,
         );
 
-        let ReadyFixture {
-            awaiting,
-            relay_key,
-            exit_key: _,
-            scope,
-        } = ready_fixture();
-        let now_ms = crate::unix_millis();
-        let relay_endpoint = endpoint_binding(&scope.attempt_id, 11, [8, 8, 8, 8], 41_001);
-        let ready = NativeProbeRelayReady {
-            permit_hash: native_probe_permit_hash(&awaiting.relay_permit)
-                .expect("Permit hash")
-                .to_vec(),
-            exit_ready_hash: vec![7; KEY_BYTES],
-            scope: Some(scope.clone()),
-            relay_client_endpoint: Some(relay_endpoint.clone()),
-            ready_at_ms: now_ms,
-            expires_at_ms: scope.attempt_expires_at_ms,
-            nonce: vec![21; KEY_BYTES],
-        };
-        let signed_ready = sign_control_message(
-            &ready,
-            &relay_key,
-            now_ms,
-            ready.expires_at_ms,
-            [21; KEY_BYTES],
-            native_time_policy(),
-        )
-        .expect("signed Ready");
-        let relay = scope.data_relay.as_ref().expect("data Relay");
-        let response = DatapathRelayResponse::granted(
-            scope.probe_id.clone(),
-            DatapathRelayOperation::NativeProbeReady,
-            relay.node_id.clone(),
-            relay.peer_id.clone(),
-            signed_ready,
-        )
-        .expect("Ready response");
-        let mut replay_cache = ReplayCache::new(4).expect("replay");
-        let armed = awaiting
-            .into_relay_ready_dispatch()
-            .expect("Ready dispatch")
-            .accept_response_for_test(&response, &mut replay_cache)
-            .expect("verified Ready");
+        let (armed, scope, relay_endpoint) = armed_fixture();
+        let (second_armed, second_scope, _) = armed_fixture();
         let (route_context, path_id, observed_relay, _) =
             armed.helper_scope().expect("helper scope");
         assert_eq!(route_context.as_slice(), scope.attempt_id);
         assert_eq!(path_id, scope.candidate_ordinal);
         assert_eq!(observed_relay, &relay_endpoint);
         let client_endpoint = endpoint_binding(&scope.attempt_id, 31, [1, 1, 1, 1], 42_001);
-        let start = armed.start(client_endpoint).expect("signed Start");
+        let second_client_endpoint =
+            endpoint_binding(&second_scope.attempt_id, 32, [1, 1, 1, 2], 42_002);
+        let start_barrier_ms = crate::unix_millis();
+        let start_barrier = Instant::now();
+        let start = armed
+            .start_at(client_endpoint, start_barrier_ms, start_barrier)
+            .expect("first signed Start");
+        let second_start = second_armed
+            .start_at(second_client_endpoint, start_barrier_ms, start_barrier)
+            .expect("second signed Start");
+        assert_eq!(signed_start_time(&start), start_barrier_ms);
+        assert_eq!(signed_start_time(&second_start), start_barrier_ms);
         let dispatch = start.into_relay_start_dispatch().expect("Start dispatch");
         let (relay_peer, request) = dispatch.request_for_test();
         let expected_relay = scope.data_relay.as_ref().expect("data Relay");
@@ -1749,6 +1720,71 @@ mod dispatch_tests {
             exit_key,
             scope,
         }
+    }
+
+    fn armed_fixture() -> (
+        ArmedNativeProbe,
+        NativeProbePathScope,
+        NativeProbeEndpointBinding,
+    ) {
+        let ReadyFixture {
+            awaiting,
+            relay_key,
+            exit_key: _,
+            scope,
+        } = ready_fixture();
+        let now_ms = crate::unix_millis();
+        let relay_endpoint = endpoint_binding(&scope.attempt_id, 11, [8, 8, 8, 8], 41_001);
+        let ready = NativeProbeRelayReady {
+            permit_hash: native_probe_permit_hash(&awaiting.relay_permit)
+                .expect("Permit hash")
+                .to_vec(),
+            exit_ready_hash: vec![7; KEY_BYTES],
+            scope: Some(scope.clone()),
+            relay_client_endpoint: Some(relay_endpoint.clone()),
+            ready_at_ms: now_ms,
+            expires_at_ms: scope.attempt_expires_at_ms,
+            nonce: vec![21; KEY_BYTES],
+        };
+        let signed_ready = sign_control_message(
+            &ready,
+            &relay_key,
+            now_ms,
+            ready.expires_at_ms,
+            [21; KEY_BYTES],
+            native_time_policy(),
+        )
+        .expect("signed Ready");
+        let relay = scope.data_relay.as_ref().expect("data Relay");
+        let response = DatapathRelayResponse::granted(
+            scope.probe_id.clone(),
+            DatapathRelayOperation::NativeProbeReady,
+            relay.node_id.clone(),
+            relay.peer_id.clone(),
+            signed_ready,
+        )
+        .expect("Ready response");
+        let mut replay_cache = ReplayCache::new(4).expect("replay");
+        let armed = awaiting
+            .into_relay_ready_dispatch()
+            .expect("Ready dispatch")
+            .accept_response_for_test(&response, &mut replay_cache)
+            .expect("verified Ready");
+        (armed, scope, relay_endpoint)
+    }
+
+    fn signed_start_time(start: &AwaitingNativeResult) -> u64 {
+        let envelope: SignedEnvelope = volparossa_protocol::decode_canonical(
+            start.encoded_start(),
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("signed Start envelope");
+        let start: volparossa_protocol::NativeProbeStart = volparossa_protocol::decode_canonical(
+            &envelope.payload,
+            volparossa_protocol::MAX_CONTROL_PAYLOAD_SIZE,
+        )
+        .expect("signed Start payload");
+        start.started_at_ms
     }
 
     #[allow(

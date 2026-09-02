@@ -999,6 +999,17 @@ struct PreparedClientNativePath {
     relay_endpoint: WireguardEndpoint,
 }
 
+/// Every path started against one local clock barrier, before any Relay authorization can block.
+struct LocallyStartedClientNativePath {
+    scope: NativeProbePathScope,
+    awaiting: native_preselection::AwaitingNativeResult,
+    path_id: u32,
+    lease_handle: Vec<u8>,
+    prepared_lease_commitment: [u8; 32],
+    endpoint_binding: NativeProbeEndpointBinding,
+    relay_endpoint: WireguardEndpoint,
+}
+
 /// Helper-prepared Client context with exact standard Relay activation authority attached.
 #[must_use = "an authorized native Client context must be activated or destroyed"]
 pub(crate) struct AuthorizedPreparedClientNativeProbe {
@@ -1360,18 +1371,37 @@ impl PreparedClientNativeProbe {
             paths,
             hard_expires_at_unix,
         } = self;
-        let mut authorized_paths = Vec::with_capacity(paths.len());
-        let mut activations = Vec::with_capacity(paths.len());
+        let start_barrier_ms = crate::unix_millis();
+        let start_barrier = Instant::now();
+        let mut started_paths = Vec::with_capacity(paths.len());
         for path in paths {
             let scope = path.armed.path_scope().clone();
-            let awaiting = path.armed.start(path.endpoint_binding.clone())?;
-            let (awaiting, signed_relay_reservation) = awaiting
+            let awaiting = path.armed.start_at(
+                path.endpoint_binding.clone(),
+                start_barrier_ms,
+                start_barrier,
+            )?;
+            started_paths.push(LocallyStartedClientNativePath {
+                scope,
+                awaiting,
+                path_id: path.path_id,
+                lease_handle: path.lease_handle,
+                prepared_lease_commitment: path.prepared_lease_commitment,
+                endpoint_binding: path.endpoint_binding,
+                relay_endpoint: path.relay_endpoint,
+            });
+        }
+        let mut authorized_paths = Vec::with_capacity(started_paths.len());
+        let mut activations = Vec::with_capacity(started_paths.len());
+        for path in started_paths {
+            let (awaiting, signed_relay_reservation) = path
+                .awaiting
                 .into_relay_authorization_dispatch()?
                 .execute(discovery)
                 .await?;
             let now_ms = crate::unix_millis();
             verify_native_client_activation_authority(
-                &scope,
+                &path.scope,
                 path.endpoint_binding
                     .endpoint
                     .as_ref()
