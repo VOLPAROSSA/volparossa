@@ -1197,6 +1197,10 @@ write_config() {
         printf '  exit_download_limit_mbps: %s\n' "$exit_capacity"
         printf '  maximum_relay_sessions: %s\n' "$relay_capacity"
         printf '  maximum_exit_sessions: %s\n' "$exit_capacity"
+        # The native preselection challenge proves one bounded liveness sample, not a synthetic
+        # 10-Mbps throughput claim. Keep the acceptance route minimum equal to that honest floor.
+        printf 'routing:\n  client_minimum_upload_mbps: 1\n'
+        printf '  client_minimum_download_mbps: 1\n'
         printf 'policy:\n  fail_closed: true\n'
         printf '  manifest_path: "%s/development-policy.manifest"\n' "$WORK"
         printf '  minimum_signatures: 3\n  reject_ech: true\n'
