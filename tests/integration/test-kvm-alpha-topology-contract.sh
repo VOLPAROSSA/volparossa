@@ -202,6 +202,7 @@ grep -F 'wait_fresh_advertisement "$R2_PEER"' "$GUEST" >/dev/null
 grep -F 'wait_fresh_advertisement "$R1_PEER"' "$GUEST" >/dev/null
 grep -F 'a01_select_route bootstrap1' "$GUEST" >/dev/null
 grep -F 'a01_select_route bootstrap2' "$GUEST" >/dev/null
+grep -F 'NATIVE_PROBE_PROOF_UNAVAILABLE' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A01",success:$success' "$GUEST" >/dev/null
 grep -F 'a01_bootstrap_resilience:{requested:$a01_requested' "$GUEST" >/dev/null
 grep -F 'Require successful A01-A15 evidence' "$WORKFLOW" >/dev/null
