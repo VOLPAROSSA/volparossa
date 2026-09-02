@@ -4,10 +4,11 @@ use sha2::{Digest as _, Sha256};
 use volparossa_protocol::{
     ClientSessionCapability, ControlMessageType, ControlPayload, ExitCapacityHold,
     ExitCapacityHoldRequest, ExitConfirmationReceipt, ExitReservationConfirmation,
-    ExitReservationFinalizeRequest, ProbeAddressFamily, ProbeLegEvidence, RelayAuthorization,
-    RelayProbePermit, RelayProbePermitRequest, RelayProbeResult, SignedEnvelope,
-    exit_confirmation_envelope_hash, finalized_reservation_bundle_hash, generate_nonce,
-    sign_control_message_with, verify_control_message, verify_relay_reservation,
+    ExitReservationFinalizeRequest, MAX_NATIVE_PROBE_LIFETIME_MS, ProbeAddressFamily,
+    ProbeLegEvidence, RelayAuthorization, RelayProbePermit, RelayProbePermitRequest,
+    RelayProbeResult, SignedEnvelope, exit_confirmation_envelope_hash,
+    finalized_reservation_bundle_hash, generate_nonce, sign_control_message_with,
+    verify_control_message, verify_relay_reservation,
 };
 
 #[allow(
@@ -689,6 +690,24 @@ impl ExitService {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_NATIVE_PROBE_LIFETIME_MS, native_premeasurement_is_fresh};
+
+    #[test]
+    fn native_premeasurement_accepts_exact_lifetime_boundary_only() {
+        let permit_created_at_ms = 1_700_000_030_000;
+        assert!(native_premeasurement_is_fresh(
+            permit_created_at_ms,
+            permit_created_at_ms - MAX_NATIVE_PROBE_LIFETIME_MS,
+        ));
+        assert!(!native_premeasurement_is_fresh(
+            permit_created_at_ms,
+            permit_created_at_ms - MAX_NATIVE_PROBE_LIFETIME_MS - 1,
+        ));
     }
 }
 
@@ -1434,8 +1453,12 @@ fn same_probe_scope(
         && result.policy_hash == permit.policy_hash
         && result.transport == permit.transport
         && result.address_family == permit.address_family
-        && result.measured_at_ms >= permit.created_at_ms
+        && native_premeasurement_is_fresh(permit.created_at_ms, result.measured_at_ms)
         && result.expires_at_ms <= permit.expires_at_ms
+}
+
+fn native_premeasurement_is_fresh(permit_created_at_ms: u64, measured_at_ms: u64) -> bool {
+    permit_created_at_ms.saturating_sub(measured_at_ms) <= MAX_NATIVE_PROBE_LIFETIME_MS
 }
 
 fn map_probe_evidence_error(error: ProbeEvidenceError) -> ExitError {
