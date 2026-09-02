@@ -151,8 +151,12 @@ const MAX_PENDING_PER_PEER: usize = 16;
 const MAX_COALESCED_WAITERS: usize = 3;
 const MAX_DISPATCH_ATTEMPTS: usize = 3;
 const MAX_LEDGER_ENTRIES: usize = 256;
-const MAX_LEDGER_BYTES: usize = 8 * 1024 * 1024;
-const MAX_LEDGER_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
+// One complete two-path route keeps several idempotent 512-KiB response reservations alive at
+// once (advertisement, native phases, production probes and transport activation). Keep that
+// protocol transaction bounded without rejecting its later phases merely because the control
+// Relay is also one of the selected data Relays.
+const MAX_LEDGER_BYTES: usize = 64 * 1024 * 1024;
+const MAX_LEDGER_BYTES_PER_PEER: usize = 8 * 1024 * 1024;
 const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
 const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
 const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
