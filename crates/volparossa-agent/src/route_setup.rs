@@ -128,6 +128,10 @@ const CLIENT_SINGLE_RELAY_UDP_PORT: u16 = 40_001;
 const MAXIMUM_TCP_STREAM_CHUNK_BYTES: usize = 64 * 1_024;
 const OPEN_TCP_LIFETIME_MS: u64 = 60_000;
 const MPQUIC_READY_WAIT: Duration = Duration::from_secs(10);
+const TCP_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+// The discovery attempt owner cools for 30 seconds after a successful route bootstrap. Keep a
+// small bounded recovery window beyond it without extending any individual setup deadline.
+const TCP_CONNECT_RECOVERY_HORIZON: Duration = Duration::from_secs(35);
 
 /// Cloneable single-owner gate for the local Connect route bootstrap.
 #[derive(Clone)]
@@ -700,24 +704,44 @@ impl ClientRouteControl {
             return Err(ClientRouteConnectError::InvalidProfile);
         }
         let _connect = self.tcp_connect.lock().await;
-        {
-            let state = self.state.lock().await;
-            match &*state {
-                ClientRouteControlState::Established(established)
-                    if matches!(established.transport, ClientTransportState::TcpMptcp(_)) =>
-                {
-                    return Ok(ClientRouteProgress::TransportActive);
+        let retry_deadline = Instant::now() + TCP_CONNECT_RECOVERY_HORIZON;
+        loop {
+            let route_available = {
+                let state = self.state.lock().await;
+                match &*state {
+                    ClientRouteControlState::Established(established)
+                        if matches!(established.transport, ClientTransportState::TcpMptcp(_)) =>
+                    {
+                        return Ok(ClientRouteProgress::TransportActive);
+                    }
+                    ClientRouteControlState::Idle => true,
+                    ClientRouteControlState::Connecting
+                    | ClientRouteControlState::Established(_) => false,
                 }
-                ClientRouteControlState::Idle => {}
-                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
-                    return Err(ClientRouteConnectError::Busy);
+            };
+            let result = if route_available {
+                let mut tcp_profile = config.clone();
+                tcp_profile.udp.enabled = false;
+                tcp_profile.quic.enabled = false;
+                Box::pin(self.connect_with_udp_mode(&tcp_profile, discovery, helper, false)).await
+            } else {
+                Err(ClientRouteConnectError::Busy)
+            };
+            match result {
+                Ok(progress) => return Ok(progress),
+                Err(error) => {
+                    let Some(delay) =
+                        tcp_connect_retry_delay(error, Instant::now(), retry_deadline)
+                    else {
+                        return Err(error);
+                    };
+                    tokio::time::sleep(delay).await;
+                    if Instant::now() >= retry_deadline {
+                        return Err(error);
+                    }
                 }
             }
         }
-        let mut tcp_profile = config.clone();
-        tcp_profile.udp.enabled = false;
-        tcp_profile.quic.enabled = false;
-        Box::pin(self.connect_with_udp_mode(&tcp_profile, discovery, helper, false)).await
     }
 
     /// Ensure UDP/443 uses one genuine multipath-only route, never general UDP fallback.
@@ -1612,6 +1636,21 @@ impl ClientRouteControl {
         }
         self.clear_agent_mpquic_paths().await;
     }
+}
+
+fn tcp_connect_retry_delay(
+    error: ClientRouteConnectError,
+    now: Instant,
+    deadline: Instant,
+) -> Option<Duration> {
+    if !matches!(
+        error,
+        ClientRouteConnectError::Busy | ClientRouteConnectError::PreselectionUnavailable
+    ) || now >= deadline
+    {
+        return None;
+    }
+    Some(TCP_CONNECT_RETRY_INTERVAL.min(deadline.saturating_duration_since(now)))
 }
 
 struct ClientOpenTcpMaterial {
@@ -6940,6 +6979,39 @@ mod tests {
         assert_eq!(
             maximum_mpquic_tunnel_packet_bytes(27),
             Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        );
+    }
+
+    #[test]
+    fn tcp_route_retry_is_bounded_to_transient_bootstrap_failures() {
+        let now = Instant::now();
+        assert_eq!(
+            tcp_connect_retry_delay(
+                ClientRouteConnectError::Busy,
+                now,
+                now + TCP_CONNECT_RECOVERY_HORIZON
+            ),
+            Some(TCP_CONNECT_RETRY_INTERVAL)
+        );
+        assert_eq!(
+            tcp_connect_retry_delay(
+                ClientRouteConnectError::PreselectionUnavailable,
+                now,
+                now + Duration::from_millis(250)
+            ),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            tcp_connect_retry_delay(
+                ClientRouteConnectError::TransportRuntimeUnavailable,
+                now,
+                now + TCP_CONNECT_RECOVERY_HORIZON
+            ),
+            None
+        );
+        assert_eq!(
+            tcp_connect_retry_delay(ClientRouteConnectError::Busy, now, now),
+            None
         );
     }
 
