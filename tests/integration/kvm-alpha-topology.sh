@@ -421,18 +421,22 @@ copy_artifacts() {
 # Retain the live anonymous worker namespaces on an early datapath failure. This contains only
 # public interface, route, WireGuard-counter and nftables state; private keys are never emitted.
 capture_worker_network_diagnostics() {
-    : >"$WORK/worker-network-diagnostics.txt"
+    diagnostic_label=${1:-cleanup}
+    printf 'capture=%s\n' "$diagnostic_label" \
+        >>"$WORK/worker-network-diagnostics.txt"
     for diagnostic_node in client relay1 relay2 exit; do
         diagnostic_unit=volparossa-alpha-helper@$diagnostic_node.service
         diagnostic_cgroup=$(systemctl show --property=ControlGroup --value \
             "$diagnostic_unit" 2>/dev/null || true)
         case $diagnostic_cgroup in /system.slice/*) ;; *) continue ;; esac
-        diagnostic_procs=/sys/fs/cgroup$diagnostic_cgroup/cgroup.procs
-        [ -r "$diagnostic_procs" ] || continue
+        diagnostic_cgroup_root=/sys/fs/cgroup$diagnostic_cgroup
+        [ -d "$diagnostic_cgroup_root" ] || continue
+        diagnostic_pids=$(find "$diagnostic_cgroup_root" -type f -name cgroup.procs \
+            -exec cat {} \; 2>/dev/null | sort -nu | tr '\n' ' ')
         printf 'unit=%s cgroup=%s pids=%s\n' "$diagnostic_unit" \
-            "$diagnostic_cgroup" "$(tr '\n' ',' <"$diagnostic_procs")" \
+            "$diagnostic_cgroup" "$diagnostic_pids" \
             >>"$WORK/worker-network-diagnostics.txt"
-        for diagnostic_pid in $(sort -n "$diagnostic_procs"); do
+        for diagnostic_pid in $diagnostic_pids; do
             [ -r "/proc/$diagnostic_pid/cmdline" ] || continue
             diagnostic_command=$(tr '\000' ' ' <"/proc/$diagnostic_pid/cmdline")
             {
@@ -2661,7 +2665,13 @@ a01_select_route() {
         sleep 1
         selection_attempt=$((selection_attempt + 1))
     done
-    [ "$selection_status" -eq 0 ] || return 1
+    if [ "$selection_status" -ne 0 ]; then
+        if tail -n 1 "$WORK/a01-$selection_label-connect.err" \
+            | grep -F 'NATIVE_PROBE_START_UNAVAILABLE' >/dev/null; then
+            capture_worker_network_diagnostics "a01-$selection_label-native-probe-failure"
+        fi
+        return 1
+    fi
 
     selection_path_attempt=0
     while [ "$selection_path_attempt" -lt 300 ]; do
