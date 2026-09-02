@@ -1295,6 +1295,43 @@ impl RouteAuthorizedUdpIngress {
         &self.payload
     }
 
+    /// Consume another datagram only when it belongs to this exact live single-relay flow.
+    ///
+    /// The first datagram already carried the signed authorization through the native tunnel.
+    /// Continuations therefore reuse that immutable authority and may change neither the local
+    /// application tuple nor the remote destination. A changed policy or expired authorization
+    /// closes the continuation instead of silently creating a different UDP association.
+    pub(crate) fn bind_next_native_datagram(
+        &self,
+        ingress: PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<Vec<u8>, ClientIngressUdpError> {
+        self.flow
+            .ensure_active_at(now_ms)
+            .map_err(ClientIngressUdpError::Authorization)?;
+        if now_ms >= ingress.expires_at_ms
+            || ingress.hostname.is_some()
+            || ingress.source != self.source
+            || ingress.destination != self.destination
+            || ingress.policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() != 1
+            || !self
+                .flow
+                .matches_exact_ip_destination(SocketAddr::V4(ingress.destination))
+        {
+            return Err(ClientIngressUdpError::DestinationBinding);
+        }
+        policy
+            .authorize_ip(
+                now_ms,
+                IpAddr::V4(*ingress.destination.ip()),
+                TransportProtocol::Udp,
+                ingress.destination.port(),
+            )
+            .map_err(ClientIngressUdpError::Policy)?;
+        Ok(ingress.payload)
+    }
+
     /// Validate a reverse native CONNECT-IP packet and expose only its application payload.
     ///
     /// The native session has already pinned the tunnel Client address; this final boundary also
@@ -1603,6 +1640,35 @@ mod tests {
         assert_eq!(bound.source(), "10.0.0.2:52000".parse().expect("source"));
         assert_eq!(SocketAddr::V4(bound.destination()), destination);
         assert_eq!(bound.payload(), b"alpha-datagram");
+
+        let continuation = PolicyAuthorizedUdpIngress::authorize(
+            SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 52_000)),
+            destination,
+            b"second-datagram".to_vec(),
+            &policy,
+            NOW_MS + 1,
+        )
+        .expect("policy-authorized continuation");
+        assert_eq!(
+            bound
+                .bind_next_native_datagram(continuation, &policy, NOW_MS + 1)
+                .expect("same-flow continuation"),
+            b"second-datagram"
+        );
+
+        let changed_source = PolicyAuthorizedUdpIngress::authorize(
+            SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 52_001)),
+            destination,
+            b"wrong-flow".to_vec(),
+            &policy,
+            NOW_MS + 1,
+        )
+        .expect("policy-authorized different source");
+        assert!(
+            bound
+                .bind_next_native_datagram(changed_source, &policy, NOW_MS + 1)
+                .is_err()
+        );
     }
 
     fn authorize_browser_quic_test_ingress(

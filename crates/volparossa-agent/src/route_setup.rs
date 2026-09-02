@@ -1124,8 +1124,24 @@ impl ClientRouteControl {
             let mut state = self.state.lock().await;
             if let ClientRouteControlState::Established(established) = &mut *state {
                 if let ClientTransportState::NativeUdp(active) = &mut established.transport {
-                    if active.binding.is_some() {
-                        return Err(ClientRouteConnectError::Busy);
+                    if let Some(binding) = active.binding.as_ref() {
+                        let payload = binding
+                            .bind_next_native_datagram(ingress, policy, now_ms)
+                            .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
+                        let (flow, _) = binding.activation();
+                        active
+                            .session
+                            .send_general_udp(
+                                flow,
+                                None,
+                                binding.source().port(),
+                                binding.destination(),
+                                &payload,
+                                now_ms,
+                            )
+                            .await
+                            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                        return Ok(ClientRouteProgress::TransportActive);
                     }
                     let route = established
                         .route
