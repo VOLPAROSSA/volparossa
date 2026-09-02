@@ -221,7 +221,7 @@ async fn exit_requests_cross_exactly_one_control_relay_without_direct_exit_fallb
     clippy::too_many_lines,
     reason = "one exact connection-bound Relay-to-Exit Permit transport exchange"
 )]
-async fn native_permit_response_consumes_the_exact_inbound_control_connection() {
+async fn native_permit_response_dials_kademlia_address_and_consumes_exact_connection() {
     let relay_key = identity::Keypair::generate_ed25519();
     let exit_key = identity::Keypair::generate_ed25519();
     let relay_peer = relay_key.public().to_peer_id();
@@ -239,7 +239,20 @@ async fn native_permit_response_consumes_the_exact_inbound_control_connection() 
         DiscoveryProtocolRoles::new(false, false, true),
     )
     .expect("exit discovery");
-    connect(&mut relay, &mut exit).await;
+    exit.listen_on("/memory/0".parse::<Multiaddr>().expect("memory address"))
+        .expect("memory listener");
+    let exit_address = time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = next_other(&mut exit).await {
+                break address;
+            }
+        }
+    })
+    .await
+    .expect("memory listener timeout");
+    relay
+        .add_known_peer(exit_peer, &exit_address)
+        .expect("permit-bound Exit Kademlia address");
 
     let signed_request = signed_envelope(ControlMessageType::NativeProbePermitRequest);
     let request = ExitForwardRequest::new(

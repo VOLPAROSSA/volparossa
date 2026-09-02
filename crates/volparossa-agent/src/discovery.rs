@@ -3655,6 +3655,15 @@ impl DiscoveryRuntime {
         !(direct_association || privacy_conflict || pending_direct_association)
     }
 
+    /// Admit an Exit target already bound by the verified, short-lived native Permit chain.
+    ///
+    /// Native Ready and Authorization do not require an unrelated local provider-catalog entry:
+    /// the signed chain is their target authority. Direct Exit association and privacy-conflict
+    /// state remain independent fail-closed guards.
+    fn permit_bound_exit_peer_is_eligible(&self, peer: Libp2pPeerId, now_ms: u64) -> bool {
+        peer != *self.service.local_peer_id() && self.forwarded_exit_peer_is_eligible(peer, now_ms)
+    }
+
     fn mark_forwarded_exit_target(&mut self, peer: Libp2pPeerId, expires_at_ms: u64) -> bool {
         if let Some(existing) = self.forwarded_exit_targets.get_mut(&peer) {
             *existing = (*existing).max(expires_at_ms);
@@ -6087,9 +6096,7 @@ impl DiscoveryRuntime {
         let Some(authorized_control) = self.local_relay_snapshot.clone() else {
             reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
         };
-        if exit_peer == local_peer
-            || !self.exit_provider_peers.contains_key(&exit_peer)
-            || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+        if !self.permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
             || !native_probe_data_relay_capability_matches(
                 &authorized_control,
                 data_relay,
@@ -6467,9 +6474,7 @@ impl DiscoveryRuntime {
         let Some(authorized_control) = self.local_relay_snapshot.clone() else {
             reject!("NATIVE_PROBE_AUTHORIZATION_RELAY_AUTHORITY_UNAVAILABLE");
         };
-        if exit_peer == local_peer
-            || !self.exit_provider_peers.contains_key(&exit_peer)
-            || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+        if !self.permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
             || !native_probe_data_relay_capability_matches(
                 &authorized_control,
                 data_relay,
@@ -15795,6 +15800,96 @@ mod tests {
         ] {
             assert!(exit_start.contains(proof), "missing Exit proof {proof}");
         }
+    }
+
+    #[test]
+    fn native_permit_chain_targets_exact_exit_without_provider_catalog() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+
+        let ready = braced_item(production, "async fn begin_native_probe_ready(");
+        let permit = ready
+            .find("verify_native_probe_permit(")
+            .expect("verified short-lived Exit Permit");
+        let eligibility = ready
+            .find("permit_bound_exit_peer_is_eligible(")
+            .expect("privacy-safe permit target gate");
+        let dispatch = ready
+            .find(".request_exit_forward_upstream(&exit_peer")
+            .expect("exact Permit Exit dispatch");
+        assert!(permit < eligibility && eligibility < dispatch);
+        assert!(ready.contains("native_probe_data_relay_capability_matches("));
+        assert!(!ready.contains("exit_provider_peers"));
+
+        let authorization = braced_item(production, "async fn begin_native_probe_authorization(");
+        for retained in [
+            "prepared.start.encoded_start() != request.client_signed_request()",
+            "prepared.start.authorization_chain()",
+            "permit_bound_exit_peer_is_eligible(",
+            "native_probe_data_relay_capability_matches(",
+            ".request_exit_forward_upstream(&exit_peer",
+        ] {
+            assert!(
+                authorization.contains(retained),
+                "missing Permit-descended authorization binding {retained}"
+            );
+        }
+        assert!(!authorization.contains("exit_provider_peers"));
+
+        let generic = braced_item(production, "fn begin_relay_forward_inner(");
+        assert!(generic.contains("self.exit_provider_peers.contains_key(&exit_peer)"));
+        assert!(generic.contains("self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)"));
+    }
+
+    #[tokio::test]
+    async fn permit_bound_exit_target_keeps_direct_and_conflict_guards_fail_closed() {
+        let now_ms = unix_millis();
+        let mut fixture = fixture(RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        });
+        let exit_identity = Identity::generate();
+        let exit_peer = exit_identity.peer_id().to_owned();
+
+        assert!(!fixture.runtime.exit_provider_peers.contains_key(&exit_peer));
+        assert!(
+            fixture
+                .runtime
+                .permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
+        );
+        assert!(
+            !fixture.runtime.permit_bound_exit_peer_is_eligible(
+                *fixture.runtime.service.local_peer_id(),
+                now_ms
+            )
+        );
+
+        let direct = direct_capability(
+            &exit_identity,
+            &fixture.policy,
+            1,
+            now_ms.saturating_add(20_000),
+        );
+        fixture.runtime.direct_relays.insert(exit_peer, direct);
+        assert!(
+            !fixture
+                .runtime
+                .permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
+        );
+
+        fixture.runtime.direct_relays.remove(&exit_peer);
+        fixture
+            .runtime
+            .record_privacy_conflict(exit_peer, 2, now_ms.saturating_add(20_000));
+        assert!(
+            !fixture
+                .runtime
+                .permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
+        );
     }
 
     #[test]
