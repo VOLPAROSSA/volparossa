@@ -4664,12 +4664,11 @@ impl DiscoveryRuntime {
                             capability.exit_node_id,
                             exit_peer,
                             required_until_ms,
-                        ) && capability.control_relay_advertisement_sequence
-                            == control.advertisement_sequence
-                            && capability.control_relay_advertisement_expires_at_ms
-                                == control.advertisement_expires_at_ms
-                            && capability.control_relay_advertisement_payload_hash
-                                == control.advertisement_payload_hash
+                        ) && forwarded_control_projection_lineage_matches(
+                            capability,
+                            control,
+                            required_until_ms,
+                        )
                     })
         })
     }
@@ -12301,15 +12300,11 @@ impl DiscoveryRuntime {
         exact.exit
             && !self.direct_relays.contains_key(&exact.peer_id)
             && self.forwarded_exit_peer_is_eligible(exact.peer_id, captured_at_ms)
-            && capability.control_relay_node_id == control.node_id
-            && capability.control_relay_peer_id == control.peer_id
-            && capability.control_relay_public_key == control.public_key
-            && capability.control_relay_advertisement_sequence == control.advertisement_sequence
-            && capability.control_relay_advertisement_expires_at_ms
-                == control.advertisement_expires_at_ms
-            && capability.control_relay_advertisement_payload_hash
-                == control.advertisement_payload_hash
-            && capability.control_relay_advertisement_expires_at_ms > captured_at_ms
+            && forwarded_control_projection_lineage_matches(
+                capability,
+                control,
+                captured_at_ms.saturating_add(1),
+            )
             && capability.exit_node_id == exact.wire_node_id
             && capability.exit_peer_id == exact.peer_id
             && capability.exit_public_key == exact.public_key
@@ -12523,6 +12518,37 @@ fn direct_relay_authority_lineage_matches(
         && current.policy_expires_at_ms == authorized.policy_expires_at_ms
         && current.expires_at_ms >= required_until_ms
         && authorized.expires_at_ms >= required_until_ms
+}
+
+/// Keeps a still-live forwarded Exit usable across an ordinary advertisement refresh by the same
+/// authenticated control Relay. Equal sequences remain fingerprint-exact; only a strictly newer
+/// current sequence may carry forward the older, still-live provenance.
+fn forwarded_control_projection_lineage_matches(
+    capability: &ForwardedExitCapability,
+    current: &DirectRelayCapability,
+    required_until_ms: u64,
+) -> bool {
+    let sequence_matches = if capability.control_relay_advertisement_sequence
+        == current.advertisement_sequence
+    {
+        capability.control_relay_advertisement_expires_at_ms == current.advertisement_expires_at_ms
+            && capability.control_relay_advertisement_payload_hash
+                == current.advertisement_payload_hash
+    } else {
+        capability.control_relay_advertisement_sequence < current.advertisement_sequence
+    };
+
+    capability.control_relay_node_id == current.node_id
+        && capability.control_relay_peer_id == current.peer_id
+        && capability.control_relay_public_key == current.public_key
+        && capability.control_relay_advertisement_sequence != 0
+        && capability.control_relay_advertisement_expires_at_ms >= required_until_ms
+        && capability.policy_version == current.policy_version
+        && capability.policy_hash == current.policy_hash
+        && capability.policy_expires_at_ms == current.policy_expires_at_ms
+        && capability.expires_at_ms >= required_until_ms
+        && current.expires_at_ms >= required_until_ms
+        && sequence_matches
 }
 
 #[allow(
@@ -17903,9 +17929,9 @@ mod tests {
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
-        reason = "one end-to-end regression covers stale lineage, refetch and selectable recovery"
+        reason = "one end-to-end regression covers lineage projection and selectable recovery"
     )]
-    async fn refreshed_control_lineage_refetches_exit_and_restores_preselection() {
+    async fn refreshed_control_lineage_keeps_forwarded_exit_selectable() {
         let mut fixture = fixture(RolesConfig::default());
         let initial_ms = unix_millis();
         let control_identity = Identity::generate();
@@ -17967,70 +17993,13 @@ mod tests {
             capability.control_relay_advertisement_payload_hash
                 == original_control.advertisement_payload_hash
         }));
-        let stale_snapshot = route_snapshot_at(&mut fixture, 10, refresh_ms)
+        let lineage_snapshot = route_snapshot_at(&mut fixture, 10, refresh_ms)
             .await
-            .expect("stale lineage is filtered from a route snapshot");
-        assert!(stale_snapshot.forwarded_exits().is_empty());
-
-        fixture.runtime.exit_provider_peers.insert(
-            exit_peer,
-            refresh_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS),
-        );
-        fixture.runtime.schedule_exit_advertisement_fetches();
-        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
-        let (request_id, control_peer, forward_id) = {
-            let (request_id, pending) = fixture
-                .runtime
-                .pending_client_forwards
-                .iter()
-                .next()
-                .expect("stale lineage starts a replacement fetch");
-            (
-                *request_id,
-                pending.key.control_relay_peer,
-                pending.key.forward_id,
-            )
-        };
-        let exit_public_key = exit_identity
-            .ed25519_public_key_bytes()
-            .expect("exit public key");
-        let advertisement = service_advertisement(
-            &exit_identity,
-            RolesConfig {
-                client: false,
-                relay: false,
-                exit: true,
-            },
-            &fixture.policy,
-            2,
-            [164; 32],
-            refresh_ms,
-            &fixture.directory,
-        );
-        let response = ExitForwardResponse::granted(
-            forward_id.to_vec(),
-            ExitForwardOperation::FetchExitAdvertisement,
-            node_id_from_public_key(&exit_public_key).to_vec(),
-            exit_peer.to_bytes(),
-            vec![advertisement.into_signed_envelope()],
-        )
-        .expect("replacement forwarded advertisement");
-        assert_eq!(
-            fixture
-                .runtime
-                .complete_client_forward(request_id, control_peer, &response, &fixture.state)
-                .await,
-            OutboundEventOutcome::Completed
-        );
-
-        let recovered_at_ms = unix_millis();
-        let recovered = route_snapshot_at(&mut fixture, 10, recovered_at_ms)
-            .await
-            .expect("recovered route snapshot");
-        assert_eq!(recovered.forwarded_exits().len(), 1);
+            .expect("live control lineage remains in the route snapshot");
+        assert_eq!(lineage_snapshot.forwarded_exits().len(), 1);
         assert!(
             narrow_route_candidate_snapshot(
-                recovered,
+                lineage_snapshot,
                 PreselectionSamplingScope::new(
                     Transport::UdpSinglePath,
                     ObservationAddressFamily::Ipv4,
@@ -18040,8 +18009,16 @@ mod tests {
                 ),
             )
             .is_ok(),
-            "a current forwarded Exit must restore a selectable preselection snapshot"
+            "a newer signed control advertisement from the same identity and policy must not hide the Exit"
         );
+
+        fixture.runtime.exit_provider_peers.insert(
+            exit_peer,
+            refresh_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS),
+        );
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
+        assert!(fixture.runtime.pending_client_forwards.is_empty());
     }
 
     #[tokio::test]
@@ -18089,16 +18066,43 @@ mod tests {
             exit_peer_id,
             now_ms.saturating_add(10_000),
         ));
-        let mut rekeyed = control.clone();
-        rekeyed.advertisement_sequence = rekeyed.advertisement_sequence.saturating_add(1);
+        assert!(forwarded_control_projection_lineage_matches(
+            &capability,
+            &control,
+            now_ms.saturating_add(10_000),
+        ));
+        let mut refreshed = control.clone();
+        refreshed.advertisement_sequence = refreshed.advertisement_sequence.saturating_add(1);
+        refreshed.advertisement_payload_hash = refreshed.advertisement_payload_hash.xor_for_test();
         assert!(forwarded_exit_capability_matches(
             &capability,
-            &rekeyed,
-            rekeyed.node_id,
-            rekeyed.peer_id,
-            rekeyed.public_key,
+            &refreshed,
+            refreshed.node_id,
+            refreshed.peer_id,
+            refreshed.public_key,
             exit_node_id,
             exit_peer_id,
+            now_ms.saturating_add(10_000),
+        ));
+        assert!(forwarded_control_projection_lineage_matches(
+            &capability,
+            &refreshed,
+            now_ms.saturating_add(10_000),
+        ));
+        let mut substituted_same_sequence = control.clone();
+        substituted_same_sequence.advertisement_payload_hash = substituted_same_sequence
+            .advertisement_payload_hash
+            .xor_for_test();
+        assert!(!forwarded_control_projection_lineage_matches(
+            &capability,
+            &substituted_same_sequence,
+            now_ms.saturating_add(10_000),
+        ));
+        let mut rolled_back = control.clone();
+        rolled_back.advertisement_sequence = rolled_back.advertisement_sequence.saturating_sub(1);
+        assert!(!forwarded_control_projection_lineage_matches(
+            &capability,
+            &rolled_back,
             now_ms.saturating_add(10_000),
         ));
         let mut policy_changed = control.clone();
@@ -18111,6 +18115,11 @@ mod tests {
             policy_changed.public_key,
             exit_node_id,
             exit_peer_id,
+            now_ms.saturating_add(10_000),
+        ));
+        assert!(!forwarded_control_projection_lineage_matches(
+            &capability,
+            &policy_changed,
             now_ms.saturating_add(10_000),
         ));
     }
