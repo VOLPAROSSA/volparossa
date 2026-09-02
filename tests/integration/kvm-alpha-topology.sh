@@ -3339,7 +3339,9 @@ fi
 PHASE=a02-transparent-tcp-echo
 : >"$WORK/a02-client.err"
 attempt=0
-while [ "$attempt" -lt 30 ]; do
+# A01's successful preselection deliberately retains its affine gate for a 30-second cooldown.
+# Leave bounded scheduling margin so A02 always gets attempts after that gate becomes reusable.
+while [ "$attempt" -lt 45 ]; do
     attempt_label=$(printf '%02d' "$attempt")
     client_capture="$WORK/a02-client-capture-$attempt_label.json"
     client_capture_ready="$WORK/a02-client-capture-$attempt_label.ready"
