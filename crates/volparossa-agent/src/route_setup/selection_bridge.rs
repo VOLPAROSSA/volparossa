@@ -316,7 +316,9 @@ impl ActorBoundRelayProof {
         policy_hash: [u8; 32],
         required_expiry_ms: u64,
     ) -> bool {
-        self.relay.identity.direct_matches(capability)
+        self.relay
+            .identity
+            .direct_lineage_matches(capability, required_expiry_ms)
             && capability.policy_hash == policy_hash
             && capability.advertisement_expires_at_ms >= required_expiry_ms
             && capability.policy_expires_at_ms >= required_expiry_ms
@@ -5030,7 +5032,7 @@ mod tests {
             policy_expires_at_ms: NOW_MS + 90_000,
             address_family: Some(address_family),
             observed_at_ms: NOW_MS,
-            valid_until_ms: NOW_MS + MAXIMUM_EVIDENCE_AGE_MS,
+            valid_until_ms: NOW_MS + 90_000,
             forwarded_control: None,
             locally_measured_p25: Some(
                 Bandwidth::new(90, 90).expect("fresh measured delivery p25"),
@@ -6457,11 +6459,11 @@ mod tests {
         assert_eq!(plan.earliest_evidence_expiry_ms, NOW_MS + 30_000);
         assert_eq!(
             plan.forwarded_exit.control.evidence_valid_until_ms,
-            NOW_MS + MAXIMUM_EVIDENCE_AGE_MS
+            NOW_MS + 90_000
         );
         assert_eq!(
             plan.forwarded_exit.exit.evidence_valid_until_ms,
-            NOW_MS + MAXIMUM_EVIDENCE_AGE_MS
+            NOW_MS + 90_000
         );
         assert!(plan.prospective_relays.iter().all(|relay| {
             relay.relay.identity.wire_node_id != plan.forwarded_exit.control.identity.wire_node_id
@@ -7372,6 +7374,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preprobe_handoff_accepts_strictly_newer_same_actor_relay_advertisements() {
+        let plan = prospective_plan();
+        let clock = HandoffClock::new(NOW_MS + 1_001);
+        let mut io = HandoffIo::from_plan(&plan, clock.clone());
+        io.control.advertisement_sequence += 1;
+        for (index, relay) in io.relays.iter_mut().enumerate() {
+            relay.advertisement_sequence += 1;
+            if index != 0 {
+                relay.advertisement_payload_hash = relay.advertisement_payload_hash.xor_for_test();
+            }
+        }
+        let state = Arc::clone(&io.state);
+        let expected_limits = preprobe_limits();
+        let (continuation, expected) = ExpectedResolvedHandoff::consume(plan, expected_limits);
+        let (_cancellation, mut cancelled) = watch::channel(false);
+
+        let unmeasured = continuation
+            .resolve_into_unmeasured(&io, &clock, &mut cancelled)
+            .await
+            .expect("newer advertisements from the selected actors remain authorized");
+        assert_exact_resolved_handoff(&unmeasured, &io, &state, &expected);
+    }
+
+    #[tokio::test]
     async fn preprobe_handoff_rechecks_post_resolve_wall_and_cancellation() {
         for (post_resolve_wall_ms, succeeds) in [
             (NOW_MS + 1_001, true),
@@ -7477,7 +7503,7 @@ mod tests {
 
     #[tokio::test]
     async fn preprobe_manager_rejects_current_capability_drift_before_dispatch() {
-        for mutation in 0_u8..7 {
+        for mutation in 0_u8..12 {
             let plan = prospective_plan();
             let clock = HandoffClock::new(NOW_MS);
             let mut io = HandoffIo::from_plan(&plan, clock);
@@ -7509,6 +7535,27 @@ mod tests {
                     relay.advertisement_payload_hash =
                         relay.advertisement_payload_hash.xor_for_test();
                 }
+                7 => {
+                    io.control.advertisement_sequence -= 1;
+                    io.control.advertisement_payload_hash =
+                        io.control.advertisement_payload_hash.xor_for_test();
+                }
+                8 => {
+                    io.exit.control_relay_advertisement_sequence =
+                        io.control.advertisement_sequence + 1;
+                    io.exit.control_relay_advertisement_payload_hash = io
+                        .exit
+                        .control_relay_advertisement_payload_hash
+                        .xor_for_test();
+                }
+                9 => {
+                    io.control.advertisement_sequence += 1;
+                    io.control.advertisement_payload_hash =
+                        io.control.advertisement_payload_hash.xor_for_test();
+                    io.control.expires_at_ms = NOW_MS + 59_999;
+                }
+                10 => io.control.advertisement_expires_at_ms += 1,
+                11 => io.control.advertisement_sequence = 0,
                 _ => unreachable!(),
             }
             let state = Arc::clone(&io.state);

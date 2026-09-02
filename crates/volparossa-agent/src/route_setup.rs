@@ -2521,6 +2521,73 @@ impl ProspectivePeerIdentity {
     fn direct_matches(&self, capability: &DirectRelayCapability) -> bool {
         self == &Self::from_direct(capability)
     }
+
+    /// Accept the exact selected advertisement or a strictly newer advertisement from the same
+    /// actor and policy. This keeps an already-live route attempt usable across ordinary service
+    /// re-publication without allowing rollback or equal-sequence drift.
+    fn direct_lineage_matches(
+        &self,
+        current: &DirectRelayCapability,
+        required_expiry_ms: u64,
+    ) -> bool {
+        if self.wire_node_id != current.node_id
+            || self.peer_id != current.peer_id
+            || self.public_key != current.public_key
+            || self.policy_version != current.policy_version
+            || self.policy_hash != current.policy_hash
+            || self.policy_expires_at_ms != current.policy_expires_at_ms
+            || self.advertisement_expires_at_ms < required_expiry_ms
+            || self.policy_expires_at_ms < required_expiry_ms
+            || self.expires_at_ms < required_expiry_ms
+            || self.expires_at_ms
+                > self
+                    .advertisement_expires_at_ms
+                    .min(self.policy_expires_at_ms)
+            || current.advertisement_expires_at_ms < required_expiry_ms
+            || current.policy_expires_at_ms < required_expiry_ms
+            || current.expires_at_ms < required_expiry_ms
+            || current.expires_at_ms
+                > current
+                    .advertisement_expires_at_ms
+                    .min(current.policy_expires_at_ms)
+        {
+            return false;
+        }
+        if self.advertisement_sequence == current.advertisement_sequence {
+            return self.direct_matches(current);
+        }
+        self.advertisement_sequence != 0
+            && self.advertisement_sequence < current.advertisement_sequence
+    }
+}
+
+fn forwarded_control_lineage_matches_current(
+    current: &DirectRelayCapability,
+    forwarded: &ForwardedExitCapability,
+    required_expiry_ms: u64,
+) -> bool {
+    if forwarded.control_relay_node_id != current.node_id
+        || forwarded.control_relay_peer_id != current.peer_id
+        || forwarded.control_relay_public_key != current.public_key
+        || forwarded.policy_version != current.policy_version
+        || forwarded.policy_hash != current.policy_hash
+        || forwarded.policy_expires_at_ms != current.policy_expires_at_ms
+        || forwarded.control_relay_advertisement_sequence == 0
+        || forwarded.control_relay_advertisement_expires_at_ms < required_expiry_ms
+        || forwarded.expires_at_ms < required_expiry_ms
+        || current.advertisement_expires_at_ms < required_expiry_ms
+        || current.policy_expires_at_ms < required_expiry_ms
+        || current.expires_at_ms < required_expiry_ms
+    {
+        return false;
+    }
+    if forwarded.control_relay_advertisement_sequence == current.advertisement_sequence {
+        return forwarded.control_relay_advertisement_expires_at_ms
+            == current.advertisement_expires_at_ms
+            && forwarded.control_relay_advertisement_payload_hash
+                == current.advertisement_payload_hash;
+    }
+    forwarded.control_relay_advertisement_sequence < current.advertisement_sequence
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2551,15 +2618,7 @@ impl ProspectiveForwardedExit {
         control: &DirectRelayCapability,
         exit: &ForwardedExitCapability,
     ) -> Result<Self, RouteSetupError> {
-        if control.node_id != exit.control_relay_node_id
-            || control.peer_id != exit.control_relay_peer_id
-            || control.public_key != exit.control_relay_public_key
-            || control.advertisement_sequence != exit.control_relay_advertisement_sequence
-            || control.advertisement_expires_at_ms != exit.control_relay_advertisement_expires_at_ms
-            || control.advertisement_payload_hash != exit.control_relay_advertisement_payload_hash
-            || control.policy_version != exit.policy_version
-            || control.policy_hash != exit.policy_hash
-            || control.policy_expires_at_ms != exit.policy_expires_at_ms
+        if !forwarded_control_lineage_matches_current(control, exit, exit.expires_at_ms)
             || control.node_id == exit.exit_node_id
             || control.peer_id == exit.exit_peer_id
         {
@@ -2987,15 +3046,18 @@ impl RouteSetupAuthorities {
     fn validate(&self, request: &RouteSetupRequest) -> Result<(), RouteSetupError> {
         let forwarded = ProspectiveForwardedExit::from_capabilities(&self.control, &self.exit)
             .map_err(|_| RouteSetupError::Capability)?;
+        let required_expiry = request.parameters.expires_at_ms;
         if self.datapath_relays.len() != request.paths.len()
-            || forwarded.control != request.control
+            || !request
+                .control
+                .identity
+                .direct_lineage_matches(&self.control, required_expiry)
             || forwarded.exit != request.exit
             || self.control.policy_hash != request.parameters.policy_hash
             || self.exit.policy_hash != request.parameters.policy_hash
         {
             return Err(RouteSetupError::Capability);
         }
-        let required_expiry = request.parameters.expires_at_ms;
         if self.control.expires_at_ms < required_expiry
             || self.exit.expires_at_ms < required_expiry
             || self.control.advertisement_expires_at_ms < required_expiry
