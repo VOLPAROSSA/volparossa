@@ -2858,6 +2858,10 @@ while [ "$initial_advertisement_attempt" -lt 600 ]; do
             initial_advertisements_ready=no
         fi
     done
+    if ! grep -F "$EXIT_PEER" "$WORK/a01-initial-peers.txt" \
+        | grep -F 'roles=0b100' >/dev/null; then
+        initial_advertisements_ready=no
+    fi
     [ "$initial_advertisements_ready" = yes ] && break
     sleep 0.1
     initial_advertisement_attempt=$((initial_advertisement_attempt + 1))
