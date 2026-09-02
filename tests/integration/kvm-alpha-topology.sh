@@ -2674,7 +2674,9 @@ a01_select_route() {
     selection_attempt=0
     selection_attempt_error="$WORK/a01-$selection_label-connect-attempt.err"
     : >"$WORK/a01-$selection_label-connect.err"
-    while [ "$selection_attempt" -lt 30 ]; do
+    # A successful first A01 route deliberately leaves the preselection gate cooling for 30 s.
+    # Keep enough bounded attempts for the second independent bootstrap-loss scenario to begin.
+    while [ "$selection_attempt" -lt 45 ]; do
         set +e
         "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-client/control/agent.sock" connect \
