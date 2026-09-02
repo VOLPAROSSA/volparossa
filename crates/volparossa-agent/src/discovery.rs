@@ -9528,7 +9528,6 @@ impl DiscoveryRuntime {
         if let Some(existing) = self.pending_mptcp_exit_sessions.get(&route_context_id) {
             if existing.canonical_start != request.canonical_request()
                 || existing.selected_path_ids != selected_path_ids
-                || existing.expires_at_ms != pending_expiry
             {
                 let pending = self
                     .pending_mptcp_exit_sessions
@@ -9541,6 +9540,7 @@ impl DiscoveryRuntime {
         }
 
         if let Some(pending) = self.pending_mptcp_exit_sessions.get_mut(&route_context_id) {
+            pending.expires_at_ms = pending.expires_at_ms.min(pending_expiry);
             match pending.relays.entry(relay_path.relay.path_id) {
                 std::collections::hash_map::Entry::Occupied(mut entry)
                     if entry.get().forward_id == forward_id
