@@ -3088,13 +3088,16 @@ impl DiscoveryRuntime {
         let authority_current = pending.attempt_deadline > Instant::now()
             && pending.operation_expires_at_ms > now_ms
             && self.direct_relays.get(&peer).is_some_and(|current| {
-                current == &pending.authorized_relay
-                    && direct_relay_target_matches(
-                        current,
-                        pending.relay_node_id,
-                        peer,
-                        pending.operation_expires_at_ms,
-                    )
+                direct_relay_authority_lineage_matches(
+                    current,
+                    &pending.authorized_relay,
+                    pending.operation_expires_at_ms,
+                ) && direct_relay_target_matches(
+                    current,
+                    pending.relay_node_id,
+                    peer,
+                    pending.operation_expires_at_ms,
+                )
             });
         let valid = authority_current
             && response.validate().is_ok()
