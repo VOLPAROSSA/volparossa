@@ -2206,7 +2206,13 @@ async fn begin_client_route(
     let preselection =
         selection_bridge::begin_client_native_preselection(prepared, admission, discovery)
             .await
-            .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "native preselection failed before the first data-Relay dispatch"
+                );
+                ClientRouteConnectError::NativePermitUnavailable
+            })?;
     let ready = preselection
         .dispatch_relay_ready(discovery)
         .await

@@ -1116,7 +1116,13 @@ pub(crate) async fn begin_client_native_preselection(
         prepared.evidence_batch.for_route_admission(),
         &mut OsRng,
     )
-    .map_err(|_| native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+    .map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            "native preselection candidate plan was rejected"
+        );
+        native_preselection::NativePreselectionError::InvalidCandidateSet
+    })?;
     let selected_data_relays = route_plan
         .prospective_relays
         .iter()
