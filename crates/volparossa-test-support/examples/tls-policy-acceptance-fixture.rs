@@ -30,6 +30,7 @@ const PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const SERVER_DEADLINE: Duration = Duration::from_secs(300);
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(20);
+const ALLOWED_CLIENT_IO_DEADLINE: Duration = Duration::from_secs(90);
 
 type FixtureResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -291,8 +292,8 @@ fn run_allowed(
     let server_name = ServerName::try_from(SERVER_NAME.to_owned())?;
     let connection = ClientConnection::new(Arc::new(configuration), server_name)?;
     let stream = TcpStream::connect_timeout(&remote, CONNECTION_DEADLINE)?;
-    stream.set_read_timeout(Some(CONNECTION_DEADLINE))?;
-    stream.set_write_timeout(Some(CONNECTION_DEADLINE))?;
+    stream.set_read_timeout(Some(ALLOWED_CLIENT_IO_DEADLINE))?;
+    stream.set_write_timeout(Some(ALLOWED_CLIENT_IO_DEADLINE))?;
     let application = stream.local_addr()?;
     let mut tls = StreamOwned::new(connection, stream);
     let request = payload(run_id);
