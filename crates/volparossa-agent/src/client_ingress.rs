@@ -6,6 +6,7 @@
 )]
 
 use std::{
+    collections::HashMap,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     os::fd::OwnedFd,
@@ -15,8 +16,11 @@ use std::{
 use rand_core::{OsRng, RngCore as _};
 use subtle::ConstantTimeEq as _;
 use thiserror::Error;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, sleep, timeout_at};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+};
 use volparossa_inspection::{
     InspectionError, InspectionProgress, QuicInitialInspector, TlsClientHelloInspector,
 };
@@ -36,9 +40,9 @@ use volparossa_udp::{
 
 use crate::{
     helper::{
-        AcquiredIngressSocket, ActiveClientIngress, ClientIngressSocketFamily,
-        ClientIngressSocketIdentity, ClientIngressSocketKind, HelperClient, HelperClientError,
-        PreparedClientIngress,
+        AcquiredIngressReplySocket, AcquiredIngressSocket, ActiveClientIngress,
+        ClientIngressSocketFamily, ClientIngressSocketIdentity, ClientIngressSocketKind,
+        HelperClient, HelperClientError, PreparedClientIngress,
     },
     unix_seconds,
 };
@@ -57,6 +61,7 @@ const UDP_HEADER_BYTES: usize = 8;
 const MAX_BROWSER_QUIC_DATAGRAMS_PER_FLOW: u32 = 65_536;
 const MAX_PENDING_BROWSER_QUIC_DATAGRAMS: usize = 128;
 const MAX_PENDING_BROWSER_QUIC_BYTES: usize = 256 * 1024;
+const MAX_RETAINED_INGRESS_REPLY_SOCKETS: usize = 64;
 
 const IPV4_TRANSPARENT_TCP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
     ClientIngressSocketKind::TransparentTcpListener,
@@ -81,6 +86,42 @@ const IPV4_DNS_UDP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::n
 pub(crate) struct ClientIngressRuntime {
     helper: HelperClient,
     active: ActiveClientIngress,
+    reply_sockets: Mutex<ExactReplySocketCache<AcquiredIngressReplySocket>>,
+}
+
+struct ExactReplySocketCache<T> {
+    sockets: HashMap<(SocketAddrV4, SocketAddrV4), T>,
+}
+
+impl<T> ExactReplySocketCache<T> {
+    fn new() -> Self {
+        Self {
+            sockets: HashMap::new(),
+        }
+    }
+
+    fn get(&self, remote: SocketAddrV4, application: SocketAddrV4) -> Option<&T> {
+        self.sockets.get(&(remote, application))
+    }
+
+    fn is_full(&self) -> bool {
+        self.sockets.len() >= MAX_RETAINED_INGRESS_REPLY_SOCKETS
+    }
+
+    fn insert_new(
+        &mut self,
+        remote: SocketAddrV4,
+        application: SocketAddrV4,
+        socket: T,
+    ) -> Option<&T> {
+        if self.is_full() {
+            return None;
+        }
+        match self.sockets.entry((remote, application)) {
+            std::collections::hash_map::Entry::Vacant(entry) => Some(entry.insert(socket)),
+            std::collections::hash_map::Entry::Occupied(_) => None,
+        }
+    }
 }
 
 impl ClientIngressRuntime {
@@ -138,7 +179,11 @@ impl ClientIngressRuntime {
                 .await);
             }
         };
-        Ok(Self { helper, active })
+        Ok(Self {
+            helper,
+            active,
+            reply_sockets: Mutex::new(ExactReplySocketCache::new()),
+        })
     }
 
     /// Duplicate both helper-owned transparent TCP listeners into Tokio readiness owners.
@@ -250,6 +295,13 @@ impl ClientIngressRuntime {
         if payload.len() > MAX_UDP_PAYLOAD_BYTES {
             return Err(ClientIngressUdpError::ReplyPayload);
         }
+        let mut reply_sockets = self.reply_sockets.lock().await;
+        if let Some(reply) = reply_sockets.get(remote, application) {
+            return reply.send(payload).map_err(ClientIngressUdpError::Reply);
+        }
+        if reply_sockets.is_full() {
+            return Err(ClientIngressUdpError::FlowBound);
+        }
         let reply = self
             .helper
             .acquire_ingress_reply_socket(&self.active, remote, application)
@@ -258,6 +310,9 @@ impl ClientIngressRuntime {
         if reply.remote() != remote || reply.application() != application {
             return Err(ClientIngressUdpError::DestinationBinding);
         }
+        let reply = reply_sockets
+            .insert_new(remote, application, reply)
+            .ok_or(ClientIngressUdpError::FlowBound)?;
         reply.send(payload).map_err(ClientIngressUdpError::Reply)
     }
 
@@ -1595,7 +1650,8 @@ mod tests {
     use volparossa_udp::VerifiedSingleRelayPath;
 
     use super::{
-        BrowserQuicIngressGate, BrowserQuicIngressState, ClientIngressUdpError, ObservedTcpIngress,
+        BrowserQuicIngressGate, BrowserQuicIngressState, ClientIngressUdpError,
+        ExactReplySocketCache, MAX_RETAINED_INGRESS_REPLY_SOCKETS, ObservedTcpIngress,
         ObservedUdpIngress, PolicyAuthorizedUdpIngress, authorize_tcp_destination,
         build_ipv4_udp_packet, parse_ipv4_udp_packet,
     };
@@ -1647,6 +1703,27 @@ mod tests {
         assert_eq!(retained_destination, destination);
         assert_eq!(hostname.as_deref(), Some(HOSTNAME));
         assert_eq!(retained_client_hello, expected_client_hello);
+    }
+
+    #[test]
+    fn ingress_reply_socket_is_reused_beyond_helper_issuance_limit() {
+        let remote = SocketAddrV4::new(Ipv4Addr::new(47, 163, 4, 2), 443);
+        let application = SocketAddrV4::new(Ipv4Addr::new(43, 159, 1, 1), 52_006);
+        let mut cache = ExactReplySocketCache::new();
+        let mut acquisitions = 0_u32;
+
+        for _ in 0..=MAX_RETAINED_INGRESS_REPLY_SOCKETS {
+            if cache.get(remote, application).is_none() {
+                acquisitions += 1;
+                cache
+                    .insert_new(remote, application, 7_u8)
+                    .expect("first exact reply socket retained");
+            }
+            assert_eq!(cache.get(remote, application), Some(&7));
+        }
+
+        assert_eq!(acquisitions, 1);
+        assert_eq!(cache.sockets.len(), 1);
     }
 
     #[tokio::test]
