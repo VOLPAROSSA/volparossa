@@ -4,8 +4,8 @@
 //! limits. Every route requires signed exit and relay reservations. TCP and UDP
 //! flow openings reuse the replay-protected protocol and threshold-signed
 //! policy crates. The exit resolves names itself and pins only public Internet
-//! addresses. TLS on TCP/443 additionally requires a visible matching SNI and
-//! rejects ECH. UDP/443 uses a separate typestate boundary that authenticates
+//! addresses. Every hostname-authorized TCP flow additionally requires a visible matching SNI
+//! and rejects ECH. UDP/443 uses a separate typestate boundary that authenticates
 //! bounded QUIC v1 Initial packets and releases no egress-capable flow until a
 //! visible SNI exactly matches the signed destination.
 
@@ -938,9 +938,9 @@ impl ExitService {
 
     /// Run one authorized ordinary-TCP egress stream with bounded buffering.
     ///
-    /// The destination name is resolved only here at the exit. TCP/443 first
-    /// consumes and validates a bounded visible `ClientHello`, forwards those
-    /// exact bytes unchanged, then streams both directions. ECH, missing SNI,
+    /// The destination name is resolved only here at the exit. Every hostname flow first consumes
+    /// and validates a bounded visible `ClientHello`, forwards those exact bytes unchanged, then
+    /// streams both directions. ECH, missing SNI,
     /// private/reserved resolution results and timeout/byte-limit violations
     /// all close the flow.
     ///
@@ -2084,7 +2084,7 @@ where
     flow.ensure_active_at(now_ms)?;
     policy.ensure_active_at(now_ms)?;
 
-    let initial = if flow.port() == 443 && flow.hostname().is_some() {
+    let initial = if flow.hostname().is_some() {
         let hostname = flow.hostname().ok_or(ExitError::ResolutionFailed)?;
         match time::timeout(
             limits.client_hello_timeout,
@@ -2445,6 +2445,7 @@ mod tests {
         sync::Arc,
         time::Duration,
     };
+    use tokio::io::AsyncWriteExt as _;
 
     use volparossa_core::Bandwidth;
     use volparossa_metrics::MetricsRegistry;
@@ -2466,8 +2467,9 @@ mod tests {
         AcceptedExitReservation, ExitError, ExitNativeRouteAuthorizationScope,
         ExitNativeRouteIdentityError, ExitNativeRouteIdentityOwner,
         ExitNativeRouteIdentityProvider, ExitNativeRouteIdentityRequest, ExitService,
-        ExitServiceConfig, PendingQuicUdpFlow, ProbeEvidence, ProbeEvidenceError,
-        ProbeEvidenceVerifier, Udp443InspectionProgress, inspect_tls_client_hello,
+        ExitServiceConfig, InspectionError, PendingQuicUdpFlow, ProbeEvidence, ProbeEvidenceError,
+        ProbeEvidenceVerifier, StreamTransferLimits, TcpEgressLimits, Udp443InspectionProgress,
+        inspect_tls_client_hello,
     };
     use volparossa_wireguard::{
         ClientEndpointLease, EndpointRole, ExitEndpointLease, HelperContextHandle,
@@ -4031,6 +4033,47 @@ mod tests {
             inspect_tls_client_hello(&ech, "allowed.example"),
             Err(ExitError::EncryptedClientHello)
         ));
+    }
+
+    #[tokio::test]
+    async fn hostname_egress_on_nonstandard_port_requires_visible_sni_before_dns() {
+        let rule = DestinationRule::exact_domain(
+            "allowed.invalid",
+            [ProtocolPort::new(TransportProtocol::Tcp, 18_443).unwrap()],
+        )
+        .unwrap();
+        let metrics = MetricsRegistry::new();
+        let (mut service, admitted) =
+            admit_route(2, &[Transport::TcpMptcp], vec![rule], metrics.clone());
+        let relays = admitted
+            .signed_relays
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let route = service
+            .bind_tcp_route(&admitted.accepted, &relays, NOW_MS)
+            .unwrap();
+        let open = admitted.sign_open_tcp(service.policy_hash(), "allowed.invalid", 18_443);
+        let flow = service.authorize_tcp_open(&route, &open, NOW_MS).unwrap();
+        let (mut application, protected) = tokio::io::duplex(64);
+        application.write_all(&[23, 3, 3, 0, 1, 0]).await.unwrap();
+        let transfer =
+            StreamTransferLimits::new(1_024, 4_096, 4_096, Duration::from_secs(1)).unwrap();
+        let limits = TcpEgressLimits::new(
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+            transfer,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            service
+                .run_tcp_egress(&flow, protected, NOW_MS, limits)
+                .await,
+            Err(ExitError::Inspection(InspectionError::InvalidTlsRecord(_)))
+        ));
+        assert_eq!(metrics.snapshot().policy_denials, 1);
     }
 
     #[test]
