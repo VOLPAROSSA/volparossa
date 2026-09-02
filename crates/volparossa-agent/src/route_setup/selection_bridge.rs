@@ -1242,10 +1242,8 @@ impl ClientNativeRelayReady {
         }
         leases.sort_by_key(|lease| lease.path_id);
         let route_context_id = route_context_id.ok_or(ClientNativeProbeError::HelperCorrelation)?;
-        let expires_at_unix = expires_at_ms / 1_000;
-        if expires_at_unix <= crate::unix_seconds() {
-            return Err(native_preselection::NativePreselectionError::InvalidDeadline.into());
-        }
+        let (setup_expires_at_unix, hard_expires_at_unix) =
+            native_helper_prepare_deadlines(expires_at_ms, crate::unix_seconds())?;
         let path_count =
             u32::try_from(leases.len()).map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
         Ok(PrepareLeaseBatch {
@@ -1254,8 +1252,8 @@ impl ClientNativeRelayReady {
             mptcp_accepted_addrs: path_count,
             mptcp_subflows: path_count,
             leases,
-            setup_expires_at_unix: expires_at_unix,
-            hard_expires_at_unix: expires_at_unix,
+            setup_expires_at_unix,
+            hard_expires_at_unix,
             traversal_hints: Vec::new(),
         })
     }
@@ -1341,6 +1339,22 @@ impl ClientNativeRelayReady {
             hard_expires_at_unix: request.hard_expires_at_unix,
         })
     }
+}
+
+fn native_helper_prepare_deadlines(
+    expires_at_ms: u64,
+    now_unix: u64,
+) -> Result<(u64, u64), ClientNativeProbeError> {
+    let hard_expires_at_unix = expires_at_ms / 1_000;
+    let setup_expires_at_unix = hard_expires_at_unix.min(
+        now_unix
+            .checked_add(MAXIMUM_SETUP_DURATION.as_secs())
+            .ok_or(native_preselection::NativePreselectionError::InvalidDeadline)?,
+    );
+    if setup_expires_at_unix <= now_unix {
+        return Err(native_preselection::NativePreselectionError::InvalidDeadline.into());
+    }
+    Ok((setup_expires_at_unix, hard_expires_at_unix))
 }
 
 impl PreparedClientNativeProbe {
@@ -4805,6 +4819,17 @@ mod tests {
     const POLICY_BYTES: [u8; 32] = [77; 32];
     const EVIDENCE_BATCH_BYTES: [u8; 16] = [33; 16];
     const ADVERTISEMENT_MEASURED_AT_MS: u64 = NOW_MS - MAXIMUM_EVIDENCE_AGE_MS;
+
+    #[test]
+    fn native_client_helper_setup_is_shorter_than_route_custody() {
+        let now_unix = NOW_MS / 1_000;
+        let (setup, hard) = native_helper_prepare_deadlines(NOW_MS + 300_000, now_unix)
+            .expect("five-minute native route custody");
+        assert_eq!(setup, now_unix + MAXIMUM_SETUP_DURATION.as_secs());
+        assert_eq!(hard, now_unix + 300);
+        assert!(setup < hard);
+        assert!(native_helper_prepare_deadlines(NOW_MS, now_unix).is_err());
+    }
 
     #[allow(
         clippy::too_many_arguments,
