@@ -2518,6 +2518,21 @@ impl ProspectivePeerIdentity {
         }
     }
 
+    fn from_forwarded(capability: &ForwardedExitCapability, expires_at_ms: u64) -> Self {
+        Self {
+            wire_node_id: capability.exit_node_id,
+            peer_id: capability.exit_peer_id,
+            public_key: capability.exit_public_key,
+            advertisement_sequence: capability.exit_advertisement_sequence,
+            advertisement_expires_at_ms: capability.exit_advertisement_expires_at_ms,
+            advertisement_payload_hash: capability.exit_advertisement_payload_hash,
+            policy_version: capability.policy_version,
+            policy_hash: capability.policy_hash,
+            policy_expires_at_ms: capability.policy_expires_at_ms,
+            expires_at_ms,
+        }
+    }
+
     fn direct_matches(&self, capability: &DirectRelayCapability) -> bool {
         self == &Self::from_direct(capability)
     }
@@ -2618,7 +2633,13 @@ impl ProspectiveForwardedExit {
         control: &DirectRelayCapability,
         exit: &ForwardedExitCapability,
     ) -> Result<Self, RouteSetupError> {
-        if !forwarded_control_lineage_matches_current(control, exit, exit.expires_at_ms)
+        let canonical_exit_expiry_ms = exit
+            .exit_advertisement_expires_at_ms
+            .min(exit.policy_expires_at_ms)
+            .min(control.expires_at_ms);
+        if exit.expires_at_ms == 0
+            || exit.expires_at_ms > canonical_exit_expiry_ms
+            || !forwarded_control_lineage_matches_current(control, exit, exit.expires_at_ms)
             || control.node_id == exit.exit_node_id
             || control.peer_id == exit.exit_peer_id
         {
@@ -2626,18 +2647,7 @@ impl ProspectiveForwardedExit {
         }
         Ok(Self {
             control: ProspectiveDirectRelay::from_capability(control),
-            exit: ProspectivePeerIdentity {
-                wire_node_id: exit.exit_node_id,
-                peer_id: exit.exit_peer_id,
-                public_key: exit.exit_public_key,
-                advertisement_sequence: exit.exit_advertisement_sequence,
-                advertisement_expires_at_ms: exit.exit_advertisement_expires_at_ms,
-                advertisement_payload_hash: exit.exit_advertisement_payload_hash,
-                policy_version: exit.policy_version,
-                policy_hash: exit.policy_hash,
-                policy_expires_at_ms: exit.policy_expires_at_ms,
-                expires_at_ms: exit.expires_at_ms,
-            },
+            exit: ProspectivePeerIdentity::from_forwarded(exit, canonical_exit_expiry_ms),
         })
     }
 }
@@ -3047,19 +3057,32 @@ impl RouteSetupAuthorities {
         let forwarded = ProspectiveForwardedExit::from_capabilities(&self.control, &self.exit)
             .map_err(|_| RouteSetupError::Capability)?;
         let required_expiry = request.parameters.expires_at_ms;
+        let setup_required_expiry = request
+            .parameters
+            .setup_expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(RouteSetupError::Capability)?;
+        let selected_exit_expiry = self
+            .exit
+            .exit_advertisement_expires_at_ms
+            .min(self.exit.policy_expires_at_ms)
+            .min(request.control.identity.expires_at_ms);
+        let selected_exit =
+            ProspectivePeerIdentity::from_forwarded(&self.exit, selected_exit_expiry);
         if self.datapath_relays.len() != request.paths.len()
             || !request
                 .control
                 .identity
                 .direct_lineage_matches(&self.control, required_expiry)
-            || forwarded.exit != request.exit
+            || selected_exit != request.exit
+            || forwarded.exit.expires_at_ms < request.exit.expires_at_ms
             || self.control.policy_hash != request.parameters.policy_hash
             || self.exit.policy_hash != request.parameters.policy_hash
         {
             return Err(RouteSetupError::Capability);
         }
         if self.control.expires_at_ms < required_expiry
-            || self.exit.expires_at_ms < required_expiry
+            || self.exit.expires_at_ms < setup_required_expiry
             || self.control.advertisement_expires_at_ms < required_expiry
             || self.exit.exit_advertisement_expires_at_ms < required_expiry
             || self.control.policy_expires_at_ms < required_expiry
@@ -12445,6 +12468,29 @@ mod tests {
         authorities.datapath_relays[0] = authorities.control.clone();
         assert_eq!(
             authorities.validate(&fixture.transaction.transaction.request),
+            Err(RouteSetupError::Capability)
+        );
+    }
+
+    #[tokio::test]
+    async fn request_bounded_forwarded_authority_only_needs_to_cover_route_setup() {
+        let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let request = &fixture.transaction.transaction.request;
+        let mut authorities = fixture.transaction.transaction.authorities.clone();
+        let setup_expiry_ms = request
+            .parameters
+            .setup_expires_at_unix
+            .checked_mul(1_000)
+            .expect("bounded setup expiry");
+        assert!(request.parameters.expires_at_ms > setup_expiry_ms);
+
+        authorities.exit.expires_at_ms = setup_expiry_ms;
+        assert_eq!(authorities.validate(request), Ok(()));
+        assert!(request.exit.expires_at_ms > authorities.exit.expires_at_ms);
+
+        authorities.exit.expires_at_ms = setup_expiry_ms.saturating_sub(1);
+        assert_eq!(
+            authorities.validate(request),
             Err(RouteSetupError::Capability)
         );
     }

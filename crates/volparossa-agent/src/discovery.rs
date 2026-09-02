@@ -1616,6 +1616,9 @@ pub struct DiscoveryRuntime {
     exit_provider_peers: HashMap<Libp2pPeerId, u64>,
     automatic_exit_fetches: HashMap<ForwardedExitKey, u64>,
     automatic_exit_fetch_attempts: Vec<AutomaticExitFetchAttempt>,
+    // Bounded, non-authoritative control scheduling hint. Every fetch still revalidates the current
+    // direct Relay capability, provider observation, signed Exit advertisement and policy.
+    preferred_exit_controls: HashMap<Libp2pPeerId, Libp2pPeerId>,
     direct_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
     local_relay_snapshot: Option<DirectRelayCapability>,
     forwarded_exits: HashMap<ForwardedExitKey, ForwardedExitCapability>,
@@ -1760,6 +1763,7 @@ impl DiscoveryRuntime {
             exit_provider_peers: HashMap::new(),
             automatic_exit_fetches: HashMap::new(),
             automatic_exit_fetch_attempts: Vec::new(),
+            preferred_exit_controls: HashMap::new(),
             direct_relays: HashMap::new(),
             local_relay_snapshot: None,
             forwarded_exits: HashMap::new(),
@@ -3475,6 +3479,12 @@ impl DiscoveryRuntime {
             .retain(|_, record| record.expires_at_ms > now_ms);
         self.exit_provider_peers
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.preferred_exit_controls
+            .retain(|exit_peer, control_peer| {
+                exit_peer != control_peer
+                    && self.exit_provider_peers.contains_key(exit_peer)
+                    && self.direct_relays.contains_key(control_peer)
+            });
         self.automatic_exit_fetches
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
         if self.forwarded_exit_fail_closed_until_ms <= now_ms {
@@ -4691,6 +4701,28 @@ impl DiscoveryRuntime {
         exit_peer: Libp2pPeerId,
         now_ms: u64,
     ) -> Option<DirectRelayCapability> {
+        if let Some(preferred_peer) = self.preferred_exit_controls.get(&exit_peer) {
+            let preferred_key = ForwardedExitKey {
+                control_relay_peer: *preferred_peer,
+                exit_peer,
+            };
+            if self
+                .automatic_exit_fetches
+                .get(&preferred_key)
+                .is_none_or(|expiry| *expiry <= now_ms)
+                && !self
+                    .automatic_exit_fetch_attempts
+                    .iter()
+                    .any(|pending| pending.key == preferred_key)
+            {
+                if let Some(control) = controls.iter().find(|control| {
+                    control.peer_id == *preferred_peer && control.peer_id != exit_peer
+                }) {
+                    return Some(control.clone());
+                }
+            }
+        }
+
         controls
             .iter()
             .find(|control| {
@@ -11670,6 +11702,12 @@ impl DiscoveryRuntime {
                         expires_at_ms: capability_expiry_ms,
                     },
                 );
+                if self.preferred_exit_controls.contains_key(&exit_peer)
+                    || self.preferred_exit_controls.len() < MAX_EXIT_PROVIDER_PEERS
+                {
+                    self.preferred_exit_controls
+                        .insert(exit_peer, control_relay_peer);
+                }
                 let _ = self
                     .mark_forwarded_exit_target(exit_peer, accepted.advertisement_expires_at_ms);
             }
@@ -11721,6 +11759,11 @@ impl DiscoveryRuntime {
                     || current.policy_hash != accepted.policy_hash
                     || current.policy_expires_at_ms != accepted.policy_expires_at_ms
             });
+        self.preferred_exit_controls.remove(&peer);
+        if control_authority_changed {
+            self.preferred_exit_controls
+                .retain(|_, control_peer| *control_peer != peer);
+        }
         let mut keys = self
             .forwarded_exits
             .iter()
@@ -18012,6 +18055,87 @@ mod tests {
 
         assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
         assert!(fixture.runtime.pending_client_forwards.is_empty());
+    }
+
+    #[tokio::test]
+    async fn automatic_exit_fetch_prefers_the_last_successful_control_lineage() {
+        let mut fixture = fixture(RolesConfig::default());
+        let now_ms = unix_millis();
+        let deadline = now_ms.saturating_add(25_000);
+        let exit = Identity::generate();
+        let exit_peer = exit.peer_id().to_owned();
+        let mut controls = (1_u64..=3)
+            .map(|sequence| {
+                direct_capability(
+                    &Identity::generate(),
+                    &fixture.policy,
+                    sequence,
+                    now_ms.saturating_add(60_000),
+                )
+            })
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        for control in &controls {
+            fixture
+                .runtime
+                .direct_relays
+                .insert(control.peer_id, control.clone());
+        }
+        let preferred = controls[2].clone();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, deadline);
+        assert!(
+            fixture
+                .runtime
+                .mark_forwarded_exit_target(exit_peer, deadline)
+        );
+        let advertisement = service_advertisement(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            1,
+            [164; 32],
+            now_ms,
+            &fixture.directory,
+        );
+        assert!(
+            fixture
+                .runtime
+                .ingest_advertisement(
+                    exit_peer,
+                    advertisement,
+                    forwarded_provenance(&preferred, &exit, deadline),
+                    &fixture.state,
+                )
+                .await
+                .is_some()
+        );
+        assert_eq!(
+            fixture.runtime.preferred_exit_controls.get(&exit_peer),
+            Some(&preferred.peer_id)
+        );
+
+        // Simulate expiry of only the request-bounded local forwarding capability. The hint is
+        // non-authoritative: scheduling still creates a fresh bounded fetch through a current
+        // direct Relay capability.
+        fixture.runtime.forwarded_exits.clear();
+        fixture.runtime.automatic_exit_fetches.clear();
+        fixture.runtime.schedule_exit_advertisement_fetches();
+
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert_eq!(
+            fixture.runtime.automatic_exit_fetch_attempts[0].key,
+            ForwardedExitKey {
+                control_relay_peer: preferred.peer_id,
+                exit_peer,
+            }
+        );
     }
 
     #[tokio::test]

@@ -2267,6 +2267,16 @@ fn fresh_forwarded_preselection_evidence(
 ) -> Result<FreshPeerEvidence, SelectionBridgeError> {
     let advertisement = candidate.advertisement().advertisement();
     let capability = candidate.capability();
+    let canonical_capability_expires_at_ms = capability
+        .exit_advertisement_expires_at_ms
+        .min(capability.policy_expires_at_ms)
+        .min(control.capability_expires_at_ms);
+    if capability.expires_at_ms > canonical_capability_expires_at_ms {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+    // The control exchange and selection evidence remain bounded by the short-lived local fetch
+    // authority. Once that evidence has been verified, the prospective route identity may retain
+    // only the independently signed Exit/control/policy lifetime.
     let valid_until_ms = fresh_valid_until(
         projection,
         attempt_deadline_ms,
@@ -2292,7 +2302,7 @@ fn fresh_forwarded_preselection_evidence(
         capability.exit_advertisement_sequence,
         capability.exit_advertisement_expires_at_ms,
         candidate.advertisement().advertisement_payload_hash(),
-        capability.expires_at_ms,
+        canonical_capability_expires_at_ms,
         ServiceRole::Exit,
         transport,
         policy,
@@ -4567,6 +4577,8 @@ fn verify_forwarded_exit_selection_peer(
         || prospective.control.identity.policy_version != scope.policy.version
         || prospective.control.identity.policy_hash != *scope.policy.hash.as_bytes()
         || prospective.control.identity.policy_expires_at_ms != scope.policy.expires_at_ms
+        || input.capability.expires_at_ms <= scope.now_ms
+        || input.fresh.valid_until_ms > input.capability.expires_at_ms
         || prospective.exit.expires_at_ms <= scope.now_ms
         || input.fresh.capability_expires_at_ms != prospective.exit.expires_at_ms
         || prospective.exit.expires_at_ms
@@ -9097,12 +9109,24 @@ mod tests {
     #[test]
     fn forwarded_exit_actor_identity_sequence_and_policy_substitution_fail_closed() {
         let mut request_bounded_exit = exit_input();
+        let canonical_expiry = request_bounded_exit
+            .capability
+            .exit_advertisement_expires_at_ms
+            .min(request_bounded_exit.capability.policy_expires_at_ms)
+            .min(request_bounded_exit.control.capability.expires_at_ms);
         request_bounded_exit.capability.expires_at_ms = NOW_MS + 30_000;
-        request_bounded_exit.fresh.capability_expires_at_ms = NOW_MS + 30_000;
         request_bounded_exit.fresh.valid_until_ms = NOW_MS + 30_000;
-        assert!(
-            select_exit_first(scope(), &[request_bounded_exit], &mut OsRng).is_ok(),
+        let selected = select_exit_first(scope(), &[request_bounded_exit], &mut OsRng)
+            .expect(
             "a forwarded exit may be bounded below advertisement/policy expiry by its fetch authority"
+        );
+        assert_eq!(
+            selected.forwarded_exit.authority.exit.expires_at_ms,
+            canonical_expiry
+        );
+        assert!(
+            selected.forwarded_exit.authority.exit.expires_at_ms
+                > selected.exit_evidence_valid_until_ms
         );
 
         let mut wrong_exit_sequence = exit_input();
