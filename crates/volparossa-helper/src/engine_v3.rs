@@ -3112,6 +3112,11 @@ impl HelperEngine {
             ));
         }
 
+        // Native-probe descriptors are acquired while this context still owns its Activated
+        // generation. A successful Commit rotates that generation, so its generation-lifetime
+        // replay bindings must rotate out with it; otherwise a later exact Destroy cannot purge
+        // them and RouteContextsOnly cleanup remains falsely incomplete forever.
+        purge_transport_acquire_generation(&mut state, context_id, operation.generation);
         let context = state
             .contexts
             .get_mut(&context_id)
@@ -7073,6 +7078,79 @@ mod tests {
         assert_eq!(probes[1].0.request_id, [5; 16]);
         assert_ne!(probes[0].0.request_id, probes[1].0.request_id);
         assert_eq!(probes[0].1.commit, probes[1].1.commit);
+    }
+
+    #[tokio::test]
+    async fn activated_native_probe_replay_binding_rotates_out_at_commit() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = activate_client_context(&engine).await;
+
+        let acquired = engine
+            .execute_with_descriptor(request(
+                70,
+                helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                    descriptor_kind:
+                        volparossa_routing::TransportSocketKind::NativeProbeUdpConnected as i32,
+                    expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                    expected_remote: Some(transport_address([10, 77, 0, 3], 443)),
+                }),
+            ))
+            .await;
+        assert_eq!(acquired.response.result, HelperResult::Ok as i32);
+        assert!(acquired.descriptor.is_some());
+        drop(acquired);
+        assert_eq!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .len(),
+            1
+        );
+
+        backend.proof_increment.store(1, Ordering::Relaxed);
+        let committed = engine.execute(commit_request_for(&prepared, 71)).await;
+        assert_eq!(committed.result, HelperResult::Ok as i32);
+        assert!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .is_empty(),
+            "Commit must retire replay authority from the prior Activated generation"
+        );
+
+        let destroyed = engine
+            .execute(request(
+                72,
+                helper_request::Operation::DestroyContext(volparossa_routing::DestroyContext {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                }),
+            ))
+            .await;
+        assert_eq!(destroyed.result, HelperResult::Ok as i32);
+        let cleanup = engine
+            .execute(request(
+                73,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::RouteContextsOnly as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert_eq!(cleanup.diagnostic_code, "CLEANUP_COMPLETE");
     }
 
     #[tokio::test]
