@@ -838,7 +838,7 @@ impl ClientRouteControl {
             self.clear_agent_mpquic_paths().await;
         }
 
-        let result = begin_client_route(config, discovery).await;
+        let result = Box::pin(begin_client_route(config, discovery)).await;
         let result = match result {
             Ok((ready, required_native_paths)) => {
                 match Box::pin(complete_required_client_native_paths(
@@ -2109,8 +2109,7 @@ async fn complete_required_client_native_paths(
         let preselection = Box::pin(ready.retain_and_dispatch_next_permit(discovery))
             .await
             .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
-        ready = preselection
-            .dispatch_relay_ready(discovery)
+        ready = Box::pin(preselection.dispatch_relay_ready(discovery))
             .await
             .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
     }
@@ -2213,8 +2212,7 @@ async fn begin_client_route(
                 );
                 ClientRouteConnectError::NativePermitUnavailable
             })?;
-    let ready = preselection
-        .dispatch_relay_ready(discovery)
+    let ready = Box::pin(preselection.dispatch_relay_ready(discovery))
         .await
         .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
     let required_native_paths = ready.candidate_path_count();
