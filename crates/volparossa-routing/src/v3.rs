@@ -632,7 +632,8 @@ pub struct AddMptcpEndpoint {
     /// Backup-only path.
     #[prost(bool, tag = "5")]
     pub backup: bool,
-    /// TCP listener port for an Exit address-only signal; zero for every other endpoint.
+    /// Optional alternate TCP listener port for an Exit signal; zero uses the initial port and is
+    /// required for every other endpoint.
     #[prost(uint32, tag = "6")]
     pub listener_port: u32,
 }

@@ -3390,7 +3390,7 @@ fn validated_mptcp_endpoint_mode(
     let requires_listener_port =
         context_role == ContextRole::Exit && mode == MptcpEndpointMode::Signal && !backup;
     let listener_port_is_valid = if requires_listener_port {
-        u16::try_from(listener_port).is_ok_and(|port| port != 0)
+        u16::try_from(listener_port).is_ok()
     } else {
         listener_port == 0
     };
@@ -6496,7 +6496,7 @@ mod tests {
                 false,
                 0,
             ),
-            Err(BackendError::Invalid)
+            Ok(InternalMptcpMode::Signal)
         );
         for (mode, backup) in [
             (MptcpEndpointMode::Signal, true),

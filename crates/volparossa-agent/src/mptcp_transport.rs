@@ -339,7 +339,9 @@ impl ExitMptcpTransport {
                 path_id,
                 mode: MptcpEndpointMode::Signal as i32,
                 backup: false,
-                listener_port: u32::from(signal.port()),
+                // The additional address uses the initial listener port. Omitting the optional
+                // ADD_ADDR port interoperates with the Debian 13 in-kernel path manager.
+                listener_port: 0,
             };
             if let Err(error) = helper.add_mptcp_endpoint(request).await {
                 rollback_paths(
@@ -397,7 +399,7 @@ pub fn adopt_exit_listener(
         return Err(MptcpTransportError::InvalidMetadata);
     }
     let local = socket_address(metadata.local.as_ref())?;
-    MptcpListener::from_bound_owned_fd(descriptor, local).map_err(Into::into)
+    MptcpListener::from_wildcard_owned_fd(descriptor, local).map_err(Into::into)
 }
 
 fn adopt_client_stream(

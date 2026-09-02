@@ -3014,12 +3014,10 @@ fn mptcp_endpoint_flags(
     let requires_listener_port =
         role == RoutingContextRole::Exit && mode == InternalMptcpMode::Signal && !backup;
     let listener_port = if requires_listener_port {
-        Some(
-            u16::try_from(listener_port)
-                .ok()
-                .filter(|port| *port != 0)
-                .ok_or(InternalWorkerResult::Invalid)?,
-        )
+        match u16::try_from(listener_port).map_err(|_| InternalWorkerResult::Invalid)? {
+            0 => None,
+            port => Some(port),
+        }
     } else if listener_port == 0 {
         None
     } else {
@@ -14372,7 +14370,7 @@ mod tests {
                 false,
                 0,
             ),
-            Err(InternalWorkerResult::Invalid)
+            Ok((EndpointFlags::SIGNAL, None))
         );
         for (mode, backup) in [
             (InternalMptcpMode::Signal, true),

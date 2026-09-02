@@ -1445,6 +1445,7 @@ fn create_connected_mptcp(
 }
 
 fn create_mptcp_listener(local: SocketAddr) -> Result<OwnedFd, WorkerTransportError> {
+    let bound = mptcp_listener_address(local)?;
     let socket = Socket::new(
         Domain::for_address(local),
         Type::STREAM.nonblocking().cloexec(),
@@ -1452,7 +1453,7 @@ fn create_mptcp_listener(local: SocketAddr) -> Result<OwnedFd, WorkerTransportEr
     )?;
     configure_exact_address_family(&socket, local)?;
     socket.set_reuse_address(true)?;
-    socket.bind(&SockAddr::from(local))?;
+    socket.bind(&SockAddr::from(bound))?;
     socket.listen(MPTCP_LISTEN_BACKLOG)?;
     validate_mptcp_listener(&socket, local)?;
     Ok(socket.into())
@@ -1524,11 +1525,29 @@ fn validate_connected_mptcp(
 }
 
 fn validate_mptcp_listener(socket: &Socket, local: SocketAddr) -> Result<(), WorkerTransportError> {
-    validate_common(socket, Type::STREAM, Protocol::MPTCP, local, true)?;
+    validate_common(
+        socket,
+        Type::STREAM,
+        Protocol::MPTCP,
+        mptcp_listener_address(local)?,
+        true,
+    )?;
     if peer_is_connected(socket)? {
         return Err(WorkerTransportError::Invalid);
     }
     Ok(())
+}
+
+fn mptcp_listener_address(
+    authorised_local: SocketAddr,
+) -> Result<SocketAddr, WorkerTransportError> {
+    if authorised_local.ip().is_unspecified() || authorised_local.port() == 0 {
+        return Err(WorkerTransportError::Invalid);
+    }
+    Ok(match authorised_local {
+        SocketAddr::V4(address) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, address.port())),
+        SocketAddr::V6(address) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, address.port())),
+    })
 }
 
 fn validate_bound_udp(socket: &Socket, local: SocketAddr) -> Result<(), WorkerTransportError> {
@@ -2919,6 +2938,13 @@ mod tests {
             let exit_socket = Socket::from(exit_descriptor);
             validate_mptcp_listener(&exit_socket, exit_address)
                 .expect("returned Exit descriptor is a genuine MPTCP listener");
+            assert_eq!(
+                exit_socket
+                    .local_addr()
+                    .expect("Exit listener local")
+                    .as_socket(),
+                Some(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 39_123)))
+            );
 
             let mut client_request = acquire_request_for_local(
                 InternalTransportSocketKind::MptcpConnected,
