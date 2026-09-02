@@ -4590,10 +4590,7 @@ impl DiscoveryRuntime {
         for (exit_peer, provider_expiry_ms) in exits {
             if self.automatic_exit_fetch_attempts.len() >= self.candidate_limit.max(1)
                 || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
-                || self
-                    .forwarded_exits
-                    .keys()
-                    .any(|key| key.exit_peer == exit_peer)
+                || self.has_current_forwarded_exit(exit_peer, now_ms.saturating_add(1_000))
                 || self
                     .automatic_exit_fetch_attempts
                     .iter()
@@ -4643,6 +4640,35 @@ impl DiscoveryRuntime {
                     state: AutomaticExitFetchAttemptState::InFlight(receiver),
                 });
         }
+    }
+
+    /// A retained affine forwarding capability may outlive the exact advertisement snapshot that
+    /// created it. It remains valid for already-authorized operations, but it must not suppress a
+    /// refresh needed by a new preselection snapshot.
+    fn has_current_forwarded_exit(&self, exit_peer: Libp2pPeerId, required_until_ms: u64) -> bool {
+        self.forwarded_exits.iter().any(|(key, capability)| {
+            key.exit_peer == exit_peer
+                && self
+                    .direct_relays
+                    .get(&key.control_relay_peer)
+                    .is_some_and(|control| {
+                        forwarded_exit_capability_matches(
+                            capability,
+                            control,
+                            control.node_id,
+                            control.peer_id,
+                            control.public_key,
+                            capability.exit_node_id,
+                            exit_peer,
+                            required_until_ms,
+                        ) && capability.control_relay_advertisement_sequence
+                            == control.advertisement_sequence
+                            && capability.control_relay_advertisement_expires_at_ms
+                                == control.advertisement_expires_at_ms
+                            && capability.control_relay_advertisement_payload_hash
+                                == control.advertisement_payload_hash
+                    })
+        })
     }
 
     fn next_untried_exit_control(
@@ -17509,6 +17535,150 @@ mod tests {
 
         assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
         assert!(fixture.runtime.pending_client_forwards.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end regression covers stale lineage, refetch and selectable recovery"
+    )]
+    async fn refreshed_control_lineage_refetches_exit_and_restores_preselection() {
+        let mut fixture = fixture(RolesConfig::default());
+        let initial_ms = unix_millis();
+        let control_identity = Identity::generate();
+        let exit_identity = Identity::generate();
+        let exit_peer = exit_identity.peer_id().to_owned();
+        let original_control = install_valid_snapshot_route_for(
+            &mut fixture,
+            &control_identity,
+            &exit_identity,
+            initial_ms,
+        )
+        .await;
+        let other_relay = Identity::generate();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &other_relay,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                1,
+                [162; 32],
+                initial_ms,
+            )
+            .await
+            .is_some()
+        );
+
+        let refresh_ms = unix_millis();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &control_identity,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                2,
+                [163; 32],
+                refresh_ms,
+            )
+            .await
+            .is_some()
+        );
+        let refreshed_control = fixture
+            .runtime
+            .direct_relays
+            .get(control_identity.peer_id())
+            .expect("refreshed direct control")
+            .clone();
+        assert_ne!(
+            original_control.advertisement_payload_hash,
+            refreshed_control.advertisement_payload_hash
+        );
+        assert!(fixture.runtime.forwarded_exits.values().any(|capability| {
+            capability.control_relay_advertisement_payload_hash
+                == original_control.advertisement_payload_hash
+        }));
+        let stale_snapshot = route_snapshot_at(&mut fixture, 10, refresh_ms)
+            .await
+            .expect("stale lineage is filtered from a route snapshot");
+        assert!(stale_snapshot.forwarded_exits().is_empty());
+
+        fixture.runtime.exit_provider_peers.insert(
+            exit_peer,
+            refresh_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS),
+        );
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        let (request_id, control_peer, forward_id) = {
+            let (request_id, pending) = fixture
+                .runtime
+                .pending_client_forwards
+                .iter()
+                .next()
+                .expect("stale lineage starts a replacement fetch");
+            (
+                *request_id,
+                pending.key.control_relay_peer,
+                pending.key.forward_id,
+            )
+        };
+        let exit_public_key = exit_identity
+            .ed25519_public_key_bytes()
+            .expect("exit public key");
+        let advertisement = service_advertisement(
+            &exit_identity,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            2,
+            [164; 32],
+            refresh_ms,
+            &fixture.directory,
+        );
+        let response = ExitForwardResponse::granted(
+            forward_id.to_vec(),
+            ExitForwardOperation::FetchExitAdvertisement,
+            node_id_from_public_key(&exit_public_key).to_vec(),
+            exit_peer.to_bytes(),
+            vec![advertisement.into_signed_envelope()],
+        )
+        .expect("replacement forwarded advertisement");
+        assert_eq!(
+            fixture
+                .runtime
+                .complete_client_forward(request_id, control_peer, &response, &fixture.state)
+                .await,
+            OutboundEventOutcome::Completed
+        );
+
+        let recovered_at_ms = unix_millis();
+        let recovered = route_snapshot_at(&mut fixture, 10, recovered_at_ms)
+            .await
+            .expect("recovered route snapshot");
+        assert_eq!(recovered.forwarded_exits().len(), 1);
+        assert!(
+            narrow_route_candidate_snapshot(
+                recovered,
+                PreselectionSamplingScope::new(
+                    Transport::UdpSinglePath,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth::new(10, 10).expect("minimum capacity"),
+                    1,
+                    1,
+                ),
+            )
+            .is_ok(),
+            "a current forwarded Exit must restore a selectable preselection snapshot"
+        );
     }
 
     #[tokio::test]
