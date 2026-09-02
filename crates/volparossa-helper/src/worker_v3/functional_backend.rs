@@ -116,7 +116,7 @@ const STAGE_ACQUIRE_INGRESS: u8 = 11;
 const STAGE_ACTIVATE_INGRESS: u8 = 12;
 const STAGE_DESTROY_INGRESS: u8 = 13;
 const STAGE_ACQUIRE_INGRESS_REPLY: u8 = 14;
-const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 5;
+const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 1;
 const NATIVE_PROBE_AUTHORIZED_RATE_MBPS: u64 = 1;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);

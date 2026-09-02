@@ -138,6 +138,7 @@ const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 const LIVE_FDSTORE_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const PROBE_COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const TERMINATION_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_MAX_WORKERS: usize = 64;
 const DEFAULT_MAX_CACHE_ENTRIES: usize = 1_024;
@@ -2170,13 +2171,6 @@ enum WorkerProbeOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RelayForwardingGrowth {
-    Grew,
-    NoGrowth,
-    Terminate,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerDestroyOutcome {
     Destroyed,
     Invalid,
@@ -2546,23 +2540,34 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             let Some(baseline) = ownership.activation_baseline else {
                 return WorkerProbeOutcome::Failed(InternalWorkerResult::Invalid);
             };
-            let proof = self.kernel.probe_wireguard(
-                &ownership.resource,
-                prepared.public_key,
-                prepared.listen_port,
-                peer,
-                deadline,
-            );
-            let Ok(proof) = proof else {
-                return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+            let proof = loop {
+                if deadline.ensure_remaining().is_err() {
+                    return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+                }
+                let proof = self.kernel.probe_wireguard(
+                    &ownership.resource,
+                    prepared.public_key,
+                    prepared.listen_port,
+                    peer,
+                    deadline,
+                );
+                let Ok(proof) = proof else {
+                    return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+                };
+                if proof.latest_handshake_nanoseconds >= 1_000_000_000 {
+                    return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+                }
+                if proof.latest_handshake_unix >= lease.not_before_unix
+                    && proof.received_bytes > baseline.received_bytes
+                    && proof.transmitted_bytes > baseline.transmitted_bytes
+                {
+                    break proof;
+                }
+                let Ok(remaining) = deadline.remaining() else {
+                    return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+                };
+                thread::sleep(remaining.min(PROBE_COMMIT_POLL_INTERVAL));
             };
-            if proof.latest_handshake_unix < lease.not_before_unix
-                || proof.latest_handshake_nanoseconds >= 1_000_000_000
-                || proof.received_bytes <= baseline.received_bytes
-                || proof.transmitted_bytes <= baseline.transmitted_bytes
-            {
-                return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
-            }
             probed.push(ProbedLease {
                 path_id: lease.path_id,
                 role: lease.role,
@@ -2571,12 +2576,8 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 transmitted_bytes: proof.transmitted_bytes,
             });
         }
-        match self.prove_relay_forwarding_growth(deadline) {
-            RelayForwardingGrowth::Grew => {}
-            RelayForwardingGrowth::NoGrowth => {
-                return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
-            }
-            RelayForwardingGrowth::Terminate => return WorkerProbeOutcome::Terminate,
+        if !self.prove_relay_forwarding_fence_active(deadline) {
+            return WorkerProbeOutcome::Terminate;
         }
         let ownerships = match self.lease.take() {
             Some(WorkerLeaseLifecycle::Activated(ownerships)) => ownerships,
@@ -2781,21 +2782,17 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         }
     }
 
-    fn prove_relay_forwarding_growth(&self, deadline: HardDeadline) -> RelayForwardingGrowth {
+    fn prove_relay_forwarding_fence_active(&self, deadline: HardDeadline) -> bool {
         match self.relay_fence.as_ref() {
             Some(WorkerRelayFence::NonRelay) if !matches!(self.role, RoutingContextRole::Relay) => {
-                RelayForwardingGrowth::Grew
+                true
             }
             Some(WorkerRelayFence::Active {
                 authority,
-                activation_baseline: Some(baseline),
-            }) => {
-                let proof = relay_fence::verify_active_relay_fence(authority, deadline)
-                    .map(|current| current.both_allowed_directions_grew_since(baseline));
-                classify_relay_forwarding_growth(&proof)
-            }
+                activation_baseline: Some(_),
+            }) => relay_fence::verify_active_relay_fence(authority, deadline).is_ok(),
             #[cfg(test)]
-            Some(WorkerRelayFence::Fixture) => RelayForwardingGrowth::Grew,
+            Some(WorkerRelayFence::Fixture) => true,
             Some(
                 WorkerRelayFence::NonRelay
                 | WorkerRelayFence::Restricted(_)
@@ -2804,7 +2801,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                     ..
                 },
             )
-            | None => RelayForwardingGrowth::Terminate,
+            | None => false,
         }
     }
 
@@ -3003,16 +3000,6 @@ fn mptcp_endpoint_flags(
         flags.insert(EndpointFlags::BACKUP);
     }
     Ok(flags)
-}
-
-fn classify_relay_forwarding_growth(
-    proof: &Result<bool, relay_fence::RelayFenceError>,
-) -> RelayForwardingGrowth {
-    match proof {
-        Ok(true) => RelayForwardingGrowth::Grew,
-        Ok(false) => RelayForwardingGrowth::NoGrowth,
-        Err(_) => RelayForwardingGrowth::Terminate,
-    }
 }
 
 fn validate_worker_prepare(
@@ -13504,20 +13491,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_fence_verification_errors_and_missing_authority_terminate_the_worker() {
-        assert_eq!(
-            classify_relay_forwarding_growth(&Ok(true)),
-            RelayForwardingGrowth::Grew
-        );
-        assert_eq!(
-            classify_relay_forwarding_growth(&Ok(false)),
-            RelayForwardingGrowth::NoGrowth
-        );
-        assert_eq!(
-            classify_relay_forwarding_growth(&Err(relay_fence::RelayFenceError::UnexpectedPolicy)),
-            RelayForwardingGrowth::Terminate
-        );
-
+    fn relay_commit_requires_an_active_fence_but_not_pretraffic_forwarding_growth() {
         let route_context_id = [0xbc; 16];
         let baseline = WireguardV3PeerProof {
             latest_handshake_unix: 100,
@@ -13555,7 +13529,9 @@ mod tests {
             context.activate(&worker_relay_activate(route_context_id), worker_deadline()),
             WorkerActivateOutcome::Activated(_)
         ));
+        assert!(context.prove_relay_forwarding_fence_active(worker_deadline()));
         context.relay_fence = None;
+        assert!(!context.prove_relay_forwarding_fence_active(worker_deadline()));
         assert!(matches!(
             context.probe_commit(
                 &worker_relay_probe(route_context_id, 149),
@@ -13570,7 +13546,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_relay_pair_partial_probe_is_retryable_and_never_commits_one_leg() {
+    fn worker_relay_pair_polls_partial_probe_and_never_commits_one_leg() {
         let route_context_id = [0xa8; 16];
         let baseline = WireguardV3PeerProof {
             latest_handshake_unix: 100,
@@ -13593,7 +13569,7 @@ mod tests {
             RoutingContextRole::Relay,
             FakeWorkerKernel {
                 activation_proofs: VecDeque::from([baseline, baseline]),
-                probe_proofs: VecDeque::from([complete, incomplete, complete, complete]),
+                probe_proofs: VecDeque::from([complete, incomplete, complete]),
                 ..FakeWorkerKernel::default()
             },
         );
@@ -13613,22 +13589,11 @@ mod tests {
             WorkerActivateOutcome::Activated(_)
         ));
 
-        assert!(matches!(
-            context.probe_commit(
-                &worker_relay_probe(route_context_id, 149),
-                worker_deadline(),
-            ),
-            WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel)
-        ));
-        assert!(matches!(
-            context.lease,
-            Some(WorkerLeaseLifecycle::Activated(_))
-        ));
         let WorkerProbeOutcome::Committed(probed) = context.probe_commit(
             &worker_relay_probe(route_context_id, 149),
             worker_deadline(),
         ) else {
-            panic!("complete Relay retry")
+            panic!("bounded Relay polling")
         };
         assert_eq!(probed.len(), 2);
         assert_eq!(
@@ -13638,7 +13603,7 @@ mod tests {
                 .iter()
                 .filter(|call| **call == "probe")
                 .count(),
-            4
+            3
         );
     }
 
@@ -14421,7 +14386,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_worker_probe_remains_activated_for_a_fresh_retry() {
+    fn worker_probe_polls_stale_sample_until_bidirectional_growth() {
         let route_context_id = [0x3e; 16];
         let baseline = WireguardV3PeerProof {
             latest_handshake_unix: 100,
@@ -14434,12 +14399,20 @@ mod tests {
             RoutingContextRole::Client,
             FakeWorkerKernel {
                 activation_proof: Some(baseline),
-                probe_proof: Some(WireguardV3PeerProof {
-                    latest_handshake_unix: 150,
-                    latest_handshake_nanoseconds: 0,
-                    received_bytes: 11,
-                    transmitted_bytes: 20,
-                }),
+                probe_proofs: VecDeque::from([
+                    WireguardV3PeerProof {
+                        latest_handshake_unix: 150,
+                        latest_handshake_nanoseconds: 0,
+                        received_bytes: 11,
+                        transmitted_bytes: 20,
+                    },
+                    WireguardV3PeerProof {
+                        latest_handshake_unix: 150,
+                        latest_handshake_nanoseconds: 0,
+                        received_bytes: 11,
+                        transmitted_bytes: 21,
+                    },
+                ]),
                 ..FakeWorkerKernel::default()
             },
         );
@@ -14458,19 +14431,6 @@ mod tests {
             context.activate(&worker_activate(route_context_id), worker_deadline()),
             WorkerActivateOutcome::Activated(_)
         ));
-        assert!(matches!(
-            context.probe_commit(&worker_probe(route_context_id, 100), worker_deadline()),
-            WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel)
-        ));
-        assert!(matches!(
-            context.lease,
-            Some(WorkerLeaseLifecycle::Activated(_))
-        ));
-
-        context.kernel.probe_proof = Some(WireguardV3PeerProof {
-            transmitted_bytes: 21,
-            ..context.kernel.probe_proof.expect("first probe")
-        });
         assert!(matches!(
             context.probe_commit(&worker_probe(route_context_id, 100), worker_deadline()),
             WorkerProbeOutcome::Committed(_)
