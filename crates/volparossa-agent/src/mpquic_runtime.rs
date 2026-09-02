@@ -446,11 +446,16 @@ impl ActiveProductionMpquicExitRoute {
                     continue;
                 }
                 if datagram.destination.port() == BROWSER_QUIC_PORT {
-                    let mut pending = pending_browser_flows.remove(&datagram.client).ok_or(
-                        ProductionMpquicError::Invalid(
-                            "browser QUIC data before hostname authorization",
-                        ),
-                    )?;
+                    let Some(mut pending) = take_verified_browser_quic_candidate(
+                        &mut pending_browser_flows,
+                        datagram.client,
+                    ) else {
+                        // The authorization and browser Initial travel as separate native
+                        // datagrams, so delivery order is not guaranteed. An early Initial has no
+                        // verified destination authority and is therefore dropped without opening
+                        // an egress socket or terminating the authenticated route.
+                        continue;
+                    };
                     let complete = pending.inspect(datagram.destination, datagram.payload)?;
                     if !complete {
                         pending_browser_flows.insert(datagram.client, pending);
@@ -632,6 +637,13 @@ struct PendingExitBrowserQuicFlow {
     datagrams: Vec<Vec<u8>>,
     bytes: usize,
     last_activity: Instant,
+}
+
+fn take_verified_browser_quic_candidate(
+    pending: &mut HashMap<SocketAddrV4, PendingExitBrowserQuicFlow>,
+    client: SocketAddrV4,
+) -> Option<PendingExitBrowserQuicFlow> {
+    pending.remove(&client)
 }
 
 impl PendingExitBrowserQuicFlow {
@@ -3082,6 +3094,15 @@ mod tests {
         assert_eq!(parsed.client, client);
         assert_eq!(parsed.destination, control);
         assert_eq!(parsed.payload, b"signed-flow");
+    }
+
+    #[test]
+    fn browser_data_before_authorization_is_dropped_without_egress_admission() {
+        let client = SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 23), 53_001);
+        let mut pending = HashMap::new();
+
+        assert!(take_verified_browser_quic_candidate(&mut pending, client).is_none());
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]
