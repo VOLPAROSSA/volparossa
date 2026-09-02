@@ -409,7 +409,8 @@ copy_artifacts() {
         a13-client-routes-before.json a13-client-routes-after.json \
         a13-exit-route-before.txt a13-exit-route-after.txt \
         a13-destination-route-before.txt a13-destination-route-after.txt \
-        a14-owned-before.json a14-paths-before.txt a14-crashes.json a14-evidence.json \
+        a14-owned-before.json a14-owned-after-paths.txt a14-paths-before.txt \
+        a14-crashes.json a14-evidence.json \
         host-state-before.json host-state-after.json a15-evidence.json; do
         if [ -f "$WORK/$artifact" ] && [ ! -L "$WORK/$artifact" ]; then
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 \
@@ -817,12 +818,6 @@ cleanup() {
         cat "$HOSTS_BACKUP" >/etc/hosts || original_status=1
         HOSTS_BACKUP=
     fi
-    for cleanup_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
-        rm -f -- "$WORK/runtime-$cleanup_node/helper.sock" \
-            "$WORK/runtime-$cleanup_node/control/agent.sock" \
-            "$WORK/runtime-$cleanup_node/native/mpquic.sock"
-    done
-
     cleanup_attempt=0
     while [ "$cleanup_attempt" -lt 100 ]; do
         cleanup_units_remaining=0
@@ -841,6 +836,26 @@ cleanup() {
     for cleanup_unit in $AGENT_UNITS $MPQUIC_UNITS $HELPER_UNITS; do
         [ "$(unit_load_state "$cleanup_unit")" = not-found ] \
             || REMAINING_UNITS=$((REMAINING_UNITS + 1))
+    done
+    remaining_links=0
+    remaining_routes=0
+    remaining_mptcp_endpoints=0
+    remaining_mpquic_paths=0
+    remaining_nftables_rules=0
+    if [ "$A14_REQUESTED" = true ] \
+        && ! measure_a14_remaining_network_objects; then
+        remaining_links=1
+        remaining_routes=1
+        remaining_mptcp_endpoints=1
+        remaining_mpquic_paths=1
+        remaining_nftables_rules=1
+        original_status=1
+        OBSERVED_BLOCKER=A14_REMAINING_INVENTORY_UNAVAILABLE
+    fi
+    for cleanup_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
+        rm -f -- "$WORK/runtime-$cleanup_node/helper.sock" \
+            "$WORK/runtime-$cleanup_node/control/agent.sock" \
+            "$WORK/runtime-$cleanup_node/native/mpquic.sock"
     done
     remaining_runtime_sockets=$(find "$WORK"/runtime-* -type s -print \
         | awk 'END { print NR + 0 }')
@@ -890,7 +905,9 @@ cleanup() {
     host_leaks=1
     [ "$A15_STATUS" -ne 0 ] || host_leaks=0
     REMAINING_OWNED_OBJECTS=$((REMAINING_NAMESPACES + REMAINING_UNITS \
-        + remaining_runtime_sockets + host_leaks))
+        + remaining_runtime_sockets + remaining_links + remaining_routes \
+        + remaining_mptcp_endpoints + remaining_mpquic_paths \
+        + remaining_nftables_rules + host_leaks))
 
     if [ "$A14_REQUESTED" = true ]; then
         a14_success=false
@@ -920,14 +937,19 @@ cleanup() {
             --argjson namespaces "$REMAINING_NAMESPACES" \
             --argjson units "$REMAINING_UNITS" \
             --argjson sockets "$remaining_runtime_sockets" \
+            --argjson links "$remaining_links" \
+            --argjson routes "$remaining_routes" \
+            --argjson mptcp "$remaining_mptcp_endpoints" \
+            --argjson mpquic "$remaining_mpquic_paths" \
+            --argjson nft "$remaining_nftables_rules" \
             --argjson remaining "$REMAINING_OWNED_OBJECTS" \
             '{schema_version:1,acceptance_id:"A14",success:$success,
               forced_crashes:$crashes,owned_before:$before,
               cleanup:{remaining_owned_objects:$remaining,
                 remaining_namespaces:$namespaces,remaining_units:$units,
-                remaining_runtime_sockets:$sockets,remaining_links:0,
-                remaining_routes:0,remaining_mptcp_endpoints:0,
-                remaining_mpquic_paths:0,remaining_nftables_rules:0},
+                remaining_runtime_sockets:$sockets,remaining_links:$links,
+                remaining_routes:$routes,remaining_mptcp_endpoints:$mptcp,
+                remaining_mpquic_paths:$mpquic,remaining_nftables_rules:$nft},
               verification_basis:{all_product_networking_namespace_owned:true,
                 owned_namespace_mounts_absent:($namespaces == 0),
                 guest_root_state_exactly_restored:$host[0].unchanged}}' \
@@ -3198,6 +3220,48 @@ record_a14_owned_inventory() {
           namespaces:[$client[0],$bootstrap1[0],$bootstrap2[0],$relay0[0],
             $relay1[0],$relay2[0],$exit_node[0],$destination[0]]}' \
         >"$WORK/a14-owned-before.json"
+}
+
+measure_a14_remaining_network_objects() {
+    remaining_links=0
+    remaining_routes=0
+    remaining_mptcp_endpoints=0
+    remaining_mpquic_paths=0
+    remaining_nftables_rules=0
+
+    for remaining_namespace in $(ip netns list | awk -v prefix="$PREFIX-" \
+        '$1 ~ ("^" prefix) { print $1 }'); do
+        measured_links=$(ip -n "$remaining_namespace" -j link show \
+            | jq -er 'length') || return 1
+        measured_routes=$(ip -n "$remaining_namespace" -j route show table all \
+            | jq -er 'length') || return 1
+        measured_mptcp=$(ip netns exec "$remaining_namespace" \
+            ip -j mptcp endpoint show | jq -er 'length') || return 1
+        measured_nft=$(ip netns exec "$remaining_namespace" nft -j list ruleset \
+            | jq -er '[.nftables[] | select(has("rule"))] | length') \
+            || return 1
+        remaining_links=$((remaining_links + measured_links))
+        remaining_routes=$((remaining_routes + measured_routes))
+        remaining_mptcp_endpoints=$((remaining_mptcp_endpoints + measured_mptcp))
+        remaining_nftables_rules=$((remaining_nftables_rules + measured_nft))
+    done
+
+    : >"$WORK/a14-owned-after-paths.txt"
+    for remaining_control_socket in "$WORK"/runtime-*/control/agent.sock; do
+        [ -S "$remaining_control_socket" ] || continue
+        remaining_paths_file=$WORK/a14-owned-after-paths-one.txt
+        if "$binary_directory/volparossa" \
+            --control-socket "$remaining_control_socket" paths \
+            >"$remaining_paths_file" 2>/dev/null; then
+            cat "$remaining_paths_file" >>"$WORK/a14-owned-after-paths.txt"
+            measured_paths=$(awk '
+                /^context=[0-9a-f][0-9a-f]* path=[1-8] relay=/ { count++ }
+                END { print count + 0 }
+            ' "$remaining_paths_file")
+            remaining_mpquic_paths=$((remaining_mpquic_paths + measured_paths))
+        fi
+        rm -f -- "$remaining_paths_file"
+    done
 }
 
 force_crash_unit() {
