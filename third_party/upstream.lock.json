@@ -126,7 +126,7 @@
       "applies_to_commit": "6957ccf9b9fcb9ab62c43672638876abe47162dc",
       "applies_after": "patches/volparossa-xquic.patch",
       "file": "patches/volparossa-xquic-edt.patch",
-      "sha256": "af000f26550b8f1d9a9fcba460bd28e1068502bb3d955fc214cb9d03964cefe1",
+      "sha256": "1cf0fc84fe87a6057ad654a412b7b9b2edc47d71875e06d6fc17079a6bef6ebf",
       "purpose": [
         "select exactly one writable path by bounded estimated delivery time",
         "use live RTT, in-flight queue, bandwidth, congestion window and recent loss",
