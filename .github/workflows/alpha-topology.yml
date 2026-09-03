@@ -19,7 +19,7 @@ defaults:
 
 jobs:
   alpha-topology:
-    name: Debian 13 KVM eight-node smoke
+    name: Debian 13 KVM twelve-node smoke
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&

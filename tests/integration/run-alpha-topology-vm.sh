@@ -32,7 +32,7 @@ print_plan() {
         '  verify and copy the locally built pinned mqvpn/xquic daemon;' \
         '  boot one temporary KVM-only qcow2 overlay with QEMU user networking;' \
         '  install Debian build/runtime packages and build only required binaries;' \
-        '  run the eight-node production-helper topology as guest root;' \
+        '  run the twelve-node production-helper topology as guest root;' \
         '  retrieve bounded non-secret logs and its machine-readable result;' \
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'

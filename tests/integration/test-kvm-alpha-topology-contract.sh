@@ -47,12 +47,16 @@ grep -F -- '-p volparossa-test-support --example tls-policy-acceptance-fixture' 
 [ "$(grep -Fc 'launch_helper relay0 "$R0"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay1 "$R1"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper relay2 "$R2"' "$GUEST")" -eq 1 ]
+[ "$(grep -Fc 'launch_helper relay3 "$R3"' "$GUEST")" -eq 1 ]
+[ "$(grep -Fc 'launch_helper relay4 "$R4"' "$GUEST")" -eq 1 ]
+[ "$(grep -Fc 'launch_helper relay5 "$R5"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_helper exit "$EXIT_NODE"' "$GUEST")" -eq 1 ]
+[ "$(grep -Fc 'launch_helper exit2 "$EXIT2_NODE"' "$GUEST")" -eq 1 ]
 [ "$(grep -Fc 'launch_agent relay0 "$R0"' "$GUEST")" -eq 1 ]
 grep -F 'launch_agent bootstrap1 "$B1"' "$GUEST" >/dev/null
 grep -F 'launch_agent bootstrap2 "$B2"' "$GUEST" >/dev/null
 grep -F 'verify_helper relay0 "$R0"' "$GUEST" >/dev/null
-grep -F 'for cleanup_ns in "$DEST" "$EXIT_NODE" "$R2" "$R1" "$R0" "$B2" "$B1"' \
+grep -F 'for cleanup_ns in "$DEST" "$EXIT2_NODE" "$EXIT_NODE" "$R5" "$R4" "$R3"' \
     "$GUEST" >/dev/null
 grep -F 'helper_unit=volparossa-alpha-helper@$node.service' "$GUEST" >/dev/null
 grep -F 'agent_unit=volparossa-alpha-agent@$node.service' "$GUEST" >/dev/null
@@ -65,6 +69,7 @@ grep -F -- '--property="BindPaths=$WORK/runtime-$node:/run/volparossa"' "$GUEST"
 grep -F 'VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock' "$GUEST" >/dev/null
 grep -F 'launch_mpquic client "$CLIENT" client' "$GUEST" >/dev/null
 grep -F 'launch_mpquic exit "$EXIT_NODE" exit' "$GUEST" >/dev/null
+grep -F 'launch_mpquic exit2 "$EXIT2_NODE" exit' "$GUEST" >/dev/null
 if grep -Eq 'launch_mpquic relay[012]' "$GUEST"; then exit 1; fi
 grep -F -- '--socket /run/volparossa/native/mpquic.sock' "$GUEST" >/dev/null
 grep -F 'native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records}' \
@@ -72,9 +77,12 @@ grep -F 'native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records}' 
 grep -F 'DIRECT_CLIENT_EXIT_REACHABLE' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" link add underlay type dummy' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" route add default dev underlay scope global' "$GUEST" >/dev/null
-[ "$(grep -Fc 'add_public_underlay ' "$GUEST")" -eq 7 ]
+[ "$(grep -Fc 'add_public_underlay ' "$GUEST")" -eq 11 ]
 grep -F 'ip -n "$CLIENT" route add unreachable "$forbidden/32"' "$GUEST" >/dev/null
-grep -F '10.241.20.2 10.241.21.2 10.241.22.2 10.241.31.1' "$GUEST" >/dev/null
+grep -F 'for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2' \
+    "$GUEST" >/dev/null
+grep -F '10.241.32.1 10.241.32.2 46.162.3.1 47.163.4.1 51.167.7.1' \
+    "$GUEST" >/dev/null
 grep -F 'link_nodes "$CLIENT" cr0 10.241.10.1/30 "$R0" r0c 10.241.10.2/30' \
     "$GUEST" >/dev/null
 grep -F 'link_nodes "$R0" r0x 10.241.20.1/30 "$EXIT_NODE" xr0 10.241.20.2/30' \
@@ -93,11 +101,21 @@ grep -F '/ip4/41.157.2.1/udp/41000/quic-v1/p2p/$B2_PEER' "$GUEST" >/dev/null
 grep -F 'write_config exit acceptance-exit false true 46.162.3.1' "$GUEST" >/dev/null
 grep -F 'exit_control_relay:"relay0",data_relays:["relay1","relay2"]' \
     "$GUEST" >/dev/null
-grep -F 'bootstrap1|bootstrap2) required_active_peers=4' "$GUEST" >/dev/null
-grep -F 'relay0) required_active_peers=3' "$GUEST" >/dev/null
-grep -F 'relay1|relay2) required_active_peers=2' "$GUEST" >/dev/null
+grep -F 'bootstrap1|bootstrap2) required_active_peers=7' "$GUEST" >/dev/null
+grep -F 'relay0) required_active_peers=4' "$GUEST" >/dev/null
+grep -F 'relay1|relay2|relay3|relay4|relay5) required_active_peers=2' "$GUEST" >/dev/null
+grep -F 'node_count:12,relay_count:6,exit_count:2,physical_network_count:29' \
+    "$GUEST" >/dev/null
+grep -F 'production_helpers:11,production_agents:11,native_mpquic_processes:3' \
+    "$GUEST" >/dev/null
+grep -F '.network_namespace_count == 12' "$GUEST" >/dev/null
+grep -F '.runtime_socket_count >= 25' "$GUEST" >/dev/null
+grep -F 'length == 25 and' "$GUEST" >/dev/null
 if grep -E 'ip -n "\$CLIENT" route add (unicast )?46\.162\.3\.1' "$GUEST"; then exit 1; fi
 if grep -F 'link_nodes "$CLIENT"' "$GUEST" | grep -F '"$EXIT_NODE"'; then
+    exit 1
+fi
+if grep -F 'link_nodes "$CLIENT"' "$GUEST" | grep -F '"$EXIT2_NODE"'; then
     exit 1
 fi
 grep -F 'payload, source = udp.recvfrom(2048)' "$GUEST" >/dev/null
