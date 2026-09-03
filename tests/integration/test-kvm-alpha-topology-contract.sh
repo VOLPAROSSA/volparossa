@@ -149,6 +149,8 @@ grep -F 'after_marker.relay2_wireguard_data_datagrams > 0' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A04",success:$success' "$GUEST" >/dev/null
 grep -F 'a04_mptcp_relay_failover:{requested:$a04_requested,succeeded:$a04_succeeded' "$GUEST" \
     >/dev/null
+grep -F 'a01_transient_connect_unavailable "$WORK/connect-client.err" || break' "$GUEST" \
+    >/dev/null
 grep -F 'http3-acceptance-fixture" server' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" client a06' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" client a07' "$GUEST" >/dev/null

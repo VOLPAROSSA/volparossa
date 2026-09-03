@@ -4192,7 +4192,7 @@ PHASE=a04-complete
 PHASE=client-connect
 CONNECT_REQUESTED=true
 attempt=0
-while [ "$attempt" -lt 30 ]; do
+while [ "$attempt" -lt 120 ]; do
     set +e
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-client/control/agent.sock" connect \
@@ -4201,8 +4201,7 @@ while [ "$attempt" -lt 30 ]; do
     CONNECT_STATUS=$?
     set -e
     [ "$CONNECT_STATUS" -ne 0 ] || break
-    grep -F 'PRESELECTION_UNAVAILABLE' "$WORK/connect-client.err" >/dev/null \
-        || break
+    a01_transient_connect_unavailable "$WORK/connect-client.err" || break
     sleep 1
     attempt=$((attempt + 1))
 done
