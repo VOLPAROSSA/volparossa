@@ -100,6 +100,7 @@ use crate::{
         send_credential_worker_request_with_deadline,
         send_credential_worker_response_with_deadline, validate_adopted_ingress_reply_socket,
         validate_adopted_ingress_socket, validate_adopted_transport_socket,
+        wait_for_credential_worker_request,
     },
 };
 use volparossa_linux_uapi::install_close_range_on_exec;
@@ -1616,6 +1617,7 @@ fn receive_deadline_bound_worker_request(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
 ) -> Result<(InternalWorkerRequest, HardDeadline), WorkerV3Error> {
+    wait_for_credential_worker_request(channel)?;
     let bound_request = receive_credential_worker_request(channel, expected_parent)?;
     let deadline = HardDeadline::from_monotonic_expiry_nanos(
         bound_request.monotonic_deadline_ns,

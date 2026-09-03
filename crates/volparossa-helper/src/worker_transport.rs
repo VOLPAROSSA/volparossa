@@ -616,6 +616,25 @@ pub(crate) fn receive_credential_worker_request<S: AsFd>(
     receive_credential_worker_request_with_deadline(channel, expected, deadline)
 }
 
+/// Wait until a worker request is readable without treating an idle worker as failed.
+///
+/// Each individual poll remains bounded so interruptions and a broken channel are observed, but
+/// a clean timeout merely begins another readiness wait. No record is consumed here, so a timeout
+/// can never make request custody ambiguous. Once readable, the ordinary bounded authenticated
+/// receive below owns the complete transaction.
+pub(crate) fn wait_for_credential_worker_request<S: AsFd>(
+    channel: &S,
+) -> Result<(), WorkerTransportError> {
+    loop {
+        let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+        match wait_for_readable_fd(channel, deadline) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 /// Receives one canonical request before the caller's absolute transaction deadline.
 pub(crate) fn receive_credential_worker_request_with_deadline<S: AsFd>(
     channel: &S,
