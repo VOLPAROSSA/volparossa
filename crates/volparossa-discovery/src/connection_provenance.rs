@@ -95,6 +95,7 @@ struct ConnectionRecord {
     peer_id: PeerId,
     generation: NonZeroU64,
     prefix: Option<NativeNetworkPrefix>,
+    relayed: bool,
 }
 
 /// Affine proof that one exact authenticated connection had the requested native family.
@@ -255,6 +256,7 @@ impl ConnectionRegistry {
         }
 
         let prefix = direct_public_prefix(peer_id, endpoint);
+        let relayed = endpoint.is_relayed();
         if self
             .records
             .insert(
@@ -265,6 +267,7 @@ impl ConnectionRegistry {
                     // generation therefore advances only inside this connection's own lineage.
                     generation: NonZeroU64::MIN,
                     prefix,
+                    relayed,
                 },
             )
             .is_some()
@@ -306,11 +309,14 @@ impl ConnectionRegistry {
         record.generation = generation;
         let old_prefix = direct_public_prefix(peer_id, old);
         let new_prefix = direct_public_prefix(peer_id, new);
-        if !same_optional_prefix(record.prefix.as_ref(), old_prefix.as_ref()) {
+        if record.relayed != old.is_relayed()
+            || !same_optional_prefix(record.prefix.as_ref(), old_prefix.as_ref())
+        {
             self.poison();
             return;
         }
         record.prefix = new_prefix;
+        record.relayed = new.is_relayed();
     }
 
     fn closed(
@@ -334,6 +340,7 @@ impl ConnectionRegistry {
             .count();
         let closed_prefix = direct_public_prefix(peer_id, endpoint);
         if record.peer_id != peer_id
+            || record.relayed != endpoint.is_relayed()
             || !same_optional_prefix(record.prefix.as_ref(), closed_prefix.as_ref())
             || peer_connections.checked_sub(1) != Some(remaining_established)
         {
@@ -343,6 +350,14 @@ impl ConnectionRegistry {
         if self.records.remove(&connection_id).is_none() {
             self.poison();
         }
+    }
+
+    fn allows_identify_address_import(&self, peer_id: PeerId, connection_id: ConnectionId) -> bool {
+        !self.poisoned
+            && self
+                .records
+                .get(&connection_id)
+                .is_some_and(|record| record.peer_id == peer_id && !record.relayed)
     }
 
     fn unique_witness(&self, peer_id: PeerId, family: IpFamily) -> Option<ConnectionWitness> {
@@ -538,6 +553,15 @@ impl ConnectionProvenanceBehaviour {
         family: IpFamily,
     ) -> Option<ConnectionWitness> {
         self.registry.unique_witness(peer_id, family)
+    }
+
+    pub(super) fn allows_identify_address_import(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+    ) -> bool {
+        self.registry
+            .allows_identify_address_import(peer_id, connection_id)
     }
 
     pub(super) fn exact_witness(
@@ -897,6 +921,33 @@ mod tests {
         );
         assert!(direct_public_multiaddr_prefix(peer, relayed.get_remote_address()).is_some());
         assert!(direct_public_prefix(peer, &relayed).is_none());
+    }
+
+    #[test]
+    fn identify_address_import_requires_exact_non_relayed_connection() {
+        let peer = PeerId::random();
+        let relay = PeerId::random();
+        let direct = dialer("/ip4/1.1.1.8/udp/41000/quic-v1");
+        let relayed = listener(
+            &format!("/ip4/8.8.8.8/tcp/443/p2p/{relay}/p2p-circuit"),
+            "/ip4/1.1.1.8/udp/41000/quic-v1",
+        );
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+
+        established(&mut behaviour, peer, 1, &direct, 0);
+        established(&mut behaviour, peer, 2, &relayed, 1);
+        assert!(behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(1)));
+        assert!(!behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(2)));
+        assert!(
+            !behaviour
+                .allows_identify_address_import(PeerId::random(), ConnectionId::new_unchecked(1))
+        );
+        assert!(!behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(3)));
+
+        change(&mut behaviour, peer, 1, &direct, &relayed);
+        assert!(!behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(1)));
+        change(&mut behaviour, peer, 1, &relayed, &direct);
+        assert!(behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(1)));
     }
 
     #[test]
@@ -1393,7 +1444,7 @@ mod tests {
         );
         assert_eq!(
             compact_source(source_item_body(source, record_declaration)),
-            "peer_id:PeerId,generation:NonZeroU64,prefix:Option<NativeNetworkPrefix>,"
+            "peer_id:PeerId,generation:NonZeroU64,prefix:Option<NativeNetworkPrefix>,relayed:bool,"
         );
         for declaration in [witness_declaration, bound_declaration] {
             assert_eq!(

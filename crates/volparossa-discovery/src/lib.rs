@@ -1079,13 +1079,31 @@ impl DiscoveryService {
         }
     }
 
-    fn refresh_identify_addresses(&mut self, peer_id: PeerId, info: &identify::Info) {
+    fn refresh_identify_addresses(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+        info: &identify::Info,
+    ) {
         if !identify_supports_private_kademlia(peer_id, info) {
             // mDNS is observed before authenticated Identify and may therefore have admitted a
             // client-only peer temporarily. Purge every source, including Known and mDNS, so a
             // private-DHT server cannot retain or redistribute that client's public address.
             self.address_admissions.forget_peer(&peer_id);
             let _ = self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+            return;
+        }
+
+        // A peer reached through Circuit Relay v2 may advertise a directly dialable public
+        // listener. Importing it would silently upgrade a deliberately relayed relationship to a
+        // direct one. Bind Identify address authority to the exact non-relayed connection that
+        // carried the event; unknown or poisoned connection lineage fails closed.
+        if !self
+            .swarm
+            .behaviour()
+            .connection_provenance
+            .allows_identify_address_import(peer_id, connection_id)
+        {
             return;
         }
 
@@ -1879,9 +1897,13 @@ impl DiscoveryService {
                             }
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Identify(
-                            identify::Event::Received { peer_id, info, .. },
+                            identify::Event::Received {
+                                peer_id,
+                                connection_id,
+                                info,
+                            },
                         )) => {
-                            self.refresh_identify_addresses(*peer_id, info);
+                            self.refresh_identify_addresses(*peer_id, *connection_id, info);
                         }
                         _ => {}
                     }
@@ -2064,7 +2086,17 @@ fn validate_capability_key(value: &str) -> Result<(), DiscoveryError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use libp2p::{
+        core::{ConnectedPoint, Endpoint, transport::PortUse},
+        swarm::{FromSwarm, behaviour::ConnectionEstablished},
+    };
+    use tokio::time::{Duration, timeout};
+
     use super::*;
+
+    static NEXT_TEST_MEMORY_ADDRESS: AtomicU64 = AtomicU64::new(8_000_000);
 
     #[test]
     fn service_and_bootstrap_roles_are_private_kademlia_servers() {
@@ -2356,14 +2388,15 @@ mod tests {
         service
             .add_prepared_kademlia_address(remote_peer, address, AddressSource::Mdns)
             .expect("mDNS admission");
+        let connection_id = libp2p::swarm::ConnectionId::new_unchecked(1);
 
         let supported = identify_info(&remote, vec![StreamProtocol::new(KADEMLIA_PROTOCOL)]);
-        service.refresh_identify_addresses(remote_peer, &supported);
+        service.refresh_identify_addresses(remote_peer, connection_id, &supported);
         assert!(service.address_admissions.contains_peer(&remote_peer));
 
         let unsupported =
             identify_info(&remote, vec![StreamProtocol::new("/volparossa/not-kad/1")]);
-        service.refresh_identify_addresses(remote_peer, &unsupported);
+        service.refresh_identify_addresses(remote_peer, connection_id, &unsupported);
         assert!(!service.address_admissions.contains_peer(&remote_peer));
         assert!(
             service
@@ -2376,6 +2409,152 @@ mod tests {
                     .all(|entry| entry.node.key.preimage() != &remote_peer))
         );
     }
+
+    #[tokio::test]
+    async fn relayed_identify_cannot_import_direct_listeners() {
+        let local = identity::Keypair::generate_ed25519();
+        let remote = identity::Keypair::generate_ed25519();
+        let remote_peer = remote.public().to_peer_id();
+        let circuit_relay = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let mut service = DiscoveryService::new(local).expect("discovery service");
+        let relayed_endpoint = ConnectedPoint::Listener {
+            local_addr: format!("/ip4/8.8.8.8/tcp/443/p2p/{circuit_relay}/p2p-circuit")
+                .parse()
+                .expect("relayed local endpoint"),
+            send_back_addr: "/ip4/1.1.1.1/udp/41000/quic-v1"
+                .parse()
+                .expect("remote endpoint"),
+        };
+        let direct_endpoint = ConnectedPoint::Dialer {
+            address: "/ip4/1.1.1.1/udp/41000/quic-v1"
+                .parse()
+                .expect("direct endpoint"),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        };
+        let relayed_id = libp2p::swarm::ConnectionId::new_unchecked(1);
+        let direct_id = libp2p::swarm::ConnectionId::new_unchecked(2);
+        let info = identify_info(&remote, vec![StreamProtocol::new(KADEMLIA_PROTOCOL)]);
+
+        service
+            .swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+                peer_id: remote_peer,
+                connection_id: relayed_id,
+                endpoint: &relayed_endpoint,
+                failed_addresses: &[],
+                other_established: 0,
+            }));
+        service.refresh_identify_addresses(remote_peer, relayed_id, &info);
+        assert!(!service.address_admissions.contains_peer(&remote_peer));
+
+        service
+            .swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+                peer_id: remote_peer,
+                connection_id: direct_id,
+                endpoint: &direct_endpoint,
+                failed_addresses: &[],
+                other_established: 1,
+            }));
+        service.refresh_identify_addresses(remote_peer, direct_id, &info);
+        let admitted = &service.address_admissions.by_peer[&remote_peer];
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0].sources, AddressSource::Identify.mask());
+
+        let mut changed_info = info;
+        changed_info.listen_addrs = vec![test_address(4_003)];
+        service.refresh_identify_addresses(remote_peer, relayed_id, &changed_info);
+        let retained = &service.address_admissions.by_peer[&remote_peer];
+        assert_eq!(retained.len(), 1);
+        assert!(retained[0].address.to_string().contains("/tcp/4001/"));
+    }
+
+    async fn next_other_event(
+        service: &mut DiscoveryService,
+    ) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
+        loop {
+            if let DiscoveryEvent::Other(event) = service.next_event().await {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn client_mode_identify_excludes_private_kademlia_server_protocol() {
+        let client_key = identity::Keypair::generate_ed25519();
+        let client_peer = client_key.public().to_peer_id();
+        let exit_key = identity::Keypair::generate_ed25519();
+        let mut client = DiscoveryService::new_with_protocol_roles(
+            client_key,
+            DiscoveryProtocolRoles::new(true, false, false),
+        )
+        .expect("client discovery");
+        let mut exit = DiscoveryService::new_with_protocol_roles(
+            exit_key,
+            DiscoveryProtocolRoles::new(false, false, true),
+        )
+        .expect("exit discovery");
+        let memory_id = NEXT_TEST_MEMORY_ADDRESS.fetch_add(1, Ordering::Relaxed);
+        client
+            .listen_on(
+                format!("/memory/{memory_id}")
+                    .parse()
+                    .expect("memory listener"),
+            )
+            .expect("listen");
+        let listen_address = timeout(Duration::from_secs(10), async {
+            loop {
+                if let libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } =
+                    next_other_event(&mut client).await
+                {
+                    break address;
+                }
+            }
+        })
+        .await
+        .expect("listener timeout");
+        exit.dial_peerlink(&PeerLink::new(client_peer, listen_address).expect("client peerlink"))
+            .expect("dial client");
+
+        let info = timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = next_other_event(&mut exit) => {
+                        if let libp2p::swarm::SwarmEvent::Behaviour(
+                            BehaviourEvent::Identify(identify::Event::Received {
+                                peer_id,
+                                info,
+                                ..
+                            }),
+                        ) = event
+                        {
+                            if peer_id == client_peer {
+                                break info;
+                            }
+                        }
+                    }
+                    _ = next_other_event(&mut client) => {}
+                }
+            }
+        })
+        .await
+        .expect("Identify timeout");
+
+        assert_eq!(info.public_key.to_peer_id(), client_peer);
+        assert!(
+            !info
+                .protocols
+                .iter()
+                .any(|protocol| protocol.as_ref() == KADEMLIA_PROTOCOL)
+        );
+        assert!(!identify_supports_private_kademlia(client_peer, &info));
+    }
+
     #[test]
     fn connection_limits_reject_excess_pending_inbound_without_bypasses() {
         let mut behaviour = connection_limits_behaviour();
