@@ -271,9 +271,14 @@ async fn run_server(
             }
         }
         stream.finish().await?;
-        // Give the peer's H3 stream driver time to observe FIN before the bounded
-        // connection-level H3_NO_ERROR close below.
-        sleep(Duration::from_millis(100)).await;
+
+        // `finish` only queues the stream FIN; it does not prove that the peer has received the
+        // complete response. Keep the connection alive until the Client, which closes only after
+        // validating every response byte, acknowledges completion by closing its QUIC connection.
+        // A fixed sleep followed by a server-side close can reset a large response still in flight.
+        let _peer_close = timeout(IO_DEADLINE, connection.closed())
+            .await
+            .map_err(|_| "timed out waiting for HTTP/3 peer completion")?;
 
         let evidence = json!({
             "schema_version": 1,
@@ -289,12 +294,12 @@ async fn run_server(
             "response_bytes": case.response_bytes(),
             "response_sha256": hex::encode(response_hash.finalize()),
             "release_observed": release_observed,
+            "peer_completion_observed": true,
         });
         write_json_new(
             &coordination.join(format!("server-{}.json", case.label())),
             &evidence,
         )?;
-        connection.close(quinn::VarInt::from_u32(0x100), b"HTTP/3 case complete");
     }
 
     endpoint.close(quinn::VarInt::from_u32(0), b"acceptance complete");

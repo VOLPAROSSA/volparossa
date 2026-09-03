@@ -4950,6 +4950,7 @@ if [ "$A06_STATUS" -eq 0 ]; then
             and ($destination.protocol == "HTTP/3")
             and ($destination.http_version == "HTTP/3")
             and ($destination.negotiated_alpn == "h3")
+            and ($destination.peer_completion_observed == true)
             and ($destination.hostname == $app.hostname)
             and ($destination.listen == $app.destination)
             and ($destination.source.ip == "47.163.4.1")
@@ -5120,6 +5121,7 @@ if [ "$A07_STATUS" -eq 0 ]; then
             and ($destination.protocol == "HTTP/3")
             and ($destination.http_version == "HTTP/3")
             and ($destination.negotiated_alpn == "h3")
+            and ($destination.peer_completion_observed == true)
             and ($destination.release_observed == true)
             and ($destination.source.ip == "47.163.4.1")
             and $removal.process_active_at_removal

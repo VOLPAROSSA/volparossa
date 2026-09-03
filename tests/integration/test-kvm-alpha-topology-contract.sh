@@ -83,6 +83,7 @@ if grep -Eq 'launch_mpquic relay[012]' "$GUEST"; then exit 1; fi
 grep -F -- '--socket /run/volparossa/native/mpquic.sock' "$GUEST" >/dev/null
 grep -F 'native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records}' \
     "$GUEST" >/dev/null
+grep -F 'and ($destination.peer_completion_observed == true)' "$GUEST" >/dev/null
 grep -F 'DIRECT_CLIENT_EXIT_REACHABLE' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" link add underlay type dummy' "$GUEST" >/dev/null
 grep -F 'ip -n "$underlay_ns" route add default dev underlay scope global' "$GUEST" >/dev/null
