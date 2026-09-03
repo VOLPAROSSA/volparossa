@@ -277,10 +277,26 @@ grep -F 'relay1_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
 grep -F 'after_marker.relay2_wireguard_data_bytes > 1048576' "$GUEST" >/dev/null
 grep -F 'def is_ipv4_multicast(address):' "$GUEST" >/dev/null
 grep -F 'not is_ipv4_multicast(destination)' "$GUEST" >/dev/null
+grep -F 'is_outbound_client_discovery_attempt = (' "$GUEST" >/dev/null
+grep -F 'and interface == "underlay"' "$GUEST" >/dev/null
+grep -F 'and source == "46.162.3.1"' "$GUEST" >/dev/null
+grep -F 'and destination == "43.159.1.1"' "$GUEST" >/dev/null
+grep -F 'and destination_port == 41000' "$GUEST" >/dev/null
+grep -F 'outbound_client_discovery_attempt_packets"] += 1' "$GUEST" >/dev/null
 grep -F 'topology_control_public = {' "$GUEST" >/dev/null
 grep -F 'allowed = topology_control_public | {' "$GUEST" >/dev/null
+for scaled_public in 48.164.4.1 49.165.5.1 50.166.6.1 51.167.7.1; do
+    grep -F "\"$scaled_public\"," "$GUEST" >/dev/null
+done
 grep -F '47.163.4.2 whose appearance in an outer header is counted separately above' "$GUEST" \
     >/dev/null
+grep -F 'cr0 cr1 cr2 cr3 cr4 cr5 cb1 cb2 underlay' "$GUEST" >/dev/null
+grep -F 'xr0 xr1 xr2 xr3 xr4 xr5 xd underlay' "$GUEST" >/dev/null
+grep -F '"10.241.23.2/32","10.241.24.2/32","10.241.25.2/32"' "$GUEST" \
+    >/dev/null
+grep -F '"51.167.7.1/32","52.168.8.1/32","52.168.8.2/32"' "$GUEST" >/dev/null
+grep -F 'IN("cr0","cr1","cr2","cr3","cr4","cr5","cb1","cb2","underlay")' \
+    "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A11",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A12",success:$success' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A13",success:$success' "$GUEST" >/dev/null

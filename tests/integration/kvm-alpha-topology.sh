@@ -2236,6 +2236,7 @@ counters = {
     "unexpected_outer_packets": 0,
     "client_public_packets": 0,
     "direct_client_exit_packets": 0,
+    "outbound_client_discovery_attempt_packets": 0,
     "control_relay_packets": 0,
     "client_leg_packets": 0,
     "exit_leg_packets": 0,
@@ -2295,6 +2296,27 @@ while running and time.monotonic() < deadline:
             source = socket.inet_ntoa(frame[offset + 12 : offset + 16])
             destination = socket.inet_ntoa(frame[offset + 16 : offset + 20])
             interface = sockets[capture]
+            transport_offset = offset + header_length
+            source_port = 0
+            destination_port = 0
+            if (
+                protocol in {socket.IPPROTO_TCP, socket.IPPROTO_UDP}
+                and len(frame) >= transport_offset + 4
+            ):
+                source_port, destination_port = struct.unpack(
+                    "!HH", frame[transport_offset : transport_offset + 4]
+                )
+            is_outbound_client_discovery_attempt = (
+                role == "exit"
+                and interface == "underlay"
+                and protocol == socket.IPPROTO_UDP
+                and source == "46.162.3.1"
+                and destination == "43.159.1.1"
+                and source_port != 0
+                and destination_port == 41000
+            )
+            if is_outbound_client_discovery_attempt:
+                counters["outbound_client_discovery_attempt_packets"] += 1
             if protocol in {socket.IPPROTO_TCP, socket.IPPROTO_UDP}:
                 counters["routed_transport_packets"] += 1
             if source == "47.163.4.2" or destination == "47.163.4.2":
@@ -2302,7 +2324,6 @@ while running and time.monotonic() < deadline:
             if source == "43.159.1.1" or destination == "43.159.1.1":
                 counters["client_public_packets"] += 1
 
-            transport_offset = offset + header_length
             udp_length = 0
             wireguard_message_type = 0
             if protocol == socket.IPPROTO_UDP and len(frame) >= transport_offset + 12:
@@ -2319,11 +2340,20 @@ while running and time.monotonic() < deadline:
                     "10.241.20.2",
                     "10.241.21.2",
                     "10.241.22.2",
+                    "10.241.23.2",
+                    "10.241.24.2",
+                    "10.241.25.2",
+                    "10.241.26.2",
                     "10.241.31.1",
                     "10.241.31.2",
+                    "10.241.32.1",
+                    "10.241.32.2",
                     "46.162.3.1",
                     "47.163.4.1",
                     "47.163.4.2",
+                    "51.167.7.1",
+                    "52.168.8.1",
+                    "52.168.8.2",
                 }
                 if (source == "43.159.1.1" and destination in forbidden_exit) or (
                     destination == "43.159.1.1" and source in forbidden_exit
@@ -2353,6 +2383,10 @@ while running and time.monotonic() < deadline:
                     "44.160.1.1",
                     "45.161.2.1",
                     "46.162.3.1",
+                    "48.164.4.1",
+                    "49.165.5.1",
+                    "50.166.6.1",
+                    "51.167.7.1",
                 }
                 if role == "relay1":
                     client_interface, exit_interface = "r1c", "r1x"
@@ -3513,7 +3547,8 @@ start_privacy_observers() {
 
     ip netns exec "$CLIENT" python3 "$WORK/bin/privacy-observer.py" \
         client "$WORK/privacy-client.json" "$WORK/privacy-client.ready" \
-        cr0 cr1 cr2 underlay >"$WORK/privacy-client.log" 2>&1 &
+        cr0 cr1 cr2 cr3 cr4 cr5 cb1 cb2 underlay \
+        >"$WORK/privacy-client.log" 2>&1 &
     PRIVACY_CLIENT_PID=$!
     ip netns exec "$R1" python3 "$WORK/bin/privacy-observer.py" \
         relay1 "$WORK/privacy-relay1.json" "$WORK/privacy-relay1.ready" \
@@ -3525,7 +3560,7 @@ start_privacy_observers() {
     PRIVACY_RELAY2_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/privacy-observer.py" \
         exit "$WORK/privacy-exit.json" "$WORK/privacy-exit.ready" \
-        xr0 xr1 xr2 xd underlay >"$WORK/privacy-exit.log" 2>&1 &
+        xr0 xr1 xr2 xr3 xr4 xr5 xd underlay >"$WORK/privacy-exit.log" 2>&1 &
     PRIVACY_EXIT_PID=$!
 
     wait_observer "$PRIVACY_CLIENT_PID" "$WORK/privacy-client.ready" \
@@ -5608,6 +5643,7 @@ jq -S -c -n --slurpfile exit_capture "$WORK/privacy-exit.json" \
     | (($exit.capture_role == "exit") and ($exit.truncated == false)
         and ($exit.relay1_wireguard_data_datagrams > 0)
         and ($exit.relay2_wireguard_data_datagrams > 0)
+        and ($exit.outbound_client_discovery_attempt_packets == 0)
         and ($exit.client_public_packets == 0)
         and ($exit.direct_client_exit_packets == 0)) as $success
     | {schema_version:1,acceptance_id:"A12",success:$success,
@@ -5635,21 +5671,26 @@ jq -S -c -n \
     --rawfile destination_route_after "$WORK/a13-destination-route-after.txt" \
     '($client_capture[0]) as $client
     | ["46.162.3.1/32","47.163.4.1/32","47.163.4.2/32",
+       "51.167.7.1/32","52.168.8.1/32","52.168.8.2/32",
        "10.241.20.2/32","10.241.21.2/32","10.241.22.2/32",
-       "10.241.31.1/32","10.241.31.2/32"] as $forbidden
+       "10.241.23.2/32","10.241.24.2/32","10.241.25.2/32",
+       "10.241.26.2/32","10.241.31.1/32","10.241.31.2/32",
+       "10.241.32.1/32","10.241.32.2/32"] as $forbidden
     | ([($routes_before[0][]),($routes_after[0][])]
         | map(select((.dst // "") as $dst | $forbidden | index($dst)))
         | map(select((.type // "unicast") != "unreachable"))
-        | map(select((.dev // "") | IN("cr0","cr1","cr2")))) as $direct_routes
+        | map(select((.dev // "")
+            | IN("cr0","cr1","cr2","cr3","cr4","cr5","cb1","cb2","underlay"))))
+        as $direct_routes
     | (($client.capture_role == "client") and ($client.truncated == false)
         and ($client.relay1_wireguard_data_datagrams > 0)
         and ($client.relay2_wireguard_data_datagrams > 0)
         and ($client.direct_client_exit_packets == 0)
         and ($direct_routes | length) == 0
-        and ($exit_route_before | test("dev (cr0|cr1|cr2)( |$)") | not)
-        and ($exit_route_after | test("dev (cr0|cr1|cr2)( |$)") | not)
-        and ($destination_route_before | test("dev (cr0|cr1|cr2)( |$)") | not)
-        and ($destination_route_after | test("dev (cr0|cr1|cr2)( |$)") | not)
+        and ($exit_route_before | test("dev (cr[0-5]|cb[12])( |$)") | not)
+        and ($exit_route_after | test("dev (cr[0-5]|cb[12])( |$)") | not)
+        and ($destination_route_before | test("dev (cr[0-5]|cb[12])( |$)") | not)
+        and ($destination_route_after | test("dev (cr[0-5]|cb[12])( |$)") | not)
         and ($destination_route_before | contains("dev underlay"))) as $success
     | {schema_version:1,acceptance_id:"A13",success:$success,
        topology:{direct_client_exit_adjacency:false,peerless_fallback_underlay:true},
