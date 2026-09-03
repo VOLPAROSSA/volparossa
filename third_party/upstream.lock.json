@@ -126,12 +126,14 @@
       "applies_to_commit": "6957ccf9b9fcb9ab62c43672638876abe47162dc",
       "applies_after": "patches/volparossa-xquic.patch",
       "file": "patches/volparossa-xquic-edt.patch",
-      "sha256": "a6d6cae3535b11b650902cec79b91a8e849760b1103ef009d91db99d216d3a57",
+      "sha256": "29a49cc1cf96df42ce715c082e67a2da14f83eca1c9565f3a0a66851ca7eb34f",
       "purpose": [
         "select exactly one writable path by bounded estimated delivery time",
         "use live RTT, in-flight queue, bandwidth, congestion window and recent loss",
+        "give each healthy active path continuous service within 256 KiB after a 2 MiB ACKed bootstrap floor",
+        "stop forced service after 8 MiB attempted without sufficient ACK progress",
         "exclude congestion-blocked paths without reinjection, duplication or FEC",
-        "exercise both healthy choices and reject a later congested lossy path in one deterministic native contract test"
+        "exercise same-session 4 MiB fairness and reject a later congested lossy path in one deterministic native contract test"
       ]
     },
     {

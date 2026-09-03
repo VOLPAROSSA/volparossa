@@ -58,10 +58,10 @@ index c89a751..fe0e084 100644
          xqc_conn_send_ping;
 diff --git a/src/transport/scheduler/xqc_scheduler_volparossa_edt.c b/src/transport/scheduler/xqc_scheduler_volparossa_edt.c
 new file mode 100644
-index 0000000..9288f50
+index 0000000..0a366b3
 --- /dev/null
 +++ b/src/transport/scheduler/xqc_scheduler_volparossa_edt.c
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,361 @@
 +// SPDX-License-Identifier: GPL-3.0-only
 +
 +/**
@@ -72,12 +72,20 @@ index 0000000..9288f50
 + *   RTT/2 + queued/rate + RTT*(inflight/cwnd)
 + *         + RTT*(loss/(1-loss))
 + *
-+ * queued is the path's current bytes in flight plus the packet being
-+ * scheduled.  The independent congestion term makes a nearly-full cwnd lose
-+ * before it becomes completely blocked.  The loss multiplier is capped at
-+ * 100 RTTs and the queue term at 60 seconds, keeping adversarial or transient
-+ * counters finite.  Reinjection is deliberately unsupported: this scheduler
-+ * returns one original path and never duplicates or applies FEC.
++ * queued is the path's current bytes in flight, bytes already scheduled in
++ * this send burst, and the packet being scheduled.  The independent
++ * congestion term makes a nearly-full cwnd lose before it becomes completely
++ * blocked.  Before every active path has acknowledged 2 MiB, bounded startup
++ * exploration selects the sendable path with the least projected delivered
++ * bytes.  Afterwards EDT remains primary while a 256 KiB maximum service skew
++ * gives every healthy active path continuous genuine application traffic.
++ * Forced service stops when attempted-minus-acknowledged transport reaches
++ * 8 MiB, so an active black hole cannot retain a fixed traffic share forever.
++ * The loss multiplier is capped at 100 RTTs and the queue term at 60 seconds,
++ * keeping
++ * adversarial or transient counters finite.  Reinjection is deliberately
++ * unsupported: this scheduler returns one original path and never duplicates
++ * or applies FEC.
 + */
 +
 +#include "src/transport/scheduler/xqc_scheduler_volparossa_edt.h"
@@ -87,9 +95,25 @@ index 0000000..9288f50
 +#include "src/transport/xqc_send_ctl.h"
 +
 +#include <limits.h>
++#include <string.h>
 +
 +#define VOLPAROSSA_EDT_QUEUE_LIMIT_US (60ULL * 1000000ULL)
 +#define VOLPAROSSA_EDT_LOSS_MULTIPLIER_LIMIT 100.0L
++#define VOLPAROSSA_EDT_EXPLORATION_FLOOR_BYTES (2ULL * 1024ULL * 1024ULL)
++#define VOLPAROSSA_EDT_EXPLORATION_ATTEMPT_CAP_BYTES \
++    (8ULL * 1024ULL * 1024ULL)
++#define VOLPAROSSA_EDT_MAX_SERVICE_SKEW_BYTES (256ULL * 1024ULL)
++
++typedef struct volparossa_edt_path_window_s {
++    uint64_t path_id;
++    uint64_t delivered_start;
++    uint64_t attempted_start;
++    xqc_bool_t occupied;
++} volparossa_edt_path_window_t;
++
++typedef struct volparossa_edt_scheduler_s {
++    volparossa_edt_path_window_t windows[XQC_PATH_HARD_CAP];
++} volparossa_edt_scheduler_t;
 +
 +static uint64_t
 +volparossa_edt_saturating_add(uint64_t left, uint64_t right)
@@ -123,9 +147,11 @@ index 0000000..9288f50
 +    uint64_t cwnd_bytes =
 +        ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(ctl->ctl_cong);
 +    uint64_t inflight_bytes = ctl->ctl_bytes_in_flight;
++    uint64_t scheduled_bytes = path->path_schedule_bytes;
 +    uint64_t packet = packet_bytes > 0 ? (uint64_t)packet_bytes : 1;
 +    if (srtt_us == 0 || cwnd_bytes == 0 || packet > UINT64_MAX - inflight_bytes
-+        || inflight_bytes + packet > cwnd_bytes)
++        || scheduled_bytes > UINT64_MAX - inflight_bytes - packet
++        || inflight_bytes + scheduled_bytes + packet > cwnd_bytes)
 +    {
 +        return UINT64_MAX;
 +    }
@@ -135,7 +161,7 @@ index 0000000..9288f50
 +        return UINT64_MAX;
 +    }
 +
-+    uint64_t queued_bytes = inflight_bytes + packet;
++    uint64_t queued_bytes = inflight_bytes + scheduled_bytes + packet;
 +    long double queue_us =
 +        ((long double)queued_bytes * 1000000.0L)
 +        / (long double)rate_bytes_per_second;
@@ -172,17 +198,86 @@ index 0000000..9288f50
 +    return volparossa_edt_saturating_add(cost, loss_cost);
 +}
 +
++static uint64_t
++volparossa_edt_projected_delivered_bytes(xqc_path_ctx_t *path)
++{
++    xqc_send_ctl_t *ctl = path->path_send_ctl;
++    uint64_t projected = volparossa_edt_saturating_add(
++        ctl->ctl_delivered, (uint64_t)ctl->ctl_bytes_in_flight);
++    return volparossa_edt_saturating_add(
++        projected, (uint64_t)path->path_schedule_bytes);
++}
++
++static volparossa_edt_path_window_t *
++volparossa_edt_path_window(volparossa_edt_scheduler_t *scheduler,
++                           uint64_t path_id)
++{
++    if (scheduler == NULL) {
++        return NULL;
++    }
++    size_t index = (size_t)(path_id % XQC_PATH_HARD_CAP);
++    for (size_t probe = 0; probe < XQC_PATH_HARD_CAP; ++probe) {
++        volparossa_edt_path_window_t *window =
++            &scheduler->windows[(index + probe) % XQC_PATH_HARD_CAP];
++        if (!window->occupied) {
++            window->occupied = XQC_TRUE;
++            window->path_id = path_id;
++            return window;
++        }
++        if (window->path_id == path_id) {
++            return window;
++        }
++    }
++    return NULL;
++}
++
++static uint64_t
++volparossa_edt_attempt_debt_bytes(volparossa_edt_scheduler_t *scheduler,
++                                  xqc_path_ctx_t *path)
++{
++    volparossa_edt_path_window_t *window =
++        volparossa_edt_path_window(scheduler, path->path_id);
++    if (window == NULL) {
++        return VOLPAROSSA_EDT_EXPLORATION_ATTEMPT_CAP_BYTES;
++    }
++
++    xqc_send_ctl_t *ctl = path->path_send_ctl;
++    uint64_t delivered = ctl->ctl_delivered;
++    uint64_t attempted = ctl->ctl_bytes_send;
++    if (delivered < window->delivered_start
++        || attempted < window->attempted_start)
++    {
++        window->delivered_start = delivered;
++        window->attempted_start = attempted;
++    }
++    if (delivered - window->delivered_start
++        >= VOLPAROSSA_EDT_EXPLORATION_FLOOR_BYTES)
++    {
++        window->delivered_start = delivered;
++        window->attempted_start = attempted;
++    }
++    uint64_t projected_attempted = volparossa_edt_saturating_add(
++        attempted, (uint64_t)path->path_schedule_bytes);
++    uint64_t attempted_delta = projected_attempted > window->attempted_start
++        ? projected_attempted - window->attempted_start
++        : 0;
++    uint64_t delivered_delta = delivered - window->delivered_start;
++    return attempted_delta > delivered_delta
++        ? attempted_delta - delivered_delta
++        : 0;
++}
++
 +static size_t
 +volparossa_edt_scheduler_size(void)
 +{
-+    return 0;
++    return sizeof(volparossa_edt_scheduler_t);
 +}
 +
 +static void
 +volparossa_edt_scheduler_init(void *scheduler, xqc_log_t *log,
 +                              xqc_scheduler_params_t *params)
 +{
-+    (void)scheduler;
++    memset(scheduler, 0, sizeof(volparossa_edt_scheduler_t));
 +    (void)log;
 +    (void)params;
 +}
@@ -192,7 +287,8 @@ index 0000000..9288f50
 +                                 xqc_packet_out_t *packet_out, int check_cwnd,
 +                                 int reinject, xqc_bool_t *cc_blocked)
 +{
-+    (void)scheduler;
++    volparossa_edt_scheduler_t *edt_scheduler =
++        (volparossa_edt_scheduler_t *)scheduler;
 +    if (cc_blocked != NULL) {
 +        *cc_blocked = XQC_FALSE;
 +    }
@@ -202,8 +298,17 @@ index 0000000..9288f50
 +
 +    xqc_path_ctx_t *best = NULL;
 +    xqc_path_ctx_t *sendable_fallback = NULL;
++    xqc_path_ctx_t *startup = NULL;
++    xqc_path_ctx_t *least_served = NULL;
 +    uint64_t best_cost = UINT64_MAX;
++    uint64_t least_startup_delivered = UINT64_MAX;
++    uint64_t least_projected_delivered = UINT64_MAX;
 +    xqc_bool_t reached_congestion_check = XQC_FALSE;
++    xqc_bool_t exploration_needed = XQC_FALSE;
++    xqc_bool_t forced_service_selected = XQC_FALSE;
++    xqc_bool_t application_packet =
++        (packet_out->po_frame_types
++         & (XQC_FRAME_BIT_STREAM | XQC_FRAME_BIT_DATAGRAM)) != 0;
 +    size_t visited = 0;
 +    xqc_list_head_t *position;
 +    xqc_list_head_t *next;
@@ -221,10 +326,42 @@ index 0000000..9288f50
 +        {
 +            continue;
 +        }
++        xqc_bool_t path_needs_exploration =
++            path->path_send_ctl->ctl_delivered
++                < VOLPAROSSA_EDT_EXPLORATION_FLOOR_BYTES
++            && volparossa_edt_attempt_debt_bytes(edt_scheduler, path)
++                < VOLPAROSSA_EDT_EXPLORATION_ATTEMPT_CAP_BYTES;
++        if (path_needs_exploration) {
++            exploration_needed = XQC_TRUE;
++        }
 +
 +        reached_congestion_check = XQC_TRUE;
 +        if (!xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
 +            continue;
++        }
++        uint64_t projected_delivered =
++            volparossa_edt_projected_delivered_bytes(path);
++        if (path_needs_exploration
++            && (startup == NULL
++                || projected_delivered < least_startup_delivered
++                || (projected_delivered == least_startup_delivered
++                    && path->path_id < startup->path_id)))
++        {
++            startup = path;
++            least_startup_delivered = projected_delivered;
++        }
++        xqc_bool_t forced_service_eligible =
++            volparossa_edt_attempt_debt_bytes(edt_scheduler, path)
++                < VOLPAROSSA_EDT_EXPLORATION_ATTEMPT_CAP_BYTES;
++        if (forced_service_eligible) {
++            if (least_served == NULL
++                || projected_delivered < least_projected_delivered
++                || (projected_delivered == least_projected_delivered
++                    && path->path_id < least_served->path_id))
++            {
++                least_served = path;
++                least_projected_delivered = projected_delivered;
++            }
 +        }
 +        if (sendable_fallback == NULL
 +            || path->path_id < sendable_fallback->path_id)
@@ -244,7 +381,27 @@ index 0000000..9288f50
 +        }
 +    }
 +
-+    if (best == NULL) {
++    if (application_packet && exploration_needed && startup != NULL) {
++        best = startup;
++        best_cost = UINT64_MAX;
++        forced_service_selected = XQC_TRUE;
++        least_projected_delivered = least_startup_delivered;
++
++    } else if (application_packet && best != NULL && least_served != NULL
++               && best != least_served)
++    {
++        uint64_t best_projected =
++            volparossa_edt_projected_delivered_bytes(best);
++        if (best_projected > least_projected_delivered
++            && best_projected - least_projected_delivered
++                > VOLPAROSSA_EDT_MAX_SERVICE_SKEW_BYTES)
++        {
++            best = least_served;
++            best_cost = UINT64_MAX;
++            forced_service_selected = XQC_TRUE;
++        }
++
++    } else if (best == NULL) {
 +        best = sendable_fallback;
 +    }
 +    if (cc_blocked != NULL && reached_congestion_check && best == NULL) {
@@ -252,8 +409,11 @@ index 0000000..9288f50
 +    }
 +    if (best != NULL) {
 +        xqc_log(conn->log, XQC_LOG_DEBUG,
-+                "|volparossa_edt|select|path:%ui|cost_us:%ui|packet:%uz|",
-+                best->path_id, best_cost, packet_out->po_used_size);
++                "|volparossa_edt|select|path:%ui|cost_us:%ui|packet:%uz|"
++                "forced_service:%d|least_projected_delivered:%ui|",
++                best->path_id, best_cost, packet_out->po_used_size,
++                forced_service_selected,
++                forced_service_selected ? least_projected_delivered : 0);
 +    }
 +    return best;
 +}
@@ -286,10 +446,10 @@ index 0000000..5e516a6
 +#endif /* _XQC_SCHEDULER_VOLPAROSSA_EDT_H_INCLUDED_ */
 diff --git a/tests/xqc_volparossa_edt_contract.c b/tests/xqc_volparossa_edt_contract.c
 new file mode 100644
-index 0000000..efd0b3b
+index 0000000..872a1a9
 --- /dev/null
 +++ b/tests/xqc_volparossa_edt_contract.c
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,254 @@
 +// SPDX-License-Identifier: GPL-3.0-only
 +
 +/**
@@ -301,6 +461,7 @@ index 0000000..efd0b3b
 +
 +#include <stdint.h>
 +#include <stdio.h>
++#include <stdlib.h>
 +#include <string.h>
 +
 +#include "xquic/xquic.h"
@@ -321,6 +482,7 @@ index 0000000..efd0b3b
 +    xqc_path_ctx_t paths[3];
 +    xqc_send_ctl_t send_ctls[3];
 +    edt_mock_congestion_t congestion[3];
++    void *scheduler;
 +} edt_test_fixture_t;
 +
 +static uint64_t
@@ -378,7 +540,7 @@ index 0000000..efd0b3b
 +    xqc_bool_t blocked = XQC_FALSE;
 +    xqc_path_ctx_t *selected =
 +        xqc_volparossa_edt_scheduler_cb.xqc_scheduler_get_path(
-+            NULL, &fixture->conn, &packet, 1, 0, &blocked);
++            fixture->scheduler, &fixture->conn, &packet, 1, 0, &blocked);
 +    if (cc_blocked != NULL) {
 +        *cc_blocked = blocked;
 +    }
@@ -393,6 +555,14 @@ index 0000000..efd0b3b
 +    fixture.log.log_level = XQC_LOG_FATAL;
 +    fixture.conn.log = &fixture.log;
 +    xqc_init_list_head(&fixture.conn.conn_paths_list);
++    fixture.scheduler =
++        calloc(1, xqc_volparossa_edt_scheduler_cb.xqc_scheduler_size());
++    if (fixture.scheduler == NULL) {
++        fputs("could not allocate EDT scheduler fixture\n", stderr);
++        return 1;
++    }
++    xqc_volparossa_edt_scheduler_cb.xqc_scheduler_init(
++        fixture.scheduler, &fixture.log, NULL);
 +
 +    /* Two healthy paths: the low-RTT path initially arrives first. */
 +    edt_add_path(&fixture, 0, 10, 12000, 20000000, 128000, 2000, 0, 100);
@@ -400,6 +570,11 @@ index 0000000..efd0b3b
 +    /* This path looks fast by RTT/rate alone but is queued, congested and
 +     * lossy, so its predicted delivery is later than either healthy path. */
 +    edt_add_path(&fixture, 2, 30, 5000, 100000000, 128000, 100000, 80, 100);
++    for (size_t index = 0; index < 3; ++index) {
++        fixture.send_ctls[index].ctl_delivered = 2ULL * 1024ULL * 1024ULL;
++        fixture.send_ctls[index].ctl_bytes_send =
++            fixture.send_ctls[index].ctl_delivered;
++    }
 +
 +    if (edt_select(&fixture, NULL) != 10) {
 +        fputs("EDT did not select the earliest healthy path\n", stderr);
@@ -430,13 +605,102 @@ index 0000000..efd0b3b
 +        return 1;
 +    }
 +
-+    /* As soon as one path has usable observations, its finite EDT estimate
-+     * takes precedence over the cold-start fallback. */
++    /* A finite path may not starve a cold path.  The cold path receives real
++     * application traffic until every active path has 2 MiB acknowledged. */
 +    fixture.send_ctls[0].ctl_srtt = 12000;
 +    fixture.congestion[0].rate_bytes_per_second = 20000000;
-+    if (edt_select(&fixture, NULL) != 30) {
-+        fputs("EDT fallback overrode a finite path estimate\n", stderr);
++    fixture.paths[2].app_path_status = XQC_APP_PATH_STATUS_STANDBY;
++    fixture.send_ctls[1].ctl_delivered = 0;
++    fixture.send_ctls[1].ctl_bytes_send = 0;
++    if (edt_select(&fixture, NULL) != 10) {
++        fputs("EDT did not explore the cold active path\n", stderr);
 +        return 1;
 +    }
++
++    /* Bytes already assigned in this send burst count toward exploration,
++     * so a large burst cannot be queued entirely on the first path before
++     * its send counters advance. */
++    fixture.paths[1].path_schedule_bytes = 256 * 1024;
++    if (edt_select(&fixture, NULL) != 30) {
++        fputs("EDT did not balance projected startup delivery\n", stderr);
++        return 1;
++    }
++    fixture.paths[1].path_schedule_bytes = 0;
++
++    /* ACKed transport bytes, rather than attempted sends, end exploration.
++     * Once both paths reach the floor, the finite EDT estimate wins. */
++    fixture.send_ctls[0].ctl_delivered = 2ULL * 1024ULL * 1024ULL;
++    fixture.send_ctls[1].ctl_delivered = 2ULL * 1024ULL * 1024ULL;
++    fixture.send_ctls[0].ctl_bytes_send = fixture.send_ctls[0].ctl_delivered;
++    fixture.send_ctls[1].ctl_bytes_send = fixture.send_ctls[1].ctl_delivered;
++    if (edt_select(&fixture, NULL) != 30) {
++        fputs("EDT did not resume metric selection after exploration\n", stderr);
++        return 1;
++    }
++
++    /* A later transfer on the same connection must still exercise both paths.
++     * Start at the maximum permitted service skew, make path 30's EDT vastly
++     * better, then schedule the exact 4 MiB A07 pre-failure request.  Bounding
++     * both the start and end skew to 256 KiB gives each path at least
++     * (4 MiB - 2 * 256 KiB) / 2 = 1.75 MiB of new genuine traffic. */
++    const uint64_t baseline = 8ULL * 1024ULL * 1024ULL;
++    const uint64_t service_skew = 256ULL * 1024ULL;
++    fixture.send_ctls[0].ctl_delivered = baseline + service_skew;
++    fixture.send_ctls[0].ctl_bytes_send = fixture.send_ctls[0].ctl_delivered;
++    fixture.send_ctls[0].ctl_srtt = 1000;
++    fixture.congestion[0].rate_bytes_per_second = 1000000000U;
++    fixture.congestion[0].cwnd_bytes = 16ULL * 1024ULL * 1024ULL;
++    fixture.send_ctls[1].ctl_delivered = baseline;
++    fixture.send_ctls[1].ctl_bytes_send = fixture.send_ctls[1].ctl_delivered;
++    fixture.send_ctls[1].ctl_srtt = 100000;
++    fixture.congestion[1].rate_bytes_per_second = 1000000U;
++    fixture.congestion[1].cwnd_bytes = 16ULL * 1024ULL * 1024ULL;
++    uint64_t assigned_path_30 = 0;
++    uint64_t assigned_path_10 = 0;
++    const uint64_t later_transfer_bytes = 4ULL * 1024ULL * 1024ULL;
++    while (assigned_path_30 + assigned_path_10 < later_transfer_bytes) {
++        uint64_t selected = edt_select(&fixture, NULL);
++        if (selected == 30) {
++            assigned_path_30 += 1200;
++            fixture.paths[0].path_schedule_bytes += 1200;
++        } else if (selected == 10) {
++            assigned_path_10 += 1200;
++            fixture.paths[1].path_schedule_bytes += 1200;
++        } else {
++            fputs("EDT selected an unexpected path in later transfer\n", stderr);
++            return 1;
++        }
++    }
++    if (assigned_path_30 <= 1024ULL * 1024ULL
++        || assigned_path_10 <= 1024ULL * 1024ULL)
++    {
++        fputs("EDT starved one path in a later same-session transfer\n", stderr);
++        return 1;
++    }
++
++    /* An active black hole gets a bounded opportunity to obtain ACKs.  ACKed
++     * progress reduces its attempt debt; after 8 MiB remains unacknowledged,
++     * it cannot indefinitely override EDT. */
++    fixture.paths[0].path_schedule_bytes = 0;
++    fixture.paths[1].path_schedule_bytes = 0;
++    fixture.send_ctls[0].ctl_delivered = baseline + 2ULL * 1024ULL * 1024ULL;
++    fixture.send_ctls[0].ctl_bytes_send = fixture.send_ctls[0].ctl_delivered;
++    fixture.send_ctls[1].ctl_delivered = baseline;
++    fixture.send_ctls[1].ctl_bytes_send = baseline;
++    (void)edt_select(&fixture, NULL);
++    fixture.send_ctls[1].ctl_delivered = baseline + 1024ULL * 1024ULL;
++    fixture.send_ctls[1].ctl_bytes_send =
++        baseline + 8ULL * 1024ULL * 1024ULL;
++    if (edt_select(&fixture, NULL) != 10) {
++        fputs("EDT did not subtract ACK progress from attempt debt\n", stderr);
++        return 1;
++    }
++    fixture.send_ctls[1].ctl_bytes_send =
++        baseline + 9ULL * 1024ULL * 1024ULL;
++    if (edt_select(&fixture, NULL) != 30) {
++        fputs("EDT did not bound unsuccessful path exploration\n", stderr);
++        return 1;
++    }
++    free(fixture.scheduler);
 +    return 0;
 +}
