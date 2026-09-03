@@ -3968,6 +3968,12 @@ A03_STATUS=1
 attempt=0
 while [ "$attempt" -lt 30 ]; do
     if start_mptcp_download a03-aggregate a03-aggregate "$attempt" -; then
+        # The destination-ready marker proves that the primary MPTCP flow is
+        # established, while the helper-installed additional subflow may still
+        # be completing its asynchronous MP_JOIN.  Give that real second
+        # subflow the same bounded settling window used by the single-path
+        # isolation case before releasing the measured payload.
+        sleep 2
         aggregate_before_r1=$(tc_sent_bytes "$R1" r1c) \
             || fail A03_RELAY1_COUNTER_UNAVAILABLE
         aggregate_before_r2=$(tc_sent_bytes "$R2" r2c) \
