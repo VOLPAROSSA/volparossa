@@ -498,6 +498,38 @@ static vmp_transport_error_t reject_transport_receive(
     return VMP_TRANSPORT_ENGINE;
 }
 
+static vmp_transport_error_t reject_exit_create(
+    void *factory_context, const vmp_start_exit_session_t *start,
+    void **out_session)
+{
+    (void)factory_context;
+    (void)start;
+    (void)out_session;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t reject_exit_add(
+    void *session, const vmp_start_exit_session_t *path, int listener_fd,
+    int64_t *out_handle)
+{
+    (void)session;
+    (void)path;
+    (void)out_handle;
+    if (listener_fd >= 0) (void)close(listener_fd);
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t reject_exit_snapshot(
+    void *session, vmp_exit_transport_snapshot_t *out)
+{
+    (void)session;
+    (void)out;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
 static const vmp_transport_ops_t REJECT_TRANSPORT_OPS = {
     .create = reject_transport_create,
     .destroy = reject_transport_destroy,
@@ -507,6 +539,14 @@ static const vmp_transport_ops_t REJECT_TRANSPORT_OPS = {
     .snapshot = reject_transport_snapshot,
     .send_inner = reject_transport_send,
     .receive_inner = reject_transport_receive,
+    .exit_create = reject_exit_create,
+    .exit_destroy = reject_transport_destroy,
+    .exit_add_listener = reject_exit_add,
+    .exit_start = reject_transport_pump,
+    .exit_pump = reject_transport_pump,
+    .exit_snapshot = reject_exit_snapshot,
+    .exit_send_inner = reject_transport_send,
+    .exit_receive_inner = reject_transport_receive,
 };
 
 static bool runtime_clock_snapshot(void *context, uint64_t *out_boottime_ms,
@@ -1051,18 +1091,18 @@ static void test_framed_exit_authorization_replay_is_consumed_once(void)
     assert(state.calls == 1U && state.closed_descriptors == 1U);
     assert(state.results[0] == VMP_RESULT_TRANSPORT);
     assert(strcmp(state.diagnostics[0],
-                  "exit_listener_orchestration_unavailable") == 0);
-    assert(runtime_auth_calls == 1U && runtime_backend_calls == 0U);
+                  "exit_transport_create_failed") == 0);
+    assert(runtime_auth_calls == 1U && runtime_backend_calls == 1U);
 
     serve_runtime_exit_frame(&state, 0x72U);
     assert(state.calls == 2U && state.closed_descriptors == 2U);
     assert(state.results[1] == VMP_RESULT_UNAUTHORISED);
     assert(strcmp(state.diagnostics[1], "authorization_replay") == 0);
-    assert(runtime_auth_calls == 2U && runtime_backend_calls == 0U);
+    assert(runtime_auth_calls == 2U && runtime_backend_calls == 1U);
     assert(clock.snapshot_calls == 3U && clock.boottime_calls == 0U);
 
     vmp_runtime_destroy(runtime);
-    assert(runtime_backend_calls == 0U);
+    assert(runtime_backend_calls == 1U);
 }
 
 static void test_fragmented_binding_recvmsg_is_reassembled(void)

@@ -1,6 +1,6 @@
 //! Signed route, whitelist, replay, and opening-frame tests.
 
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 use ed25519_dalek::SigningKey;
 use tokio::io::duplex;
@@ -169,6 +169,36 @@ fn policy_for_domain(domain: &str) -> VerifiedManifest {
     .unwrap()
 }
 
+fn policy_for_ip(address: IpAddr) -> VerifiedManifest {
+    let maintainer = key(90);
+    let trust = TrustStore::new(
+        PolicyMode::Production,
+        vec![TrustedMaintainer::production(maintainer.verifying_key())],
+    )
+    .unwrap();
+    let mut specification = ManifestSpec::new(1, 1, NOW - 2_000, NOW - 1_000, NOW + 120_000)
+        .unwrap()
+        .with_required_signatures(1)
+        .unwrap();
+    specification
+        .add_rule(
+            DestinationRule::exact_ip(
+                address,
+                [ProtocolPort::new(TransportProtocol::Tcp, 443).unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let encoded = sign_manifest(&specification, &trust, &[&maintainer]).unwrap();
+    verify_manifest(
+        &encoded,
+        NOW,
+        &trust,
+        VerificationPolicy::new(1, 1, 300_000, 60_000).unwrap(),
+    )
+    .unwrap()
+}
+
 fn signed_exit(exit: &SigningKey, scope: &V4GrantScope) -> Vec<u8> {
     signed_exit_with(exit, scope, |_| {})
 }
@@ -206,6 +236,7 @@ where
             masque_context_id: 1,
             client_native_instance_id: vec![14; 32],
             exit_native_instance_id: vec![15; 32],
+            credential_hpke_public_key: vec![16; 32],
         }),
     };
     mutate(&mut message);
@@ -337,14 +368,12 @@ fn endpoint(key: u8, port: u16) -> WireguardEndpoint {
     }
 }
 
-#[tokio::test]
-async fn signed_open_frame_is_bound_to_multipath_route_and_policy() {
+fn verified_route_fixture() -> (VerifiedMptcpRoute, SigningKey, ReplayCache) {
     let control_relay = key(49);
     let exit = key(50);
     let relay_one = key(51);
     let relay_two = key(52);
     let client = key(53);
-    let client_id = node_id(&client);
     let scope = v4_grant_scope(&exit, &client, &control_relay);
     let signed_exit = signed_exit(&exit, &scope);
     let signed_relay_one = signed_relay(&exit, &relay_one, &scope, 1);
@@ -358,6 +387,13 @@ async fn signed_open_frame_is_bound_to_multipath_route_and_policy() {
         &mut replay,
     )
     .unwrap();
+    (route, client, replay)
+}
+
+#[tokio::test]
+async fn signed_open_frame_is_bound_to_multipath_route_and_policy() {
+    let (route, client, mut replay) = verified_route_fixture();
+    let client_id = node_id(&client);
     assert_eq!(route.path_count(), 2);
 
     let policy = policy();
@@ -372,6 +408,7 @@ async fn signed_open_frame_is_bound_to_multipath_route_and_policy() {
         timestamp_ms: NOW,
         expires_at_ms: EXPIRY,
         nonce: open_nonce.to_vec(),
+        destination_ip: Vec::new(),
     };
     let signed_open = sign_control_message(
         &open,
@@ -406,7 +443,7 @@ async fn signed_open_frame_is_bound_to_multipath_route_and_policy() {
     )
     .await
     .unwrap();
-    assert_eq!(authorized.hostname(), "www.example.com");
+    assert_eq!(authorized.hostname(), Some("www.example.com"));
     assert_eq!(authorized.port(), 443);
     assert!(!format!("{authorized:?}").contains("example.com"));
 
@@ -417,6 +454,80 @@ async fn signed_open_frame_is_bound_to_multipath_route_and_policy() {
         error,
         TcpProxyError::Protocol(ProtocolError::Replay)
     ));
+}
+
+#[test]
+fn signed_open_frame_binds_exact_raw_ip_to_policy() {
+    let (route, client, _) = verified_route_fixture();
+    let destination_ip: IpAddr = "93.184.216.34".parse().unwrap();
+    let ip_policy = policy_for_ip(destination_ip);
+    let ip_nonce = [62; 32];
+    let ip_open = OpenTcp {
+        route_context_id: route.route_context_id().to_vec(),
+        flow_id: vec![63; 16],
+        client_ephemeral_id: node_id(&client),
+        hostname: String::new(),
+        port: 443,
+        policy_hash: ip_policy.policy_hash().to_vec(),
+        timestamp_ms: NOW,
+        expires_at_ms: EXPIRY,
+        nonce: ip_nonce.to_vec(),
+        destination_ip: match destination_ip {
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
+        },
+    };
+    let signed_ip_open = sign_control_message(
+        &ip_open,
+        &client,
+        NOW,
+        EXPIRY,
+        ip_nonce,
+        TimePolicy::default(),
+    )
+    .unwrap();
+    let mut ip_replay = ReplayCache::new(2).unwrap();
+    let authorized_ip = TcpAuthorizationScope::new(&route, &ip_policy)
+        .verify(
+            &signed_ip_open,
+            NOW + 2,
+            TimePolicy::default(),
+            &mut ip_replay,
+        )
+        .unwrap();
+    assert_eq!(authorized_ip.hostname(), None);
+    assert_eq!(authorized_ip.destination_ip(), Some(destination_ip));
+}
+
+#[test]
+fn signed_open_frame_binds_allowed_hostname_to_transparent_destination_ip() {
+    let (route, client, _) = verified_route_fixture();
+    let destination_ip: IpAddr = "93.184.216.34".parse().unwrap();
+    let domain_policy = policy();
+    let nonce = [64; 32];
+    let open = OpenTcp {
+        route_context_id: route.route_context_id().to_vec(),
+        flow_id: vec![65; 16],
+        client_ephemeral_id: node_id(&client),
+        hostname: "www.example.com".to_owned(),
+        port: 443,
+        policy_hash: domain_policy.policy_hash().to_vec(),
+        timestamp_ms: NOW,
+        expires_at_ms: EXPIRY,
+        nonce: nonce.to_vec(),
+        destination_ip: match destination_ip {
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
+        },
+    };
+    let signed =
+        sign_control_message(&open, &client, NOW, EXPIRY, nonce, TimePolicy::default()).unwrap();
+    let mut replay = ReplayCache::new(2).unwrap();
+    let authorized = TcpAuthorizationScope::new(&route, &domain_policy)
+        .verify(&signed, NOW + 2, TimePolicy::default(), &mut replay)
+        .unwrap();
+    assert_eq!(authorized.hostname(), Some("www.example.com"));
+    assert_eq!(authorized.destination_ip(), Some(destination_ip));
 }
 
 #[test]

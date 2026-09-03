@@ -808,6 +808,10 @@ static void test_response_is_compatible_and_bounded(void)
     response.path_count = 1;
     response.paths[0].path_id = 1;
     response.paths[0].smoothed_rtt_us = 1000;
+    response.paths[0].packets_lost = 2;
+    response.paths[0].delivered_bytes = 0;
+    response.paths[0].congestion_window_bytes = 64000;
+    response.paths[0].bytes_in_flight = 1200;
     response.paths[0].delivery_rate_bps = 8000000;
     response.paths[0].data_carrying = true;
     response.native_process_identity.role = VMP_NATIVE_ROLE_CLIENT;

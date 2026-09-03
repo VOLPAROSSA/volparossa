@@ -8,19 +8,31 @@
 
 mod native_preselection;
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, net::UdpSocket as StdUdpSocket, time::Duration};
 
-use crate::discovery::{
-    AdvertisementPayloadHash, BoundPreselectionFreshnessProofBatch,
-    CompletedPreselectionFreshnessAttempt, CoolingPreselectionAttemptGate,
-    DirectRelayCandidateSnapshot, DirectRelayCapability, ForwardedExitCandidateSnapshot,
-    ForwardedExitCapability, PreselectionTranscriptFreshnessFacts,
-    PreselectionTransportFreshnessFacts, RouteCandidateAdvertisement, RouteCandidatePolicySnapshot,
-    RouteCandidateSnapshot,
+use crate::{
+    discovery::{
+        AdvertisementPayloadHash, BoundPreselectionFreshnessProofBatch,
+        CompletedPreselectionFreshnessAttempt, CoolingPreselectionAttemptGate,
+        DirectRelayCandidateSnapshot, DirectRelayCapability, DiscoveryControlHandle,
+        ForwardedExitCandidateSnapshot, ForwardedExitCapability,
+        PreselectionTranscriptFreshnessFacts, PreselectionTransportFreshnessFacts,
+        RouteCandidateAdvertisement, RouteCandidatePolicySnapshot, RouteCandidateSnapshot,
+    },
+    endpoint_leases::{
+        EndpointLeaseBindingError, bind_prepared_endpoint_leases, protocol_endpoint_for_native,
+    },
+    helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
 };
 use rand_core::{OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{sync::watch, time::Instant};
+use tokio::{
+    net::UdpSocket,
+    sync::watch,
+    task::JoinSet,
+    time::{Instant, timeout},
+};
 use volparossa_core::{
     Bandwidth, IpFamily, NodeId, ObservedNetworkPrefix, OperatorId, PeerId, PolicyHash,
     ServiceRole, Transport as SelectionTransport, UnixTime,
@@ -28,10 +40,19 @@ use volparossa_core::{
 #[cfg(test)]
 use volparossa_peerstore::StoredPeer;
 use volparossa_protocol::{
-    ObservationAddressFamily, PreselectionObservationRole, ProbeAddressFamily,
-    Transport as ProtocolTransport, node_id_from_public_key,
+    NativeProbeEndpointBinding, NativeProbeLeaseProof, NativeProbePathScope,
+    ObservationAddressFamily, PreselectionObservationRole, ProbeAddressFamily, TimePolicy,
+    Transport as ProtocolTransport, WireguardEndpoint, native_probe_prepared_lease_commitment,
+    node_id_from_public_key, verify_relay_reservation,
 };
 use volparossa_reservation::RelayPathIntent;
+use volparossa_routing::{
+    AcquireTransportSocket, ActivateLeaseBatch, ActivatedLeaseBatch, CommitLeaseBatch,
+    CommittedLeaseBatch, ContextRole, DestroyContext, DestroyedContext, LeaseActivation,
+    LeaseCommit, LeasePlan, NATIVE_PROBE_CLIENT_PORT, NATIVE_PROBE_DATAGRAM_BYTES,
+    NATIVE_PROBE_EXIT_PORT, PrepareLeaseBatch, PublicUdpEndpoint, TransportSocketAddress,
+    TransportSocketKind, WireguardRole,
+};
 use volparossa_selection::{
     Candidate, CandidateEvidence, CompleteRelayPathMetrics, DiversityAnchor, FilterRequirements,
     MAXIMUM_PROSPECTIVE_RELAYS, MAXIMUM_SELECTION_CANDIDATES, PrefixObservedCandidate,
@@ -40,19 +61,55 @@ use volparossa_selection::{
     select_projected_relay_paths, select_prospective_relays_with_observed_prefixes,
     validate_relay_selection_policy,
 };
+use volparossa_wireguard::overlay_addresses;
 
 use super::{
-    DiversitySnapshot, ID_BYTES, LocalRouteBackend, MAXIMUM_REPLAY_CAPACITY,
-    MAXIMUM_RESERVATION_LIFETIME_MS, MAXIMUM_SETUP_DURATION, PostProbeSelectionPolicy,
-    ProbeProjection, ProspectiveDirectRelay, ProspectiveForwardedExit, ProspectivePeerIdentity,
-    ProspectiveRouteRelay, ReservationSession, ReservationTransport, RouteCapabilityResolver,
-    RouteSetupAuthorities, RouteSetupClock, RouteSetupError, RouteSetupFailure, RouteSetupHandle,
-    RouteSetupLimits, RouteSetupManager, RouteSetupParameters, RouteSetupPath, RouteSetupPhase,
-    RouteSetupRequest, RouteSetupTransaction, SelectedForwardedExit, SelectedRouteSetupPath,
-    UnmeasuredRouteSetup, bounded_call,
+    ClientNativeRouteScope, DiversitySnapshot, ID_BYTES, LocalRouteBackend,
+    MAXIMUM_REPLAY_CAPACITY, MAXIMUM_RESERVATION_LIFETIME_MS, MAXIMUM_SETUP_DURATION,
+    PostProbeSelectionPolicy, ProbeProjection, ProspectiveDirectRelay, ProspectiveForwardedExit,
+    ProspectivePeerIdentity, ProspectiveRouteRelay, ReservationSession, ReservationTransport,
+    RouteCapabilityResolver, RouteSetupAuthorities, RouteSetupClock, RouteSetupError,
+    RouteSetupFailure, RouteSetupHandle, RouteSetupLimits, RouteSetupManager, RouteSetupParameters,
+    RouteSetupPath, RouteSetupPhase, RouteSetupRequest, RouteSetupTransaction,
+    SelectedForwardedExit, SelectedRouteSetupPath, UnmeasuredRouteSetup, bounded_call,
 };
 
-const MAXIMUM_EVIDENCE_AGE_MS: u64 = 60_000;
+/// Exit helper incarnation proven by a terminal native path, affined to its signed attempt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct VerifiedExitHelperRuntimeId {
+    helper_runtime_id: [u8; 32],
+    attempt_id: [u8; ID_BYTES],
+    candidate_set_hash: [u8; 32],
+}
+
+impl VerifiedExitHelperRuntimeId {
+    const fn new(
+        helper_runtime_id: [u8; 32],
+        attempt_id: [u8; ID_BYTES],
+        candidate_set_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            helper_runtime_id,
+            attempt_id,
+            candidate_set_hash,
+        }
+    }
+
+    /// Borrow the exact Exit helper runtime accepted by the signed native probe.
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.helper_runtime_id
+    }
+
+    pub(crate) fn is_same_signed_attempt(&self, other: &Self) -> bool {
+        self.attempt_id == other.attempt_id && self.candidate_set_hash == other.candidate_set_hash
+    }
+}
+
+// A completed A1 observation feeds a bounded thirty-second native sampler followed by a bounded
+// thirty-second production setup. Keep enough signed-evidence headroom for both phases even when
+// the preceding preselection transaction used most of its own thirty-second deadline.
+const MAXIMUM_EVIDENCE_AGE_MS: u64 = 120_000;
+const NATIVE_PROBE_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Eq, PartialEq)]
 struct ActorRelayDiversity {
@@ -199,8 +256,8 @@ impl ActorBoundRelayProof {
         let exit_diversity =
             ActorRelayDiversity::from_snapshot(exit_diversity, requirements.address_family)?;
         if setup_expires_at_ms > self.evidence_valid_until_ms
-            || hard_expires_at_ms > self.advertisement_expires_at_ms
-            || hard_expires_at_ms > identity.expires_at_ms
+            || setup_expires_at_ms > self.advertisement_expires_at_ms
+            || setup_expires_at_ms > identity.expires_at_ms
             || hard_expires_at_ms > identity.policy_expires_at_ms
             || identity.policy_version != exit.policy_version
             || identity.policy_version != control.policy_version
@@ -257,13 +314,16 @@ impl ActorBoundRelayProof {
         &self,
         capability: &DirectRelayCapability,
         policy_hash: [u8; 32],
-        required_expiry_ms: u64,
+        setup_required_expiry_ms: u64,
+        route_required_expiry_ms: u64,
     ) -> bool {
-        self.relay.identity.direct_matches(capability)
+        self.relay
+            .identity
+            .direct_lineage_matches(capability, setup_required_expiry_ms)
             && capability.policy_hash == policy_hash
-            && capability.advertisement_expires_at_ms >= required_expiry_ms
-            && capability.policy_expires_at_ms >= required_expiry_ms
-            && capability.expires_at_ms >= required_expiry_ms
+            && capability.advertisement_expires_at_ms >= setup_required_expiry_ms
+            && capability.expires_at_ms >= setup_required_expiry_ms
+            && capability.policy_expires_at_ms >= route_required_expiry_ms
     }
 
     pub(super) fn relay_intent(&self, path_id: u32) -> RelayPathIntent {
@@ -473,6 +533,14 @@ struct FreshEvidenceBatch {
 }
 
 impl FreshEvidenceBatch {
+    /// One private, purpose-bound copy for the parallel native/route admission split.
+    fn for_route_admission(&self) -> Self {
+        Self {
+            batch_id: self.batch_id,
+            entries: self.entries.clone(),
+        }
+    }
+
     #[cfg(test)]
     fn for_test(
         entries: Vec<FreshPeerEvidence>,
@@ -529,6 +597,14 @@ struct ProspectiveRoutePlan {
     scope: RouteSelectionScope,
     prospective_relays: Vec<ProspectiveRelayBinding>,
     earliest_evidence_expiry_ms: u64,
+    native_proof_state: NativeProofState,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NativeProofState {
+    NotRequired,
+    Required,
+    Satisfied,
 }
 
 /// One prospective relay assigned its route-attempt path number before any live evidence.
@@ -542,7 +618,7 @@ struct PlannedProspectivePath {
 /// This continuation deliberately has no `Clone`, `Copy`, `Debug`, serialization, getter or
 /// decomposition API. Dropping it before dispatch is cancellation by abandonment: no external
 /// state exists yet and no rollback or journal mutation is required.
-struct PreProbeContinuation {
+pub(crate) struct PreProbeContinuation {
     batch_id: EvidenceBatchId,
     selected_at_ms: u64,
     attempt_started_at_ms: u64,
@@ -555,6 +631,7 @@ struct PreProbeContinuation {
     deadline: Instant,
     route_authority: RouteSessionAuthority,
     reservation_session: ReservationSession,
+    client_native_route_scope: Option<ClientNativeRouteScope>,
 }
 
 /// Fully assembled, still unresolved handoff state owned by the one manager task.
@@ -836,10 +913,1066 @@ pub(crate) struct PreparedPreselectionEvidence {
     evidence_batch: FreshEvidenceBatch,
 }
 
+/// Config-bound selection inputs retained only long enough to mint the real route continuation.
+#[derive(Clone, Debug)]
+pub(crate) struct ClientRouteAdmissionProfile {
+    preflight: SnapshotPreflightParameters,
+    hard_lifetime: Duration,
+}
+
+impl ClientRouteAdmissionProfile {
+    pub(crate) fn new(
+        transport: SelectionTransport,
+        minimum_capacity: Bandwidth,
+        address_family: IpFamily,
+        exit_mix: SelectionMix,
+        relay_policy: RelaySelectionPolicy,
+        hard_lifetime: Duration,
+    ) -> Self {
+        Self {
+            preflight: SnapshotPreflightParameters {
+                transport,
+                minimum_capacity,
+                address_family: Some(address_family),
+                region: None,
+                exit_mix,
+                relay_policy,
+            },
+            hard_lifetime,
+        }
+    }
+}
+
+/// Affine production continuation after the first Exit Permit crossed its selected control Relay.
+///
+/// The remaining candidates, replay cache, and verified Permit stay together for the later
+/// Relay-ready/helper-backed stages; none is projected into the local control protocol.
+#[must_use = "native client preselection must remain owned by the route coordinator"]
+pub(crate) struct ClientNativePreselection {
+    batch: ClientNativeProbeBatchOwner,
+    awaiting_relay_ready: native_preselection::AwaitingNativeRelayReady,
+}
+
+/// Affine owner shared by every path in one native candidate-set attempt.
+///
+/// Ready authorities are collected before the helper is touched. They then advance through one
+/// shared attempt-ID route context and one exact multi-lease helper lifecycle.
+#[must_use = "native path-batch ownership must remain affine"]
+struct ClientNativeProbeBatchOwner {
+    owner: native_preselection::NativePreselectionAttemptOwner,
+    route_plan: Option<ProspectiveRoutePlan>,
+    route_hard_lifetime: Duration,
+    replay: volparossa_protocol::ReplayCache,
+    armed: Vec<native_preselection::ArmedNativeProbe>,
+    proofs: Vec<native_preselection::BoundNativePathProof>,
+    committed_owner: Option<RuntimeBoundPreparedLeaseBatch>,
+}
+
 /// Terminal proof-to-evidence rejection with cooldown ownership retained.
 struct PreselectionEvidenceJoinFailure {
     gate: CoolingPreselectionAttemptGate,
     error: SelectionBridgeError,
+}
+
+/// Verified data-Relay readiness awaiting one same-runtime helper Prepare.
+#[must_use = "verified Relay readiness must remain with its affine native attempt"]
+pub(crate) struct ClientNativeRelayReady {
+    batch: ClientNativeProbeBatchOwner,
+    armed: native_preselection::ArmedNativeProbe,
+}
+
+/// Helper-prepared local endpoint awaiting exact activation before Start can be signed.
+#[must_use = "a prepared native Client context must be activated or destroyed"]
+pub(crate) struct PreparedClientNativeProbe {
+    batch: ClientNativeProbeBatchOwner,
+    prepared_owner: RuntimeBoundPreparedLeaseBatch,
+    helper_runtime_id: [u8; 32],
+    route_context_id: [u8; 16],
+    context_handle: Vec<u8>,
+    paths: Vec<PreparedClientNativePath>,
+    hard_expires_at_unix: u64,
+}
+
+struct PreparedClientNativePath {
+    armed: native_preselection::ArmedNativeProbe,
+    path_id: u32,
+    lease_handle: Vec<u8>,
+    prepared_lease_commitment: [u8; 32],
+    endpoint_binding: NativeProbeEndpointBinding,
+    relay_endpoint: WireguardEndpoint,
+}
+
+/// Every path started against one local clock barrier, before any Relay authorization can block.
+struct LocallyStartedClientNativePath {
+    scope: NativeProbePathScope,
+    awaiting: native_preselection::AwaitingNativeResult,
+    path_id: u32,
+    lease_handle: Vec<u8>,
+    prepared_lease_commitment: [u8; 32],
+    endpoint_binding: NativeProbeEndpointBinding,
+    relay_endpoint: WireguardEndpoint,
+}
+
+/// Helper-prepared Client context with exact standard Relay activation authority attached.
+#[must_use = "an authorized native Client context must be activated or destroyed"]
+pub(crate) struct AuthorizedPreparedClientNativeProbe {
+    batch: ClientNativeProbeBatchOwner,
+    prepared_owner: RuntimeBoundPreparedLeaseBatch,
+    helper_runtime_id: [u8; 32],
+    route_context_id: [u8; 16],
+    context_handle: Vec<u8>,
+    paths: Vec<AuthorizedClientNativePath>,
+    activation: ActivateLeaseBatch,
+}
+
+struct AuthorizedClientNativePath {
+    awaiting: native_preselection::AwaitingNativeResult,
+    path_id: u32,
+    lease_handle: Vec<u8>,
+    prepared_lease_commitment: [u8; 32],
+}
+
+/// Signed Start dispatched to the exact data Relay and awaiting local helper commit proof.
+#[must_use = "a started native Client probe must consume helper proof or be destroyed"]
+pub(crate) struct AwaitingClientNativeProbeResult {
+    batch: ClientNativeProbeBatchOwner,
+    prepared_owner: RuntimeBoundPreparedLeaseBatch,
+    helper_runtime_id: [u8; 32],
+    route_context_id: [u8; 16],
+    context_handle: Vec<u8>,
+    paths: Vec<AwaitingClientNativePathResult>,
+}
+
+struct AwaitingClientNativePathResult {
+    awaiting: native_preselection::AwaitingNativeResult,
+    path_id: u32,
+    lease_handle: Vec<u8>,
+    prepared_lease_commitment: [u8; 32],
+}
+
+/// One or more terminal cryptographic path proofs plus remaining affine candidate ownership.
+#[must_use = "native proof-batch ownership must remain with later route admission"]
+pub(crate) struct CompletedClientNativeProbe {
+    batch: ClientNativeProbeBatchOwner,
+    sampler_destroyed: bool,
+}
+
+/// Terminal sampler ownership plus the real, still-undispatched reservation continuation.
+#[must_use = "native route admission must retire the sampler context and execute the continuation"]
+pub(crate) struct PreparedNativeRouteAdmission {
+    continuation: PreProbeContinuation,
+    remote_retirement: RemoteNativeSamplerRetirement,
+    exit_helper_runtime_id: VerifiedExitHelperRuntimeId,
+}
+
+enum RemoteNativeSamplerRetirement {
+    ConfirmedByTerminalResults,
+}
+
+impl PreparedNativeRouteAdmission {
+    /// Consume the admission into its route handoff and remote-retirement status.
+    pub(crate) fn into_parts(self) -> (PreProbeContinuation, bool, VerifiedExitHelperRuntimeId) {
+        let confirmed = matches!(
+            self.remote_retirement,
+            RemoteNativeSamplerRetirement::ConfirmedByTerminalResults
+        );
+        (self.continuation, confirmed, self.exit_helper_runtime_id)
+    }
+}
+
+// One path accepts Request, Permit, Relay Ready, Relay reservation, nested Exit authorization,
+// Relay Result, and nested Exit Result envelopes into the shared fail-closed replay cache.
+const CLIENT_NATIVE_REPLAY_ENTRIES_PER_PATH: usize = 7;
+
+/// Failure while binding the exact helper lifecycle to the native probe transcript.
+#[derive(Debug, Error)]
+pub(crate) enum ClientNativeProbeError {
+    #[error(transparent)]
+    Native(#[from] native_preselection::NativePreselectionError),
+    #[error(transparent)]
+    Endpoint(#[from] EndpointLeaseBindingError),
+    #[error("native Client helper response did not match its exact prepared context")]
+    HelperCorrelation,
+}
+
+/// Exact Destroy authority retained when post-Prepare endpoint binding fails closed.
+#[must_use = "a failed post-Prepare bind still owns one helper context cleanup"]
+pub(crate) struct ClientNativePreparedBindFailure {
+    error: ClientNativeProbeError,
+    cleanup: DestroyContext,
+}
+
+impl ClientNativePreparedBindFailure {
+    /// Borrow the binding failure classification.
+    pub(crate) fn error(&self) -> &ClientNativeProbeError {
+        &self.error
+    }
+
+    /// Consume the failure into its exact helper cleanup request.
+    pub(crate) fn into_cleanup(self) -> DestroyContext {
+        self.cleanup
+    }
+}
+
+/// Consume one actor-owned A1 handoff and dispatch its first native Permit only through the exact
+/// selected control Relay.
+pub(crate) async fn begin_client_native_preselection(
+    prepared: PreparedPreselectionEvidence,
+    admission: ClientRouteAdmissionProfile,
+    discovery: &DiscoveryControlHandle,
+) -> Result<ClientNativePreselection, native_preselection::NativePreselectionError> {
+    let replay_capacity = volparossa_protocol::MAX_NATIVE_PROBE_CANDIDATES
+        .checked_mul(CLIENT_NATIVE_REPLAY_ENTRIES_PER_PATH)
+        .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+    let route_plan = native_probe_candidate_plan(
+        &prepared.snapshot,
+        admission.preflight,
+        prepared.evidence_batch.for_route_admission(),
+        &mut OsRng,
+    )
+    .map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            "native preselection candidate plan was rejected"
+        );
+        native_preselection::NativePreselectionError::InvalidCandidateSet
+    })?;
+    let selected_data_relays = route_plan
+        .prospective_relays
+        .iter()
+        .map(|relay| {
+            native_preselection::NativeDataRelayIdentity::new(
+                relay.relay.identity.wire_node_id,
+                relay.relay.identity.peer_id.to_bytes(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let reserved_capacity = route_plan.scope.minimum_capacity;
+    ClientNativeProbeBatchOwner {
+        owner: native_preselection::begin_native_preselection(
+            prepared,
+            &selected_data_relays,
+            reserved_capacity,
+        )?,
+        route_plan: Some(route_plan),
+        route_hard_lifetime: admission.hard_lifetime,
+        replay: volparossa_protocol::ReplayCache::new(replay_capacity)?,
+        armed: Vec::new(),
+        proofs: Vec::new(),
+        committed_owner: None,
+    }
+    .dispatch_next_permit(discovery)
+    .await
+}
+
+impl ClientNativeProbeBatchOwner {
+    /// Consume exactly one remaining candidate into the selected control-Relay Permit RPC.
+    async fn dispatch_next_permit(
+        mut self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<ClientNativePreselection, native_preselection::NativePreselectionError> {
+        if !self.proofs.is_empty() || self.committed_owner.is_some() {
+            return Err(native_preselection::NativePreselectionError::InvalidCandidateSet);
+        }
+        let awaiting = self
+            .owner
+            .begin_next()?
+            .ok_or(native_preselection::NativePreselectionError::InvalidCandidateSet)?;
+        let dispatch = awaiting.into_forward_dispatch()?;
+        let awaiting_relay_ready = dispatch.execute(discovery, &mut self.replay).await?;
+        Ok(ClientNativePreselection {
+            batch: self,
+            awaiting_relay_ready,
+        })
+    }
+}
+
+impl ClientNativePreselection {
+    /// Dispatch the endpoint-free request/Permit pair only to the selected data Relay.
+    pub(crate) async fn dispatch_relay_ready(
+        self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<ClientNativeRelayReady, ClientNativeProbeError> {
+        let Self {
+            mut batch,
+            awaiting_relay_ready,
+        } = self;
+        let armed = awaiting_relay_ready
+            .into_relay_ready_dispatch()?
+            .execute(discovery, &mut batch.replay)
+            .await?;
+        Ok(ClientNativeRelayReady { batch, armed })
+    }
+}
+
+impl ClientNativeRelayReady {
+    /// Total candidate-set paths that must prove native reachability before admission.
+    pub(crate) fn candidate_path_count(&self) -> usize {
+        self.batch.owner.candidate_count()
+    }
+
+    /// Number of exact Ready authorities retained for the shared helper lifecycle.
+    pub(crate) fn ready_path_count(&self) -> usize {
+        self.batch.armed.len() + 1
+    }
+
+    /// Retain this Ready authority and dispatch the next candidate without touching the helper.
+    pub(crate) async fn retain_and_dispatch_next_permit(
+        self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<ClientNativePreselection, ClientNativeProbeError> {
+        let Self { mut batch, armed } = self;
+        batch.armed.push(armed);
+        Ok(batch.dispatch_next_permit(discovery).await?)
+    }
+
+    /// Exact shared-context Client plan a lifecycle owner may dispatch to the helper.
+    pub(crate) fn prepare_request(&self) -> Result<PrepareLeaseBatch, ClientNativeProbeError> {
+        let mut route_context_id = None;
+        let mut path_ids = HashSet::with_capacity(self.ready_path_count());
+        let mut expires_at_ms = u64::MAX;
+        let mut leases = Vec::with_capacity(self.ready_path_count());
+        for armed in self.batch.armed.iter().chain(std::iter::once(&self.armed)) {
+            let (context, path_id, _relay_endpoint, path_expires_at_ms) = armed.helper_scope()?;
+            if route_context_id.is_some_and(|expected| expected != context)
+                || !path_ids.insert(path_id)
+            {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            route_context_id = Some(context);
+            expires_at_ms = expires_at_ms.min(path_expires_at_ms);
+            leases.push(LeasePlan {
+                path_id,
+                role: WireguardRole::Client as i32,
+            });
+        }
+        leases.sort_by_key(|lease| lease.path_id);
+        let route_context_id = route_context_id.ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        let (setup_expires_at_unix, hard_expires_at_unix) =
+            native_helper_prepare_deadlines(expires_at_ms, crate::unix_seconds())?;
+        let path_count =
+            u32::try_from(leases.len()).map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        Ok(PrepareLeaseBatch {
+            route_context_id: route_context_id.to_vec(),
+            role: ContextRole::Client as i32,
+            mptcp_accepted_addrs: path_count,
+            mptcp_subflows: path_count,
+            leases,
+            setup_expires_at_unix,
+            hard_expires_at_unix,
+            traversal_hints: Vec::new(),
+        })
+    }
+
+    /// Bind one same-runtime helper response while preserving exact cleanup on every rejection.
+    pub(crate) fn bind_prepared_endpoint(
+        self,
+        request: &PrepareLeaseBatch,
+        prepared: RuntimeBoundPreparedLeaseBatch,
+    ) -> Result<PreparedClientNativeProbe, ClientNativePreparedBindFailure> {
+        let cleanup = prepared.destroy_request();
+        self.bind_prepared_endpoint_inner(request, prepared)
+            .map_err(|error| ClientNativePreparedBindFailure { error, cleanup })
+    }
+
+    fn bind_prepared_endpoint_inner(
+        self,
+        request: &PrepareLeaseBatch,
+        prepared: RuntimeBoundPreparedLeaseBatch,
+    ) -> Result<PreparedClientNativeProbe, ClientNativeProbeError> {
+        let Self { mut batch, armed } = self;
+        batch.armed.push(armed);
+        let armed = std::mem::take(&mut batch.armed);
+        let endpoints = bind_prepared_endpoint_leases(request, prepared.prepared().clone())?;
+        if endpoints.client_leases().len() != armed.len() {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let helper_runtime_id = prepared.helper_runtime_id();
+        let route_context_id: [u8; 16] = request
+            .route_context_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        let mut paths = Vec::with_capacity(armed.len());
+        for armed in armed {
+            let (context, path_id, relay_binding, _expires_at_ms) = armed.helper_scope()?;
+            let lease = endpoints
+                .client_leases()
+                .iter()
+                .find(|lease| lease.path_id() == path_id)
+                .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+            if context != route_context_id {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            let local_endpoint = protocol_endpoint_for_native(lease.public_endpoint());
+            let lease_handle = *lease.lease_handle().as_bytes();
+            let commitment = native_probe_prepared_lease_commitment(
+                &helper_runtime_id,
+                &route_context_id,
+                &lease_handle,
+                &local_endpoint,
+            )
+            .map_err(native_preselection::NativePreselectionError::from)?;
+            let endpoint_binding = NativeProbeEndpointBinding {
+                helper_runtime_id: helper_runtime_id.to_vec(),
+                route_context_id: route_context_id.to_vec(),
+                endpoint: Some(local_endpoint),
+                prepared_lease_commitment: commitment.to_vec(),
+                path_id,
+            };
+            let relay_endpoint = relay_binding
+                .endpoint
+                .as_ref()
+                .ok_or(ClientNativeProbeError::HelperCorrelation)?
+                .clone();
+            paths.push(PreparedClientNativePath {
+                armed,
+                path_id,
+                lease_handle: lease_handle.to_vec(),
+                prepared_lease_commitment: commitment,
+                endpoint_binding,
+                relay_endpoint,
+            });
+        }
+        paths.sort_by_key(|path| path.path_id);
+        Ok(PreparedClientNativeProbe {
+            batch,
+            prepared_owner: prepared,
+            helper_runtime_id,
+            route_context_id,
+            context_handle: endpoints.context_handle().as_bytes().to_vec(),
+            paths,
+            hard_expires_at_unix: request.hard_expires_at_unix,
+        })
+    }
+}
+
+fn native_helper_prepare_deadlines(
+    expires_at_ms: u64,
+    now_unix: u64,
+) -> Result<(u64, u64), ClientNativeProbeError> {
+    let hard_expires_at_unix = expires_at_ms / 1_000;
+    let setup_expires_at_unix = hard_expires_at_unix.min(
+        now_unix
+            .checked_add(MAXIMUM_SETUP_DURATION.as_secs())
+            .ok_or(native_preselection::NativePreselectionError::InvalidDeadline)?,
+    );
+    if setup_expires_at_unix <= now_unix {
+        return Err(native_preselection::NativePreselectionError::InvalidDeadline.into());
+    }
+    Ok((setup_expires_at_unix, hard_expires_at_unix))
+}
+
+impl PreparedClientNativeProbe {
+    /// Destroy authority retained from this successful local Prepare.
+    pub(crate) fn destroy_request(&self) -> DestroyContext {
+        self.prepared_owner.destroy_request()
+    }
+
+    /// Sign Start, obtain one exact standard nested reservation, and bind it before activation.
+    pub(crate) async fn request_activation_authority(
+        self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<AuthorizedPreparedClientNativeProbe, ClientNativePreparedBindFailure> {
+        let cleanup = self.destroy_request();
+        Box::pin(self.request_activation_authority_inner(discovery))
+            .await
+            .map_err(|error| ClientNativePreparedBindFailure { error, cleanup })
+    }
+
+    async fn request_activation_authority_inner(
+        self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<AuthorizedPreparedClientNativeProbe, ClientNativeProbeError> {
+        let Self {
+            mut batch,
+            prepared_owner,
+            helper_runtime_id,
+            route_context_id,
+            context_handle,
+            paths,
+            hard_expires_at_unix,
+        } = self;
+        let start_barrier_ms = crate::unix_millis();
+        let start_barrier = Instant::now();
+        let mut started_paths = Vec::with_capacity(paths.len());
+        for path in paths {
+            let scope = path.armed.path_scope().clone();
+            let awaiting = path.armed.start_at(
+                path.endpoint_binding.clone(),
+                start_barrier_ms,
+                start_barrier,
+            )?;
+            started_paths.push(LocallyStartedClientNativePath {
+                scope,
+                awaiting,
+                path_id: path.path_id,
+                lease_handle: path.lease_handle,
+                prepared_lease_commitment: path.prepared_lease_commitment,
+                endpoint_binding: path.endpoint_binding,
+                relay_endpoint: path.relay_endpoint,
+            });
+        }
+        let mut authorized_paths = Vec::with_capacity(started_paths.len());
+        let mut activations = Vec::with_capacity(started_paths.len());
+        for path in started_paths {
+            let (awaiting, signed_relay_reservation) = path
+                .awaiting
+                .into_relay_authorization_dispatch()?
+                .execute(discovery)
+                .await?;
+            let now_ms = crate::unix_millis();
+            verify_native_client_activation_authority(
+                &path.scope,
+                path.endpoint_binding
+                    .endpoint
+                    .as_ref()
+                    .ok_or(ClientNativeProbeError::HelperCorrelation)?,
+                &path.relay_endpoint,
+                hard_expires_at_unix,
+                awaiting.encoded_start(),
+                &signed_relay_reservation,
+                now_ms,
+                &mut batch.replay,
+            )?;
+            activations.push(LeaseActivation {
+                lease_handle: path.lease_handle.clone(),
+                path_id: path.path_id,
+                role: WireguardRole::Client as i32,
+                peer_public_key: path.relay_endpoint.public_key.clone(),
+                peer_endpoint: Some(PublicUdpEndpoint {
+                    address: path.relay_endpoint.underlay_ip.clone(),
+                    port: path.relay_endpoint.listen_port,
+                }),
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                signed_relay_reservation,
+                signed_client_relay_request: Vec::new(),
+            });
+            authorized_paths.push(AuthorizedClientNativePath {
+                awaiting,
+                path_id: path.path_id,
+                lease_handle: path.lease_handle,
+                prepared_lease_commitment: path.prepared_lease_commitment,
+            });
+        }
+        let activation = ActivateLeaseBatch {
+            route_context_id: route_context_id.to_vec(),
+            context_handle: context_handle.clone(),
+            leases: activations,
+        };
+        Ok(AuthorizedPreparedClientNativeProbe {
+            batch,
+            prepared_owner,
+            helper_runtime_id,
+            route_context_id,
+            context_handle,
+            paths: authorized_paths,
+            activation,
+        })
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native seam binds one signed route authority to both prepared endpoints and scope"
+)]
+fn verify_native_client_activation_authority(
+    scope: &NativeProbePathScope,
+    local_endpoint: &WireguardEndpoint,
+    relay_endpoint: &WireguardEndpoint,
+    hard_expires_at_unix: u64,
+    signed_start: &[u8],
+    signed_relay_reservation: &[u8],
+    now_ms: u64,
+    replay_cache: &mut volparossa_protocol::ReplayCache,
+) -> Result<(), ClientNativeProbeError> {
+    let (relay, exit) = verify_relay_reservation(
+        signed_relay_reservation,
+        now_ms,
+        TimePolicy::default(),
+        replay_cache,
+    )
+    .map_err(native_preselection::NativePreselectionError::from)?;
+    let data_relay = scope
+        .data_relay
+        .as_ref()
+        .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+    let selected_exit = scope
+        .exit
+        .as_ref()
+        .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+    let control = scope
+        .control
+        .as_ref()
+        .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+    let relay_message = relay.message();
+    let signed_start_sha256: [u8; 32] = Sha256::digest(signed_start).into();
+    let hard_expires_at_ms = hard_expires_at_unix
+        .checked_mul(1_000)
+        .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+    if relay.sender_id().as_slice() != data_relay.node_id
+        || exit.sender_id().as_slice() != selected_exit.node_id
+        || relay_message.reservation_id != scope.probe_id
+        || relay_message.route_context_id != scope.attempt_id
+        || relay_message.path_id != scope.candidate_ordinal
+        || relay_message.relay_node_id != data_relay.node_id
+        || relay_message.relay_peer_id != data_relay.peer_id
+        || relay_message.exit_node_id != selected_exit.node_id
+        || relay_message.exit_peer_id != selected_exit.peer_id
+        || relay_message.control_relay_node_id != control.node_id
+        || relay_message.control_relay_peer_id != control.peer_id
+        || relay_message.client_session_id != scope.client_session_id
+        || relay_message.client_session_public_key != scope.client_session_public_key
+        || relay_message.capability_id != scope.attempt_id
+        || relay_message.hold_id != scope.probe_id
+        || !relay_message.allowed_transports.contains(&scope.transport)
+        || relay_message.policy_hash != scope.policy_hash
+        || relay_message.client_wireguard_public_key != local_endpoint.public_key
+        || relay_message.relay_client_wireguard_endpoint.as_ref() != Some(relay_endpoint)
+        || relay_message.signed_client_relay_request_sha256 != signed_start_sha256
+        || relay.expires_at_ms() < hard_expires_at_ms
+        || relay.expires_at_ms() > scope.attempt_expires_at_ms
+    {
+        return Err(ClientNativeProbeError::HelperCorrelation);
+    }
+    Ok(())
+}
+
+impl AuthorizedPreparedClientNativeProbe {
+    /// Borrow the exact shared-context Client activation request.
+    pub(crate) fn activation_request(&self) -> &ActivateLeaseBatch {
+        &self.activation
+    }
+
+    /// Borrow the affine helper owner for the exact same-runtime activation call.
+    pub(crate) fn runtime_owner_mut(&mut self) -> &mut RuntimeBoundPreparedLeaseBatch {
+        &mut self.prepared_owner
+    }
+
+    /// Destroy authority retained throughout helper activation.
+    pub(crate) fn destroy_request(&self) -> DestroyContext {
+        self.prepared_owner.destroy_request()
+    }
+
+    /// Exchange each exact one-shot challenge through its Activated-only helper socket.
+    pub(crate) async fn exchange_challenges(
+        &self,
+        helper: &HelperClient,
+    ) -> Result<(), ClientNativeProbeError> {
+        for path in &self.paths {
+            let request = native_probe_client_socket_request(
+                self.route_context_id,
+                &self.context_handle,
+                path.path_id,
+            )?;
+            let acquired = helper
+                .acquire_transport_socket(request.clone())
+                .await
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            if acquired.metadata().path_id != request.path_id
+                || acquired.metadata().role != request.role
+                || acquired.metadata().descriptor_kind != request.descriptor_kind
+                || acquired.metadata().local != request.expected_local
+                || acquired.metadata().remote != request.expected_remote
+            {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            let (descriptor, _) = acquired.into_parts();
+            let socket = StdUdpSocket::from(descriptor);
+            socket
+                .set_nonblocking(true)
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            let socket = UdpSocket::from_std(socket)
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            let challenge = path.awaiting.challenge();
+            let sent = timeout(NATIVE_PROBE_CHALLENGE_TIMEOUT, socket.send(challenge))
+                .await
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            if sent != NATIVE_PROBE_DATAGRAM_BYTES {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            let mut echoed = [0_u8; NATIVE_PROBE_DATAGRAM_BYTES];
+            let received = timeout(NATIVE_PROBE_CHALLENGE_TIMEOUT, socket.recv(&mut echoed))
+                .await
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+            if received != NATIVE_PROBE_DATAGRAM_BYTES || echoed.as_slice() != challenge {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+        }
+        Ok(())
+    }
+
+    /// Correlate the exact helper activation before any terminal Start is dispatched.
+    pub(crate) fn accept_activation(
+        self,
+        activated: &ActivatedLeaseBatch,
+    ) -> Result<AwaitingClientNativeProbeResult, ClientNativeProbeError> {
+        if activated.context_handle != self.context_handle
+            || activated
+                .lease_handles
+                .iter()
+                .map(Vec::as_slice)
+                .ne(self.paths.iter().map(|path| path.lease_handle.as_slice()))
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let mut paths = Vec::with_capacity(self.paths.len());
+        for path in self.paths {
+            paths.push(AwaitingClientNativePathResult {
+                awaiting: path.awaiting,
+                path_id: path.path_id,
+                lease_handle: path.lease_handle,
+                prepared_lease_commitment: path.prepared_lease_commitment,
+            });
+        }
+        Ok(AwaitingClientNativeProbeResult {
+            batch: self.batch,
+            prepared_owner: self.prepared_owner,
+            helper_runtime_id: self.helper_runtime_id,
+            route_context_id: self.route_context_id,
+            context_handle: self.context_handle,
+            paths,
+        })
+    }
+}
+
+impl AwaitingClientNativeProbeResult {
+    /// Borrow the affine helper owner for the exact same-runtime commit call.
+    pub(crate) fn runtime_owner_mut(&mut self) -> &mut RuntimeBoundPreparedLeaseBatch {
+        &mut self.prepared_owner
+    }
+
+    /// Exact helper commit request for every activated Client path.
+    pub(crate) fn commit_request(&self) -> CommitLeaseBatch {
+        CommitLeaseBatch {
+            route_context_id: self.route_context_id.to_vec(),
+            context_handle: self.context_handle.clone(),
+            leases: self
+                .paths
+                .iter()
+                .map(|path| LeaseCommit {
+                    lease_handle: path.lease_handle.clone(),
+                    path_id: path.path_id,
+                    role: WireguardRole::Client as i32,
+                })
+                .collect(),
+        }
+    }
+
+    /// Destroy authority retained throughout Start/result verification.
+    pub(crate) fn destroy_request(&self) -> DestroyContext {
+        self.prepared_owner.destroy_request()
+    }
+
+    /// Consume local commit facts, then dispatch every terminal Start concurrently.
+    pub(crate) async fn accept_committed_and_dispatch(
+        mut self,
+        committed: CommittedLeaseBatch,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<CompletedClientNativeProbe, ClientNativeProbeError> {
+        if committed.context_handle != self.context_handle
+            || committed.leases.len() != self.paths.len()
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let mut dispatches = JoinSet::new();
+        for (path, lease) in self.paths.into_iter().zip(committed.leases) {
+            if lease.lease_handle != path.lease_handle
+                || lease.latest_handshake_unix == 0
+                || lease.received_bytes == 0
+                || lease.transmitted_bytes == 0
+            {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            let discovery = discovery.clone();
+            dispatches.spawn(async move {
+                let dispatch = path.awaiting.into_relay_start_dispatch()?;
+                let result = dispatch.execute(&discovery).await;
+                if let Err(error) = &result {
+                    tracing::warn!(
+                        path_id = path.path_id,
+                        error = %error,
+                        "native terminal Start dispatch failed"
+                    );
+                }
+                let (awaiting, signed_relay_result) = result?;
+                Ok::<_, native_preselection::NativePreselectionError>((
+                    path.path_id,
+                    path.prepared_lease_commitment,
+                    lease,
+                    awaiting,
+                    signed_relay_result,
+                ))
+            });
+        }
+        let mut results = Vec::with_capacity(dispatches.len());
+        while let Some(joined) = dispatches.join_next().await {
+            results.push(joined.map_err(|_| {
+                ClientNativeProbeError::Native(
+                    native_preselection::NativePreselectionError::RelayTransportUnavailable,
+                )
+            })??);
+        }
+        results.sort_unstable_by_key(|(path_id, ..)| *path_id);
+        for (_path_id, prepared_lease_commitment, lease, awaiting, signed_relay_result) in results {
+            let proof = awaiting.accept_result(
+                NativeProbeLeaseProof {
+                    helper_runtime_id: self.helper_runtime_id.to_vec(),
+                    route_context_id: self.route_context_id.to_vec(),
+                    prepared_lease_commitment: prepared_lease_commitment.to_vec(),
+                    latest_handshake_unix: lease.latest_handshake_unix,
+                    received_bytes_after_baseline: lease.received_bytes,
+                    transmitted_bytes_after_baseline: lease.transmitted_bytes,
+                },
+                &signed_relay_result,
+                &mut self.batch.replay,
+            )?;
+            self.batch.proofs.push(proof);
+        }
+        self.batch.committed_owner = Some(self.prepared_owner);
+        Ok(CompletedClientNativeProbe {
+            batch: self.batch,
+            sampler_destroyed: false,
+        })
+    }
+}
+
+fn established_route_hard_expiry(
+    plan: &ProspectiveRoutePlan,
+    now_ms: u64,
+    route_hard_lifetime: Duration,
+) -> Result<u64, ClientNativeProbeError> {
+    // Discovery capabilities and freshness evidence authorize setup only. Once every actor has
+    // accepted the reservation, its signed policy and reservation bound the live route; otherwise
+    // an advertisement nearing refresh would tear down an already-authorized data path.
+    let actor_policy_ceiling_ms = std::iter::once(&plan.forwarded_exit.control.identity)
+        .chain(std::iter::once(&plan.forwarded_exit.exit.identity))
+        .chain(
+            plan.prospective_relays
+                .iter()
+                .map(|relay| &relay.relay.identity),
+        )
+        .map(|identity| identity.policy_expires_at_ms)
+        .min()
+        .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+    now_ms
+        .checked_add(
+            u64::try_from(route_hard_lifetime.as_millis())
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+        )
+        .map(|expires_at_ms| {
+            expires_at_ms
+                .min(plan.scope.policy.expires_at_ms)
+                .min(actor_policy_ceiling_ms)
+        })
+        .ok_or(ClientNativeProbeError::HelperCorrelation)
+}
+
+impl CompletedClientNativeProbe {
+    /// Borrow the exact committed sampler owner for terminal confirmed destruction.
+    pub(crate) fn runtime_owner(
+        &self,
+    ) -> Result<&RuntimeBoundPreparedLeaseBatch, ClientNativeProbeError> {
+        self.batch
+            .committed_owner
+            .as_ref()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)
+    }
+
+    /// Consume a correlated helper Destroy acknowledgement before route admission can continue.
+    pub(crate) fn accept_destroyed(
+        mut self,
+        _destroyed: DestroyedContext,
+    ) -> Result<Self, ClientNativeProbeError> {
+        self.batch
+            .committed_owner
+            .take()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        self.sampler_destroyed = true;
+        Ok(self)
+    }
+
+    /// Number of exact per-path Result proofs retained with the shared committed helper context.
+    pub(crate) fn completed_path_count(&self) -> usize {
+        debug_assert!(self.batch.committed_owner.is_none());
+        debug_assert!(self.sampler_destroyed);
+        self.batch.proofs.len()
+    }
+
+    /// Consume terminal native evidence into the existing production route continuation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the affine proof join and expiry computation remain one fail-closed transaction"
+    )]
+    pub(crate) fn into_route_admission(
+        mut self,
+        client_native_instance_id: [u8; 32],
+    ) -> Result<PreparedNativeRouteAdmission, ClientNativeProbeError> {
+        let mut plan = self.batch.route_plan.take().ok_or_else(|| {
+            tracing::warn!(
+                stage = "missing-route-plan",
+                "native route admission rejected"
+            );
+            ClientNativeProbeError::HelperCorrelation
+        })?;
+        if !self.sampler_destroyed
+            || self.batch.committed_owner.is_some()
+            || plan.native_proof_state != NativeProofState::Required
+        {
+            tracing::warn!(stage = "sampler-state", "native route admission rejected");
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let proven_relays = self
+            .batch
+            .proofs
+            .iter()
+            .map(|proof| {
+                let relay = proof.data_relay();
+                (relay.node_id.clone(), relay.peer_id.clone())
+            })
+            .collect::<HashSet<_>>();
+        let expected_relays = plan
+            .prospective_relays
+            .iter()
+            .map(|relay| &relay.relay.identity)
+            .map(|identity| (identity.wire_node_id.to_vec(), identity.peer_id.to_bytes()))
+            .collect::<HashSet<_>>();
+        let expected_control = &plan.forwarded_exit.control.identity;
+        let expected_exit = &plan.forwarded_exit.exit.identity;
+        let actors_match = self.batch.proofs.iter().all(|proof| {
+            let control = proof.control();
+            let exit = proof.exit();
+            control.node_id == expected_control.wire_node_id
+                && control.peer_id == expected_control.peer_id.to_bytes()
+                && exit.node_id == expected_exit.wire_node_id
+                && exit.peer_id == expected_exit.peer_id.to_bytes()
+        });
+        if proven_relays.len() != self.batch.proofs.len()
+            || expected_relays.len() != self.batch.proofs.len()
+            || proven_relays != expected_relays
+            || !actors_match
+        {
+            tracing::warn!(
+                stage = "actor-set",
+                proven_relays = proven_relays.len(),
+                expected_relays = expected_relays.len(),
+                actors_match,
+                "native route admission rejected"
+            );
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let first_proof = self
+            .batch
+            .proofs
+            .first()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        if client_native_instance_id == [0; 32] {
+            tracing::warn!(stage = "native-instance", "native route admission rejected");
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let client_helper_runtime_id = *first_proof.client_helper_runtime_id();
+        let exit_helper_runtime_id = first_proof.exit_helper_runtime_id();
+        if self.batch.proofs.iter().any(|proof| {
+            proof.client_helper_runtime_id() != &client_helper_runtime_id
+                || proof.exit_helper_runtime_id().as_bytes() != exit_helper_runtime_id.as_bytes()
+                || !proof
+                    .exit_helper_runtime_id()
+                    .is_same_signed_attempt(&exit_helper_runtime_id)
+        }) {
+            tracing::warn!(stage = "helper-runtime", "native route admission rejected");
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        plan.native_proof_state = NativeProofState::Satisfied;
+        let now_ms = crate::unix_millis();
+        let setup_ceiling_ms = now_ms
+            .checked_add(
+                u64::try_from(MAXIMUM_SETUP_DURATION.as_millis())
+                    .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+            )
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?
+            .min(plan.earliest_evidence_expiry_ms);
+        let hard_expires_at_ms =
+            established_route_hard_expiry(&plan, now_ms, self.batch.route_hard_lifetime)?;
+        if hard_expires_at_ms < setup_ceiling_ms {
+            tracing::warn!(
+                stage = "expiry-order",
+                hard_expires_at_ms,
+                setup_ceiling_ms,
+                "native route admission rejected"
+            );
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let limits = RouteSetupLimits::new(
+            MAXIMUM_SETUP_DURATION,
+            super::MAXIMUM_CALL_DURATION,
+            super::MAXIMUM_OUTBOUND_ATTEMPTS,
+        )
+        .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        let continuation = consume_prospective_route_plan(
+            plan,
+            RouteDeadlines {
+                setup_expires_at_ms: setup_ceiling_ms,
+                hard_expires_at_ms,
+            },
+            limits,
+            MAXIMUM_REPLAY_CAPACITY,
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "consume-plan",
+                error = %error,
+                "native route admission rejected"
+            );
+            ClientNativeProbeError::HelperCorrelation
+        })?
+        .bind_client_native_route_scope(ClientNativeRouteScope {
+            masque_context_id: generate_masque_context_id()
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+            client_native_instance_id,
+        })
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "bind-native-scope",
+                error = %error,
+                "native route admission rejected"
+            );
+            ClientNativeProbeError::HelperCorrelation
+        })?;
+        Ok(PreparedNativeRouteAdmission {
+            continuation,
+            remote_retirement: RemoteNativeSamplerRetirement::ConfirmedByTerminalResults,
+            exit_helper_runtime_id,
+        })
+    }
+}
+
+fn native_probe_client_socket_request(
+    route_context_id: [u8; 16],
+    context_handle: &[u8],
+    path_id: u32,
+) -> Result<AcquireTransportSocket, ClientNativeProbeError> {
+    let path_number =
+        u8::try_from(path_id).map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+    let addresses = overlay_addresses(route_context_id, path_number)
+        .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+    Ok(AcquireTransportSocket {
+        route_context_id: route_context_id.to_vec(),
+        context_handle: context_handle.to_vec(),
+        path_id,
+        role: WireguardRole::Client as i32,
+        descriptor_kind: TransportSocketKind::NativeProbeUdpConnected as i32,
+        expected_local: Some(TransportSocketAddress {
+            address: addresses.client.octets().to_vec(),
+            port: u32::from(NATIVE_PROBE_CLIENT_PORT),
+        }),
+        expected_remote: Some(TransportSocketAddress {
+            address: addresses.exit.octets().to_vec(),
+            port: u32::from(NATIVE_PROBE_EXIT_PORT),
+        }),
+    })
 }
 
 struct ActorFreshnessProjection {
@@ -1164,6 +2297,16 @@ fn fresh_forwarded_preselection_evidence(
 ) -> Result<FreshPeerEvidence, SelectionBridgeError> {
     let advertisement = candidate.advertisement().advertisement();
     let capability = candidate.capability();
+    let canonical_capability_expires_at_ms = capability
+        .exit_advertisement_expires_at_ms
+        .min(capability.policy_expires_at_ms)
+        .min(control.capability_expires_at_ms);
+    if capability.expires_at_ms > canonical_capability_expires_at_ms {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+    // The control exchange and selection evidence remain bounded by the short-lived local fetch
+    // authority. Once that evidence has been verified, the prospective route identity may retain
+    // only the independently signed Exit/control/policy lifetime.
     let valid_until_ms = fresh_valid_until(
         projection,
         attempt_deadline_ms,
@@ -1189,7 +2332,7 @@ fn fresh_forwarded_preselection_evidence(
         capability.exit_advertisement_sequence,
         capability.exit_advertisement_expires_at_ms,
         candidate.advertisement().advertisement_payload_hash(),
-        capability.expires_at_ms,
+        canonical_capability_expires_at_ms,
         ServiceRole::Exit,
         transport,
         policy,
@@ -1722,6 +2865,41 @@ fn snapshot_route_plan<R: RngCore + ?Sized>(
     )
 }
 
+/// Rank the exact A1 candidate set for native probing without granting route authority.
+///
+/// A1 control receipts intentionally leave dataplane usability false. This private copy enables
+/// the existing exit-first scorer only to choose the peers that must be probed. The returned plan
+/// carries an explicit proof-required state, and route allocation rejects it until the exact
+/// terminal native results bind every selected Relay plus the shared control Relay and Exit.
+fn native_probe_candidate_plan<R: RngCore + ?Sized>(
+    snapshot: &RouteCandidateSnapshot,
+    parameters: SnapshotPreflightParameters,
+    mut evidence_batch: FreshEvidenceBatch,
+    rng: &mut R,
+) -> Result<ProspectiveRoutePlan, SelectionBridgeError> {
+    let trusted_now_ms = crate::unix_millis();
+    evidence_batch.validate_at(trusted_now_ms)?;
+    if evidence_batch
+        .entries
+        .iter()
+        .any(|evidence| !evidence.reachable || evidence.network_address_usable)
+    {
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
+    for evidence in &mut evidence_batch.entries {
+        evidence.network_address_usable = true;
+    }
+    let mut plan = snapshot_route_plan_with_trusted_now(
+        snapshot,
+        parameters,
+        evidence_batch,
+        trusted_now_ms,
+        rng,
+    )?;
+    plan.native_proof_state = NativeProofState::Required;
+    Ok(plan)
+}
+
 #[cfg(test)]
 fn snapshot_route_plan_at<R: RngCore + ?Sized>(
     snapshot: &RouteCandidateSnapshot,
@@ -1802,6 +2980,7 @@ fn snapshot_route_plan_with_trusted_now<R: RngCore + ?Sized>(
         scope: selected.scope,
         prospective_relays,
         earliest_evidence_expiry_ms,
+        native_proof_state: NativeProofState::NotRequired,
     })
 }
 
@@ -1854,10 +3033,7 @@ fn validate_preprobe_peer_binding(
     {
         return Err(SelectionBridgeError::EvidenceBinding);
     }
-    Ok(identity
-        .advertisement_expires_at_ms
-        .min(identity.expires_at_ms)
-        .min(identity.policy_expires_at_ms))
+    Ok(identity.policy_expires_at_ms)
 }
 
 fn validate_preprobe_peer_evidence(
@@ -1914,12 +3090,18 @@ fn validate_and_allocate_preprobe_plan(
         scope,
         prospective_relays,
         earliest_evidence_expiry_ms,
+        native_proof_state,
     } = plan;
-    if !batch_id.is_valid()
+    if native_proof_state == NativeProofState::Required
+        || !batch_id.is_valid()
         || selected_at_ms == 0
         || selected_at_ms != scope.now_ms
         || selected_at_ms > trusted_now_ms
     {
+        tracing::warn!(
+            stage = "plan-envelope",
+            "prospective route admission validation rejected"
+        );
         return Err(SelectionBridgeError::EvidenceBinding);
     }
     scope.validate()?;
@@ -1951,6 +3133,10 @@ fn validate_and_allocate_preprobe_plan(
         || forwarded_exit.selected.control_diversity != forwarded_exit.control_diversity
         || forwarded_exit.selected.exit_diversity != forwarded_exit.exit_diversity
     {
+        tracing::warn!(
+            stage = "forwarded-exit-binding",
+            "prospective route admission validation rejected"
+        );
         return Err(SelectionBridgeError::EvidenceBinding);
     }
     let control_expiry_ms = forwarded_exit
@@ -1958,45 +3144,89 @@ fn validate_and_allocate_preprobe_plan(
         .identity
         .advertisement_expires_at_ms
         .min(forwarded_exit.control.identity.policy_expires_at_ms);
-    let exit_expiry_ms = forwarded_exit
+    let exit_expiry_ceiling_ms = forwarded_exit
         .exit
         .identity
         .advertisement_expires_at_ms
         .min(forwarded_exit.exit.identity.policy_expires_at_ms)
         .min(forwarded_exit.control.identity.expires_at_ms);
+    let exit_expiry_ms = forwarded_exit.exit.identity.expires_at_ms;
+    if exit_expiry_ms > exit_expiry_ceiling_ms {
+        tracing::warn!(
+            stage = "exit-expiry-ceiling",
+            "prospective route admission validation rejected"
+        );
+        return Err(SelectionBridgeError::EvidenceBinding);
+    }
     let mut hard_expiry_ceiling_ms = scope.policy.expires_at_ms;
-    hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(validate_preprobe_peer_binding(
-        &forwarded_exit.control,
-        control_expiry_ms,
-        &scope,
-        trusted_now_ms,
-        &mut node_ids,
-        &mut peer_ids,
-        &mut public_keys,
-    )?);
+    hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(
+        validate_preprobe_peer_binding(
+            &forwarded_exit.control,
+            control_expiry_ms,
+            &scope,
+            trusted_now_ms,
+            &mut node_ids,
+            &mut peer_ids,
+            &mut public_keys,
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "control-binding",
+                error = %error,
+                "prospective route admission validation rejected"
+            );
+            error
+        })?,
+    );
     validate_preprobe_peer_evidence(
         &forwarded_exit.control_peer_evidence,
         &forwarded_exit.control_diversity,
         &scope,
         trusted_now_ms,
         &[],
-    )?;
-    hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(validate_preprobe_peer_binding(
-        &forwarded_exit.exit,
-        exit_expiry_ms,
-        &scope,
-        trusted_now_ms,
-        &mut node_ids,
-        &mut peer_ids,
-        &mut public_keys,
-    )?);
+    )
+    .map_err(|error| {
+        tracing::warn!(
+            stage = "control-evidence",
+            error = %error,
+            "prospective route admission validation rejected"
+        );
+        error
+    })?;
+    hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(
+        validate_preprobe_peer_binding(
+            &forwarded_exit.exit,
+            exit_expiry_ms,
+            &scope,
+            trusted_now_ms,
+            &mut node_ids,
+            &mut peer_ids,
+            &mut public_keys,
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "exit-binding",
+                error = %error,
+                "prospective route admission validation rejected"
+            );
+            error
+        })?,
+    );
     validate_preprobe_peer_evidence(
         &forwarded_exit.exit_peer_evidence,
         &forwarded_exit.exit_diversity,
         &scope,
         trusted_now_ms,
         &[&forwarded_exit.control_diversity],
-    )?;
+    )
+    .map_err(|error| {
+        tracing::warn!(
+            stage = "exit-evidence",
+            error = %error,
+            "prospective route admission validation rejected"
+        );
+        error
+    })?;
 
     let mut evidence_expiry_min_ms = forwarded_exit
         .control
@@ -2009,28 +3239,48 @@ fn validate_and_allocate_preprobe_plan(
         &forwarded_exit.control_diversity,
         &forwarded_exit.exit_diversity,
     ];
-    for relay in &prospective_relays {
+    for (relay_index, relay) in prospective_relays.iter().enumerate() {
         let relay_expiry_ms = relay
             .relay
             .identity
             .advertisement_expires_at_ms
             .min(relay.relay.identity.policy_expires_at_ms);
-        hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(validate_preprobe_peer_binding(
-            &relay.relay,
-            relay_expiry_ms,
-            &scope,
-            trusted_now_ms,
-            &mut node_ids,
-            &mut peer_ids,
-            &mut public_keys,
-        )?);
+        hard_expiry_ceiling_ms = hard_expiry_ceiling_ms.min(
+            validate_preprobe_peer_binding(
+                &relay.relay,
+                relay_expiry_ms,
+                &scope,
+                trusted_now_ms,
+                &mut node_ids,
+                &mut peer_ids,
+                &mut public_keys,
+            )
+            .map_err(|error| {
+                tracing::warn!(
+                    stage = "relay-binding",
+                    relay_index,
+                    error = %error,
+                    "prospective route admission validation rejected"
+                );
+                error
+            })?,
+        );
         validate_preprobe_peer_evidence(
             &relay.peer_evidence,
             &relay.diversity,
             &scope,
             trusted_now_ms,
             &diversity,
-        )?;
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                stage = "relay-evidence",
+                relay_index,
+                error = %error,
+                "prospective route admission validation rejected"
+            );
+            error
+        })?;
         relay
             .proof
             .validate_preprobe_binding(
@@ -2041,7 +3291,15 @@ fn validate_and_allocate_preprobe_plan(
                 &current_requirements,
                 batch_id,
             )
-            .map_err(|_| SelectionBridgeError::EvidenceBinding)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    stage = "relay-proof",
+                    relay_index,
+                    error = %error,
+                    "prospective route admission validation rejected"
+                );
+                SelectionBridgeError::EvidenceBinding
+            })?;
         evidence_expiry_min_ms = evidence_expiry_min_ms.min(relay.relay.evidence_valid_until_ms);
         diversity.push(&relay.diversity);
     }
@@ -2139,6 +3397,7 @@ impl ValidatedPreProbePlan {
             deadline: self.deadline,
             route_authority,
             reservation_session,
+            client_native_route_scope: None,
         }
     }
 
@@ -2271,12 +3530,16 @@ impl PendingPreProbeResolve {
             .identity
             .advertisement_expires_at_ms
             .min(self.control.identity.policy_expires_at_ms);
-        let exit_expiry_ms = self
+        let exit_expiry_ceiling_ms = self
             .exit
             .identity
             .advertisement_expires_at_ms
             .min(self.exit.identity.policy_expires_at_ms)
             .min(self.control.identity.expires_at_ms);
+        let exit_expiry_ms = self.exit.identity.expires_at_ms;
+        if exit_expiry_ms > exit_expiry_ceiling_ms {
+            return Err(RouteSetupError::Invalid("exit capability expiry ceiling"));
+        }
         validate_preprobe_peer_binding(
             &self.control,
             control_expiry_ms,
@@ -2302,6 +3565,21 @@ impl PendingPreProbeResolve {
 }
 
 impl PreProbeContinuation {
+    fn bind_client_native_route_scope(
+        mut self,
+        scope: ClientNativeRouteScope,
+    ) -> Result<Self, RouteSetupError> {
+        if self.client_native_route_scope.is_some()
+            || scope.masque_context_id == 0
+            || scope.masque_context_id > volparossa_protocol::MAX_MASQUE_CONTEXT_ID
+            || scope.client_native_instance_id == [0; 32]
+        {
+            return Err(RouteSetupError::Invalid("client native route scope"));
+        }
+        self.client_native_route_scope = Some(scope);
+        Ok(self)
+    }
+
     fn ensure_handoff_live_at(
         &self,
         trusted_now_ms: u64,
@@ -2332,10 +3610,7 @@ impl PreProbeContinuation {
             .into_iter()
             .chain(self.paths.iter().map(|path| &path.relay.relay))
         {
-            hard_expiry_ms = hard_expiry_ms
-                .min(binding.identity.advertisement_expires_at_ms)
-                .min(binding.identity.expires_at_ms)
-                .min(binding.identity.policy_expires_at_ms);
+            hard_expiry_ms = hard_expiry_ms.min(binding.identity.policy_expires_at_ms);
             evidence_expiry_ms = evidence_expiry_ms.min(binding.evidence_valid_until_ms);
         }
         if evidence_expiry_ms != self.earliest_evidence_expiry_ms
@@ -2365,6 +3640,7 @@ impl PreProbeContinuation {
             deadline,
             route_authority,
             reservation_session,
+            client_native_route_scope,
         } = self;
         let ProspectiveForwardedExitBinding {
             selected,
@@ -2390,6 +3666,7 @@ impl PreProbeContinuation {
             deadlines,
             hard_expiry_ms,
             evidence_expiry_ms,
+            client_native_route_scope,
         )
         .map_err(|_| RouteSetupError::Invalid("pre-probe route parameters"))?;
         let request = RouteSetupRequest::new(selected, prospective_relays, parameters)?;
@@ -2479,7 +3756,7 @@ impl<L> RouteSetupManager<ReservationSession, L>
 where
     L: LocalRouteBackend,
 {
-    fn spawn_preprobe<R, C>(
+    pub(super) fn spawn_preprobe<R, C>(
         &self,
         continuation: PreProbeContinuation,
         resolver_and_transport: R,
@@ -2731,6 +4008,10 @@ impl SelectedExit {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exact-set selection and proof consumption remain one affine transaction"
+    )]
     fn select_relays_and_build<R: RngCore + ?Sized>(
         self,
         paths: &[CompleteRelayPathEvidence],
@@ -2837,6 +4118,7 @@ impl SelectedExit {
             deadlines,
             earliest_expiry_ms,
             earliest_setup_evidence_expiry_ms,
+            None,
         )?;
         RouteSetupRequest::new(self.forwarded_exit, relay_bindings, parameters)
             .map_err(SelectionBridgeError::RouteSetup)
@@ -3319,6 +4601,8 @@ fn verify_forwarded_exit_selection_peer(
         || prospective.control.identity.policy_version != scope.policy.version
         || prospective.control.identity.policy_hash != *scope.policy.hash.as_bytes()
         || prospective.control.identity.policy_expires_at_ms != scope.policy.expires_at_ms
+        || input.capability.expires_at_ms <= scope.now_ms
+        || input.fresh.valid_until_ms > input.capability.expires_at_ms
         || prospective.exit.expires_at_ms <= scope.now_ms
         || input.fresh.capability_expires_at_ms != prospective.exit.expires_at_ms
         || prospective.exit.expires_at_ms
@@ -3420,6 +4704,7 @@ fn build_parameters(
     deadlines: RouteDeadlines,
     earliest_expiry_ms: u64,
     earliest_setup_evidence_expiry_ms: u64,
+    client_native_route_scope: Option<ClientNativeRouteScope>,
 ) -> Result<RouteSetupParameters, SelectionBridgeError> {
     let maximum_setup_ms = u64::try_from(MAXIMUM_SETUP_DURATION.as_millis())
         .map_err(|_| SelectionBridgeError::InvalidDeadline)?;
@@ -3477,8 +4762,22 @@ fn build_parameters(
         expires_at_ms: deadlines.hard_expires_at_ms,
         setup_expires_at_unix,
         hard_expires_at_unix,
-        client_native_route_scope: None,
+        client_native_route_scope,
     })
+}
+
+fn generate_masque_context_id() -> Result<u64, SelectionBridgeError> {
+    let mut rng = OsRng;
+    for _ in 0..8 {
+        let mut bytes = [0_u8; 8];
+        rng.try_fill_bytes(&mut bytes)
+            .map_err(|_| SelectionBridgeError::EntropyUnavailable)?;
+        let value = u64::from_le_bytes(bytes) & volparossa_protocol::MAX_MASQUE_CONTEXT_ID;
+        if value != 0 {
+            return Ok(value);
+        }
+    }
+    Err(SelectionBridgeError::EntropyUnavailable)
 }
 
 const fn protocol_transport(transport: SelectionTransport) -> ProtocolTransport {
@@ -3520,9 +4819,9 @@ mod tests {
 
     use super::super::{
         ActivateLeaseBatch, ActivatedLeaseBatch, CleanupStatus, CommitLeaseBatch,
-        CommittedLeaseBatch, DestroyContext, DestroyedContext, ExitForwardRequest,
-        ExitForwardResponse, LocalPrepareFailure, PrepareLeaseBatch,
-        PrepareReconciliationAuthority, PreparedLeaseBatch, ReconciledExpiredPrepare,
+        CommittedLeaseBatch, DestroyedContext, ExitForwardRequest, ExitForwardResponse,
+        LocalPrepareFailure, PrepareLeaseBatch, PrepareReconciliationAuthority,
+        ReconciledExpiredPrepare, RuntimeBoundPreparedLeaseBatch,
     };
     use super::*;
 
@@ -3530,6 +4829,17 @@ mod tests {
     const POLICY_BYTES: [u8; 32] = [77; 32];
     const EVIDENCE_BATCH_BYTES: [u8; 16] = [33; 16];
     const ADVERTISEMENT_MEASURED_AT_MS: u64 = NOW_MS - MAXIMUM_EVIDENCE_AGE_MS;
+
+    #[test]
+    fn native_client_helper_setup_is_shorter_than_route_custody() {
+        let now_unix = NOW_MS / 1_000;
+        let (setup, hard) = native_helper_prepare_deadlines(NOW_MS + 300_000, now_unix)
+            .expect("five-minute native route custody");
+        assert_eq!(setup, now_unix + MAXIMUM_SETUP_DURATION.as_secs());
+        assert_eq!(hard, now_unix + 300);
+        assert!(setup < hard);
+        assert!(native_helper_prepare_deadlines(NOW_MS, now_unix).is_err());
+    }
 
     #[allow(
         clippy::too_many_arguments,
@@ -3769,7 +5079,7 @@ mod tests {
             policy_expires_at_ms: NOW_MS + 90_000,
             address_family: Some(address_family),
             observed_at_ms: NOW_MS,
-            valid_until_ms: NOW_MS + MAXIMUM_EVIDENCE_AGE_MS,
+            valid_until_ms: NOW_MS + 90_000,
             forwarded_control: None,
             locally_measured_p25: Some(
                 Bandwidth::new(90, 90).expect("fresh measured delivery p25"),
@@ -4414,22 +5724,27 @@ mod tests {
             .split("impl FreshEvidenceBatch {")
             .nth(1)
             .expect("fresh batch implementation");
-        assert_eq!(batch_impl.matches("fn ").count(), 2);
+        assert_eq!(batch_impl.matches("fn ").count(), 3);
         assert_eq!(
             batch_impl.matches("#[cfg(test)]\n    fn for_test(").count(),
             1
         );
         assert_eq!(batch_impl.matches("fn validate_at(").count(), 1);
+        assert_eq!(batch_impl.matches("fn for_route_admission(").count(), 1);
         assert!(!batch_impl.contains("fn new("));
         assert!(!batch_impl.contains("\n    pub "));
 
         let prepared_start = product
             .find("/// Opaque, affine handoff from the discovery owner")
             .expect("prepared evidence documentation");
-        let prepared_end = product[prepared_start..]
-            .find("/// Terminal proof-to-evidence rejection")
+        let prepared_declaration = product[prepared_start..]
+            .find("pub(crate) struct PreparedPreselectionEvidence {")
             .map(|offset| prepared_start + offset)
-            .expect("prepared evidence section end");
+            .expect("prepared evidence declaration");
+        let prepared_end = product[prepared_declaration..]
+            .find("\n}")
+            .map(|offset| prepared_declaration + offset + 2)
+            .expect("prepared evidence body end");
         let prepared = &product[prepared_start..prepared_end];
         assert!(prepared.contains("pub(crate) struct PreparedPreselectionEvidence {"));
         assert!(!prepared.contains("#[derive"));
@@ -4678,6 +5993,47 @@ mod tests {
         )
     }
 
+    fn assert_first_native_permit_dispatch(
+        owner: &mut native_preselection::NativePreselectionAttemptOwner,
+        candidate_set: &volparossa_protocol::NativeProbeCandidateSet,
+        minted_at_ms: u64,
+        minted_at: Instant,
+        expected_expiry: u64,
+    ) {
+        let awaiting = owner
+            .begin_next_for_test(minted_at_ms + 1, minted_at + Duration::from_millis(1))
+            .expect("live first candidate")
+            .expect("first candidate exists");
+        let dispatch = awaiting
+            .into_forward_dispatch_for_test(minted_at_ms + 1)
+            .expect("exact client-hop wrapper");
+        let (control_peer, request) = dispatch.request_for_test();
+        let control = candidate_set.control.as_ref().expect("control actor");
+        let exit = candidate_set.exit.as_ref().expect("Exit actor");
+        assert_eq!(control_peer.to_bytes(), control.peer_id);
+        assert_eq!(request.control_relay_node_id(), control.node_id);
+        assert_eq!(request.control_relay_peer_id(), control.peer_id);
+        assert_eq!(request.control_relay_public_key(), control.public_key);
+        assert_eq!(request.exit_node_id(), exit.node_id);
+        assert_eq!(request.exit_peer_id(), exit.peer_id);
+        assert_ne!(request.control_relay_peer_id(), request.exit_peer_id());
+        assert_eq!(
+            request.validated_operation().expect("native operation"),
+            volparossa_discovery::ExitForwardOperation::NativeProbePermit
+        );
+        assert_eq!(
+            request.deadline_unix_ms(),
+            (minted_at_ms + 1)
+                .saturating_add(crate::discovery::MAX_FORWARD_OPERATION_LIFETIME_MS)
+                .min(expected_expiry)
+        );
+        let envelope: SignedEnvelope =
+            decode_canonical(request.canonical_request(), MAX_CONTROL_MESSAGE_SIZE)
+                .expect("signed native Permit request");
+        assert_eq!(request.forward_id(), &envelope.nonce[..ID_BYTES]);
+        assert_eq!(envelope.expires_at_ms, expected_expiry);
+    }
+
     #[test]
     fn exact_preselection_proofs_mint_conservative_affine_fresh_batch() {
         let (snapshot, _) = snapshot_fixture();
@@ -4797,6 +6153,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine-owner regression audits every queued candidate and expiry boundary"
+    )]
     fn native_owner_consumes_live_a1_receipts_then_mints_an_independent_bounded_attempt() {
         let (snapshot, _) = snapshot_fixture();
         let completed = preselection_freshness_attempt(
@@ -4813,18 +6173,22 @@ mod tests {
         };
         let minted_at_ms = NOW_MS + 4_999;
         let minted_at = Instant::now();
-        let owner = native_preselection::begin_native_preselection_for_test(
+        let mut owner = native_preselection::begin_native_preselection_for_test(
             prepared,
+            2,
+            Bandwidth::new(8, 12).expect("reserved capacity"),
             minted_at_ms,
             minted_at,
         )
         .expect("live handoff must mint native owner");
-        let candidate_set = owner.candidate_set_for_test();
+        let candidate_set = owner.candidate_set_for_test().clone();
         assert_eq!(candidate_set.preselection_batch_id, EVIDENCE_BATCH_BYTES);
-        assert_eq!(candidate_set.data_relays.len(), 3);
-        assert_eq!(
-            candidate_set.data_relays.first(),
-            candidate_set.control.as_ref()
+        assert_eq!(candidate_set.data_relays.len(), 2);
+        assert!(
+            candidate_set
+                .data_relays
+                .iter()
+                .all(|relay| Some(relay) != candidate_set.control.as_ref())
         );
         assert_eq!(candidate_set.transport, ProtocolTransport::TcpMptcp as i32);
         assert_eq!(
@@ -4834,12 +6198,13 @@ mod tests {
         assert_eq!(candidate_set.policy_version, 7);
         assert_eq!(candidate_set.policy_hash, POLICY_BYTES);
 
-        let expected_expiry = minted_at_ms + volparossa_protocol::MAX_NATIVE_PROBE_LIFETIME_MS;
+        let expected_expiry = (minted_at_ms + volparossa_protocol::MAX_NATIVE_PROBE_LIFETIME_MS)
+            .min(candidate_set.policy_expires_at_ms);
         let (attempt_expiry, monotonic_expiry) = owner.deadline_for_test();
         assert_eq!(attempt_expiry, expected_expiry);
         assert_eq!(
             monotonic_expiry.duration_since(minted_at),
-            Duration::from_millis(volparossa_protocol::MAX_NATIVE_PROBE_LIFETIME_MS)
+            Duration::from_millis(expected_expiry - minted_at_ms)
         );
         assert!(
             attempt_expiry > NOW_MS + 5_000,
@@ -4864,10 +6229,59 @@ mod tests {
             let scope = request.scope.expect("path scope");
             assert_eq!(scope.candidate_ordinal, ordinal);
             assert_eq!(scope.attempt_expires_at_ms, expected_expiry);
+            assert_eq!(scope.reserved_up_mbps, 8);
+            assert_eq!(scope.reserved_down_mbps, 12);
             assert_eq!(request.expires_at_ms, expected_expiry);
             assert!(probe_ids.insert(scope.probe_id));
             assert!(session_ids.insert(scope.client_session_id));
         }
+
+        assert_first_native_permit_dispatch(
+            &mut owner,
+            &candidate_set,
+            minted_at_ms,
+            minted_at,
+            expected_expiry,
+        );
+        for expected_ordinal in 2_u32..=2 {
+            let awaiting = owner
+                .begin_next_for_test(minted_at_ms + 1, minted_at + Duration::from_millis(1))
+                .expect("live next candidate")
+                .expect("required candidate exists");
+            let dispatch = awaiting
+                .into_forward_dispatch_for_test(minted_at_ms + 1)
+                .expect("exact client-hop wrapper");
+            let (control_peer, request) = dispatch.request_for_test();
+            let envelope: SignedEnvelope =
+                decode_canonical(request.canonical_request(), MAX_CONTROL_MESSAGE_SIZE)
+                    .expect("signed native Permit request");
+            let request: volparossa_protocol::NativeProbePermitRequest = decode_canonical(
+                &envelope.payload,
+                volparossa_protocol::MAX_CONTROL_PAYLOAD_SIZE,
+            )
+            .expect("permit request payload");
+            let scope = request.scope.expect("path scope");
+            assert_eq!(scope.candidate_ordinal, expected_ordinal);
+            assert_eq!(
+                scope.data_relay.as_ref(),
+                candidate_set
+                    .data_relays
+                    .get(usize::try_from(expected_ordinal - 1).expect("bounded ordinal"))
+            );
+            assert_eq!(scope.control, candidate_set.control);
+            assert_eq!(scope.exit, candidate_set.exit);
+            assert_eq!(
+                control_peer.to_bytes(),
+                candidate_set.control.as_ref().expect("control").peer_id
+            );
+        }
+        assert!(
+            owner
+                .begin_next_for_test(minted_at_ms + 1, minted_at + Duration::from_millis(1))
+                .expect("live exhausted owner")
+                .is_none(),
+            "every candidate must be consumed exactly once"
+        );
 
         let (snapshot, _) = snapshot_fixture();
         let completed = preselection_freshness_attempt(
@@ -4884,11 +6298,87 @@ mod tests {
         assert!(matches!(
             native_preselection::begin_native_preselection_for_test(
                 expired,
+                2,
+                Bandwidth::new(8, 12).expect("reserved capacity"),
                 NOW_MS + 5_000,
                 Instant::now(),
             ),
             Err(native_preselection::NativePreselectionError::InvalidPreparedEvidence)
         ));
+    }
+
+    #[test]
+    fn native_permit_deadline_does_not_outlive_forwarding_authority() {
+        let (snapshot, _) = snapshot_fixture();
+        let original = snapshot
+            .forwarded_exits()
+            .first()
+            .expect("one forwarded Exit")
+            .clone();
+        let forwarding_expires_at_ms = NOW_MS + 20_000;
+        let mut capability = original.capability().clone();
+        capability.expires_at_ms = forwarding_expires_at_ms;
+        let bounded_snapshot = RouteCandidateSnapshot::for_test(
+            snapshot.captured_at_ms(),
+            snapshot.policy(),
+            snapshot.direct_relays().to_vec(),
+            vec![ForwardedExitCandidateSnapshot::for_test(
+                original.advertisement().clone(),
+                original.control().clone(),
+                capability,
+            )],
+        );
+        let completed = preselection_freshness_attempt(
+            bounded_snapshot,
+            exact_preselection_freshness_records(),
+            ProtocolTransport::TcpMptcp,
+            ObservationAddressFamily::Ipv4,
+            EVIDENCE_BATCH_BYTES,
+            Bandwidth::new(80, 80).expect("configured ceiling"),
+        );
+        let Ok((prepared, _gate)) = prepare_preselection_evidence_at(completed, NOW_MS + 500)
+        else {
+            panic!("exact A1 proofs must prepare opaque evidence");
+        };
+        let minted_at_ms = NOW_MS + 4_999;
+        let minted_at = Instant::now();
+        let mut owner = native_preselection::begin_native_preselection_for_test(
+            prepared,
+            2,
+            Bandwidth::new(8, 12).expect("reserved capacity"),
+            minted_at_ms,
+            minted_at,
+        )
+        .expect("remaining forwarding authority must mint native owner");
+
+        assert!(
+            owner
+                .candidate_set_for_test()
+                .exit
+                .as_ref()
+                .expect("selected Exit")
+                .capability_expires_at_ms
+                > forwarding_expires_at_ms,
+            "canonical route identity must retain its independent signed lifetime"
+        );
+        let (attempt_expiry, monotonic_expiry) = owner.deadline_for_test();
+        assert_eq!(attempt_expiry, forwarding_expires_at_ms);
+        assert_eq!(
+            monotonic_expiry.duration_since(minted_at),
+            Duration::from_millis(forwarding_expires_at_ms - minted_at_ms)
+        );
+        assert!(attempt_expiry > NOW_MS + 5_000);
+
+        let dispatch = owner
+            .begin_next_for_test(minted_at_ms, minted_at)
+            .expect("live attempt")
+            .expect("first native candidate")
+            .into_forward_dispatch_for_test(minted_at_ms)
+            .expect("exact Permit wrapper");
+        assert_eq!(
+            dispatch.request_for_test().1.deadline_unix_ms(),
+            forwarding_expires_at_ms
+        );
     }
 
     #[test]
@@ -5101,11 +6591,11 @@ mod tests {
         assert_eq!(plan.earliest_evidence_expiry_ms, NOW_MS + 30_000);
         assert_eq!(
             plan.forwarded_exit.control.evidence_valid_until_ms,
-            NOW_MS + MAXIMUM_EVIDENCE_AGE_MS
+            NOW_MS + 90_000
         );
         assert_eq!(
             plan.forwarded_exit.exit.evidence_valid_until_ms,
-            NOW_MS + MAXIMUM_EVIDENCE_AGE_MS
+            NOW_MS + 90_000
         );
         assert!(plan.prospective_relays.iter().all(|relay| {
             relay.relay.identity.wire_node_id != plan.forwarded_exit.control.identity.wire_node_id
@@ -5145,6 +6635,26 @@ mod tests {
             NOW_MS + 50_000
         );
         assert_eq!(plan.earliest_evidence_expiry_ms, NOW_MS + 40_000);
+    }
+
+    #[test]
+    fn established_route_outlives_consumed_setup_authority() {
+        let mut plan = prospective_plan();
+        plan.earliest_evidence_expiry_ms = NOW_MS + 30_000;
+        assert_eq!(plan.earliest_evidence_expiry_ms, NOW_MS + 30_000);
+        plan.forwarded_exit
+            .control
+            .identity
+            .advertisement_expires_at_ms = NOW_MS + 40_000;
+        plan.forwarded_exit.control.identity.expires_at_ms = NOW_MS + 40_000;
+
+        let hard_expiry = established_route_hard_expiry(&plan, NOW_MS, Duration::from_secs(60))
+            .expect("policy-bounded route lifetime");
+
+        assert_eq!(hard_expiry, NOW_MS + 60_000);
+        assert!(hard_expiry > plan.earliest_evidence_expiry_ms);
+        assert!(hard_expiry > plan.forwarded_exit.control.identity.expires_at_ms);
+        assert!(hard_expiry <= plan.scope.policy.expires_at_ms);
     }
 
     fn prospective_plan() -> ProspectiveRoutePlan {
@@ -5479,6 +6989,13 @@ mod tests {
             false
         }
 
+        async fn endpoint_traversal_hints(
+            &mut self,
+            _bindings: Vec<crate::discovery::EndpointTraversalBinding>,
+        ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+            Ok(Vec::new())
+        }
+
         async fn exit_forward<'a>(
             &'a mut self,
             _control: &'a DirectRelayCapability,
@@ -5512,13 +7029,14 @@ mod tests {
         async fn prepare(
             &mut self,
             _request: &PrepareLeaseBatch,
-        ) -> Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
+        ) -> Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(LocalPrepareFailure::Definitive(NoopHandoffLocalError))
         }
 
         async fn activate(
             &mut self,
+            _owner: &mut RuntimeBoundPreparedLeaseBatch,
             _request: &ActivateLeaseBatch,
         ) -> Result<ActivatedLeaseBatch, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -5527,6 +7045,7 @@ mod tests {
 
         async fn commit(
             &mut self,
+            _owner: &mut RuntimeBoundPreparedLeaseBatch,
             _request: &CommitLeaseBatch,
         ) -> Result<CommittedLeaseBatch, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -5535,7 +7054,7 @@ mod tests {
 
         async fn destroy(
             &mut self,
-            _request: &DestroyContext,
+            _owner: &RuntimeBoundPreparedLeaseBatch,
         ) -> Result<DestroyedContext, Self::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(NoopHandoffLocalError)
@@ -6007,6 +7526,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preprobe_handoff_accepts_strictly_newer_same_actor_relay_advertisements() {
+        let plan = prospective_plan();
+        let clock = HandoffClock::new(NOW_MS + 1_001);
+        let mut io = HandoffIo::from_plan(&plan, clock.clone());
+        io.control.advertisement_sequence += 1;
+        for (index, relay) in io.relays.iter_mut().enumerate() {
+            relay.advertisement_sequence += 1;
+            if index != 0 {
+                relay.advertisement_payload_hash = relay.advertisement_payload_hash.xor_for_test();
+            }
+        }
+        let state = Arc::clone(&io.state);
+        let expected_limits = preprobe_limits();
+        let (continuation, expected) = ExpectedResolvedHandoff::consume(plan, expected_limits);
+        let (_cancellation, mut cancelled) = watch::channel(false);
+
+        let unmeasured = continuation
+            .resolve_into_unmeasured(&io, &clock, &mut cancelled)
+            .await
+            .expect("newer advertisements from the selected actors remain authorized");
+        assert_exact_resolved_handoff(&unmeasured, &io, &state, &expected);
+    }
+
+    #[tokio::test]
     async fn preprobe_handoff_rechecks_post_resolve_wall_and_cancellation() {
         for (post_resolve_wall_ms, succeeds) in [
             (NOW_MS + 1_001, true),
@@ -6112,7 +7655,7 @@ mod tests {
 
     #[tokio::test]
     async fn preprobe_manager_rejects_current_capability_drift_before_dispatch() {
-        for mutation in 0_u8..7 {
+        for mutation in 0_u8..12 {
             let plan = prospective_plan();
             let clock = HandoffClock::new(NOW_MS);
             let mut io = HandoffIo::from_plan(&plan, clock);
@@ -6144,6 +7687,27 @@ mod tests {
                     relay.advertisement_payload_hash =
                         relay.advertisement_payload_hash.xor_for_test();
                 }
+                7 => {
+                    io.control.advertisement_sequence -= 1;
+                    io.control.advertisement_payload_hash =
+                        io.control.advertisement_payload_hash.xor_for_test();
+                }
+                8 => {
+                    io.exit.control_relay_advertisement_sequence =
+                        io.control.advertisement_sequence + 1;
+                    io.exit.control_relay_advertisement_payload_hash = io
+                        .exit
+                        .control_relay_advertisement_payload_hash
+                        .xor_for_test();
+                }
+                9 => {
+                    io.control.advertisement_sequence += 1;
+                    io.control.advertisement_payload_hash =
+                        io.control.advertisement_payload_hash.xor_for_test();
+                    io.control.expires_at_ms = NOW_MS + 59_999;
+                }
+                10 => io.control.advertisement_expires_at_ms += 1,
+                11 => io.control.advertisement_sequence = 0,
                 _ => unreachable!(),
             }
             let state = Arc::clone(&io.state);
@@ -6673,7 +8237,7 @@ mod tests {
     }
 
     #[test]
-    fn preprobe_continuation_source_has_no_clone_debug_serde_decomposition_or_caller() {
+    fn preprobe_continuation_is_affine_and_exposes_only_the_orchestrator_handoff() {
         let source = include_str!("selection_bridge.rs");
         for type_name in ["PreProbeContinuation", "PendingPreProbeResolve"] {
             let declaration = source
@@ -6686,18 +8250,11 @@ mod tests {
                 .map(|offset| declaration + offset)
                 .expect("affine handoff body");
             assert!(!source[declaration..body_end].contains("\n    pub "));
-            for visibility in ["pub ", "pub(crate) ", "pub(super) "] {
-                assert!(!source.contains(&format!("{visibility}struct {type_name}")));
-            }
             assert!(!source.contains(&format!(" for {type_name}")));
         }
-        for forbidden in [
-            ["fn into_", "parts"].concat(),
-            ["fn as_", "inner"].concat(),
-            ["fn dead", "line("].concat(),
-            ["impl De", "ref"].concat(),
-        ] {
-            assert!(!source.contains(&forbidden));
+        assert!(source.contains("pub(crate) struct PreProbeContinuation"));
+        for visibility in ["pub ", "pub(crate) ", "pub(super) "] {
+            assert!(!source.contains(&format!("{visibility}struct PendingPreProbeResolve")));
         }
         let pending_impl = source
             .split("impl PendingPreProbeResolve")
@@ -6709,13 +8266,22 @@ mod tests {
             .nth(1)
             .and_then(|suffix| suffix.split("impl<L> RouteSetupManager").next())
             .expect("continuation impl");
+        for forbidden in [
+            ["fn into_", "parts"].concat(),
+            ["fn as_", "inner"].concat(),
+            ["fn dead", "line("].concat(),
+            ["impl De", "ref"].concat(),
+        ] {
+            assert!(!pending_impl.contains(&forbidden));
+            assert!(!continuation_impl.contains(&forbidden));
+        }
         assert!(!pending_impl.contains("\n    pub "));
         assert!(!continuation_impl.contains("\n    pub "));
         let consume_name = ["consume_prospective_route_", "plan("].concat();
         assert_eq!(
             source.matches(&consume_name).count(),
-            1,
-            "the dormant product wrapper must have no caller"
+            2,
+            "only the declaration and exact native-admission handoff may consume the plan"
         );
     }
 
@@ -6735,12 +8301,18 @@ mod tests {
             "only legacy spawn and C2c handoff may enter the one-task seam"
         );
         assert_eq!(product_bridge.matches("fn spawn_preprobe<").count(), 1);
+        assert_eq!(
+            product_bridge
+                .matches("pub(super) fn spawn_preprobe")
+                .count(),
+            1,
+            "the parent route actor is the only permitted caller"
+        );
         let preprobe_call = [".spawn_", "preprobe("].concat();
         assert_eq!(product_bridge.matches(&preprobe_call).count(), 0);
         for forbidden in [
             "pub fn spawn_preprobe",
             "pub(crate) fn spawn_preprobe",
-            "pub(super) fn spawn_preprobe",
             "pub trait RouteCapabilityResolver",
             "pub(crate) trait RouteCapabilityResolver",
             "pub(super) trait RouteCapabilityResolver",
@@ -7677,12 +9249,24 @@ mod tests {
     #[test]
     fn forwarded_exit_actor_identity_sequence_and_policy_substitution_fail_closed() {
         let mut request_bounded_exit = exit_input();
+        let canonical_expiry = request_bounded_exit
+            .capability
+            .exit_advertisement_expires_at_ms
+            .min(request_bounded_exit.capability.policy_expires_at_ms)
+            .min(request_bounded_exit.control.capability.expires_at_ms);
         request_bounded_exit.capability.expires_at_ms = NOW_MS + 30_000;
-        request_bounded_exit.fresh.capability_expires_at_ms = NOW_MS + 30_000;
         request_bounded_exit.fresh.valid_until_ms = NOW_MS + 30_000;
-        assert!(
-            select_exit_first(scope(), &[request_bounded_exit], &mut OsRng).is_ok(),
+        let selected = select_exit_first(scope(), &[request_bounded_exit], &mut OsRng)
+            .expect(
             "a forwarded exit may be bounded below advertisement/policy expiry by its fetch authority"
+        );
+        assert_eq!(
+            selected.forwarded_exit.authority.exit.expires_at_ms,
+            canonical_expiry
+        );
+        assert!(
+            selected.forwarded_exit.authority.exit.expires_at_ms
+                > selected.exit_evidence_valid_until_ms
         );
 
         let mut wrong_exit_sequence = exit_input();
@@ -8118,6 +9702,7 @@ mod tests {
             deadlines(),
             NOW_MS + 90_000,
             NOW_MS + 60_000,
+            None,
         )
         .expect("representable post-probe policy");
 

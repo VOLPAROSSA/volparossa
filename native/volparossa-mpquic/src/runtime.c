@@ -12,6 +12,19 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define VMP_STATUS_METRIC_SRTT (UINT64_C(1) << 0U)
+#define VMP_STATUS_METRIC_LOSS (UINT64_C(1) << 1U)
+#define VMP_STATUS_METRIC_CWND (UINT64_C(1) << 2U)
+#define VMP_STATUS_METRIC_INFLIGHT (UINT64_C(1) << 3U)
+#define VMP_STATUS_METRIC_ESTIMATED_RATE (UINT64_C(1) << 4U)
+#define VMP_STATUS_METRIC_ACKED_TRANSPORT (UINT64_C(1) << 5U)
+#define VMP_STATUS_METRICS_REQUIRED                                      \
+    (VMP_STATUS_METRIC_SRTT | VMP_STATUS_METRIC_LOSS |                  \
+     VMP_STATUS_METRIC_CWND | VMP_STATUS_METRIC_INFLIGHT |              \
+     VMP_STATUS_METRIC_ESTIMATED_RATE |                                 \
+     VMP_STATUS_METRIC_ACKED_TRANSPORT)
+#define VMP_ACTIVE_FAILOVER_GRACE_MS UINT64_C(60000)
+
 typedef struct runtime_path {
     bool used;
     int64_t transport_handle;
@@ -40,10 +53,35 @@ typedef struct runtime_session {
     uint8_t auth_secret[VMP_MAX_AUTH_SECRET];
     char tls_server_name[VMP_MAX_TLS_SERVER_NAME + 1U];
     uint64_t authorization_deadline_boottime_ms;
+    uint64_t active_failover_deadline_boottime_ms;
     size_t authorization_index;
     void *transport_session;
     runtime_path_t paths[VMP_MAX_PATHS];
 } runtime_session_t;
+
+typedef struct runtime_exit_path {
+    bool used;
+    int64_t transport_handle;
+    uint32_t path_id;
+    uint8_t listener_ip[16];
+    uint16_t listener_port;
+    uint8_t expected_client_ip[16];
+    uint16_t expected_client_port;
+    uint8_t reservation_hash[VMP_RESERVATION_HASH_LEN];
+} runtime_exit_path_t;
+
+typedef struct runtime_exit_session {
+    bool used;
+    bool failed;
+    bool started;
+    vmp_start_exit_session_t start;
+    uint8_t auth_secret[VMP_MAX_AUTH_SECRET];
+    char tls_server_name[VMP_MAX_TLS_SERVER_NAME + 1U];
+    uint64_t authorization_deadline_boottime_ms;
+    size_t authorization_index;
+    void *transport_session;
+    runtime_exit_path_t paths[VMP_MAX_PATHS];
+} runtime_exit_session_t;
 
 struct vmp_runtime {
     vmp_runtime_mode_t mode;
@@ -59,6 +97,7 @@ struct vmp_runtime {
     uint64_t wall_anchor_realtime_ms;
     uint64_t last_boottime_ms;
     runtime_session_t sessions[VMP_MAX_SESSIONS];
+    runtime_exit_session_t exit_sessions[VMP_MAX_SESSIONS];
     runtime_authorization_t
         authorizations[VMP_MAX_AUTHORIZATION_RECORDS];
 };
@@ -303,7 +342,15 @@ static bool valid_transport(const vmp_transport_ops_t *transport)
            transport->destroy != NULL && transport->add_path != NULL &&
            transport->remove_path != NULL && transport->pump != NULL &&
            transport->snapshot != NULL && transport->send_inner != NULL &&
-           transport->receive_inner != NULL;
+           transport->receive_inner != NULL &&
+           transport->exit_create != NULL &&
+           transport->exit_destroy != NULL &&
+           transport->exit_add_listener != NULL &&
+           transport->exit_start != NULL &&
+           transport->exit_pump != NULL &&
+           transport->exit_snapshot != NULL &&
+           transport->exit_send_inner != NULL &&
+           transport->exit_receive_inner != NULL;
 }
 
 static void set_result(vmp_response_t *response, vmp_result_t result,
@@ -491,6 +538,18 @@ static runtime_path_t *free_path(runtime_session_t *session)
     return NULL;
 }
 
+static const runtime_path_t *find_path_by_handle(
+    const runtime_session_t *session, int64_t handle)
+{
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        if (session->paths[index].used &&
+            session->paths[index].transport_handle == handle) {
+            return &session->paths[index];
+        }
+    }
+    return NULL;
+}
+
 static bool start_matches(const runtime_session_t *session,
                           const vmp_start_session_t *start)
 {
@@ -599,6 +658,158 @@ static size_t path_count(const runtime_session_t *session)
     return count;
 }
 
+static runtime_exit_session_t *find_exit_session(
+    vmp_runtime_t *runtime, const uint8_t context[VMP_CONTEXT_ID_LEN])
+{
+    for (size_t index = 0U; index < VMP_MAX_SESSIONS; ++index) {
+        runtime_exit_session_t *session = &runtime->exit_sessions[index];
+        if (session->used &&
+            memcmp(session->start.route_context_id, context,
+                   VMP_CONTEXT_ID_LEN) == 0) {
+            return session;
+        }
+    }
+    return NULL;
+}
+
+static runtime_exit_session_t *free_exit_session(vmp_runtime_t *runtime)
+{
+    for (size_t index = 0U; index < VMP_MAX_SESSIONS; ++index) {
+        if (!runtime->exit_sessions[index].used) {
+            return &runtime->exit_sessions[index];
+        }
+    }
+    return NULL;
+}
+
+static size_t exit_path_count(const runtime_exit_session_t *session)
+{
+    size_t count = 0U;
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        if (session->paths[index].used) ++count;
+    }
+    return count;
+}
+
+static runtime_exit_path_t *free_exit_path(runtime_exit_session_t *session)
+{
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        if (!session->paths[index].used) return &session->paths[index];
+    }
+    return NULL;
+}
+
+static bool exit_start_matches(const runtime_exit_session_t *session,
+                               const vmp_start_exit_session_t *start)
+{
+    return memcmp(session->start.route_context_id, start->route_context_id,
+                  VMP_CONTEXT_ID_LEN) == 0 &&
+           session->start.expires_at_ms == start->expires_at_ms &&
+           session->start.minimum_paths == start->minimum_paths &&
+           session->start.masque_context_id == start->masque_context_id &&
+           session->start.transport_mode == start->transport_mode &&
+           memcmp(session->start.exit_spki_sha256,
+                  start->exit_spki_sha256, VMP_SPKI_SHA256_LEN) == 0 &&
+           memcmp(session->start.reservation_id, start->reservation_id,
+                  VMP_RESERVATION_ID_LEN) == 0 &&
+           memcmp(session->start.finalize_id, start->finalize_id,
+                  VMP_FINALIZE_ID_LEN) == 0 &&
+           memcmp(session->start.auth_commitment, start->auth_commitment,
+                  VMP_AUTH_COMMITMENT_LEN) == 0 &&
+           memcmp(session->start.certificate_sha256,
+                  start->certificate_sha256,
+                  VMP_CERTIFICATE_SHA256_LEN) == 0 &&
+           memcmp(session->start.client_native_instance_id,
+                  start->client_native_instance_id,
+                  VMP_NATIVE_INSTANCE_ID_LEN) == 0 &&
+           memcmp(session->start.exit_native_instance_id,
+                  start->exit_native_instance_id,
+                  VMP_NATIVE_INSTANCE_ID_LEN) == 0 &&
+           constant_time_secret_equal(&session->start.auth_secret,
+                                      &start->auth_secret) &&
+           session->start.tls_server_name.len == start->tls_server_name.len &&
+           memcmp(session->start.tls_server_name.data,
+                  start->tls_server_name.data,
+                  start->tls_server_name.len) == 0;
+}
+
+static bool exit_path_conflicts(const runtime_exit_session_t *session,
+                                const vmp_start_exit_session_t *candidate)
+{
+    for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+        const runtime_exit_path_t *path = &session->paths[index];
+        if (!path->used) continue;
+        if (path->path_id == candidate->path_id ||
+            (path->listener_port == candidate->listener_port &&
+             memcmp(path->listener_ip, candidate->listener_ip, 16U) == 0) ||
+            (path->expected_client_port == candidate->expected_client_port &&
+             memcmp(path->expected_client_ip,
+                    candidate->expected_client_ip, 16U) == 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void copy_exit_start(runtime_exit_session_t *session,
+                            const vmp_start_exit_session_t *start,
+                            const char tls_server_name
+                                [VMP_MAX_TLS_SERVER_NAME + 1U],
+                            uint64_t deadline_boottime_ms,
+                            size_t authorization_index)
+{
+    memset(session, 0, sizeof(*session));
+    session->used = true;
+    session->start = *start;
+    memcpy(session->auth_secret, start->auth_secret.data,
+           start->auth_secret.len);
+    session->start.auth_secret.data = session->auth_secret;
+    memcpy(session->tls_server_name, tls_server_name,
+           start->tls_server_name.len + 1U);
+    session->start.tls_server_name.data =
+        (const uint8_t *)session->tls_server_name;
+    /* PEM views are used only synchronously by exit_create and must not be
+     * reachable after the request frame is retired. */
+    session->start.tls_certificate_pem.data = NULL;
+    session->start.tls_certificate_pem.len = 0U;
+    session->start.tls_private_key_pem.data = NULL;
+    session->start.tls_private_key_pem.len = 0U;
+    session->authorization_deadline_boottime_ms = deadline_boottime_ms;
+    session->authorization_index = authorization_index;
+}
+
+static bool exit_authorization_matches(
+    const vmp_runtime_t *runtime, const runtime_exit_session_t *session)
+{
+    if (session->authorization_index >= VMP_MAX_AUTHORIZATION_RECORDS) {
+        return false;
+    }
+    const runtime_authorization_t *authorization =
+        &runtime->authorizations[session->authorization_index];
+    return authorization->state == RUNTIME_AUTHORIZATION_ACTIVE &&
+           authorization->deadline_boottime_ms ==
+               session->authorization_deadline_boottime_ms &&
+           memcmp(authorization->reservation_id,
+                  session->start.reservation_id,
+                  VMP_RESERVATION_ID_LEN) == 0 &&
+           memcmp(authorization->finalize_id,
+                  session->start.finalize_id,
+                  VMP_FINALIZE_ID_LEN) == 0;
+}
+
+static void destroy_exit_session(vmp_runtime_t *runtime,
+                                 runtime_exit_session_t *session)
+{
+    if (session->used && exit_authorization_matches(runtime, session)) {
+        runtime->authorizations[session->authorization_index].state =
+            RUNTIME_AUTHORIZATION_TOMBSTONE;
+    }
+    if (session->transport_session != NULL) {
+        runtime->transport.exit_destroy(session->transport_session);
+    }
+    secure_zero(session, sizeof(*session));
+}
+
 static bool known_handle(const runtime_session_t *session, int64_t handle,
                          bool observed[VMP_MAX_PATHS])
 {
@@ -619,12 +830,23 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
                                              bool *out_ready,
                                              bool *out_has_assignment,
                                              vmp_tunnel_assignment_t
-                                                 *out_assignment)
+                                                 *out_assignment,
+                                             vmp_transport_path_snapshot_t
+                                                 *out_snapshots,
+                                             size_t *out_snapshot_count)
 {
     *out_active = 0U;
     *out_ready = false;
     *out_has_assignment = false;
     memset(out_assignment, 0, sizeof(*out_assignment));
+    if ((out_snapshots == NULL) != (out_snapshot_count == NULL)) {
+        return VMP_TRANSPORT_INVALID;
+    }
+    if (out_snapshots != NULL) {
+        memset(out_snapshots, 0,
+               VMP_MAX_PATHS * sizeof(*out_snapshots));
+        *out_snapshot_count = 0U;
+    }
     if (session->failed) return VMP_TRANSPORT_ENGINE;
     if (session->transport_session == NULL) return VMP_TRANSPORT_OK;
 
@@ -673,11 +895,54 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
     *out_ready = ready;
     *out_has_assignment = has_assignment;
     if (has_assignment) memcpy(out_assignment, &assignment, sizeof(assignment));
+    if (out_snapshots != NULL) {
+        memcpy(out_snapshots, snapshots,
+               count * sizeof(*out_snapshots));
+        *out_snapshot_count = count;
+    }
     secure_zero(&assignment, sizeof(assignment));
-    if (!ready || *out_active < session->start.minimum_paths) {
+    if (!ready) {
         session->started = false;
     }
     return VMP_TRANSPORT_OK;
+}
+
+/* A route must activate with its full signed minimum. Once active, a physical
+ * Relay failure may leave one live path while the agent replaces or retires
+ * the route. Keep that already-established flow alive for one short bounded
+ * interval; explicit path removal clears `started` and cannot enter grace. */
+static bool active_path_requirement_met(vmp_runtime_t *runtime,
+                                        runtime_session_t *session,
+                                        size_t active)
+{
+    if (active >= session->start.minimum_paths) {
+        session->active_failover_deadline_boottime_ms = 0U;
+        return true;
+    }
+    if (!session->started ||
+        session->start.transport_mode !=
+            VMP_TRANSPORT_MODE_MULTIPATH_QUIC ||
+        active == 0U || path_count(session) < session->start.minimum_paths) {
+        return false;
+    }
+    uint64_t now_ms = 0U;
+    if (!read_boottime(runtime, &now_ms)) {
+        session->started = false;
+        return false;
+    }
+    if (session->active_failover_deadline_boottime_ms == 0U) {
+        if (now_ms > UINT64_MAX - VMP_ACTIVE_FAILOVER_GRACE_MS) {
+            session->started = false;
+            return false;
+        }
+        session->active_failover_deadline_boottime_ms =
+            now_ms + VMP_ACTIVE_FAILOVER_GRACE_MS;
+    }
+    if (now_ms >= session->active_failover_deadline_boottime_ms) {
+        session->started = false;
+        return false;
+    }
+    return true;
 }
 
 static bool session_authorization_matches(
@@ -716,6 +981,9 @@ static void destroy_all_sessions(vmp_runtime_t *runtime)
         if (runtime->sessions[index].used) {
             destroy_session(runtime, &runtime->sessions[index]);
         }
+        if (runtime->exit_sessions[index].used) {
+            destroy_exit_session(runtime, &runtime->exit_sessions[index]);
+        }
     }
 }
 
@@ -726,6 +994,12 @@ static void expire_sessions_at(vmp_runtime_t *runtime, uint64_t now_ms)
         if (session->used &&
             now_ms >= session->authorization_deadline_boottime_ms) {
             destroy_session(runtime, session);
+        }
+        runtime_exit_session_t *exit_session =
+            &runtime->exit_sessions[index];
+        if (exit_session->used &&
+            now_ms >= exit_session->authorization_deadline_boottime_ms) {
+            destroy_exit_session(runtime, exit_session);
         }
     }
 }
@@ -799,6 +1073,31 @@ static bool require_live(vmp_runtime_t *runtime, runtime_session_t *session,
     return true;
 }
 
+static bool require_exit_live(vmp_runtime_t *runtime,
+                              runtime_exit_session_t *session,
+                              vmp_response_t *response)
+{
+    uint64_t now_ms = 0U;
+    if (!read_boottime(runtime, &now_ms)) {
+        destroy_exit_session(runtime, session);
+        set_result(response, VMP_RESULT_UNAUTHORISED,
+                   "authorization_clock");
+        return false;
+    }
+    if (now_ms >= session->authorization_deadline_boottime_ms) {
+        destroy_exit_session(runtime, session);
+        purge_authorizations_at(runtime, now_ms);
+        set_result(response, VMP_RESULT_UNAUTHORISED, "session_expired");
+        return false;
+    }
+    if (!exit_authorization_matches(runtime, session)) {
+        destroy_exit_session(runtime, session);
+        set_result(response, VMP_RESULT_TRANSPORT, "authorization_state");
+        return false;
+    }
+    return true;
+}
+
 vmp_runtime_t *vmp_runtime_create(vmp_runtime_mode_t mode,
                                   const uint8_t native_instance_id
                                       [VMP_NATIVE_INSTANCE_ID_LEN],
@@ -864,16 +1163,30 @@ vmp_server_error_t vmp_runtime_pump(void *context)
     purge_authorizations_at(runtime, now_ms);
     for (size_t index = 0; index < VMP_MAX_SESSIONS; ++index) {
         runtime_session_t *session = &runtime->sessions[index];
-        if (!session->used) continue;
-        if (session->failed || session->transport_session == NULL) continue;
-        const vmp_transport_error_t error =
-            runtime->transport.pump(session->transport_session);
-        if (error != VMP_TRANSPORT_OK) {
-            if (error == VMP_TRANSPORT_OVERFLOW) {
-                session->reverse_overflow = true;
+        if (session->used && !session->failed &&
+            session->transport_session != NULL) {
+            const vmp_transport_error_t error =
+                runtime->transport.pump(session->transport_session);
+            if (error != VMP_TRANSPORT_OK) {
+                if (error == VMP_TRANSPORT_OVERFLOW) {
+                    session->reverse_overflow = true;
+                }
+                session->failed = true;
+                session->started = false;
             }
-            session->failed = true;
-            session->started = false;
+        }
+        runtime_exit_session_t *exit_session =
+            &runtime->exit_sessions[index];
+        if (!exit_session->used || exit_session->failed ||
+            !exit_session->started ||
+            exit_session->transport_session == NULL) {
+            continue;
+        }
+        const vmp_transport_error_t exit_error =
+            runtime->transport.exit_pump(exit_session->transport_session);
+        if (exit_error != VMP_TRANSPORT_OK) {
+            exit_session->failed = true;
+            exit_session->started = false;
         }
     }
     return VMP_SERVER_OK;
@@ -994,7 +1307,8 @@ static void dispatch_start(vmp_runtime_t *runtime,
     vmp_tunnel_assignment_t assignment;
     memset(&assignment, 0, sizeof(assignment));
     const vmp_transport_error_t snapshot_error = snapshot_active(
-        runtime, session, &active, &ready, &has_assignment, &assignment);
+        runtime, session, &active, &ready, &has_assignment, &assignment,
+        NULL, NULL);
     if (snapshot_error != VMP_TRANSPORT_OK) {
         secure_zero(&assignment, sizeof(assignment));
         set_result(response,
@@ -1014,6 +1328,7 @@ static void dispatch_start(vmp_runtime_t *runtime,
         return;
     }
     session->started = true;
+    session->active_failover_deadline_boottime_ms = 0U;
     set_result(response, VMP_RESULT_OK, "ok");
     response->has_tunnel_assignment = true;
     memcpy(&response->tunnel_assignment, &assignment, sizeof(assignment));
@@ -1200,7 +1515,8 @@ static bool require_active(vmp_runtime_t *runtime, runtime_session_t *session,
     vmp_tunnel_assignment_t assignment;
     memset(&assignment, 0, sizeof(assignment));
     const vmp_transport_error_t snapshot_error = snapshot_active(
-        runtime, session, &active, &ready, &has_assignment, &assignment);
+        runtime, session, &active, &ready, &has_assignment, &assignment,
+        NULL, NULL);
     if (snapshot_error != VMP_TRANSPORT_OK) {
         secure_zero(&assignment, sizeof(assignment));
         set_result(response,
@@ -1214,7 +1530,7 @@ static bool require_active(vmp_runtime_t *runtime, runtime_session_t *session,
     }
     secure_zero(&assignment, sizeof(assignment));
     if (!session->started || !ready || !has_assignment ||
-        active < session->start.minimum_paths) {
+        !active_path_requirement_met(runtime, session, active)) {
         set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
                    "required_paths_not_active");
         return false;
@@ -1226,6 +1542,49 @@ static void dispatch_send(vmp_runtime_t *runtime,
                           const vmp_send_datagram_t *request,
                           vmp_response_t *response)
 {
+    if (runtime->mode == VMP_RUNTIME_EXIT) {
+        runtime_exit_session_t *exit_session =
+            find_exit_session(runtime, request->route_context_id);
+        if (exit_session == NULL) {
+            set_result(response, VMP_RESULT_NOT_FOUND, "session_not_found");
+            return;
+        }
+        if (!require_exit_live(runtime, exit_session, response)) return;
+        if (request->masque_context_id !=
+            exit_session->start.masque_context_id) {
+            set_result(response, VMP_RESULT_INVALID_REQUEST,
+                       "masque_context_mismatch");
+            return;
+        }
+        vmp_exit_transport_snapshot_t snapshot;
+        memset(&snapshot, 0, sizeof(snapshot));
+        if (!exit_session->started || exit_session->failed ||
+            runtime->transport.exit_snapshot(
+                exit_session->transport_session, &snapshot) !=
+                VMP_TRANSPORT_OK ||
+            !snapshot.listening || !snapshot.connected ||
+            snapshot.retained_paths < exit_session->start.minimum_paths) {
+            set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
+                       "exit_session_not_connected");
+            return;
+        }
+        const vmp_transport_error_t exit_error =
+            runtime->transport.exit_send_inner(
+                exit_session->transport_session,
+                request->masque_context_id,
+                request->inner_ip_packet.data,
+                request->inner_ip_packet.len);
+        if (exit_error == VMP_TRANSPORT_OK) {
+            set_result(response, VMP_RESULT_OK, "ok");
+        } else {
+            exit_session->failed = exit_error != VMP_TRANSPORT_RESOURCE;
+            set_result(response, VMP_RESULT_TRANSPORT,
+                       exit_error == VMP_TRANSPORT_RESOURCE
+                           ? "send_backpressure"
+                           : "native_transport_failed");
+        }
+        return;
+    }
     runtime_session_t *session =
         find_session(runtime, request->route_context_id);
     if (session == NULL) {
@@ -1270,6 +1629,63 @@ static void dispatch_receive(vmp_runtime_t *runtime,
                              const vmp_receive_datagram_t *request,
                              vmp_response_t *response)
 {
+    if (runtime->mode == VMP_RUNTIME_EXIT) {
+        runtime_exit_session_t *exit_session =
+            find_exit_session(runtime, request->route_context_id);
+        if (exit_session == NULL) {
+            set_result(response, VMP_RESULT_NOT_FOUND, "session_not_found");
+            return;
+        }
+        if (!require_exit_live(runtime, exit_session, response)) return;
+        if (request->masque_context_id !=
+            exit_session->start.masque_context_id) {
+            set_result(response, VMP_RESULT_INVALID_REQUEST,
+                       "masque_context_mismatch");
+            return;
+        }
+        vmp_exit_transport_snapshot_t snapshot;
+        memset(&snapshot, 0, sizeof(snapshot));
+        if (!exit_session->started || exit_session->failed ||
+            runtime->transport.exit_snapshot(
+                exit_session->transport_session, &snapshot) !=
+                VMP_TRANSPORT_OK ||
+            !snapshot.listening || !snapshot.connected ||
+            snapshot.retained_paths < exit_session->start.minimum_paths) {
+            set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
+                       "exit_session_not_connected");
+            return;
+        }
+        set_result(response, VMP_RESULT_OK, "datagram");
+        size_t packet_len = 0U;
+        const vmp_transport_error_t exit_error =
+            runtime->transport.exit_receive_inner(
+                exit_session->transport_session,
+                request->masque_context_id,
+                response->received_datagram.inner_ip_packet,
+                sizeof(response->received_datagram.inner_ip_packet),
+                &packet_len);
+        if (exit_error == VMP_TRANSPORT_EMPTY) {
+            set_result(response, VMP_RESULT_NO_DATAGRAM, "no_datagram");
+            return;
+        }
+        if (exit_error != VMP_TRANSPORT_OK ||
+            !valid_inner_packet(
+                response->received_datagram.inner_ip_packet,
+                packet_len)) {
+            exit_session->failed = true;
+            exit_session->started = false;
+            set_result(response, VMP_RESULT_TRANSPORT,
+                       "native_transport_failed");
+            return;
+        }
+        response->has_received_datagram = true;
+        memcpy(response->received_datagram.route_context_id,
+               request->route_context_id, VMP_CONTEXT_ID_LEN);
+        response->received_datagram.masque_context_id =
+            request->masque_context_id;
+        response->received_datagram.inner_ip_packet_len = packet_len;
+        return;
+    }
     runtime_session_t *session =
         find_session(runtime, request->route_context_id);
     if (session == NULL) {
@@ -1335,14 +1751,82 @@ static void dispatch_status(vmp_runtime_t *runtime,
         return;
     }
     if (!require_live(runtime, session, response)) return;
-    if (!require_active(runtime, session, response)) return;
+    if (session->reverse_overflow) {
+        set_result(response, VMP_RESULT_QUEUE_OVERFLOW,
+                   "reverse_queue_overflow");
+        return;
+    }
+    size_t active = 0U;
+    bool ready = false;
+    bool has_assignment = false;
+    vmp_tunnel_assignment_t assignment;
+    vmp_transport_path_snapshot_t snapshots[VMP_MAX_PATHS];
+    size_t snapshot_count = 0U;
+    memset(&assignment, 0, sizeof(assignment));
+    const vmp_transport_error_t snapshot_error = snapshot_active(
+        runtime, session, &active, &ready, &has_assignment, &assignment,
+        snapshots, &snapshot_count);
+    secure_zero(&assignment, sizeof(assignment));
+    if (snapshot_error != VMP_TRANSPORT_OK) {
+        set_result(response,
+                   snapshot_error == VMP_TRANSPORT_OVERFLOW
+                       ? VMP_RESULT_QUEUE_OVERFLOW
+                       : VMP_RESULT_TRANSPORT,
+                   snapshot_error == VMP_TRANSPORT_OVERFLOW
+                       ? "reverse_queue_overflow"
+                       : "native_transport_failed");
+        return;
+    }
+    if (!session->started || !ready || !has_assignment ||
+        !active_path_requirement_met(runtime, session, active)) {
+        set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
+                   "required_paths_not_active");
+        return;
+    }
 
-    /* xquic's exposed delivered counter is ACKed QUIC transport bytes and can
-     * include retransmissions and framing. NativePathStatus requires unique
-     * delivered payload bytes, so returning zero or relabelling that counter
-     * would be false telemetry. */
-    set_result(response, VMP_RESULT_TRANSPORT,
-               "unique_delivery_metric_unsupported");
+    vmp_path_status_t paths[VMP_MAX_PATHS];
+    memset(paths, 0, sizeof(paths));
+    for (size_t index = 0U; index < snapshot_count; ++index) {
+        const vmp_transport_path_snapshot_t *snapshot = &snapshots[index];
+        const runtime_path_t *path =
+            find_path_by_handle(session, snapshot->handle);
+        if (path == NULL ||
+            snapshot->metrics_valid != VMP_STATUS_METRICS_REQUIRED ||
+            snapshot->estimated_rate_bytes_per_sec > UINT64_MAX / 8U) {
+            session->failed = true;
+            session->started = false;
+            set_result(response, VMP_RESULT_TRANSPORT,
+                       "path_metrics_unavailable");
+            return;
+        }
+        vmp_path_status_t *status = &paths[index];
+        status->path_id = path->request.path_id;
+        status->smoothed_rtt_us = snapshot->smoothed_rtt_us;
+        status->packets_lost = snapshot->packets_lost;
+        /* ACKed transport can contain framing and retransmissions. It proves
+         * that a path carried transport data, but never unique inner bytes. */
+        status->delivered_bytes = 0U;
+        status->congestion_window_bytes =
+            snapshot->congestion_window_bytes;
+        status->bytes_in_flight = snapshot->bytes_in_flight;
+        status->delivery_rate_bps =
+            snapshot->estimated_rate_bytes_per_sec * 8U;
+        status->data_carrying = snapshot->acked_transport_bytes > 0U;
+    }
+    for (size_t index = 1U; index < snapshot_count; ++index) {
+        vmp_path_status_t current = paths[index];
+        size_t insertion = index;
+        while (insertion > 0U &&
+               paths[insertion - 1U].path_id > current.path_id) {
+            paths[insertion] = paths[insertion - 1U];
+            --insertion;
+        }
+        paths[insertion] = current;
+    }
+    set_result(response, VMP_RESULT_OK, "ok");
+    memcpy(response->paths, paths,
+           snapshot_count * sizeof(*response->paths));
+    response->path_count = snapshot_count;
 }
 
 static void dispatch_start_exit(vmp_runtime_t *runtime,
@@ -1357,8 +1841,8 @@ static void dispatch_start_exit(vmp_runtime_t *runtime,
         return;
     }
     const bool valid_listener = exact_exit_listener(listener_fd, start);
-    if (listener_fd >= 0) (void)close(listener_fd);
     if (!vmp_start_exit_is_valid(start) || !valid_listener) {
+        if (listener_fd >= 0) (void)close(listener_fd);
         set_result(response, VMP_RESULT_INVALID_REQUEST,
                    valid_listener ? "session_parameters"
                                   : "exit_listener_descriptor");
@@ -1366,62 +1850,157 @@ static void dispatch_start_exit(vmp_runtime_t *runtime,
     }
     if (!valid_auth_commitment(runtime, &start->auth_secret,
                                start->auth_commitment)) {
+        (void)close(listener_fd);
         set_result(response, VMP_RESULT_UNAUTHORISED,
                    "auth_commitment_mismatch");
         return;
     }
-    uint64_t deadline_boottime_ms = 0U;
-    const authorization_admission_t admission = authorization_deadline(
-        runtime, start->expires_at_ms, &deadline_boottime_ms);
-    if (admission != AUTHORIZATION_ADMISSION_OK) {
-        set_result(response, VMP_RESULT_UNAUTHORISED,
-                   admission == AUTHORIZATION_ADMISSION_CLOCK
-                       ? "authorization_clock"
-                       : "authorization_window");
+    runtime_exit_session_t *session =
+        find_exit_session(runtime, start->route_context_id);
+    if (session == NULL) {
+        uint64_t deadline_boottime_ms = 0U;
+        const authorization_admission_t admission = authorization_deadline(
+            runtime, start->expires_at_ms, &deadline_boottime_ms);
+        if (admission != AUTHORIZATION_ADMISSION_OK) {
+            (void)close(listener_fd);
+            set_result(response, VMP_RESULT_UNAUTHORISED,
+                       admission == AUTHORIZATION_ADMISSION_CLOCK
+                           ? "authorization_clock"
+                           : "authorization_window");
+            return;
+        }
+        size_t authorization_index = 0U;
+        const authorization_lookup_t lookup = find_authorization(
+            runtime, start->reservation_id, start->finalize_id,
+            &authorization_index);
+        if (lookup != AUTHORIZATION_LOOKUP_NONE) {
+            (void)close(listener_fd);
+            set_result(response, VMP_RESULT_UNAUTHORISED,
+                       lookup == AUTHORIZATION_LOOKUP_EXACT
+                           ? "authorization_replay"
+                           : "authorization_scope_reuse");
+            return;
+        }
+        session = free_exit_session(runtime);
+        runtime_authorization_t *authorization =
+            free_authorization(runtime, &authorization_index);
+        char tls_server_name[VMP_MAX_TLS_SERVER_NAME + 1U];
+        memset(tls_server_name, 0, sizeof(tls_server_name));
+        if (session == NULL || authorization == NULL ||
+            !copy_tls_name(&start->tls_server_name, tls_server_name)) {
+            (void)close(listener_fd);
+            secure_zero(tls_server_name, sizeof(tls_server_name));
+            set_result(response, VMP_RESULT_TRANSPORT,
+                       session == NULL ? "session_limit"
+                                       : "authorization_capacity");
+            return;
+        }
+        store_authorization(authorization, RUNTIME_AUTHORIZATION_ACTIVE,
+                            start->reservation_id, start->finalize_id,
+                            deadline_boottime_ms);
+        void *transport_session = NULL;
+        const vmp_transport_error_t create_error =
+            runtime->transport.exit_create(runtime->factory_context, start,
+                                           &transport_session);
+        if (create_error != VMP_TRANSPORT_OK || transport_session == NULL) {
+            authorization->state = RUNTIME_AUTHORIZATION_TOMBSTONE;
+            (void)close(listener_fd);
+            secure_zero(tls_server_name, sizeof(tls_server_name));
+            set_result(response, VMP_RESULT_TRANSPORT,
+                       "exit_transport_create_failed");
+            return;
+        }
+        copy_exit_start(session, start, tls_server_name,
+                        deadline_boottime_ms, authorization_index);
+        session->transport_session = transport_session;
+        secure_zero(tls_server_name, sizeof(tls_server_name));
+    } else if (!require_exit_live(runtime, session, response) ||
+               !exit_start_matches(session, start)) {
+        (void)close(listener_fd);
+        if (response->result == VMP_RESULT_OK) {
+            set_result(response, VMP_RESULT_INVALID_REQUEST,
+                       "session_parameters_changed");
+        }
         return;
     }
 
-    size_t authorization_index = 0U;
-    const authorization_lookup_t lookup = find_authorization(
-        runtime, start->reservation_id, start->finalize_id,
-        &authorization_index);
-    if (lookup != AUTHORIZATION_LOOKUP_NONE) {
-        set_result(response, VMP_RESULT_UNAUTHORISED,
-                   lookup == AUTHORIZATION_LOOKUP_EXACT
-                       ? "authorization_replay"
-                       : "authorization_scope_reuse");
+    runtime_exit_path_t *path = free_exit_path(session);
+    if (session->failed || path == NULL ||
+        exit_path_conflicts(session, start)) {
+        (void)close(listener_fd);
+        set_result(response, VMP_RESULT_INVALID_REQUEST,
+                   exit_path_conflicts(session, start)
+                       ? "exit_path_conflict"
+                       : "exit_path_capacity");
         return;
     }
-    runtime_authorization_t *authorization =
-        free_authorization(runtime, &authorization_index);
-    if (authorization == NULL) {
+    int64_t handle = -1;
+    const vmp_transport_error_t add_error =
+        runtime->transport.exit_add_listener(
+            session->transport_session, start, listener_fd, &handle);
+    if (add_error != VMP_TRANSPORT_OK || handle < 0) {
+        session->failed = true;
+        session->started = false;
         set_result(response, VMP_RESULT_TRANSPORT,
-                   "authorization_capacity");
+                   "exit_listener_activation_failed");
         return;
     }
-    /* A structurally valid exit request whose bearer matches its supplied
-     * commitment is consumed process-locally before the still fail-closed
-     * backend boundary. Signature verification and a preverified affine
-     * handoff are outside this runtime; this table only binds the exact
-     * reservation/finalize scope it receives. */
-    store_authorization(authorization, RUNTIME_AUTHORIZATION_TOMBSTONE,
-                        start->reservation_id, start->finalize_id,
-                        deadline_boottime_ms);
+    memset(path, 0, sizeof(*path));
+    path->used = true;
+    path->transport_handle = handle;
+    path->path_id = start->path_id;
+    memcpy(path->listener_ip, start->listener_ip, 16U);
+    path->listener_port = start->listener_port;
+    memcpy(path->expected_client_ip, start->expected_client_ip, 16U);
+    path->expected_client_port = start->expected_client_port;
+    memcpy(path->reservation_hash, start->reservation_hash,
+           VMP_RESERVATION_HASH_LEN);
 
-    /* API v6 has consumed a UDP descriptor whose current tuple and flags match
-     * the route request. Helper origin, assigned-address state and exact
-     * network namespace remain unproven. Bounded certificate/key candidate PEM
-     * is carried in memory, but this process boundary still has no reviewed
-     * exit transport factory. Starting a replacement host-local listener,
-     * reading secret paths, or falling back is forbidden. */
-    set_result(response, VMP_RESULT_TRANSPORT,
-               "exit_listener_orchestration_unavailable");
+    if (exit_path_count(session) < session->start.minimum_paths) {
+        set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
+                   "required_exit_listeners_not_retained");
+        return;
+    }
+    if (!session->started) {
+        if (runtime->transport.exit_start(session->transport_session) !=
+            VMP_TRANSPORT_OK) {
+            session->failed = true;
+            set_result(response, VMP_RESULT_TRANSPORT,
+                       "exit_transport_start_failed");
+            return;
+        }
+        session->started = true;
+    }
+    vmp_exit_transport_snapshot_t snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+    if (runtime->transport.exit_snapshot(session->transport_session,
+                                         &snapshot) != VMP_TRANSPORT_OK ||
+        !snapshot.listening ||
+        snapshot.retained_paths < session->start.minimum_paths) {
+        session->failed = true;
+        session->started = false;
+        set_result(response, VMP_RESULT_TRANSPORT,
+                   "exit_transport_not_listening");
+        return;
+    }
+    set_result(response, VMP_RESULT_OK, "exit_listeners_ready");
 }
 
 static void dispatch_stop(vmp_runtime_t *runtime,
                           const vmp_context_request_t *request,
                           vmp_response_t *response)
 {
+    if (runtime->mode == VMP_RUNTIME_EXIT) {
+        runtime_exit_session_t *exit_session =
+            find_exit_session(runtime, request->route_context_id);
+        if (exit_session == NULL) {
+            set_result(response, VMP_RESULT_NOT_FOUND, "session_not_found");
+            return;
+        }
+        destroy_exit_session(runtime, exit_session);
+        set_result(response, VMP_RESULT_OK, "ok");
+        return;
+    }
     runtime_session_t *session =
         find_session(runtime, request->route_context_id);
     if (session == NULL) {

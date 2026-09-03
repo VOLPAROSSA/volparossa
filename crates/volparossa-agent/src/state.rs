@@ -4,14 +4,16 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use volparossa_config::{Config, RolesConfig};
 use volparossa_local_control::{
-    LogLevel, LogList, LogRecord, PathList, PathSummary, PeerList, PeerSummary, PolicySnapshot,
-    RoleSnapshot, SessionList, SessionSummary, StatusSnapshot,
+    LogLevel, LogList, LogRecord, PathList, PathState, PathSummary, PeerList, PeerSummary,
+    PolicySnapshot, RoleSnapshot, SessionList, SessionSummary, StatusSnapshot,
 };
 use volparossa_metrics::{MetricsError, MetricsRegistry};
 use volparossa_policy::VerifiedManifest;
 use volparossa_selection::RouteContextCache;
 
 const MAX_LOG_RECORDS: usize = 1_000;
+const MAX_MPQUIC_PATHS: usize = 8;
+const ROUTE_CONTEXT_ID_BYTES: usize = 16;
 
 /// Mutable state owned by the agent. It contains no destination, DNS, URL,
 /// payload, or durable node-to-browsing association.
@@ -23,6 +25,7 @@ pub struct AgentState {
     connected_peers: HashSet<String>,
     peers: BTreeMap<String, PeerSummary>,
     paths: Vec<PathSummary>,
+    mpquic_context_id: Option<Vec<u8>>,
     sessions: Vec<SessionSummary>,
     logs: VecDeque<LogRecord>,
     candidate_pool: usize,
@@ -51,6 +54,7 @@ impl AgentState {
             connected_peers: HashSet::new(),
             peers: BTreeMap::new(),
             paths: Vec::new(),
+            mpquic_context_id: None,
             sessions: Vec::new(),
             logs: VecDeque::with_capacity(MAX_LOG_RECORDS),
             candidate_pool: 0,
@@ -66,12 +70,15 @@ impl AgentState {
     /// Returns aggregate transport and discovery state without destinations.
     #[must_use]
     pub fn status(&self) -> StatusSnapshot {
+        let active_contexts = self
+            .route_contexts
+            .context_count()
+            .saturating_add(usize::from(self.mpquic_context_id.is_some()));
         StatusSnapshot {
-            connected: self.route_contexts.context_count() > 0
-                && (!self.paths.is_empty() || !self.sessions.is_empty()),
+            connected: active_contexts > 0 && (!self.paths.is_empty() || !self.sessions.is_empty()),
             active_peers: bounded_u32(self.connected_peers.len()),
             candidate_pool: bounded_u32(self.candidate_pool),
-            active_contexts: bounded_u32(self.route_contexts.context_count()),
+            active_contexts: bounded_u32(active_contexts),
             mptcp_subflows: self.mptcp_subflows,
             mpquic_paths: self.mpquic_paths,
         }
@@ -187,6 +194,42 @@ impl AgentState {
         }
     }
 
+    /// Replaces only the currently owned MPQUIC route projection.
+    ///
+    /// The summaries contain route and peer identity plus aggregate path counters only. They
+    /// retain no destination or payload. Paths belonging to another transport context are left
+    /// untouched.
+    pub fn replace_mpquic_paths(&mut self, mut paths: Vec<PathSummary>) -> Result<(), StateError> {
+        let context_id = validate_mpquic_paths(&paths)?.to_vec();
+        if let Some(previous) = self.mpquic_context_id.as_ref() {
+            self.paths
+                .retain(|path| path.route_context_id.as_slice() != previous.as_slice());
+        }
+        self.paths
+            .retain(|path| path.route_context_id.as_slice() != context_id.as_slice());
+        paths.sort_unstable_by_key(|path| path.path_id);
+        self.mpquic_paths = bounded_u32(
+            paths
+                .iter()
+                .filter(|path| PathState::try_from(path.state).ok() == Some(PathState::Active))
+                .count(),
+        );
+        self.paths.extend(paths);
+        self.mpquic_context_id = Some(context_id);
+        self.sync_metrics();
+        Ok(())
+    }
+
+    /// Removes only the MPQUIC projection after its native and helper owners stop.
+    pub fn clear_mpquic_paths(&mut self) {
+        if let Some(context_id) = self.mpquic_context_id.take() {
+            self.paths
+                .retain(|path| path.route_context_id != context_id);
+        }
+        self.mpquic_paths = 0;
+        self.sync_metrics();
+    }
+
     /// Returns only actually established sessions.
     #[must_use]
     pub fn session_list(&self) -> SessionList {
@@ -225,6 +268,7 @@ impl AgentState {
             config.routing.context_ttl_seconds,
         )?;
         self.paths.clear();
+        self.mpquic_context_id = None;
         self.sessions.clear();
         self.mptcp_subflows = 0;
         self.mpquic_paths = 0;
@@ -236,6 +280,7 @@ impl AgentState {
     #[must_use]
     pub fn has_network_state(&self) -> bool {
         self.route_contexts.context_count() > 0
+            || self.mpquic_context_id.is_some()
             || !self.paths.is_empty()
             || !self.sessions.is_empty()
     }
@@ -253,6 +298,39 @@ impl AgentState {
         );
         update_metric(self.metrics.set_mpquic_paths(self.mpquic_paths as usize));
     }
+}
+
+fn validate_mpquic_paths(paths: &[PathSummary]) -> Result<&[u8], StateError> {
+    if !(2..=MAX_MPQUIC_PATHS).contains(&paths.len()) {
+        return Err(StateError::InvalidMpquicPaths);
+    }
+    let context_id = paths[0].route_context_id.as_slice();
+    let exit_peer_id = paths[0].exit_peer_id.as_str();
+    if context_id.len() != ROUTE_CONTEXT_ID_BYTES
+        || context_id.iter().all(|byte| *byte == 0)
+        || exit_peer_id.is_empty()
+    {
+        return Err(StateError::InvalidMpquicPaths);
+    }
+    let mut path_ids = HashSet::with_capacity(paths.len());
+    let mut relay_peer_ids = HashSet::with_capacity(paths.len());
+    for path in paths {
+        if path.route_context_id.as_slice() != context_id
+            || path.exit_peer_id != exit_peer_id
+            || path.relay_peer_id.is_empty()
+            || path.path_id == 0
+            || usize::try_from(path.path_id).map_or(true, |id| id > MAX_MPQUIC_PATHS)
+            || !path_ids.insert(path.path_id)
+            || !relay_peer_ids.insert(path.relay_peer_id.as_str())
+            || !matches!(
+                PathState::try_from(path.state).ok(),
+                Some(PathState::Reachable | PathState::Active | PathState::Backup)
+            )
+        {
+            return Err(StateError::InvalidMpquicPaths);
+        }
+    }
+    Ok(context_id)
 }
 
 fn update_metric(result: Result<(), MetricsError>) {
@@ -275,6 +353,9 @@ pub enum StateError {
     /// Route-context limits were invalid.
     #[error("route-context state limits are invalid")]
     Route(#[from] volparossa_selection::RouteContextError),
+    /// Native MPQUIC status did not describe one exact bounded route.
+    #[error("native MPQUIC path state is invalid")]
+    InvalidMpquicPaths,
 }
 
 #[cfg(test)]
@@ -297,5 +378,74 @@ mod tests {
 
         state.peer_disconnected("transient-peer");
         assert_eq!(registry.snapshot().active_peers, 0);
+    }
+
+    fn path(context: u8, path_id: u32, relay: &str, state: PathState) -> PathSummary {
+        PathSummary {
+            route_context_id: vec![context; ROUTE_CONTEXT_ID_BYTES],
+            path_id,
+            relay_peer_id: relay.to_owned(),
+            exit_peer_id: "exit-peer".to_owned(),
+            state: state as i32,
+            smoothed_rtt_micros: 1_000_u64.saturating_mul(u64::from(path_id)),
+            user_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn mpquic_projection_updates_status_metrics_and_clears_its_context_only() {
+        let config = Config::default();
+        let registry = MetricsRegistry::new();
+        let mut state =
+            AgentState::new(&config, config.roles, None, registry.clone()).expect("state");
+        state
+            .paths
+            .push(path(9, 8, "mptcp-relay", PathState::Active));
+
+        state
+            .replace_mpquic_paths(vec![
+                path(7, 2, "relay-two", PathState::Active),
+                path(7, 1, "relay-one", PathState::Reachable),
+            ])
+            .expect("valid MPQUIC projection");
+
+        let status = state.status();
+        assert!(status.connected);
+        assert_eq!(status.active_contexts, 1);
+        assert_eq!(status.mpquic_paths, 1);
+        assert_eq!(registry.snapshot().mpquic_paths, 1);
+        assert_eq!(state.path_list().paths.len(), 3);
+
+        state.clear_mpquic_paths();
+        assert_eq!(
+            state.path_list().paths,
+            [path(9, 8, "mptcp-relay", PathState::Active)]
+        );
+        assert_eq!(state.status().mpquic_paths, 0);
+        assert_eq!(registry.snapshot().mpquic_paths, 0);
+    }
+
+    #[test]
+    fn invalid_mpquic_projection_does_not_replace_existing_state() {
+        let config = Config::default();
+        let mut state =
+            AgentState::new(&config, config.roles, None, MetricsRegistry::new()).expect("state");
+        state
+            .replace_mpquic_paths(vec![
+                path(7, 1, "relay-one", PathState::Reachable),
+                path(7, 2, "relay-two", PathState::Active),
+            ])
+            .expect("initial projection");
+        let before = state.path_list();
+        let invalid = vec![
+            path(8, 1, "same-relay", PathState::Active),
+            path(8, 2, "same-relay", PathState::Active),
+        ];
+
+        assert!(matches!(
+            state.replace_mpquic_paths(invalid),
+            Err(StateError::InvalidMpquicPaths)
+        ));
+        assert_eq!(state.path_list(), before);
     }
 }

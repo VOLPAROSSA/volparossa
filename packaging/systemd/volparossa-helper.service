@@ -7,6 +7,8 @@ ConditionPathExists=/etc/volparossa/config.yaml
 
 [Service]
 Type=simple
+ExitType=main
+RemainAfterExit=no
 User=root
 Group=volparossa
 UMask=0077
@@ -14,10 +16,16 @@ Environment=VOLPAROSSA_CONFIG=/etc/volparossa/config.yaml
 Environment=VOLPAROSSA_RUNTIME_DIRECTORY=/run/volparossa
 Environment=VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock
 ExecStart=/usr/libexec/volparossa/volparossa-helper
+SuccessExitStatus=
 Restart=on-failure
+RestartMode=normal
 RestartSec=3s
+RestartForceExitStatus=
+RestartPreventExitStatus=70 71
 KillMode=control-group
 SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+TimeoutStopFailureMode=terminate
 TimeoutStartSec=30s
 TimeoutStopSec=45s
 LimitCORE=0
@@ -26,8 +34,8 @@ FileDescriptorStoreMax=128
 FileDescriptorStorePreserve=yes
 
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN
-AmbientCapabilities=CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_KILL CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN
+AmbientCapabilities=CAP_KILL CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

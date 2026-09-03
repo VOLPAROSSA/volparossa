@@ -14,21 +14,111 @@ use std::collections::{HashMap, hash_map::Entry};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use volparossa_core::{
+    Bandwidth, ClientEphemeralId, NodeId, ReservationId, RouteContextId, ServiceRole,
+    Transport as CoreTransport,
+};
 use volparossa_protocol::{
     MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbeEndpointBinding, NativeProbeExitReady,
     NativeProbeExitResult, NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermit,
-    NativeProbePermitRequest, ObservationNetworkPrefix, PreselectionActorBinding, TimePolicy,
-    generate_nonce, native_probe_challenge_hash, native_probe_exit_ready_hash,
-    native_probe_permit_hash, native_probe_permit_request_hash,
-    native_probe_prepared_lease_commitment, node_id_from_public_key, sign_control_message_with,
-    verify_control_message,
+    NativeProbePermitRequest, ObservationNetworkPrefix, PreselectionActorBinding,
+    RelayAuthorization, TimePolicy, Transport, generate_nonce, native_probe_challenge_hash,
+    native_probe_exit_ready_hash, native_probe_permit_hash, native_probe_permit_request_hash,
+    native_probe_prepared_lease_commitment, native_probe_start_hash, node_id_from_public_key,
+    sign_control_message_with, verify_control_message, verify_native_probe_authorization_chain,
 };
+use volparossa_reservation::AuthorizedReservation;
 use volparossa_wireguard::ExitEndpointLease;
 
 use super::{AcceptedNativeProbePermit, ExitError, ExitService, NODE_ID_BYTES, wire_endpoint};
 
 const ID_BYTES: usize = 16;
 const NONCE_BYTES: usize = 32;
+
+/// Exit-signed standard path authorization produced from one exact native Start chain.
+#[derive(Clone)]
+pub struct AcceptedNativeProbeRelayAuthorization {
+    encoded: Vec<u8>,
+    request: Vec<u8>,
+    request_sha256: [u8; NODE_ID_BYTES],
+    reservation_id: [u8; ID_BYTES],
+    expires_at_ms: u64,
+}
+
+impl AcceptedNativeProbeRelayAuthorization {
+    /// Return the canonical Exit-signed [`RelayAuthorization`] envelope.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+
+    /// Return the canonical native phase bundle independently accepted by this Exit.
+    #[must_use]
+    pub fn authorization_chain(&self) -> &[u8] {
+        &self.request
+    }
+
+    /// Return SHA-256 of the exact accepted native phase bundle.
+    #[must_use]
+    pub const fn authorization_chain_sha256(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.request_sha256
+    }
+
+    /// Return the probe-scoped reservation identifier.
+    #[must_use]
+    pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
+        &self.reservation_id
+    }
+
+    /// Return the exclusive signed expiry in Unix milliseconds.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+}
+
+impl std::fmt::Debug for AcceptedNativeProbeRelayAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AcceptedNativeProbeRelayAuthorization")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("wireguard_keys", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+pub(super) struct CachedNativeProbeRelayAuthorization {
+    pub(super) response: AcceptedNativeProbeRelayAuthorization,
+    pub(super) expires_at_ms: u64,
+}
+
+/// Exit-signed readiness plus the probe identity retained by the production service.
+#[derive(Clone)]
+pub struct AcceptedNativeProbeExitReady {
+    encoded: Vec<u8>,
+    probe_id: [u8; ID_BYTES],
+    expires_at_ms: u64,
+}
+
+impl AcceptedNativeProbeExitReady {
+    /// Borrow the exact Exit-signed native readiness envelope.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+
+    /// Return the probe identity whose helper owner must remain retained.
+    #[must_use]
+    pub const fn probe_id(&self) -> &[u8; ID_BYTES] {
+        &self.probe_id
+    }
+
+    /// Return the exclusive signed readiness expiry in Unix milliseconds.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+}
 
 /// Exact endpoint-free request and Exit permit, consumed by readiness once.
 #[must_use = "an issued native-probe permit must be consumed or expire"]
@@ -207,14 +297,75 @@ impl NativeProbePermitLedger {
             Entry::Occupied(_) => Err(ExitError::LeaseInvariant),
         }
     }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the exact Permit, authenticated data Relay, boot and policy epoch form one affine match"
+    )]
+    fn take_exact_for_ready(
+        &mut self,
+        signed_request: &[u8],
+        signed_permit: &[u8],
+        authenticated_data_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_data_relay_peer_id: &[u8],
+        exit_boot_id: [u8; ID_BYTES],
+        policy_version: u64,
+        policy_hash: &[u8; NODE_ID_BYTES],
+        policy_expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<([u8; NODE_ID_BYTES], StoredNativeProbePermit), ExitError> {
+        let request_hash: [u8; NODE_ID_BYTES] = Sha256::digest(signed_request).into();
+        let stored = self
+            .entries
+            .get(&request_hash)
+            .ok_or(ExitError::InvalidGrant(
+                "native probe Permit owner unavailable",
+            ))?;
+        let data_relay = stored
+            .owner
+            .scope
+            .data_relay
+            .as_ref()
+            .ok_or(ExitError::InvalidGrant("native probe data Relay"))?;
+        if stored.owner.signed_request != signed_request
+            || stored.owner.signed_permit != signed_permit
+            || data_relay.node_id.as_slice() != authenticated_data_relay_node_id
+            || data_relay.peer_id != authenticated_data_relay_peer_id
+            || stored.exit_boot_id != exit_boot_id
+            || stored.policy_version != policy_version
+            || stored.policy_hash != *policy_hash
+            || stored.policy_expires_at_ms != policy_expires_at_ms
+            || stored.expires_at_ms <= now_ms
+        {
+            return Err(ExitError::InvalidGrant("native probe Ready owner mismatch"));
+        }
+        let stored = self
+            .entries
+            .remove(&request_hash)
+            .ok_or(ExitError::LeaseInvariant)?;
+        Ok((request_hash, stored))
+    }
+
+    fn restore(
+        &mut self,
+        request_hash: [u8; NODE_ID_BYTES],
+        stored: StoredNativeProbePermit,
+    ) -> Result<(), ExitError> {
+        match self.entries.entry(request_hash) {
+            Entry::Vacant(entry) => {
+                entry.insert(stored);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(ExitError::LeaseInvariant),
+        }
+    }
 }
 
 /// Typed projection of one local Exit endpoint plus a claimed helper runtime.
 ///
 /// `ExitEndpointLease` is `Copy`, so this value is deliberately not described as affine helper
-/// custody, same-connection provenance or cleanup authority. Construction and use stay inside this
-/// callerless module until a future provider owns the actual helper context and bounded
-/// Destroy/reaper lifecycle.
+/// custody, same-connection provenance or cleanup authority. The agent keeps the actual helper
+/// owner process-local while this projection remains phase-bound inside `ExitService`.
 #[must_use = "a native-probe Exit endpoint projection must remain phase-bound"]
 struct PreparedNativeProbeExitProjection {
     _lease_projection: ExitEndpointLease,
@@ -243,6 +394,7 @@ impl PreparedNativeProbeExitProjection {
                 route_context_id: lease.route_context_id().to_vec(),
                 endpoint: Some(endpoint),
                 prepared_lease_commitment: commitment.to_vec(),
+                path_id: lease.path_id(),
             },
         })
     }
@@ -250,12 +402,12 @@ impl PreparedNativeProbeExitProjection {
 
 /// Exit readiness plus the exact local projection retained for terminal proof binding.
 #[must_use = "native-probe Exit readiness must retain its projection until result"]
-struct IssuedNativeProbeExitReady {
+pub(super) struct IssuedNativeProbeExitReady {
     permit: IssuedNativeProbePermit,
     signed_ready: Vec<u8>,
     prepared_exit: PreparedNativeProbeExitProjection,
     exit_boot_id: [u8; ID_BYTES],
-    expires_at_ms: u64,
+    pub(super) expires_at_ms: u64,
 }
 
 impl IssuedNativeProbeExitReady {
@@ -295,6 +447,20 @@ impl IssuedNativeProbeExitResult {
     }
 }
 
+/// Transport-safe terminal native-probe result signed only after helper-backed observation.
+#[must_use = "a native-probe Exit result must be delivered to its authenticated data Relay"]
+pub struct AcceptedNativeProbeExitResult {
+    encoded: Vec<u8>,
+}
+
+impl AcceptedNativeProbeExitResult {
+    /// Borrow the exact Exit-signed terminal result.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+}
+
 impl ExitService {
     /// Verify, sign and retain one native-probe Permit before returning transport-only bytes.
     ///
@@ -317,6 +483,7 @@ impl ExitService {
         encoded_request: &[u8],
         authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
         authenticated_control_relay_peer_id: &[u8],
+        exit_control_address: &str,
         now_ms: u64,
         local_public_key: [u8; NODE_ID_BYTES],
         signer: F,
@@ -352,6 +519,7 @@ impl ExitService {
             encoded_request.to_vec(),
             authenticated_control_relay_node_id,
             authenticated_control_relay_peer_id,
+            exit_control_address,
             now_ms,
             local_public_key,
             signer,
@@ -381,7 +549,347 @@ impl ExitService {
             .ok_or(ExitError::LeaseInvariant)
     }
 
-    /// Verify one exact client request and mint one affine endpoint-free Exit permit.
+    /// Consume one exact retained Permit and a real helper-prepared Exit lease into readiness.
+    ///
+    /// The authenticated data Relay must be the actor selected by the original client request.
+    /// The supplied Relay-facing binding and typed Exit lease are checked by the protocol phase
+    /// producer before any signed bytes are returned. The affine readiness owner remains inside
+    /// `ExitService` for the later probe-result phase.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing/substituted Permit ownership, wrong Relay identity, helper/runtime or
+    /// endpoint mismatch, stale policy/boot state, replay, expiry, or signing failure.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "authenticated Relay, helper lease, local identity and signer remain explicit"
+    )]
+    pub fn issue_native_probe_ready_from_permit_with<F>(
+        &mut self,
+        signed_request: &[u8],
+        signed_permit: &[u8],
+        authenticated_data_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_data_relay_peer_id: &[u8],
+        relay_exit_endpoint: NativeProbeEndpointBinding,
+        helper_runtime_id: [u8; NODE_ID_BYTES],
+        exit_lease: ExitEndpointLease,
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        signer: F,
+    ) -> Result<AcceptedNativeProbeExitReady, ExitError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        self.require_enabled()?;
+        self.policy.ensure_active_at(now_ms)?;
+        self.ensure_native_probe_local_identity(local_public_key)?;
+        self.native_probe_permit_ledger.purge_expired(now_ms);
+        let policy_version = self.policy.manifest_version();
+        let policy_hash = *self.policy.policy_hash();
+        let policy_expires_at_ms = self.policy.expires_at_ms();
+        let (request_hash, stored) = self.native_probe_permit_ledger.take_exact_for_ready(
+            signed_request,
+            signed_permit,
+            authenticated_data_relay_node_id,
+            authenticated_data_relay_peer_id,
+            self.exit_boot_id,
+            policy_version,
+            &policy_hash,
+            policy_expires_at_ms,
+            now_ms,
+        )?;
+        let probe_id = stored.probe_id;
+        if self.native_probe_ready_owners.contains_key(&probe_id) {
+            self.native_probe_permit_ledger
+                .restore(request_hash, stored)?;
+            return Err(ExitError::LeaseInvariant);
+        }
+        let prepared_exit =
+            match PreparedNativeProbeExitProjection::from_typed_exit_lease_projection(
+                helper_runtime_id,
+                exit_lease,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.native_probe_permit_ledger
+                        .restore(request_hash, stored)?;
+                    return Err(error);
+                }
+            };
+        let owner = stored.owner;
+        let issued = self.issue_native_probe_ready_with(
+            owner,
+            authenticated_data_relay_node_id,
+            authenticated_data_relay_peer_id,
+            relay_exit_endpoint,
+            prepared_exit,
+            now_ms,
+            local_public_key,
+            signer,
+        )?;
+        let accepted = AcceptedNativeProbeExitReady {
+            encoded: issued.signed_ready().to_vec(),
+            probe_id,
+            expires_at_ms: issued.expires_at_ms,
+        };
+        self.native_probe_ready_owners.insert(probe_id, issued);
+        Ok(accepted)
+    }
+
+    /// Consume one retained Ready owner and exact helper/datapath facts into a terminal result.
+    ///
+    /// The agent calls this only after the shared sampler helper context has been committed and
+    /// confirmed destroyed. The retained projection supplies the prepared-lease commitment; the
+    /// caller cannot substitute it while reporting the exact runtime, context and observed path.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a missing Ready owner, mismatched helper/datapath facts, stale policy or scope,
+    /// invalid observed prefix, zero post-baseline proof, or signing failure.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "authenticated Relay, helper observation and signer remain explicit"
+    )]
+    pub fn issue_native_probe_result_from_observation_with<F>(
+        &mut self,
+        probe_id: [u8; ID_BYTES],
+        authenticated_data_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_data_relay_peer_id: &[u8],
+        helper_runtime_id: [u8; NODE_ID_BYTES],
+        route_context_id: [u8; ID_BYTES],
+        challenge_response: [u8; NONCE_BYTES],
+        observed_network_prefix: ObservationNetworkPrefix,
+        latest_handshake_unix: u64,
+        received_bytes_after_baseline: u64,
+        transmitted_bytes_after_baseline: u64,
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        signer: F,
+    ) -> Result<AcceptedNativeProbeExitResult, ExitError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        let ready = self
+            .native_probe_ready_owners
+            .remove(&probe_id)
+            .ok_or(ExitError::LeaseInvariant)?;
+        let prepared_lease_commitment = ready
+            .prepared_exit
+            .binding
+            .prepared_lease_commitment
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::LeaseInvariant)?;
+        let observation = NativeProbeExitObservation {
+            helper_runtime_id,
+            route_context_id,
+            prepared_lease_commitment,
+            challenge_response: Zeroizing::new(challenge_response),
+            observed_network_prefix,
+            latest_handshake_unix,
+            received_bytes_after_baseline,
+            transmitted_bytes_after_baseline,
+        };
+        let issued = self.issue_native_probe_result_with(
+            ready,
+            observation,
+            authenticated_data_relay_node_id,
+            authenticated_data_relay_peer_id,
+            now_ms,
+            local_public_key,
+            signer,
+        )?;
+        Ok(AcceptedNativeProbeExitResult {
+            encoded: issued.signed_result().to_vec(),
+        })
+    }
+
+    /// Independently verify one data-Relay-forwarded native Start chain and issue the standard
+    /// Exit half of its probe-only `WireGuard` reservation.
+    ///
+    /// The canonical chain includes all five signed phases from the client Permit request through
+    /// Start. The authenticated forwarding identity must be the exact selected data Relay, the
+    /// signed Exit readiness must carry this process boot incarnation, and its prepared Exit
+    /// endpoint plus the prepared Client key become immutable fields of the standard
+    /// [`RelayAuthorization`]. Capacity is atomically consumed before bytes are returned. Exact
+    /// retries receive the original signature without consuming replay or capacity twice.
+    ///
+    /// # Errors
+    ///
+    /// Rejects disabled mode, inactive policy, wrong local/forwarding identity, stale or
+    /// substituted phase chains, wrong boot incarnation, exhausted capacity, cache exhaustion or
+    /// signing failure.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "authenticated channel, local identity and signing authority remain explicit"
+    )]
+    pub fn issue_native_probe_relay_authorization_with<F>(
+        &mut self,
+        encoded_chain: &[u8],
+        authenticated_data_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_data_relay_peer_id: &[u8],
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        signer: F,
+    ) -> Result<AcceptedNativeProbeRelayAuthorization, ExitError>
+    where
+        F: FnOnce(&[u8]) -> Option<[u8; 64]>,
+    {
+        self.require_enabled()?;
+        self.policy.ensure_active_at(now_ms)?;
+        self.ensure_native_probe_local_identity(local_public_key)?;
+        self.purge_expired(now_ms);
+        let request_hash: [u8; NODE_ID_BYTES] = Sha256::digest(encoded_chain).into();
+        if let Some(cached) = self.native_probe_authorization_cache.get(&request_hash) {
+            if cached.response.authorization_chain() != encoded_chain
+                || cached.response.authorization_chain_sha256() != &request_hash
+            {
+                return Err(ExitError::InvalidGrant(
+                    "native authorization request hash collision",
+                ));
+            }
+            return Ok(cached.response.clone());
+        }
+        if self.native_probe_authorization_cache.len() >= self.response_cache_capacity {
+            return Err(ExitError::IdempotencyCapacity);
+        }
+
+        let chain = verify_native_probe_authorization_chain(encoded_chain, now_ms)?;
+        let scope = chain.scope();
+        self.validate_live_native_probe_scope(scope, now_ms, local_public_key)?;
+        require_authenticated_actor(
+            scope.data_relay.as_ref(),
+            authenticated_data_relay_node_id,
+            authenticated_data_relay_peer_id,
+            "native probe data Relay",
+        )?;
+        if chain.exit_boot_id() != self.exit_boot_id {
+            return Err(ExitError::ExitBootMismatch);
+        }
+
+        let data_relay = exact_actor(scope.data_relay.as_ref(), now_ms, "native probe data Relay")?;
+        let control = exact_actor(scope.control.as_ref(), now_ms, "native probe control Relay")?;
+        let exit = exact_actor(scope.exit.as_ref(), now_ms, "native probe Exit actor")?;
+        let reservation_id: [u8; ID_BYTES] = scope
+            .probe_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native probe ID"))?;
+        let capability_id: [u8; ID_BYTES] = scope
+            .attempt_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native attempt ID"))?;
+        let path_id = scope.candidate_ordinal;
+        let start_hash = native_probe_start_hash(chain.encoded_start())?;
+        let finalize_id: [u8; ID_BYTES] = start_hash[..ID_BYTES]
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native Start hash"))?;
+        if finalize_id == [0; ID_BYTES] {
+            return Err(ExitError::InvalidGrant("native Start hash"));
+        }
+        let client_endpoint = chain
+            .client_endpoint()
+            .endpoint
+            .as_ref()
+            .ok_or(ExitError::InvalidGrant("native Client endpoint"))?;
+        let exit_endpoint = chain
+            .exit_endpoint()
+            .endpoint
+            .as_ref()
+            .ok_or(ExitError::InvalidGrant("native Exit endpoint"))?;
+        let transport = native_core_transport(scope.transport)?;
+        let reserved_bandwidth = Bandwidth::new(
+            u32::try_from(scope.reserved_up_mbps)
+                .map_err(|_| ExitError::InvalidGrant("native probe upload rate"))?,
+            u32::try_from(scope.reserved_down_mbps)
+                .map_err(|_| ExitError::InvalidGrant("native probe download rate"))?,
+        )
+        .map_err(|_| ExitError::InvalidGrant("native probe bandwidth"))?;
+        let authorization = RelayAuthorization {
+            reservation_id: reservation_id.to_vec(),
+            route_context_id: capability_id.to_vec(),
+            path_id,
+            relay_node_id: data_relay.node_id.to_vec(),
+            exit_node_id: exit.node_id.to_vec(),
+            client_session_id: scope.client_session_id.clone(),
+            allowed_transports: vec![scope.transport],
+            maximum_up_mbps: scope.reserved_up_mbps,
+            maximum_down_mbps: scope.reserved_down_mbps,
+            client_wireguard_public_key: client_endpoint.public_key.clone(),
+            exit_wireguard_endpoint: Some(exit_endpoint.clone()),
+            policy_hash: scope.policy_hash.clone(),
+            created_at_ms: chain.started_at_ms(),
+            expires_at_ms: chain.expires_at_ms(),
+            nonce: generate_nonce().to_vec(),
+            relay_peer_id: data_relay.peer_id,
+            capability_id: capability_id.to_vec(),
+            client_session_public_key: scope.client_session_public_key.clone(),
+            exit_boot_id: self.exit_boot_id.to_vec(),
+            hold_id: reservation_id.to_vec(),
+            finalize_id: finalize_id.to_vec(),
+            control_relay_node_id: control.node_id.to_vec(),
+            control_relay_peer_id: control.peer_id,
+            exit_peer_id: exit.peer_id,
+        };
+        let allocation = AuthorizedReservation {
+            reservation_id: super::text_id::<ReservationId>(&reservation_id)?,
+            route_context_id: super::text_id::<RouteContextId>(&capability_id)?,
+            service_node_id: super::text_id::<NodeId>(&self.config.node_id)?,
+            client_ephemeral_id: super::text_id::<ClientEphemeralId>(&scope.client_session_id)?,
+            role: ServiceRole::Exit,
+            allowed_transports: vec![transport],
+            bandwidth: reserved_bandwidth,
+            maximum_paths: u8::try_from(volparossa_protocol::MAX_NATIVE_PROBE_PATHS)
+                .map_err(|_| ExitError::InvalidGrant("native path limit"))?,
+            created_at: super::unix_seconds(authorization.created_at_ms),
+            expires_at: super::unix_seconds(authorization.expires_at_ms),
+        };
+        let reservation_key = allocation.reservation_id.clone();
+        self.ledger_mut()?
+            .reserve(allocation, super::unix_seconds(now_ms))?;
+        let nonce: [u8; NONCE_BYTES] = authorization
+            .nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExitError::InvalidGrant("native authorization nonce"))?;
+        let encoded = match sign_control_message_with(
+            &authorization,
+            local_public_key,
+            authorization.created_at_ms,
+            authorization.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+            signer,
+        ) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                if self.ledger_mut()?.release(&reservation_key).is_err() {
+                    return Err(ExitError::LedgerInvariant);
+                }
+                return Err(error.into());
+            }
+        };
+        let response = AcceptedNativeProbeRelayAuthorization {
+            encoded,
+            request: encoded_chain.to_vec(),
+            request_sha256: request_hash,
+            reservation_id,
+            expires_at_ms: authorization.expires_at_ms,
+        };
+        self.native_probe_authorization_cache.insert(
+            request_hash,
+            CachedNativeProbeRelayAuthorization {
+                response: response.clone(),
+                expires_at_ms: authorization.expires_at_ms,
+            },
+        );
+        self.sync_metrics();
+        Ok(response)
+    }
+
+    /// Verify one exact client request and mint one affine dataplane-endpoint-free Exit permit.
     ///
     /// The caller-supplied authenticated channel identity must match the signed control Relay.
     /// Enabled-role, current exact policy, Exit identity, every actor's node/key/Peer-ID binding
@@ -396,6 +904,7 @@ impl ExitService {
         signed_request: Vec<u8>,
         authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
         authenticated_control_relay_peer_id: &[u8],
+        exit_control_address: &str,
         now_ms: u64,
         local_public_key: [u8; NODE_ID_BYTES],
         signer: F,
@@ -442,6 +951,7 @@ impl ExitService {
                 issued_at_ms: now_ms,
                 expires_at_ms,
                 nonce: nonce.to_vec(),
+                exit_control_address: exit_control_address.to_owned(),
             };
             let signed_permit = sign_control_message_with(
                 &permit,
@@ -505,7 +1015,7 @@ impl ExitService {
             return Err(ExitError::ExitBootMismatch);
         }
         if now_ms >= permit.expires_at_ms
-            || prepared_exit.binding.route_context_id != permit.scope.probe_id
+            || prepared_exit.binding.route_context_id != permit.scope.attempt_id
         {
             return Err(ExitError::InvalidGrant("native probe prepared Exit lease"));
         }
@@ -520,6 +1030,7 @@ impl ExitService {
             ready_at_ms: now_ms,
             expires_at_ms,
             nonce: nonce.to_vec(),
+            exit_boot_id: self.exit_boot_id.to_vec(),
         };
         let signed_ready = sign_control_message_with(
             &ready,
@@ -664,6 +1175,15 @@ impl ExitService {
     }
 }
 
+fn native_core_transport(value: i32) -> Result<CoreTransport, ExitError> {
+    match Transport::try_from(value) {
+        Ok(Transport::TcpMptcp) => Ok(CoreTransport::TcpMptcp),
+        Ok(Transport::UdpSinglePath) => Ok(CoreTransport::UdpSinglePath),
+        Ok(Transport::MultipathQuic) => Ok(CoreTransport::MultipathQuic),
+        Ok(Transport::Unspecified) | Err(_) => Err(ExitError::InvalidGrant("native transport")),
+    }
+}
+
 struct ExactActor {
     node_id: [u8; NODE_ID_BYTES],
     public_key: [u8; NODE_ID_BYTES],
@@ -754,21 +1274,24 @@ mod tests {
         sign_native_probe_start, verify_control_message, verify_native_probe_exit_ready,
         verify_native_probe_exit_result_for_relay, verify_native_probe_permit,
         verify_native_probe_relay_ready, verify_native_probe_start_for_relay,
+        verify_relay_reservation,
     };
+    use volparossa_relay::{RelayService, RelayServiceConfig};
     use volparossa_test_support::verified_development_manifest;
     use volparossa_wireguard::{
         EndpointRole, HelperContextHandle, HelperLeaseHandle, PublicWireGuardEndpoint,
-        WireGuardPublicKey,
+        RelayEndpointLease, WireGuardPublicKey,
     };
 
     use super::*;
     use crate::ExitServiceConfig;
 
     const NOW_MS: u64 = 1_900_000_000_000;
-    const ATTEMPT_EXPIRY_MS: u64 = NOW_MS + 30_000;
+    const ATTEMPT_EXPIRY_MS: u64 = NOW_MS + MAX_NATIVE_PROBE_LIFETIME_MS;
     const PROBE_ID: [u8; ID_BYTES] = [2; ID_BYTES];
     const CHALLENGE: [u8; NONCE_BYTES] = [7; NONCE_BYTES];
     const EXIT_HELPER_RUNTIME: [u8; NODE_ID_BYTES] = [0xe1; NODE_ID_BYTES];
+    const EXIT_CONTROL_ADDRESS: &str = "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit";
 
     struct Fixture {
         service: ExitService,
@@ -891,6 +1414,7 @@ mod tests {
                 self.signed_request.clone(),
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 now_ms,
                 public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -906,7 +1430,7 @@ mod tests {
             let relay_node_id = self.relay_node_id();
             let relay_peer_id = self.relay_peer_id();
             let relay_exit = relay_exit_binding(&self.scope);
-            let prepared_exit = prepared_exit_lease(PROBE_ID);
+            let prepared_exit = prepared_exit_lease([1; ID_BYTES]);
             let public_key = self.exit_public_key();
             let exit_key = &self.exit_key;
             self.service
@@ -968,6 +1492,9 @@ mod tests {
             policy_expires_at_ms,
             challenge_hash: native_probe_challenge_hash(&CHALLENGE).to_vec(),
             attempt_expires_at_ms: ATTEMPT_EXPIRY_MS,
+            required_path_count: 2,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
         }
     }
 
@@ -995,7 +1522,7 @@ mod tests {
             route_context_id,
             HelperContextHandle::from_bytes([0xe3; NODE_ID_BYTES]).expect("context handle"),
             HelperLeaseHandle::from_bytes([0xe4; NODE_ID_BYTES]).expect("lease handle"),
-            1,
+            2,
             EndpointRole::Exit,
             endpoint,
         )
@@ -1045,6 +1572,31 @@ mod tests {
         )
     }
 
+    fn relay_endpoint_lease() -> RelayEndpointLease {
+        RelayEndpointLease::new(
+            [1; ID_BYTES],
+            HelperContextHandle::from_bytes([0xd0; NODE_ID_BYTES]).expect("Relay context"),
+            HelperLeaseHandle::from_bytes([0xd4; NODE_ID_BYTES]).expect("RelayClient lease"),
+            HelperLeaseHandle::from_bytes([0xd3; NODE_ID_BYTES]).expect("RelayExit lease"),
+            2,
+            EndpointRole::RelayClient,
+            EndpointRole::RelayExit,
+            PublicWireGuardEndpoint::new(
+                WireGuardPublicKey::from_bytes([0xd5; NODE_ID_BYTES]),
+                IpAddr::V4(Ipv4Addr::new(83, 1, 1, 2)),
+                20_003,
+            )
+            .expect("RelayClient endpoint"),
+            PublicWireGuardEndpoint::new(
+                WireGuardPublicKey::from_bytes([0xd2; NODE_ID_BYTES]),
+                IpAddr::V4(Ipv4Addr::new(83, 1, 1, 1)),
+                20_002,
+            )
+            .expect("RelayExit endpoint"),
+        )
+        .expect("Relay endpoint lease")
+    }
+
     fn client_binding(scope: &NativeProbePathScope) -> NativeProbeEndpointBinding {
         binding_with_material(
             scope,
@@ -1065,7 +1617,7 @@ mod tests {
         endpoint: WireguardEndpoint,
     ) -> NativeProbeEndpointBinding {
         let route_context_id: [u8; ID_BYTES] =
-            scope.probe_id.as_slice().try_into().expect("probe ID");
+            scope.attempt_id.as_slice().try_into().expect("attempt ID");
         let commitment = native_probe_prepared_lease_commitment(
             &runtime,
             &route_context_id,
@@ -1078,6 +1630,7 @@ mod tests {
             route_context_id: route_context_id.to_vec(),
             endpoint: Some(endpoint),
             prepared_lease_commitment: commitment.to_vec(),
+            path_id: scope.candidate_ordinal,
         }
     }
 
@@ -1134,7 +1687,7 @@ mod tests {
                 &relay_node_id,
                 &relay_peer_id,
                 relay_exit,
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -1222,6 +1775,194 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real Exit-to-Relay signed reservation smoke keeps every authority visible"
+    )]
+    fn production_start_chain_returns_standard_nested_reservation() {
+        let mut fixture = Fixture::new();
+        let permit = fixture.issue_permit();
+        let signed_request = permit.signed_request().to_vec();
+        let signed_permit = permit.signed_permit().to_vec();
+        let relay_node_id = fixture.relay_node_id();
+        let relay_peer_id = fixture.relay_peer_id();
+        let relay_exit = relay_exit_binding(&fixture.scope);
+        let exit_public_key = fixture.exit_public_key();
+        let exit_key = &fixture.exit_key;
+        let exit_ready = fixture
+            .service
+            .issue_native_probe_ready_with(
+                permit,
+                &relay_node_id,
+                &relay_peer_id,
+                relay_exit.clone(),
+                prepared_exit_lease([1; ID_BYTES]),
+                NOW_MS + 2,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            )
+            .expect("Exit readiness");
+        let signed_exit_ready = exit_ready.signed_ready().to_vec();
+        let mut relay_replay = ReplayCache::new(16).expect("Relay replay");
+        let relay_permit = verify_native_probe_permit(
+            signed_request.clone(),
+            signed_permit.clone(),
+            NOW_MS + 3,
+            &mut relay_replay,
+        )
+        .expect("Relay Permit");
+        let verified_exit_ready = verify_native_probe_exit_ready(
+            relay_permit,
+            signed_exit_ready,
+            NOW_MS + 3,
+            &mut relay_replay,
+        )
+        .expect("Relay Exit readiness");
+        let relay_ready = sign_native_probe_relay_ready(
+            verified_exit_ready,
+            relay_client_binding(&fixture.scope),
+            relay_exit,
+            &fixture.relay_key,
+            NOW_MS + 3,
+            [21; NONCE_BYTES],
+        )
+        .expect("Relay readiness");
+        let signed_relay_ready = relay_ready.encoded_relay_ready().to_vec();
+        let mut client_replay = ReplayCache::new(16).expect("client replay");
+        let client_permit = verify_native_probe_permit(
+            signed_request,
+            signed_permit,
+            NOW_MS + 3,
+            &mut client_replay,
+        )
+        .expect("client Permit");
+        let client_ready = verify_native_probe_relay_ready(
+            client_permit,
+            signed_relay_ready,
+            NOW_MS + 3,
+            &mut client_replay,
+        )
+        .expect("client Relay readiness");
+        let issued_start = sign_native_probe_start(
+            client_ready,
+            client_binding(&fixture.scope),
+            &fixture.client_key,
+            NOW_MS + 4,
+            [22; NONCE_BYTES],
+        )
+        .expect("client Start");
+        let signed_start = issued_start.encoded_start().to_vec();
+        let verified_start = verify_native_probe_start_for_relay(
+            relay_ready,
+            signed_start.clone(),
+            NOW_MS + 4,
+            &mut relay_replay,
+        )
+        .expect("Relay Start");
+        let chain = verified_start
+            .authorization_chain()
+            .expect("authorization chain");
+        let exit_key = &fixture.exit_key;
+        let exit_authorization = fixture
+            .service
+            .issue_native_probe_relay_authorization_with(
+                &chain,
+                &relay_node_id,
+                &relay_peer_id,
+                NOW_MS + 4,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            )
+            .expect("Exit authorization");
+        let retry = fixture
+            .service
+            .issue_native_probe_relay_authorization_with(
+                &chain,
+                &relay_node_id,
+                &relay_peer_id,
+                NOW_MS + 5,
+                exit_public_key,
+                |_message| panic!("exact Exit retry must use cached signature"),
+            )
+            .expect("idempotent Exit authorization");
+        assert_eq!(retry.encoded(), exit_authorization.encoded());
+
+        let relay_public_key = fixture.relay_key.verifying_key().to_bytes();
+        let mut relay_service = RelayService::new(
+            RelayServiceConfig::enabled(
+                relay_node_id,
+                Bandwidth::new(100, 100).expect("Relay bandwidth"),
+                8,
+                900,
+                30,
+                64,
+            ),
+            None,
+        )
+        .expect("Relay service");
+        let relay_key = &fixture.relay_key;
+        let accepted = relay_service
+            .accept_native_probe_start_with(
+                verified_start,
+                exit_authorization.encoded(),
+                NOW_MS + 5,
+                relay_public_key,
+                |_| Some(relay_endpoint_lease()),
+                |message| Some(relay_key.sign(message).to_bytes()),
+            )
+            .expect("standard nested Relay reservation");
+        assert_eq!(accepted.signed_client_relay_request(), signed_start);
+        let signed_start_sha256: [u8; NODE_ID_BYTES] = Sha256::digest(&signed_start).into();
+        assert_eq!(
+            accepted.signed_client_relay_request_sha256(),
+            &signed_start_sha256
+        );
+        let mut client_grant_replay = ReplayCache::new(4).expect("grant replay");
+        let (relay_grant, exit_grant) = verify_relay_reservation(
+            accepted.encoded(),
+            NOW_MS + 5,
+            TimePolicy::default(),
+            &mut client_grant_replay,
+        )
+        .expect("nested standard reservation");
+        assert_eq!(relay_grant.message().route_context_id, [1; ID_BYTES]);
+        assert_eq!(
+            relay_grant.message().path_id,
+            fixture.scope.candidate_ordinal
+        );
+        assert_eq!(
+            relay_grant.message().exit_authorization,
+            exit_authorization.encoded()
+        );
+        assert_eq!(exit_grant.message().client_wireguard_public_key, [0xc3; 32]);
+        assert_eq!(
+            exit_grant.message().maximum_up_mbps,
+            fixture.scope.reserved_up_mbps
+        );
+        assert_eq!(
+            exit_grant.message().maximum_down_mbps,
+            fixture.scope.reserved_down_mbps
+        );
+        assert_eq!(
+            relay_grant.message().maximum_up_mbps,
+            fixture.scope.reserved_up_mbps
+        );
+        assert_eq!(
+            relay_grant.message().maximum_down_mbps,
+            fixture.scope.reserved_down_mbps
+        );
+        assert_eq!(
+            fixture
+                .service
+                .available(NOW_MS + 5)
+                .expect("Exit capacity")
+                .bandwidth,
+            Bandwidth::new(92, 88).expect("remaining signed capacity")
+        );
+        assert!(relay_service.take_native_probe_start(&PROBE_ID).is_some());
+    }
+
+    #[test]
     fn production_permit_is_stored_before_projection_and_retry_is_byte_identical() {
         let mut fixture = Fixture::new();
         let control_node_id = fixture.control_node_id();
@@ -1236,6 +1977,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 exit_public_key,
                 |message| {
@@ -1273,6 +2015,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> { panic!("an identical retry must bypass signing") },
@@ -1297,6 +2040,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 exit_public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -1308,6 +2052,7 @@ mod tests {
                 &request,
                 &[0xf1; NODE_ID_BYTES],
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> { panic!("foreign control node must not sign") },
@@ -1319,6 +2064,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &[0xf2; 38],
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> { panic!("foreign control Peer ID must not sign") },
@@ -1332,6 +2078,7 @@ mod tests {
                 &substituted,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -1360,6 +2107,7 @@ mod tests {
                 &request,
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 exit_public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -1372,6 +2120,7 @@ mod tests {
                 b"not a canonical envelope",
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -1409,6 +2158,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 fixture.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -1429,6 +2179,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &[0xf1; NODE_ID_BYTES],
                 &fixture.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -1444,6 +2195,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &[0xf2; 38],
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -1467,6 +2219,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &control_node_id,
                 &control_peer_id,
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 public_key,
                 |_message| None,
@@ -1506,7 +2259,7 @@ mod tests {
                 &relay_node_id,
                 &relay_peer_id,
                 relay_exit_binding(&fixture.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 ready_now,
                 exit_public_key,
                 |message| Some(exit_key.sign(message).to_bytes()),
@@ -1574,7 +2327,7 @@ mod tests {
                 &relay_node_id,
                 &relay_peer_id,
                 relay_exit_binding(&permit_fixture.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 exit_public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -1617,7 +2370,7 @@ mod tests {
                 &ready_fixture.relay_node_id(),
                 &ready_fixture.relay_peer_id(),
                 relay_exit_binding(&ready_fixture.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 ready_fixture.exit_public_key(),
                 |_message| None,
@@ -1652,6 +2405,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 2,
                 fixture.exit_public_key(),
                 |_message| -> Option<[u8; 64]> { panic!("replay must reject before signing") },
@@ -1669,6 +2423,7 @@ mod tests {
                 expired.signed_request.clone(),
                 &expired.control_node_id(),
                 &expired.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 ATTEMPT_EXPIRY_MS,
                 expired.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -1702,6 +2457,7 @@ mod tests {
                 substituted.signed_request.clone(),
                 &substituted.control_node_id(),
                 &substituted.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 substituted.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -1736,6 +2492,7 @@ mod tests {
                 fixture.signed_request.clone(),
                 &fixture.control_node_id(),
                 &fixture.control_peer_id(),
+                EXIT_CONTROL_ADDRESS,
                 NOW_MS + 1,
                 fixture.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -1758,7 +2515,7 @@ mod tests {
                 &[0xf2; NODE_ID_BYTES],
                 &wrong_relay.relay_peer_id(),
                 relay_exit_binding(&wrong_relay.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 public_key,
                 |_message| -> Option<[u8; 64]> {
@@ -1776,7 +2533,7 @@ mod tests {
                 &wrong_relay_peer.relay_node_id(),
                 &[0xf3; 38],
                 relay_exit_binding(&wrong_relay_peer.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 NOW_MS + 2,
                 wrong_relay_peer.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -1812,7 +2569,7 @@ mod tests {
                 &expired.relay_node_id(),
                 &expired.relay_peer_id(),
                 relay_exit_binding(&expired.scope),
-                prepared_exit_lease(PROBE_ID),
+                prepared_exit_lease([1; ID_BYTES]),
                 ATTEMPT_EXPIRY_MS,
                 expired.exit_public_key(),
                 |_message| -> Option<[u8; 64]> {
@@ -1824,7 +2581,7 @@ mod tests {
 
         let mut collision = Fixture::new();
         let permit = collision.issue_permit();
-        let local = prepared_exit_lease(PROBE_ID);
+        let local = prepared_exit_lease([1; ID_BYTES]);
         let local_endpoint = local.binding.endpoint.clone().expect("local endpoint");
         let colliding_relay = relay_binding_with_endpoint(
             &collision.scope,

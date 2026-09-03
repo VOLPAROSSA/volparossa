@@ -19,7 +19,9 @@ use libp2p::{
 use volparossa_core::{IpFamily, ObservedNetworkPrefix};
 use volparossa_protocol::{ObservationAddressFamily, ObservationNetworkPrefix};
 
-use crate::{MAX_ESTABLISHED_CONNECTIONS, MAX_ESTABLISHED_CONNECTIONS_PER_PEER};
+use crate::{
+    MAX_ESTABLISHED_CONNECTIONS, MAX_ESTABLISHED_CONNECTIONS_PER_PEER, PreselectionProvenanceReject,
+};
 
 /// Impossible output of the passive connection-provenance behaviour.
 pub enum ConnectionProvenanceEvent {}
@@ -95,7 +97,7 @@ struct ConnectionRecord {
     prefix: Option<NativeNetworkPrefix>,
 }
 
-/// Affine proof that exactly one connection to one peer had the requested native family.
+/// Affine proof that one exact authenticated connection had the requested native family.
 #[must_use = "a connection witness must be consumed by its registry"]
 pub(super) struct ConnectionWitness {
     peer_id: PeerId,
@@ -127,6 +129,21 @@ pub(super) struct BoundConnectionObservation {
 /// it neither verifies a signed request nor mutates Exit replay state.
 #[must_use = "a bound native-probe control connection must gate one response or be dropped"]
 pub struct BoundNativeProbeControlConnection {
+    instance: Arc<ConnectionProvenanceInstance>,
+    peer_id: PeerId,
+    connection_id: ConnectionId,
+    generation: NonZeroU64,
+}
+
+/// Affine proof that one native authorization chain arrived over an exact authenticated
+/// data-Relay connection.
+///
+/// This token is deliberately distinct from [`BoundNativeProbeControlConnection`]: a control
+/// Relay may request an endpoint-free Permit, while only the selected data Relay may request the
+/// standard endpoint-bearing reservation authorization. It can be consumed only while sending
+/// the corresponding response through the originating discovery service.
+#[must_use = "a bound native-probe data-Relay connection must gate one response or be dropped"]
+pub struct BoundNativeProbeDataRelayConnection {
     instance: Arc<ConnectionProvenanceInstance>,
     peer_id: PeerId,
     connection_id: ConnectionId,
@@ -352,6 +369,31 @@ impl ConnectionRegistry {
         })
     }
 
+    fn exact_witness(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        family: IpFamily,
+    ) -> Option<ConnectionWitness> {
+        if self.poisoned {
+            return None;
+        }
+        let record = self.records.get(&connection_id)?;
+        let prefix = record.prefix.as_ref()?;
+        if record.peer_id != peer_id
+            || prefix.normalized.family() != family
+            || !prefix.is_consistent()
+        {
+            return None;
+        }
+        Some(ConnectionWitness {
+            peer_id,
+            connection_id,
+            generation: record.generation,
+            prefix: prefix.for_witness(),
+        })
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "the affine witness must be consumed exactly once at the binding boundary"
@@ -368,13 +410,7 @@ impl ConnectionRegistry {
             generation: witness_generation,
             prefix: witness_prefix,
         } = witness;
-        let peer_connections = self
-            .records
-            .values()
-            .filter(|record| record.peer_id == expected_peer_id)
-            .count();
         if self.poisoned
-            || peer_connections != 1
             || witness_peer_id != expected_peer_id
             || witness_connection_id != expected_connection_id
         {
@@ -398,6 +434,30 @@ impl ConnectionRegistry {
         })
     }
 
+    fn diagnose_preselection_reject(
+        &self,
+        peer_id: PeerId,
+        family: IpFamily,
+        expected_connection_id: ConnectionId,
+    ) -> PreselectionProvenanceReject {
+        if self.poisoned {
+            return PreselectionProvenanceReject::RegistryPoisoned;
+        }
+        let Some(record) = self.records.get(&expected_connection_id) else {
+            return PreselectionProvenanceReject::ExactConnectionMissing;
+        };
+        if record.peer_id != peer_id {
+            return PreselectionProvenanceReject::ExactConnectionMissing;
+        }
+        let Some(prefix) = record.prefix.as_ref() else {
+            return PreselectionProvenanceReject::FamilyPrefix;
+        };
+        if !prefix.is_consistent() || prefix.normalized.family() != family {
+            return PreselectionProvenanceReject::FamilyPrefix;
+        }
+        PreselectionProvenanceReject::BindGeneration
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "ownership is the affine one-response authority; borrowing would permit reuse"
@@ -408,6 +468,29 @@ impl ConnectionRegistry {
         expected_peer_id: PeerId,
     ) -> bool {
         let BoundNativeProbeControlConnection {
+            instance: _,
+            peer_id,
+            connection_id,
+            generation,
+        } = bound;
+        if self.poisoned || peer_id != expected_peer_id {
+            return false;
+        }
+        self.records.get(&connection_id).is_some_and(|record| {
+            record.peer_id == expected_peer_id && record.generation == generation
+        })
+    }
+
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "ownership is the affine one-response authority; borrowing would permit reuse"
+    )]
+    fn consume_bound_native_probe_data_relay(
+        &self,
+        bound: BoundNativeProbeDataRelayConnection,
+        expected_peer_id: PeerId,
+    ) -> bool {
+        let BoundNativeProbeDataRelayConnection {
             instance: _,
             peer_id,
             connection_id,
@@ -457,6 +540,15 @@ impl ConnectionProvenanceBehaviour {
         self.registry.unique_witness(peer_id, family)
     }
 
+    pub(super) fn exact_witness(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        family: IpFamily,
+    ) -> Option<ConnectionWitness> {
+        self.registry.exact_witness(peer_id, connection_id, family)
+    }
+
     pub(super) fn bind(
         &self,
         witness: ConnectionWitness,
@@ -465,6 +557,16 @@ impl ConnectionProvenanceBehaviour {
     ) -> Option<BoundConnectionObservation> {
         self.registry
             .bind(witness, expected_peer_id, expected_connection_id)
+    }
+
+    pub(super) fn diagnose_preselection_reject(
+        &self,
+        peer_id: PeerId,
+        family: IpFamily,
+        expected_connection_id: ConnectionId,
+    ) -> PreselectionProvenanceReject {
+        self.registry
+            .diagnose_preselection_reject(peer_id, family, expected_connection_id)
     }
 
     pub(super) fn bind_native_probe_control(
@@ -497,6 +599,38 @@ impl ConnectionProvenanceBehaviour {
         }
         self.registry
             .consume_bound_native_probe_control(bound, expected_peer_id)
+    }
+
+    pub(super) fn bind_native_probe_data_relay(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+    ) -> Option<BoundNativeProbeDataRelayConnection> {
+        if self.registry.poisoned {
+            return None;
+        }
+        let record = self.registry.records.get(&connection_id)?;
+        if record.peer_id != peer_id {
+            return None;
+        }
+        Some(BoundNativeProbeDataRelayConnection {
+            instance: Arc::clone(&self.instance),
+            peer_id,
+            connection_id,
+            generation: record.generation,
+        })
+    }
+
+    pub(super) fn consume_bound_native_probe_data_relay(
+        &self,
+        bound: BoundNativeProbeDataRelayConnection,
+        expected_peer_id: PeerId,
+    ) -> bool {
+        if !Arc::ptr_eq(&bound.instance, &self.instance) {
+            return false;
+        }
+        self.registry
+            .consume_bound_native_probe_data_relay(bound, expected_peer_id)
     }
 }
 
@@ -842,6 +976,33 @@ mod tests {
     }
 
     #[test]
+    fn native_authorization_data_relay_binding_is_affine_and_service_local() {
+        let peer = PeerId::random();
+        let endpoint = dialer("/ip4/1.1.1.8/tcp/443");
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        established(&mut behaviour, peer, 1, &endpoint, 0);
+
+        let bound = behaviour
+            .bind_native_probe_data_relay(peer, ConnectionId::new_unchecked(1))
+            .expect("exact authenticated data Relay");
+        assert!(behaviour.consume_bound_native_probe_data_relay(bound, peer));
+
+        let cross_service = behaviour
+            .bind_native_probe_data_relay(peer, ConnectionId::new_unchecked(1))
+            .expect("originating service binding");
+        let mut other_service = ConnectionProvenanceBehaviour::new();
+        established(&mut other_service, peer, 1, &endpoint, 0);
+        assert!(!other_service.consume_bound_native_probe_data_relay(cross_service, peer));
+
+        let stale = behaviour
+            .bind_native_probe_data_relay(peer, ConnectionId::new_unchecked(1))
+            .expect("pre-change binding");
+        let changed = dialer("/ip4/1.1.1.9/tcp/443");
+        change(&mut behaviour, peer, 1, &endpoint, &changed);
+        assert!(!behaviour.consume_bound_native_probe_data_relay(stale, peer));
+    }
+
+    #[test]
     fn purpose_specific_forwarded_projection_consumes_exact_native_ipv4_and_ipv6_prefixes() {
         for (endpoint, family, expected_family, expected_prefix) in [
             (
@@ -955,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_rechecks_current_native_prefix_and_total_connection_count() {
+    fn bind_rechecks_current_native_prefix_but_retains_exact_connection_with_sibling() {
         let peer = PeerId::random();
         let public = dialer("/ip4/1.1.1.8/tcp/443");
         let invalid = dialer("/ip4/10.0.0.8/tcp/443");
@@ -986,7 +1147,7 @@ mod tests {
         assert!(
             added_sibling
                 .bind(stale_unique, peer, ConnectionId::new_unchecked(1))
-                .is_none()
+                .is_some()
         );
     }
 
@@ -1308,7 +1469,7 @@ mod tests {
             1
         );
         assert_eq!(production.matches(concat!("checked_", "add(1)")).count(), 1);
-        assert_eq!(production.matches(concat!("pub ", "struct ")).count(), 2);
+        assert_eq!(production.matches(concat!("pub ", "struct ")).count(), 3);
         assert_eq!(production.matches(concat!("pub ", "enum ")).count(), 1);
         assert!(production.contains(concat!("pub struct ConnectionProvenance", "Behaviour {")));
         assert!(production.contains(concat!("pub enum ConnectionProvenance", "Event {}")));
@@ -1316,17 +1477,25 @@ mod tests {
             "pub struct BoundNativeProbeControl",
             "Connection {"
         )));
-        let token = production
-            .split(concat!(
-                "pub struct BoundNativeProbeControl",
-                "Connection {"
-            ))
-            .nth(1)
-            .expect("native Permit connection token")
-            .split('}')
-            .next()
-            .expect("native Permit token body");
-        assert!(!token.contains("pub "));
+        for (declaration, description) in [
+            (
+                concat!("pub struct BoundNativeProbeControl", "Connection {"),
+                "native Permit connection token",
+            ),
+            (
+                concat!("pub struct BoundNativeProbeDataRelay", "Connection {"),
+                "native authorization connection token",
+            ),
+        ] {
+            let token = production
+                .split(declaration)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{description}"))
+                .split('}')
+                .next()
+                .expect("native connection token body");
+            assert!(!token.contains("pub "));
+        }
         assert!(production.contains("Swarm guarantees ConnectionIds are unique and never reused"));
         let defaults = production
             .split("impl Default for ConnectionRegistry")
@@ -1355,15 +1524,8 @@ mod tests {
         assert_eq!(crate_source.matches(event_from).count(), 1);
         assert!(!crate_source.contains(concat!("pub mod connection_", "provenance")));
         assert!(!crate_source.contains(concat!("pub ", "fn connection_", "provenance")));
-        assert_eq!(
-            crate_source
-                .matches(concat!(
-                    "pub use connection_provenance::BoundNativeProbeControl",
-                    "Connection;"
-                ))
-                .count(),
-            1
-        );
+        assert!(crate_source.contains("BoundNativeProbeControlConnection"));
+        assert!(crate_source.contains("BoundNativeProbeDataRelayConnection"));
         assert!(!crate_source.contains(concat!(
             "ConnectionProvenance(ConnectionProvenance",
             "Event)"

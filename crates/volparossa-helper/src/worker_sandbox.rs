@@ -5,7 +5,9 @@
 //! denies descendant creation, re-exec and every later namespace transition. While the child is root,
 //! the parent pins that namespace and attests the filter, exact descriptor set and single task. Only
 //! after the pin acknowledgement may the child clear all supplementary groups, irreversibly assume
-//! its dedicated uid/gid and reduce every capability set to exactly `CAP_NET_ADMIN`. The child and
+//! its dedicated uid/gid and reduce every capability set to exactly `CAP_NET_ADMIN` and
+//! `CAP_NET_BIND_SERVICE`. The latter is required only for transparent replies that preserve a
+//! privileged destination source port such as HTTPS/QUIC port 443. The child and
 //! parent both read the final identity and sandbox state back before the first authenticated request.
 //! Test applicators are compiled only under `cfg(test)`; production has no environment or runtime
 //! switch that can select one.
@@ -39,7 +41,7 @@ use rustix::{
 };
 use thiserror::Error;
 use volparossa_linux_uapi::{
-    duplicate_descriptor_cloexec, install_worker_confinement_filter, namespace_type,
+    cgroup_v2_id, duplicate_descriptor_cloexec, install_worker_confinement_filter, namespace_type,
 };
 
 const SANDBOX_PROOF_DOMAIN: &[u8; 32] = b"volparossa/worker-sandbox/v5\0\0\0\0";
@@ -59,6 +61,7 @@ const CAP_KILL: u32 = 5;
 const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
+const CAP_NET_BIND_SERVICE: u32 = 10;
 const CAP_NET_ADMIN: u32 = 12;
 const CAP_NET_RAW: u32 = 13;
 const CAP_SYS_ADMIN: u32 = 21;
@@ -66,6 +69,7 @@ const CAP_KILL_BIT: u64 = 1_u64 << CAP_KILL;
 const CAP_SETGID_BIT: u64 = 1_u64 << CAP_SETGID;
 const CAP_SETUID_BIT: u64 = 1_u64 << CAP_SETUID;
 const CAP_SETPCAP_BIT: u64 = 1_u64 << CAP_SETPCAP;
+const CAP_NET_BIND_SERVICE_BIT: u64 = 1_u64 << CAP_NET_BIND_SERVICE;
 const CAP_NET_ADMIN_BIT: u64 = 1_u64 << CAP_NET_ADMIN;
 const CAP_NET_RAW_BIT: u64 = 1_u64 << CAP_NET_RAW;
 const CAP_SYS_ADMIN_BIT: u64 = 1_u64 << CAP_SYS_ADMIN;
@@ -75,7 +79,9 @@ const HELPER_BOOTSTRAP_CAPABILITY_BITS: u64 = CAP_KILL_BIT
     | CAP_SETGID_BIT
     | CAP_SETPCAP_BIT
     | CAP_SETUID_BIT
+    | CAP_NET_BIND_SERVICE_BIT
     | CAP_SYS_ADMIN_BIT;
+const WORKER_CAPABILITY_BITS: u64 = CAP_NET_BIND_SERVICE_BIT | CAP_NET_ADMIN_BIT;
 pub(super) const SYSTEMD_RESERVED_ID: u32 = 65_535;
 
 pub(super) type ContextId = [u8; 16];
@@ -151,6 +157,10 @@ impl NetworkNamespaceIdentity {
     fn is_valid(self) -> bool {
         self.device != 0 && self.inode != 0
     }
+
+    pub(super) const fn parts(self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,6 +193,7 @@ pub(super) struct WorkerRecoveryAnchorParts {
     pub(super) executable_device: NonZeroU64,
     pub(super) executable_inode: NonZeroU64,
     pub(super) service_cgroup_inode: NonZeroU64,
+    pub(super) service_cgroup_id: NonZeroU64,
 }
 
 /// Retained kernel objects from which one worker's durable recovery anchor is revalidated.
@@ -204,6 +215,7 @@ struct PinnedWorkerRecoveryAnchor {
     cgroup_root_identity: FileIdentity,
     service_cgroup: OwnedFd,
     service_cgroup_identity: FileIdentity,
+    service_cgroup_id: NonZeroU64,
     service_cgroup_path: Box<[u8]>,
 }
 
@@ -224,6 +236,7 @@ impl PinnedWorkerRecoveryAnchor {
             cgroup_root_identity: self.cgroup_root_identity,
             service_cgroup: duplicate_descriptor_cloexec(&self.service_cgroup)?,
             service_cgroup_identity: self.service_cgroup_identity,
+            service_cgroup_id: self.service_cgroup_id,
             service_cgroup_path: self.service_cgroup_path.clone(),
         })
     }
@@ -242,6 +255,13 @@ pub(crate) struct PinnedWorkerNetworkNamespace {
 }
 
 impl PinnedWorkerNetworkNamespace {
+    pub(crate) fn verified_descriptor(&self) -> Result<BorrowedFd<'_>, WorkerSandboxError> {
+        if typed_network_namespace_identity(&self.descriptor)? != self.identity {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+        Ok(self.descriptor.as_fd())
+    }
+
     /// Compares another typed network-namespace descriptor with this still-live exact pin.
     ///
     /// Both descriptors are re-read on every comparison. The cached identity must still match this
@@ -373,6 +393,11 @@ impl PinnedWorkerRecoveryIdentity {
         let (executable_device, executable_inode) = anchor.executable_identity.nonzero_parts()?;
         let service_cgroup_inode = NonZeroU64::new(anchor.service_cgroup_identity.inode)
             .ok_or(WorkerSandboxError::Mismatch)?;
+        let service_cgroup_id =
+            cgroup_v2_id(&anchor.service_cgroup).map_err(|_| WorkerSandboxError::Mismatch)?;
+        if service_cgroup_id != anchor.service_cgroup_id {
+            return Err(WorkerSandboxError::Mismatch);
+        }
         self.ensure_alive()?;
         Ok(WorkerRecoveryAnchorParts {
             boot_id: anchor.boot_id,
@@ -383,6 +408,7 @@ impl PinnedWorkerRecoveryIdentity {
             executable_device,
             executable_inode,
             service_cgroup_inode,
+            service_cgroup_id,
         })
     }
 
@@ -556,9 +582,9 @@ impl WorkerSandboxPlan {
             identity,
             capabilities: LinuxCapabilitySnapshot {
                 inheritable: 0,
-                permitted: CAP_NET_ADMIN_BIT,
-                effective: CAP_NET_ADMIN_BIT,
-                bounding: CAP_NET_ADMIN_BIT,
+                permitted: WORKER_CAPABILITY_BITS,
+                effective: WORKER_CAPABILITY_BITS,
+                bounding: WORKER_CAPABILITY_BITS,
                 ambient: 0,
             },
             seccomp: baseline_seccomp.expected_after_worker_filter()?,
@@ -998,7 +1024,7 @@ fn namespace_identity<Fd: AsFd>(
     Ok(identity)
 }
 
-fn typed_network_namespace_identity<Fd: AsFd>(
+pub(super) fn typed_network_namespace_identity<Fd: AsFd>(
     descriptor: &Fd,
 ) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
     if namespace_type(descriptor)? != libc::CLONE_NEWNET {
@@ -1096,6 +1122,34 @@ fn parse_boot_id(bytes: &[u8]) -> Result<[u8; 16], WorkerSandboxError> {
         return Err(WorkerSandboxError::Invalid);
     }
     Ok(decoded)
+}
+
+/// Observe the current boot and exact running image inode for restart-causality checks.
+pub(super) fn current_boot_and_executable_identity()
+-> Result<([u8; 16], NonZeroU64, NonZeroU64), WorkerSandboxError> {
+    let boot_id_file = open(
+        "/proc/sys/kernel/random/boot_id",
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    ensure_procfs(&boot_id_file)?;
+    let boot_id = parse_boot_id(&read_bounded_descriptor(&boot_id_file, BOOT_ID_BYTES)?)?;
+    let executable = open(
+        "/proc/self/exe",
+        OFlags::PATH | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    let metadata = fstat(&executable).map_err(rustix_io)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    Ok((
+        boot_id,
+        NonZeroU64::new(metadata.st_dev).ok_or(WorkerSandboxError::Mismatch)?,
+        NonZeroU64::new(metadata.st_ino).ok_or(WorkerSandboxError::Mismatch)?,
+    ))
 }
 
 fn parse_canonical_u64(bytes: &[u8]) -> Result<u64, WorkerSandboxError> {
@@ -1353,6 +1407,8 @@ fn capture_recovery_anchor(
     let service_cgroup = resolve_service_cgroup(&cgroup_root, &service_cgroup_path)?;
     ensure_cgroup2(&service_cgroup)?;
     let service_cgroup_identity = descriptor_identity(&service_cgroup, FileType::Directory)?;
+    let service_cgroup_id =
+        cgroup_v2_id(&service_cgroup).map_err(|_| WorkerSandboxError::Mismatch)?;
     if service_cgroup_identity.device != cgroup_root_identity.device {
         return Err(WorkerSandboxError::Mismatch);
     }
@@ -1372,6 +1428,7 @@ fn capture_recovery_anchor(
         cgroup_root_identity,
         service_cgroup,
         service_cgroup_identity,
+        service_cgroup_id,
         service_cgroup_path,
     };
     verify_bootstrap_recovery_anchor(process_directory, &anchor)?;
@@ -1476,6 +1533,7 @@ fn verify_recovery_anchor(
     ensure_cgroup2(&anchor.service_cgroup)?;
     if descriptor_identity(&anchor.service_cgroup, FileType::Directory)?
         != anchor.service_cgroup_identity
+        || cgroup_v2_id(&anchor.service_cgroup).ok() != Some(anchor.service_cgroup_id)
     {
         return Err(WorkerSandboxError::Mismatch);
     }
@@ -1492,6 +1550,7 @@ fn verify_recovery_anchor(
     let current_service_cgroup = resolve_service_cgroup(&anchor.cgroup_root, &current_path)?;
     if descriptor_identity(&current_service_cgroup, FileType::Directory)?
         != anchor.service_cgroup_identity
+        || cgroup_v2_id(&current_service_cgroup).ok() != Some(anchor.service_cgroup_id)
     {
         return Err(WorkerSandboxError::Mismatch);
     }
@@ -1592,10 +1651,15 @@ fn exact_status_identity(
     WorkerIdentity::new(status.uids[0], status.gids[0])
 }
 
+pub(super) fn open_child_pidfd(child: &Child) -> io::Result<OwnedFd> {
+    pidfd_open(Pid::from_child(child), PidfdFlags::empty()).map_err(rustix_io)
+}
+
 /// Kernel pins created immediately after spawn and retained until confirmed reap.
 ///
-/// This value is owned only by `ProcessRetirement`. Moving a retirement record to the reaper also
-/// moves its pidfd, anchored process-directory descriptor, and pinned network namespace.
+/// This value is owned by `ProcessRetirement` or one linear fixed restart-reaper invocation.
+/// Moving a retirement record to the in-memory reaper also moves its pidfd, anchored
+/// process-directory descriptor, and pinned network namespace.
 pub(super) struct WorkerKernelPins {
     pidfd: OwnedFd,
     process_directory: OwnedFd,
@@ -1609,15 +1673,31 @@ pub(super) struct WorkerKernelPins {
 
 impl WorkerKernelPins {
     pub(super) fn pin_process(child: &Child) -> Result<Self, WorkerSandboxError> {
-        let pid = Pid::from_child(child);
-        let pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(rustix_io)?;
-        let process_directory = open(
+        let pidfd = open_child_pidfd(child)?;
+        Self::pin_process_with_pidfd(child, pidfd).map_err(|(error, _pidfd)| error)
+    }
+
+    /// Finish pinning a child while returning the already exact pidfd on every later failure.
+    ///
+    /// The restart reaper uses this form so a successful `spawn(2)` can never lose its only
+    /// PID-reuse-safe termination and reap handle merely because a subsequent procfs anchor read
+    /// failed. Generic worker construction keeps using [`Self::pin_process`].
+    pub(super) fn pin_process_with_pidfd(
+        child: &Child,
+        pidfd: OwnedFd,
+    ) -> Result<Self, (WorkerSandboxError, OwnedFd)> {
+        let process_directory = match open(
             format!("/proc/{}", child.id()),
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::empty(),
-        )
-        .map_err(rustix_io)?;
-        let recovery_anchor = capture_recovery_anchor(&process_directory, child.id())?;
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(error) => return Err((rustix_io(error).into(), pidfd)),
+        };
+        let recovery_anchor = match capture_recovery_anchor(&process_directory, child.id()) {
+            Ok(anchor) => anchor,
+            Err(error) => return Err((error, pidfd)),
+        };
         Ok(Self {
             pidfd,
             process_directory,
@@ -1779,6 +1859,10 @@ impl WorkerKernelPins {
             return Err(WorkerSandboxError::Mismatch);
         }
         Ok(())
+    }
+
+    pub(super) fn borrowed_pidfd(&self) -> BorrowedFd<'_> {
+        self.pidfd.as_fd()
     }
 
     fn observe_status(
@@ -2081,6 +2165,7 @@ impl SandboxKernel for ProductionSandboxKernel {
         let capabilities = CapabilitySet::SETGID
             | CapabilitySet::SETUID
             | CapabilitySet::SETPCAP
+            | CapabilitySet::NET_BIND_SERVICE
             | CapabilitySet::NET_ADMIN;
         set_capabilities(
             None,
@@ -2121,7 +2206,8 @@ impl SandboxKernel for ProductionSandboxKernel {
     }
 
     fn set_post_identity_capabilities(&mut self) -> Result<(), WorkerSandboxError> {
-        let transition = CapabilitySet::NET_ADMIN | CapabilitySet::SETPCAP;
+        let transition =
+            CapabilitySet::NET_BIND_SERVICE | CapabilitySet::NET_ADMIN | CapabilitySet::SETPCAP;
         set_capabilities(
             None,
             CapabilitySets {
@@ -2144,8 +2230,8 @@ impl SandboxKernel for ProductionSandboxKernel {
         set_capabilities(
             None,
             CapabilitySets {
-                effective: CapabilitySet::NET_ADMIN,
-                permitted: CapabilitySet::NET_ADMIN,
+                effective: CapabilitySet::NET_BIND_SERVICE | CapabilitySet::NET_ADMIN,
+                permitted: CapabilitySet::NET_BIND_SERVICE | CapabilitySet::NET_ADMIN,
                 inheritable: CapabilitySet::empty(),
             },
         )
@@ -2179,6 +2265,72 @@ pub(super) fn begin_production_sandbox(
     Ok(PreparedWorkerSandbox {
         state: begin_sandbox(&mut ProductionSandboxKernel, parent_network_namespace)?,
     })
+}
+
+/// Root, single-thread reaper sandbox after exactly one authenticated `setns`.
+pub(super) struct PreparedRestartReaperSandbox {
+    state: PreparedWorkerSandboxState,
+}
+
+/// Install the same monotone worker confinement without creating a new network namespace.
+///
+/// The caller must already have joined the exact retained namespace and closed the transferred
+/// descriptor. Later `setns`, `unshare`, `exec` and process-tree creation are denied before the
+/// dedicated worker identity is assumed.
+pub(super) fn begin_restart_reaper_sandbox_after_setns(
+    parent_network_namespace: NetworkNamespaceIdentity,
+    target_network_namespace: NetworkNamespaceIdentity,
+) -> Result<PreparedRestartReaperSandbox, WorkerSandboxError> {
+    let mut kernel = ProductionSandboxKernel;
+    let state = begin_restart_reaper_sandbox_after_setns_with(
+        &mut kernel,
+        parent_network_namespace,
+        target_network_namespace,
+    )?;
+    Ok(PreparedRestartReaperSandbox { state })
+}
+
+fn begin_restart_reaper_sandbox_after_setns_with<K: SandboxKernel>(
+    kernel: &mut K,
+    parent_network_namespace: NetworkNamespaceIdentity,
+    target_network_namespace: NetworkNamespaceIdentity,
+) -> Result<PreparedWorkerSandboxState, WorkerSandboxError> {
+    if !parent_network_namespace.is_valid()
+        || !target_network_namespace.is_valid()
+        || parent_network_namespace == target_network_namespace
+        || kernel.observe_network_namespace()? != target_network_namespace
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    verify_bootstrap_capabilities(kernel.initial_capabilities()?)?;
+    let baseline_seccomp = kernel.observe_initial_seccomp()?;
+    kernel.clear_ambient()?;
+    let last_capability = kernel.last_capability()?;
+    for capability in 0..=last_capability {
+        if capability != CAP_NET_ADMIN && capability != CAP_SETPCAP {
+            kernel.drop_bounding(capability)?;
+        }
+    }
+    kernel.set_pre_identity_capabilities()?;
+    verify_pre_identity_capabilities(kernel.initial_capabilities()?)?;
+    kernel.install_no_new_privileges()?;
+    kernel.install_process_tree_filter()?;
+    Ok(PreparedWorkerSandboxState {
+        parent_network_namespace,
+        worker_network_namespace: target_network_namespace,
+        baseline_seccomp,
+    })
+}
+
+impl PreparedRestartReaperSandbox {
+    pub(super) fn finish(
+        self,
+        identity: WorkerIdentity,
+    ) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
+        let snapshot = finish_sandbox(&mut ProductionSandboxKernel, self.state, identity)?;
+        prove_post_identity_denials()?;
+        Ok(snapshot)
+    }
 }
 
 impl PreparedWorkerSandbox {
@@ -2219,6 +2371,7 @@ fn pre_identity_capabilities() -> CapabilitySet {
     CapabilitySet::SETGID
         | CapabilitySet::SETUID
         | CapabilitySet::SETPCAP
+        | CapabilitySet::NET_BIND_SERVICE
         | CapabilitySet::NET_ADMIN
 }
 
@@ -2237,7 +2390,7 @@ fn validate_pre_identity_state(
         inheritable: 0,
         permitted: pre_identity_capabilities().bits(),
         effective: pre_identity_capabilities().bits(),
-        bounding: CAP_NET_ADMIN_BIT | CAP_SETPCAP_BIT,
+        bounding: WORKER_CAPABILITY_BITS | CAP_SETPCAP_BIT,
         ambient: 0,
     };
     let required_seccomp = parent_seccomp.expected_after_worker_filter()?;
@@ -2294,7 +2447,10 @@ fn begin_sandbox<K: SandboxKernel>(
     kernel.clear_ambient()?;
     let last_capability = kernel.last_capability()?;
     for capability in 0..=last_capability {
-        if capability != CAP_NET_ADMIN && capability != CAP_SETPCAP {
+        if capability != CAP_NET_BIND_SERVICE
+            && capability != CAP_NET_ADMIN
+            && capability != CAP_SETPCAP
+        {
             kernel.drop_bounding(capability)?;
         }
     }
@@ -2329,7 +2485,8 @@ fn finish_sandbox<K: SandboxKernel>(
         return Err(WorkerSandboxError::Mismatch);
     }
     // CAP_SETPCAP is deliberately the final bounding-set removal. It remains effective until the
-    // subsequent capset atomically reduces effective/permitted to CAP_NET_ADMIN.
+    // subsequent capset atomically reduces effective/permitted to the exact two worker
+    // capabilities.
     kernel.drop_bounding(CAP_SETPCAP)?;
     kernel.set_exact_capabilities()?;
     let snapshot = kernel.observe_final(prepared.parent_network_namespace)?;
@@ -2438,9 +2595,9 @@ mod tests {
             ),
             LinuxCapabilitySnapshot::fixture(
                 0,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
                 0,
             ),
         )
@@ -2498,25 +2655,37 @@ mod tests {
         for capabilities in [
             LinuxCapabilitySnapshot::fixture(
                 1,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                0,
-            ),
-            LinuxCapabilitySnapshot::fixture(0, 0, CAP_NET_ADMIN_BIT, CAP_NET_ADMIN_BIT, 0),
-            LinuxCapabilitySnapshot::fixture(0, CAP_NET_ADMIN_BIT, 0, CAP_NET_ADMIN_BIT, 0),
-            LinuxCapabilitySnapshot::fixture(
-                0,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT | 1,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
                 0,
             ),
             LinuxCapabilitySnapshot::fixture(
                 0,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
+                0,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                0,
+            ),
+            LinuxCapabilitySnapshot::fixture(
+                0,
+                WORKER_CAPABILITY_BITS,
+                0,
+                WORKER_CAPABILITY_BITS,
+                0,
+            ),
+            LinuxCapabilitySnapshot::fixture(
+                0,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS | 1,
+                0,
+            ),
+            LinuxCapabilitySnapshot::fixture(
+                0,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
                 1,
             ),
         ] {
@@ -3026,9 +3195,9 @@ mod tests {
         assert_eq!(&encoded[144..148], &4_u32.to_be_bytes());
         assert_eq!(&encoded[148..152], &[0; 4]);
         assert_eq!(&encoded[152..160], &0_u64.to_be_bytes());
-        assert_eq!(&encoded[160..168], &CAP_NET_ADMIN_BIT.to_be_bytes());
-        assert_eq!(&encoded[168..176], &CAP_NET_ADMIN_BIT.to_be_bytes());
-        assert_eq!(&encoded[176..184], &CAP_NET_ADMIN_BIT.to_be_bytes());
+        assert_eq!(&encoded[160..168], &WORKER_CAPABILITY_BITS.to_be_bytes());
+        assert_eq!(&encoded[168..176], &WORKER_CAPABILITY_BITS.to_be_bytes());
+        assert_eq!(&encoded[176..184], &WORKER_CAPABILITY_BITS.to_be_bytes());
         assert_eq!(&encoded[184..192], &0_u64.to_be_bytes());
         assert_eq!(
             SandboxProofRecord::decode(&encoded).expect("canonical"),
@@ -3097,9 +3266,9 @@ mod tests {
             "Gid:\t988\t988\t988\t988\n",
             "Groups:\t\n",
             "CapInh:\t0000000000000000\n",
-            "CapPrm:\t0000000000001000\n",
-            "CapEff:\t0000000000001000\n",
-            "CapBnd:\t0000000000001000\n",
+            "CapPrm:\t0000000000001400\n",
+            "CapEff:\t0000000000001400\n",
+            "CapBnd:\t0000000000001400\n",
             "CapAmb:\t0000000000000000\n",
             "NoNewPrivs:\t1\n",
             "Seccomp:\t2\n",
@@ -3160,7 +3329,7 @@ mod tests {
             status().replace_ascii(b"Seccomp_filters:\t4", b"Seccomp_filters:\t04"),
             status().replace_ascii(b"Seccomp_filters:\t4", b"Seccomp_filters:\t+4"),
             status().replace_ascii(b"Seccomp_filters:\t4", b"Seccomp_filters:\t4 "),
-            status().replace_ascii(b"CapBnd:\t0000000000001000", b"CapBnd:\t00000000000001000"),
+            status().replace_ascii(b"CapBnd:\t0000000000001400", b"CapBnd:\t00000000000001400"),
             vec![b'x'; MAX_PROC_STATUS_BYTES + 1],
         ] {
             assert!(parse_process_status(&changed).is_err());
@@ -3271,7 +3440,7 @@ mod tests {
         for changed in invalid {
             assert!(validate_live_proof_parent_status(changed, required_group).is_err());
         }
-        assert_eq!(HELPER_BOOTSTRAP_CAPABILITY_BITS, 0x20_31e0);
+        assert_eq!(HELPER_BOOTSTRAP_CAPABILITY_BITS, 0x20_35e0);
     }
 
     #[test]
@@ -3328,7 +3497,7 @@ mod tests {
                 inheritable: 0,
                 permitted: transition,
                 effective: transition,
-                bounding: CAP_NET_ADMIN_BIT | CAP_SETPCAP_BIT,
+                bounding: WORKER_CAPABILITY_BITS | CAP_SETPCAP_BIT,
                 ambient: 0,
             },
         };
@@ -3360,6 +3529,7 @@ mod tests {
             CAP_SETGID_BIT,
             CAP_SETUID_BIT,
             CAP_SETPCAP_BIT,
+            CAP_NET_BIND_SERVICE_BIT,
             CAP_NET_ADMIN_BIT,
         ] {
             let mut missing_effective = valid;
@@ -3582,6 +3752,7 @@ mod tests {
         assert_eq!(kernel.steps[set_pre + 2], Step::NoNewPrivileges);
         assert_eq!(kernel.steps[set_pre + 3], Step::InstallProcessTreeFilter);
         assert!(!kernel.steps[..set_pre].contains(&Step::Drop(CAP_NET_ADMIN)));
+        assert!(!kernel.steps[..set_pre].contains(&Step::Drop(CAP_NET_BIND_SERVICE)));
         assert!(!kernel.steps[..set_pre].contains(&Step::Drop(CAP_SETPCAP)));
         assert!(kernel.steps[..set_pre].contains(&Step::Drop(CAP_KILL)));
         assert!(!kernel.initial.effective.contains(CapabilitySet::KILL));
@@ -3641,6 +3812,90 @@ mod tests {
             .expect("confinement filter");
         assert!(filter < clear_groups);
         assert!(!kernel.steps[..set_exact - 1].contains(&Step::Drop(CAP_NET_ADMIN)));
+    }
+
+    #[test]
+    fn restart_reaper_sandbox_joins_once_then_uses_the_same_monotone_identity_boundary() {
+        let snapshot = production_snapshot();
+        let mut kernel = FakeKernel::production();
+        let prepared = begin_restart_reaper_sandbox_after_setns_with(
+            &mut kernel,
+            snapshot.parent_network_namespace,
+            snapshot.worker_network_namespace,
+        )
+        .expect("prepared restart reaper sandbox");
+        assert_eq!(kernel.steps[0], Step::ObserveNamespace);
+        assert_eq!(kernel.steps[1], Step::Capabilities);
+        assert!(!kernel.steps.contains(&Step::Unshare));
+        let no_new_privileges = kernel
+            .steps
+            .iter()
+            .position(|step| *step == Step::NoNewPrivileges)
+            .expect("no-new-privileges step");
+        let filter = kernel
+            .steps
+            .iter()
+            .position(|step| *step == Step::InstallProcessTreeFilter)
+            .expect("confinement filter");
+        assert_eq!(filter, no_new_privileges + 1);
+        assert!(!kernel.steps[..filter].contains(&Step::Drop(CAP_NET_ADMIN)));
+        assert!(!kernel.steps[..filter].contains(&Step::Drop(CAP_SETPCAP)));
+        assert!(kernel.steps[..filter].contains(&Step::Drop(CAP_SYS_ADMIN)));
+
+        let begin_steps = kernel.steps.len();
+        let final_snapshot = finish_sandbox(&mut kernel, prepared, worker_identity())
+            .expect("finished restart reaper sandbox");
+        assert_eq!(final_snapshot, snapshot);
+        assert_eq!(kernel.steps[begin_steps], Step::Capabilities);
+        assert_eq!(kernel.steps[begin_steps + 1], Step::ObserveNamespace);
+        let final_caps = kernel
+            .steps
+            .iter()
+            .rposition(|step| *step == Step::SetExact)
+            .expect("final exact capability set");
+        assert_eq!(kernel.steps[final_caps - 1], Step::Drop(CAP_SETPCAP));
+        assert_eq!(kernel.steps[final_caps + 1], Step::Observe);
+    }
+
+    #[test]
+    fn restart_reaper_sandbox_rejects_wrong_join_and_stops_at_each_pre_identity_failure() {
+        let snapshot = production_snapshot();
+        let mut wrong = FakeKernel::production();
+        wrong.network_namespace = snapshot.parent_network_namespace;
+        assert!(
+            begin_restart_reaper_sandbox_after_setns_with(
+                &mut wrong,
+                snapshot.parent_network_namespace,
+                snapshot.worker_network_namespace,
+            )
+            .is_err()
+        );
+        assert_eq!(wrong.steps, vec![Step::ObserveNamespace]);
+
+        for fail_at in [
+            Step::ObserveNamespace,
+            Step::Capabilities,
+            Step::ObserveInitialSeccomp,
+            Step::ClearAmbient,
+            Step::LastCapability,
+            Step::Drop(0),
+            Step::SetPreIdentityCapabilities,
+            Step::NoNewPrivileges,
+            Step::InstallProcessTreeFilter,
+        ] {
+            let mut kernel = FakeKernel::production();
+            kernel.fail_at = Some(fail_at);
+            assert!(
+                begin_restart_reaper_sandbox_after_setns_with(
+                    &mut kernel,
+                    snapshot.parent_network_namespace,
+                    snapshot.worker_network_namespace,
+                )
+                .is_err()
+            );
+            assert_eq!(kernel.steps.last(), Some(&fail_at));
+            assert!(!kernel.steps.contains(&Step::Unshare));
+        }
     }
 
     #[test]
@@ -3707,6 +3962,7 @@ mod tests {
             CapabilitySet::SETGID,
             CapabilitySet::SETUID,
             CapabilitySet::SETPCAP,
+            CapabilitySet::NET_BIND_SERVICE,
             CapabilitySet::NET_ADMIN,
         ] {
             for permitted in [false, true] {
@@ -3735,6 +3991,7 @@ mod tests {
             CapabilitySet::SETGID,
             CapabilitySet::SETUID,
             CapabilitySet::SETPCAP,
+            CapabilitySet::NET_BIND_SERVICE,
             CapabilitySet::NET_ADMIN,
             CapabilitySet::SYS_ADMIN,
         ] {

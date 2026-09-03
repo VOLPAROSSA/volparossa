@@ -142,7 +142,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   only the exact leader. A preview-first root driver now
   stages the real
   component in a transient `PrivateNetwork` systemd unit with synthetic read-only account overlays,
-  a private `/run`, the exact seven-capability parent set, exact singleton staged-agent
+  a private `/run`, the exact eight-capability parent set, exact singleton staged-agent
   supplementary-group attestation (so inherited host-root groups fail closed), confirmed leader
   reap and privacy-safe before/after host-state digests. That driver now requires exact systemd
   v257, retains the shipped `NotifyAccess=main`, 128-entry descriptor-store maximum and
@@ -326,7 +326,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   MainPID. The diagnostic helper parent contract continues to attest the final identity,
   capabilities, no-new-privileges state and seccomp state. The production hook independently
   requires and repeatedly revalidates all four UID/GID fields, its singleton group, NNP, seccomp
-  mode and bounded filter count, and all five capability masks against the exact seven-capability
+  mode and bounded filter count, and all five capability masks against the exact eight-capability
   set. The next non-retained branch smoke
   [run 33272380911](https://github.com/VOLPAROSSA/volparossa/actions/runs/33272380911) at
   `4dad3621fe9ec43ac23de432f57f6b0b7a3582ca` ran the disposable VM in
@@ -544,8 +544,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   now hands it a non-empty set only when every record is already `CleanupConfirmed`, no inherited
   or manager custody exists, the journal revalidates, and a fresh manager barrier plus two new
   identical complete empty snapshots mint one-shot exact-target manager-absence evidence. The
-  installed restart cleanup executor still refuses every `MayOwnCustody` or `MayOwnPrepare` proof,
-  leaving those phases byte-identical and blocking Ready. A separate affine
+  installed general restart cleanup executor still refuses uncorrelated proofs. One separate
+  startup-only control accepts an affine proof from the fixed exact-singleton reaper described
+  below and can CAS an unchanged `MayOwnCustody` or `MayOwnPrepare` record to
+  `CleanupConfirmed` while the actor remains `Starting` and lock-held. A separate affine
   same-runtime handle may echo only proofs already completed by the live functional backend;
   independently, the actor may settle never-dispatched `Intent` records. Admission is bounded to four
   operations plus shutdown.
@@ -573,10 +575,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   handle exposes exact registration, custody marking/arming and ordered same-runtime settlement, but
   no raw codec/revision, retirement, startup recovery or lifecycle authority. Production now has an
   inventory-attested pidfd/network-namespace publication caller and live clean-Destroy settlement;
-  no inherited-custody cleanup executor, restart reaper, supported on-disk migration, cross-runtime
-  tag-28 proof, or live-root production lifecycle proof exists.
-  One bounded startup case is now production-wired: a complete non-empty set consisting only of
-  already durable `CleanupConfirmed` targets. Already-absent members take the prior fresh-empty
+  no general inherited-custody adoption, `MayOwnPrepare` cleanup executor, supported on-disk
+  migration, cross-runtime tag-28 proof, or live-root forced-crash lifecycle proof exists.
+  Two bounded startup cases are now production-wired. The first is a complete non-empty set
+  consisting only of already durable `CleanupConfirmed` targets. Already-absent members take the prior fresh-empty
   path. Each exact-present member is prevalidated as a full set, removed once in canonical name
   order with no ancillary descriptors, and must yield two stable snapshots equal to the opaque
   predecessor minus exactly that pair. A distinct affine restart proof advances the successor; it
@@ -587,6 +589,47 @@ single clean-build A01--A15 run; the score is not a release claim.
   CAS progress is safely retryable from the remaining `CleanupConfirmed` targets. This retires
   confirmed journal custody, but does not reap a worker, destroy a namespace, clean kernel state or
   adopt inherited custody.
+  The second case is exactly one `ExactPresent + MayOwnCustody` record whose durable plan contains
+  exactly one path (Client one Client lease, Exit one Exit lease, or Relay the exact
+  RelayClient/RelayExit pair for the same path), whose boot ID equals the current boot and whose
+  recorded helper executable device/inode equals `/proc/self/exe`. The helper retains the startup
+  actor, spawn-admission guard, original pidfd and namespace owner; proves the old process pidfd
+  exited and the shared service cgroup is quiescent; then self-execs only
+  `/proc/self/exe --internal-restart-reaper-v1`. A bounded credential-authenticated
+  `SOCK_SEQPACKET` transcript transfers exactly one journal-bound `CLONE_NEWNET` FD. The
+  single-thread child joins it once, closes the FD, installs no-new-privileges plus the existing
+  fork/exec/unshare/setns-denying filter, drops to the pinned worker UID/GID with only
+  `CAP_NET_ADMIN`, and is independently sandbox-attested by the parent before cleanup starts.
+  Client/Exit require derived WireGuard names absent, loopback down, exact-empty nftables and IPv6
+  forwarding disabled. Relay requires the same derived-link/loopback baseline, IPv6 forwarding
+  `all` and `default` enabled before and after, and retires only the exact restricted DROP fence (or
+  accepts the exact-empty deletion-retry successor). It never deletes a WireGuard link or writes
+  forwarding. Active, foreign, partial or ambiguous policy fails closed. Only a challenge-bound
+  terminal proof followed by exact pidfd reap and a second shared-cgroup sample can mint the affine
+  actor evidence. The actor then performs the single phase CAS; the unchanged existing
+  `CleanupConfirmed` descriptor-store-removal/fresh-absence chain completes before socket bind.
+  Before spawning, the parent reserves one close-on-exec FD and requires waitable default
+  `SIGCHLD` plus default `SIGHUP`, `SIGINT` and `SIGTERM`; pidfd acquisition retries `EINTR` and may
+  release that reserve for one
+  `EMFILE`/`ENFILE` retry. If it still cannot pin the child, it sends no protocol record, closes the
+  channel and polls only the retained direct `Child` under a fixed hard deadline. Normal EOF exit is
+  reaped and returns an error. A stopped/stuck child, lost waitability, competing reap or timeout is
+  process-fatal: fixed `exit_group(70)` terminates the helper without a core or cleanup handlers,
+  publishes no socket, performs no journal CAS, and claims neither cleanup nor exact reap on that
+  branch. This fail-stop relies on the already-attested and packaged systemd `Type=simple`,
+  `RemainAfterExit=false`, `ExitType=main`, no additional success or forced-restart statuses,
+  `Restart=on-failure`, `RestartMode=normal`, exact three-second restart delay, status-only
+  `RestartPreventExitStatus={70,71}`, `KillMode=control-group`, `SendSIGKILL=yes`,
+  `FinalKillSignal=SIGKILL`, exact finite 45-second `TimeoutStopUSec`, and
+  `TimeoutStopFailureMode=terminate` contract for bounded whole-cgroup retirement; it never signals
+  a numeric PID. Focused injection tests cover `EINTR`, both descriptor-exhaustion errors, reserve
+  exhaustion and the bounded stopped-child fail-stop path in an isolated subprocess. The privileged
+  acceptance runner additionally has a fixed real-image transient-unit fault path: it stops the
+  exact pidfd of the real reaper before any handshake record, requires main status 70, terminal
+  `Result=exit-code`, zero restarts beyond the exact restart delay, an empty retired cgroup and
+  effective readback of the complete manager tuple.
+  `MayOwnPrepare`, `ExactNoStoredCustody`, multiple targets, multiple paths, wrong boot/image/FD,
+  failed credentials or incomplete baseline still refuse without opening the socket.
   The production non-empty restart-refusal path now owns the outer composition. It retains and
   revalidates the exact startup journal guard, holds the same opaque process-wide admission guard
   used by every worker spawn, drives the borrowing async sampler non-cancellably, and performs the
@@ -594,7 +637,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   unique-name owner, unit object path, current `MainPID` and nonzero 16-byte `InvocationID`; fresh
   bookends additionally require zero `ControlPID`, canonical non-root `ControlGroup`, nonzero
   `ControlGroupId`, no delegation, `ProtectControlGroupsEx=strict`, `PrivatePIDs=no`,
-  `KillMode=control-group`, and `SendSIGKILL=true`. The packaged helper unit now configures that
+  `Type=simple`, `RemainAfterExit=false`, `ExitType=main`, no additional success or forced-restart
+  statuses, `Restart=on-failure`, `RestartMode=normal`, exact `RestartUSec=3s`, status-only
+  `RestartPreventExitStatus={70,71}`, `KillMode=control-group`,
+  `SendSIGKILL=true`, `FinalKillSignal=SIGKILL`, exact finite `TimeoutStopUSec=45s`, and
+  `TimeoutStopFailureMode=terminate`. The packaged helper unit now configures that
   contract, subtracts the broad `@mount` syscall set explicitly from its positive allowlist, and
   disables cgroup delegation and a private PID namespace. The pinned strict cgroup view must be
   `0::/`, cgroup2 and read-only. Its
@@ -605,9 +652,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   membership across two initial, one post-manager and one synchronous-join projection. These remain
   bounded non-atomic samples. The process-local spawn guard does not exclude PID 1 migration, and
   the strict mount observation does not prove absence of an inherited writable cgroup descriptor.
-  That refusal observer performs no namespace destruction, kernel cleanup, descriptor-store
-  removal, journal transition or socket readiness; it grants no authority to the narrow cleanup-
-  confirmed path above. AV1-10 therefore remains Open and the fixed alpha score remains 11/100.
+  Outside the exact singleton slice, that refusal observer performs no namespace destruction,
+  kernel cleanup, descriptor-store removal, journal transition or socket readiness. AV1-10 remains
+  Open because retained live forced-crash/KVM recovery evidence, `MayOwnPrepare`, no-store and
+  multi-target recovery are still absent; the fixed alpha score remains 11/100.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
   and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.
@@ -746,10 +794,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   removal are connected only through the functional backend. Startup separately performs a
   record-transition-free, lock-held exact-set
   classification of durable journal targets, affinely inherited custody and a barrier-ordered
-  stable manager inventory before any `Intent` mutation. There remains no inherited adoption,
-  restart reaper, or inherited namespace/kernel cleanup executor. Only an all-`CleanupConfirmed`
-  set can consume the bounded removal/fresh-absence proof described above; every other non-empty
-  classification continues to block startup. Its production refusal observer waits
+  stable manager inventory before any `Intent` mutation. There remains no general inherited
+  adoption or broad inherited namespace/kernel cleanup executor. Only an all-`CleanupConfirmed`
+  set or the exact single-path `ExactPresent + MayOwnCustody` reaper case above can proceed; every
+  other non-empty classification continues to block startup. Its production refusal observer waits
   for exact inherited process-pidfd `POLLIN` under one hard deadline, permits `POLLHUP` only with
   `POLLIN`, remeasures the exact descriptor binding before and after each wait, and remeasures the
   complete pending set once more before constructing evidence. Process/thread-group interpretation
@@ -763,9 +811,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   revalidate that exact startup guard across the wait or freshly rejoin journal and manager
   evidence. This proves one exact worker thread group's exit, not descendant exit, cgroup
   emptiness, namespace destruction, kernel cleanup, manager removal or journal settlement. The
-  durable settlement substrate therefore does not make crash cleanup
+  durable settlement substrate plus the exact singleton reaper still does not make crash cleanup
   production-complete: AV1-10 remains Open, the fixed alpha score remains **11/100 (11%)**, and this
-  slice adds no scorecard, datapath or acceptance points.
+  slice adds no scorecard, datapath or acceptance points without live forced-crash evidence.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
@@ -903,8 +951,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   checkbox remain unchanged.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
-  and doctor contract now require exactly the reviewed seven-capability bootstrap set
-  (`CAP_KILL`, `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SETGID`, `CAP_SETPCAP`, `CAP_SETUID`,
+  and doctor contract now require exactly the reviewed eight-capability bootstrap set
+  (`CAP_KILL`, `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_SETGID`, `CAP_SETPCAP`, `CAP_SETUID`,
   `CAP_SYS_ADMIN`) and
   reject `CAP_SYS_PTRACE`; they also require `LimitCORE=0`, `NotifyAccess=main`, a 128-entry
   descriptor store (two descriptors for each of at most 64 workers), preserve that store while the
@@ -938,11 +986,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   exact-empty snapshots precede one-shot exact-target manager-absence evidence for the existing
   actor sweep. Full-set validation precedes both the first removal send and the first per-record
   CAS; a crash after partial exact progress leaves retryable present+no-store or
-  `Absent + CleanupConfirmed` state. Every `MayOwn`, wrong-phase, changed, missing, duplicate,
-  overlapping, deadline or observation-failure case still refuses startup before cleanup token or
-  socket publication. Dropping a refused set closes the exact process-local source
+  `Absent + CleanupConfirmed` state. The exact single-path, exact-present `MayOwnCustody` shape may
+  take the fixed attested reaper path described above; every other `MayOwn`, wrong-phase, changed,
+  missing, duplicate, overlapping, deadline or observation-failure case still refuses startup
+  before cleanup token or socket publication. Dropping a refused set closes the exact process-local source
   slots; source ownership and the read-only exact-set join are no longer positive-adoption
-  blockers, but a custody-capable production restart cleanup/reaper remains absent. The
+  blockers, but general custody-capable restart cleanup remains absent. The
   production durable-Prepare publisher sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
@@ -987,8 +1036,24 @@ single clean-build A01--A15 run; the score is not a release claim.
   and the disposable production-server gate covers normal exact Destroy, worker reap/purge and
   namespace/link release. Forced helper crash/termination cleanup and restart recovery remain
   without live evidence.
-- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v4 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. Acquire duplicates the already attested worker namespace pin affinely before this request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. The production functional backend now accepts only a complete live committed Client/Exit singleton lineage with exact role, path and worker-derived overlay address, invokes the existing unconnected QUIC UDP factory in the authenticated namespace child, and transfers one validated descriptor. Once backend validation and engine COMMIT succeed, each outer request is recorded descriptorlessly in a bounded same-helper-runtime context-generation request-ID/digest ledger before response/FD delivery can be known. A same-ID/digest retry calls no backend and returns descriptorless `TRANSPORT_SOCKET_ALREADY_ACQUIRED`, including after ambiguous delivery; digest substitution conflicts, and only confirmed Destroy purges the generation. A fresh request ID can acquire again for the same context/path/role, so a future caller must authorize and bound every association. Acquire-ledger saturation does not restrict Destroy, and the worker registry reserves its final tombstone slot for terminal Destroy before admitting nonterminal operations. Disposable user/network-namespace unit tests cover Client/Exit success, MPTCP/Relay refusal, binding/role/path/address/phase mismatch, worker error, rejected-descriptor closure, cancellation and channel ambiguity. Client/Exit MPTCP acquisition, an agent/runtime caller, live WireGuard-route adoption and datapath evidence remain absent; Relay application transport acquisition remains intentionally forbidden, so this row and the alpha score remain open.
-- [ ] Native MPQUIC API v6 preflights an exact role/process lifetime, targets every later operation to that instance, requires nonce plus canonical-request digest response correlation, and consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero otherwise. Start requests bind reservation/finalize IDs derived from the signed scope, bearer commitment, certificate digest, and both process instances; Rust and C share exact request/descriptor hash vectors and independently reject bearer/commitment mismatch. Native samples BOOTTIME before REALTIME, maintains a monotone wall floor, converts accepted wall expiry once to a BOOTTIME deadline, and fails closed on clock failure, regression, or overflow. A fixed 128-record process-local ledger has no live eviction, rejects exact pair replay and half-key scope reuse, permits only byte-identical live client retries, and tombstones stop, expiry, and valid exit attempts before the dormant backend boundary. Rust and two independent C boundaries enforce server `10.76.0.1/32`, client `10.76.0.2/32` through `10.76.0.254/32`, optional client `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`, and MTU 1280--1420. The native client deep-copies one assignment, permits only an identical active duplicate, exposes it only after `ESTABLISHED`, enforces outbound source and reverse-destination ownership, and wipes it on fatal transport failure. Focused tests cover these clock/replay/capacity and assignment-state rules, exact current-path projection with retired closed records only, typed terminal reverse-queue overflow, distinct framed exit nonces, stale-instance without hidden retry, response/assignment shape, socket tuple/flag checks, binding and ownership behavior, digest-failure FD cleanup, stream fragmentation with exactly-one ancillary transfer, incomplete/late/extra descriptors, timeout cleanup, and the dormant exit runtime closing its listener before `exit_listener_orchestration_unavailable`. The clean full-graph API-v6 ASan+UBSan gate passes. Peer-control v4 retains separate zeroizing, non-cloneable one-shot client/exit authorizations. Isolated native foundations now model one bounded, externally serialized exit session and validate the leaf identity in a bounded PEM certificate chain against its private key, a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics, trusted interval, canonical complete-leaf DER digest, and DER SPKI digest. They have no runtime caller and do not perform trust-chain validation. Native still does not verify the signed bundle, cache general request nonces, or retain ledger state across restart; production also lacks a preverified affine handoff through the agent, separate role service identities/sockets, exact helper-derived millisecond-to-trusted-interval conversion, a fixed independent Rust/C DER-SPKI vector, parser fuzzing, server-side pool allocation/uniqueness/lifetime binding plus exact-namespace assigned-address proof, disposable-topology evidence, trusted helper provenance, and the actual exit backend, so route setup and the launcher remain blocked.
+- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v4 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. Acquire duplicates the already attested worker namespace pin affinely before this request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. The production functional backend now accepts only a complete live committed Client/Exit singleton lineage with exact role, path and worker-derived overlay address. It invokes unconnected QUIC UDP for either role, connected `IPPROTO_MPTCP` only for Client, or an `IPPROTO_MPTCP` listener only for Exit in the authenticated namespace child, and transfers one validated descriptor without ordinary-TCP fallback. Once backend validation and engine COMMIT succeed, each outer request is recorded descriptorlessly in a bounded same-helper-runtime context-generation request-ID/digest ledger before response/FD delivery can be known. A same-ID/digest retry calls no backend and returns descriptorless `TRANSPORT_SOCKET_ALREADY_ACQUIRED`, including after ambiguous delivery; digest substitution conflicts, and only confirmed Destroy purges the generation. A fresh request ID can acquire again for the same context/path/role, so a future caller must authorize and bound every association. Acquire-ledger saturation does not restrict Destroy, and the worker registry reserves its final tombstone slot for terminal Destroy before admitting nonterminal operations. Unit tests cover exact Client/Exit lease projection, binding/role/path/address/phase mismatch, Relay refusal, worker error, rejected-descriptor closure, cancellation and channel ambiguity. A disposable user/network namespace smoke additionally creates both committed MPTCP descriptors and proves the returned Client FD negotiated MPTCP through the returned Exit listener with `MPTCP_INFO`. An agent/runtime caller, live WireGuard-route adoption, multiple proven subflows and datapath evidence remain absent; Relay application transport acquisition remains intentionally forbidden, so this row and the alpha score remain open.
+- Update (superseding the final status sentence above): the production helper now accepts bounded multi-path Client/Exit lease batches, and the agent has a typed consumer for an acquired MPTCP Client FD. Exact committed Client endpoints reach the kernel path manager in the owning worker namespace. A separate disposable two-relay namespace smoke proves two genuine subflows both carry data. The remaining gap is composing that consumer, helper-owned WireGuard links and Exit address signalling in one acceptance route; therefore this row remains open.
+- [ ] Native MPQUIC API v6 preflights an exact role/process lifetime, targets every later operation to that instance, requires nonce plus canonical-request digest response correlation, and consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero otherwise. Start requests bind reservation/finalize IDs derived from the signed scope, bearer commitment, certificate digest, and both process instances; Rust and C share exact request/descriptor hash vectors and independently reject bearer/commitment mismatch. Native samples BOOTTIME before REALTIME, maintains a monotone wall floor, converts accepted wall expiry once to a BOOTTIME deadline, and fails closed on clock failure, regression, or overflow. A fixed 128-record process-local ledger has no live eviction, rejects exact pair replay and half-key scope reuse, permits only byte-identical live client retries, and tombstones stop, expiry, and every admitted Exit authorization, including backend failure. Rust and two independent C boundaries enforce server `10.76.0.1/32`, client `10.76.0.2/32` through `10.76.0.254/32`, optional client `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`, and MTU 1280--1420. The native client deep-copies one assignment, permits only an identical active duplicate, exposes it only after `ESTABLISHED`, enforces outbound source and reverse-destination ownership, and wipes it on fatal transport failure. The Exit runtime now retains exact distinct path/listener/client tuples and caller-owned route FDs, remains pending below two paths, starts the pinned mqvpn server only when the requested multipath set is present, feeds xquic each packet's exact local tuple, and sends each native path through the matching retained FD without single-path fallback. Rust returns a non-cloneable verified Exit endpoint and binds it to the exact helper descriptor, Relay grant hash, route, path, overlay tuple, and Exit process instance before admitting a committed client MPQUIC path. Focused C tests cover a two-listener start/send/stop lifecycle; the patched pinned mqvpn library and complete native daemon compile. The row remains open: no disposable Relay/WireGuard topology yet proves two data-carrying native paths or browser QUIC/MASQUE traffic. Native still does not verify the signed bundle, cache general request nonces, or retain ledger state across restart; production also lacks the live provider-side authority call, separate role service identities/sockets, exact helper-derived millisecond-to-trusted-interval conversion, a fixed independent Rust/C DER-SPKI vector, parser fuzzing, server-side pool allocation/uniqueness/lifetime binding plus exact-namespace assigned-address proof, disposable-topology evidence, and trusted helper provenance.
+- Update: exact MPQUIC activation framing now binds the signed Exit reservation, every committed
+  Relay reservation/confirmation/receipt, the route context, both native process incarnations and the
+  complete ordered path set. A preflighted production Client consumes one helper-owned QUIC UDP FD
+  for each committed WireGuard Relay path and passes all of them to the pinned native multipath
+  process. Its browser-datagram API rechecks the exact signed policy destination on outbound and
+  reverse inner UDP packets; it has no direct-Exit address input or ordinary-QUIC fallback. The
+  Client coordinator now HPKE-seals its retained 43-byte bearer directly to a route-owner-generated
+  RFC 9180 X25519/HKDF-SHA256/ChaCha20-Poly1305 recipient key. The Client-session-signed opaque
+  delivery binds the exact reservation, route, finalization, Exit identity, TLS certificate/SPKI,
+  both native instances, expiry and nonce. The Exit verifies that signature and replay state,
+  correlates every field with its finalized reservation, decrypts and checks the public commitment,
+  and atomically consumes the TLS/native owner. The MPQUIC activation frame carries the signed
+  ciphertext; a Relay never receives the bearer plaintext. Production responder wiring still must
+  pass that frame into the provider-side native `StartExitSession`, and no disposable two-path
+  browser traffic has yet been proved, so this row and the alpha score remain open.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
 
 ## Identity and signed protocol
@@ -1079,7 +1144,48 @@ single clean-build A01--A15 run; the score is not a release claim.
   endpoint, connection, dispatch capability or other reusable authority. The production discovery
   owner consumes these values through the exact-set `FreshEvidenceBatch` join and returns only an
   opaque `PreparedPreselectionEvidence` handoff. Its false native-address-usability result grants no
-  route readiness, and no downstream route-orchestrator consumes the handoff.
+  route readiness. Empty local `Connect` now derives one explicit operator-configured address
+  family and minimum/local/conservative capacity profile, chooses the first enabled transport
+  deterministically (UDP, then TCP, then browser QUIC), and invokes that actor-owned preselection
+  boundary. UDP requires exactly one native path; TCP MPTCP requires the configured selection
+  minimum; browser Multipath QUIC requires the greater of that minimum and its own configured
+  minimum, with both multipath cases rejecting fewer than two paths or an enabled degraded
+  fallback. A private affine native continuation consumes the handoff, mints its independent
+  bounded candidate owner, wraps each required signed native Permit request in candidate order with
+  the exact selected control-Relay and Exit lineage, and dispatches it through
+  `request_exit_forward` only to that control Relay. Exact wrapper/correlation/operation/Exit checks
+  and protocol verification consume each granted Permit. The affine continuation then sends each
+  exact endpoint-free request/Permit pair directly to only its selected data Relay over typed
+  `NativeProbeReady` framing, verifies the wrapper identity, operation, status and signed
+  `NativeProbeRelayReady`, and retains the remaining candidates and shared replay state with that
+  readiness. The next typed seam binds a same-connection
+  helper runtime and one exact prepared Client lease into the native endpoint commitment and
+  retains exact Destroy authority. It signs `NativeProbeStart` while the lease is still prepared,
+  sends it only to that data Relay over the distinct `NativeProbeAuthorize` operation, and permits
+  Activate only after verifying the returned standard nested Exit/Relay-signed
+  `RelayReservation` against the exact Start hash, selected actors, route context, policy, prepared
+  Client key, Relay endpoint and helper hard expiry. The production Exit service independently
+  verifies a bounded canonical five-signature Permit-to-Start chain, current Exit boot and
+  authenticated data-Relay before atomically reserving probe capacity and signing the standard
+  `RelayAuthorization`; the production Relay service independently verifies it, exact-matches its
+  already-prepared endpoint pair, reserves capacity, signs the nested `RelayReservation`, and
+  retains the affine Start owner. A real service-composition smoke verifies that complete signed
+  chain and byte-identical Exit retry. The later affine states build exact Activate/Commit requests,
+  dispatch that already-authorized Start only after exact helper activation, and verify the
+  correlated `NativeProbeRelayResult` together with non-zero helper commit facts.
+  Production Connect repeats that exact Prepare/Authorize/Activate/Start/Commit/Result chain until
+  the required count is proven, retains every proof and committed helper context affinely, and
+  fails closed with agent-scoped cleanup if any later candidate or path phase fails; it never
+  degrades to the first completed path. Current native grants bind each candidate to its unique
+  `probe_id` route context and `path_id = 1`, so this is necessarily one helper lifecycle per path;
+  one shared multi-lease helper context remains blocked on a corresponding signed
+  Exit/Relay-grant generalization. Connect still returns `Unavailable` after this proof batch
+  because later route admission is absent. The discovery actor still lacks the production
+  Relay/Exit Ready producer and later Start/Result execution. Its Relay-to-Exit Authorize
+  responder and helper-side exact native-Start activation verifier are present, but remain
+  unreachable until Ready retains the prepared Relay/Exit endpoints and affine phase owner. The
+  client dataplane challenge injector is also absent, so no native
+  result, route admission or usable dataplane proof exists yet.
   The swarm pump rejects a still-current client-hop request unless it targets the local relay/control
   and the authenticated remote differs from the local peer and actor; requester-anonymous A0 has no
   client identity to bind. Upstream alone binds the authenticated relay exactly to
@@ -1172,30 +1278,30 @@ single clean-build A01--A15 run; the score is not a release claim.
   upstream seams may consume its affine witness, and only the affine Relay wrapper may consume an
   upstream binding into the signed endpoint-free prefix. The actor invokes the exact join and Fresh
   mint, but the existing hard filter rejects their output until an actual helper-backed native-path
-  sampler proves dataplane address usability. A private callerless native attempt owner can consume
-  the exact Prepared handoff through its test seam while the five-second receipts remain live and
-  mint a separate at-most-30-second endpoint-separated client/wire/verifier/data-Relay affine
+  sampler proves dataplane address usability. A private production-owned native attempt owner now
+  consumes the exact Prepared handoff from local Connect while the five-second receipts remain live
+  and mints a separate at-most-five-minute endpoint-separated client/wire/verifier/data-Relay affine
   contract. It does not extend the receipts or claim usability. A separate module-private,
   non-Clone Exit wire-phase owner can retain a Permit through one production-composed server-side
   caller. That caller validates the full forwarding scope, current exact control capability and locally
   served Exit advertisement, binds the inbound control Relay's exact libp2p connection, and
   consumes that token with the response channel. The bounded Exit ledger stores the affine owner
   before handoff and returns byte-identical output for an exact same-actor retry without re-signing.
-  The normal runtime cannot currently reach that success path because the local publisher
-  deliberately withdraws for an Exit role; only the test fixture injects the required signed Exit
-  advertisement. No usable Exit capability is published.
+  Relay and Exit runtimes now publish their exact signed local service advertisement and bounded
+  provider indexes from explicit operator capacity, origin-hint and active-policy configuration.
+  This opens the server's local-advertisement gate, but the self-declared capability remains
+  untrusted preselection input and no production client Permit dispatcher reaches it end to end.
   ExitReady and ExitResult remain test-only; their authenticated data-Relay values still lack a
   production connection-owned source. Its typed
   projection from the `Copy` `ExitEndpointLease` proves no helper-resource custody,
   same-connection provenance or cleanup authority; its exact helper/datapath observation
   deliberately has no constructor. A
-  production client Permit dispatcher, Ready/Result caller, challenge delivery, the actual sampler,
-  helper/datapath authority or evidence, measured capacity/readiness, usability promotion and route
-  admission are absent. No
+  production Ready/Result caller, challenge delivery, the actual sampler, helper/datapath authority
+  or evidence, measured capacity/readiness, usability promotion and route admission are absent. No
   checkbox is closed. Production still publishes no usable relay/exit capability, route
   finalization still fails closed with
-  `ProbeEvidenceUnavailable`, and no downstream route orchestrator or disposable live-network proof
-  for that pipeline exists. This closes no scorecard row; the fixed alpha score remains
+  `ProbeEvidenceUnavailable`, and no disposable live-network proof for the post-Permit pipeline
+  exists. This closes no scorecard row; the fixed alpha score remains
   **11/100 (11%)**.
 - [ ] Bootstrap from peerstore, mDNS, multiple independent built-ins, peerlinks, and signed bootstrap files works.
 - [ ] No bootstrap node or DHT record becomes a unique authority or central node catalogue.
@@ -1203,9 +1309,10 @@ single clean-build A01--A15 run; the score is not a release claim.
 
 ## Advertisements, peerstore, and reputation
 
-- [ ] Signed advertisement schema contains the required bounded fields, but production currently
-  signs only client advertisements and withdraws provider state whenever relay or exit is enabled;
-  no usable service capability is published.
+- [ ] Signed advertisement schema contains the required bounded fields, and production Relay/Exit
+  runtimes now sign, serve and index short-lived role advertisements with current ledger capacity
+  plus explicit operator/ASN/prefix/policy claims. A live multi-node ingest proof and Fresh
+  datapath evidence are still absent, so these untrusted claims do not make a route usable.
 - [x] Advertisement TTL, monotonic sequence, signature, consistency, v4 protocol, active-policy,
   current-authority, and replay checks fail closed at one synchronous commit boundary.
 - [ ] SQLite has bounded schema/APIs for advertisements, endpoints, reachability, path measurements,
@@ -1221,14 +1328,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   advertisement payload hashes. The prefix, hashes and ceiling grant no measured capacity,
   reservation or dispatch authority. Explicit validity is bounded by freshness, attempt, policy,
   advertisement and actor capability expiry. The discovery actor invokes the bridge into an opaque
-  Prepared handoff. Its private callerless native owner can consume it only through a test seam and
-  mint endpoint-free cryptographic attempt states; no production client caller, helper-backed
-  sampler or helper/datapath evidence consumes or completes them. The mint
+  Prepared handoff. Its private native owner now consumes it from production Connect and mints
+  endpoint-free cryptographic attempt states plus the first control-Relay-forwarded Permit request;
+  no helper-backed sampler or helper/datapath evidence completes them. The mint
   deliberately sets dataplane address usability false, so the actor path remains at zero usable
   route candidates instead of substituting control-plane or stored evidence. A module-private,
   non-Clone Exit wire-phase owner can retain one Permit through the connection-bound,
-  production-composed server responder, but the normal runtime cannot pass its deliberately absent
-  local Exit-advertisement gate. Its `ExitEndpointLease` projection is not helper-resource custody
+  production-composed server responder. The local Exit-advertisement gate is now supplied by the
+  normal service publisher, but no production client Permit dispatcher reaches it. Its
+  `ExitEndpointLease` projection is not helper-resource custody
   or cleanup authority and its post-baseline challenge observation has no constructor.
 - [ ] A bounded 70/20/10 exploration primitive and a peer-only prospective relay selector are
   tested. The latter canonically handles at most 200 candidates, returns at most eight, and applies
@@ -1269,14 +1377,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   bind the projected advertisement, direct/forwarded capabilities, Fresh/authenticated/verified
   records and later capability re-resolution. The production discovery owner now exact-set joins
   A1a/A1c proofs, mints the existing private Fresh batch and exposes only an opaque Prepared
-  handoff. A private callerless native attempt owner consumes it in tests and retains affine
-  endpoint-separated contracts. A module-private, non-Clone Exit wire-phase owner can retain one
+  handoff. A private production-owned native attempt owner consumes it from Connect and retains
+  affine endpoint-separated contracts. A module-private, non-Clone Exit wire-phase owner can retain one
   Permit from a connection-bound, production-composed server caller in a bounded idempotency ledger,
-  but the current local publisher serves no Exit advertisement, so normal runtime issuance remains
-  fail-closed. Its
+  and the current local publisher now serves the exact Exit advertisement, but normal runtime
+  issuance remains fail-closed because no production client Permit dispatcher consumes the affine
+  client attempt. Its
   typed `ExitEndpointLease` projection provides no helper-resource custody or cleanup authority.
-  There is no production client Permit dispatcher, Ready/Result caller, same-helper prepared-lease
-  provider, post-baseline
+  There is no production Ready/Result caller, same-helper prepared-lease provider, post-baseline
   challenge evidence producer, helper provisioning, actual sampler, measured capacity/readiness,
   datapath evidence or route admission. Its output remains deliberately unusable for selection.
 - [ ] Relay selection measures and scores the complete client-relay-exit path. The second dormant
@@ -1338,6 +1446,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   and has no production caller. Its private phase-B split returns the original transaction on a
   measurement error, rejects cancellation/deadline expiry before retirement/Prepare, and builds one
   finalize frame only after Prepare while retaining the same session/IDs/deadline. The route-level
+  helper lifecycle now retains the exact Prepare plan/result and helper runtime in one non-cloneable
+  owner. Fresh Activate, Commit and retirement Destroy streams bind that runtime before mutation;
+  timeout/cancellation leave the owner in the existing bounded retirement/retry path. This closes
+  only same-process phase correlation, not restart adoption, Ready/Result or a usable datapath. The
+  route-level
   probe associated type is no longer Clone-bound, but public reservation `Verified*` values are not
   claimed to be affine and `VerifiedRelayProbe` remains cloneable for API compatibility. C2a/C2b
   admit only explicit ordered prospective IDs `1..N` (1-8 and at least the policy minimum), retain
@@ -1444,9 +1557,9 @@ single clean-build A01--A15 run; the score is not a release claim.
 - [ ] Versioned `OPEN_TCP` framing is signed, bounded, and validated at the exit.
 - [ ] Client-to-exit proxy framing is protected by TLS 1.3 while preserving the application's own byte stream/TLS.
 - [ ] Proxy sockets explicitly use `IPPROTO_MPTCP`; ordinary TCP fallback is impossible by default.
-- [ ] `MptcpPathManagerBackend` and Debian 13 kernel path-manager backend create only selected path subflows.
+- [ ] `MptcpPathManagerBackend` and the Debian 13 kernel backend now add/remove only helper-derived endpoints for exact live committed Client leases inside the owning worker namespace. The agent can adopt a helper-returned genuine MPTCP FD and request at least two distinct selected paths. A disposable four-namespace kernel smoke proves two non-fallback subflows both carry application-scale data over different relay interfaces. The final production WireGuard-route composition and matching Exit endpoint signalling remain open, so this row is not yet complete.
 - [ ] Exit validates policy, resolves/pins the destination, validates visible TLS SNI, connects, and streams without message-sized buffering.
-- [ ] At least two MPTCP subflows carry real data over different relay paths.
+- [ ] At least two MPTCP subflows carry real data over different relay paths. Proven over two disposable routed relay namespaces; the equivalent helper-owned WireGuard acceptance topology is still required before completion.
 - [ ] Bidirectional scheduling works, aggregation exceeds a single constrained path where topology permits, and relay failure preserves the application flow.
 
 ## General UDP through one relay
@@ -1465,7 +1578,9 @@ single clean-build A01--A15 run; the score is not a release claim.
 - [ ] At least two simultaneously active outer QUIC paths bind to distinct selected WireGuard interfaces/addresses and carry real data.
 - [ ] Paths can be added/removed dynamically; failover preserves the inner QUIC flow where protocol permits.
 - [ ] Per-path RTT, loss, congestion window, delivery rate, queued bytes, and bytes-in-flight are reported.
-- [ ] Swappable scheduler predicts delivery time from RTT, queue/rate, congestion, and loss and honours congestion control.
+- [x] The production native Multipath QUIC mode uses a dedicated swappable EDT callback over live
+  RTT, in-flight queue/rate, congestion window/headroom, sendability, and loss; its deterministic
+  native contract test proves both healthy paths can win while a later congested/lossy path loses.
 - [ ] No duplication, FEC, or false multipath reporting exists.
 - [ ] UDP/443 classification recognises valid QUIC Initial packets and policy-verifiable SNI.
 - [ ] Required-multipath mode defaults to at least two paths and fails closed without an unsafe downgrade.
@@ -1822,7 +1937,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   and `MUTATION_ROLLBACK_COMPLETE` is an
   internal containment checkpoint rather than cleanup or acceptance evidence.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
-- [ ] Machine-readable acceptance report is emitted.
+- [x] Machine-readable acceptance report is emitted.
+  `tests/integration/run.sh --execute --suite all` now builds unchanged product binaries and enters
+  anonymous user, mount, PID, and network namespaces before making any network change. It creates
+  a Client, two non-adjacent Relays, an Exit, and a destination topology, launches four real
+  `volparossa-agent` processes plus TCP and UDP destination endpoints, and uses a short-lived empty
+  three-signature development policy so policy provisioning does not hide the next product gap.
+  The real client `connect` request currently fails closed at `DATAPLANE_UNAVAILABLE`; this is the
+  first observed product blocker, and no datapath case is claimed. Normal teardown stops every
+  process and reports zero remaining owned namespace objects. On the exercised Debian 13 host,
+  links, addresses, routes, rules, DNS and IPv4 forwarding matched before and after. Because that
+  host has no `nft` observer, full firewall-state evidence and therefore A15 remain explicitly
+  skipped. The fixed alpha score remains **11/100 (11%)**.
 
 ### Required acceptance tests
 

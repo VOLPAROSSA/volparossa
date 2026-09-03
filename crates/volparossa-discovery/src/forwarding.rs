@@ -14,8 +14,9 @@ use prost::Message;
 use thiserror::Error;
 use volparossa_protocol::{
     ControlMessageType, ExitReservation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
-    PROTOCOL_VERSION, RelayAuthorization, SignedEnvelope, decode_canonical, encode_canonical,
-    node_id_from_public_key,
+    MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE, NativeProbeAuthorizationChain,
+    NativeProbeEndpointBinding, PROTOCOL_VERSION, RelayAuthorization, SignedEnvelope,
+    decode_canonical, encode_canonical, node_id_from_public_key,
 };
 
 /// Client-to-control-relay exit-forwarding protocol.
@@ -51,6 +52,122 @@ pub enum ExitForwardOperation {
     FinalizeReservation = 4,
     ConfirmRelay = 5,
     NativeProbePermit = 6,
+    /// Data-Relay-to-Exit native Start chain requesting one standard Relay authorization.
+    NativeProbeAuthorize = 7,
+    /// Data-Relay-to-Exit readiness request carrying its exact helper-prepared Exit-facing endpoint.
+    NativeProbeReady = 8,
+    /// Data-Relay-to-Exit terminal Start chain requesting one helper-proven Exit result.
+    NativeProbeResult = 9,
+    /// Data-Relay-to-Exit activation after the Client committed the exact final UDP route.
+    UdpSessionStart = 10,
+    /// Data-Relay-to-Exit activation framing for one exact committed MPTCP path set.
+    MptcpSessionStart = 11,
+    /// Data-Relay-to-Exit activation framing for one exact committed MPQUIC path set.
+    MpquicSessionStart = 12,
+}
+
+/// Endpoint-bearing data-Relay request for the selected Exit's private readiness phase.
+///
+/// The authenticated upstream connection supplies the data-Relay identity. These bytes add no
+/// authority: the Exit independently verifies both signed Permit phases, the exact signed Relay
+/// advertisement and the endpoint binding before consuming its retained Permit owner.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeProbeReadyForwardRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    signed_permit_request: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    signed_permit: Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    relay_exit_endpoint: Option<NativeProbeEndpointBinding>,
+    #[prost(bytes = "vec", tag = "4")]
+    signed_relay_advertisement: Vec<u8>,
+}
+
+impl NativeProbeReadyForwardRequest {
+    /// Construct one canonical readiness request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong signed phase types or malformed endpoint material.
+    pub fn new(
+        signed_permit_request: Vec<u8>,
+        signed_permit: Vec<u8>,
+        relay_exit_endpoint: NativeProbeEndpointBinding,
+        signed_relay_advertisement: Vec<u8>,
+    ) -> Result<Self, ForwardingRpcError> {
+        let value = Self {
+            signed_permit_request,
+            signed_permit,
+            relay_exit_endpoint: Some(relay_exit_endpoint),
+            signed_relay_advertisement,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Validate bounded transport framing without claiming cryptographic authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong phase types or incomplete endpoint material.
+    pub fn validate(&self) -> Result<(), ForwardingRpcError> {
+        validate_signed_type(
+            &self.signed_permit_request,
+            ControlMessageType::NativeProbePermitRequest,
+        )?;
+        validate_signed_type(&self.signed_permit, ControlMessageType::NativeProbePermit)?;
+        validate_signed_type(
+            &self.signed_relay_advertisement,
+            ControlMessageType::NodeAdvertisement,
+        )?;
+        let endpoint = self
+            .relay_exit_endpoint
+            .as_ref()
+            .ok_or(ForwardingRpcError::InvalidFrame)?;
+        validate_fixed_nonzero::<NODE_ID_LENGTH>(&endpoint.helper_runtime_id)?;
+        validate_fixed_nonzero::<REQUEST_ID_LENGTH>(&endpoint.route_context_id)?;
+        validate_fixed_nonzero::<NODE_ID_LENGTH>(&endpoint.prepared_lease_commitment)?;
+        let wire = endpoint
+            .endpoint
+            .as_ref()
+            .ok_or(ForwardingRpcError::InvalidFrame)?;
+        validate_fixed_nonzero::<PUBLIC_KEY_LENGTH>(&wire.public_key)?;
+        if !(1..=u32::try_from(MAX_RELAY_PATHS).unwrap_or(u32::MAX)).contains(&endpoint.path_id)
+            || !matches!(wire.underlay_ip.len(), 4 | 16)
+            || wire.underlay_ip.iter().all(|byte| *byte == 0)
+            || u16::try_from(wire.listen_port)
+                .ok()
+                .is_none_or(|port| port == 0)
+        {
+            return Err(ForwardingRpcError::InvalidFrame);
+        }
+        Ok(())
+    }
+
+    /// Borrow the exact client-session-signed Permit request.
+    #[must_use]
+    pub fn signed_permit_request(&self) -> &[u8] {
+        &self.signed_permit_request
+    }
+
+    /// Borrow the exact Exit-signed Permit.
+    #[must_use]
+    pub fn signed_permit(&self) -> &[u8] {
+        &self.signed_permit
+    }
+
+    /// Borrow the data Relay's helper-prepared Exit-facing endpoint binding when present.
+    #[must_use]
+    pub const fn relay_exit_endpoint(&self) -> Option<&NativeProbeEndpointBinding> {
+        self.relay_exit_endpoint.as_ref()
+    }
+
+    /// Borrow the data Relay's exact signed advertisement committed by the Permit scope.
+    #[must_use]
+    pub fn signed_relay_advertisement(&self) -> &[u8] {
+        &self.signed_relay_advertisement
+    }
 }
 
 /// Detail-free forwarding result.
@@ -181,6 +298,51 @@ impl ExitForwardRequest {
                 }
                 validate_signed_type(&self.canonical_request, request_type(operation)?)?;
             }
+            ExitForwardOperation::NativeProbeAuthorize
+            | ExitForwardOperation::NativeProbeResult => {
+                validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
+                if self.exit_node_id == self.control_relay_node_id {
+                    return Err(ForwardingRpcError::InvalidFrame);
+                }
+                validate_native_probe_authorization_chain(&self.canonical_request)?;
+            }
+            ExitForwardOperation::NativeProbeReady => {
+                validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
+                if self.exit_node_id == self.control_relay_node_id {
+                    return Err(ForwardingRpcError::InvalidFrame);
+                }
+                decode_canonical::<NativeProbeReadyForwardRequest>(
+                    &self.canonical_request,
+                    frame_limit(),
+                )
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?
+                .validate()?;
+            }
+            ExitForwardOperation::UdpSessionStart => {
+                decode_canonical::<crate::UdpSessionStartRequest>(
+                    &self.canonical_request,
+                    frame_limit(),
+                )
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+            }
+            ExitForwardOperation::MptcpSessionStart => {
+                validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
+                if self.exit_node_id == self.control_relay_node_id {
+                    return Err(ForwardingRpcError::InvalidFrame);
+                }
+                decode_canonical::<crate::MptcpSessionStartRequest>(
+                    &self.canonical_request,
+                    frame_limit(),
+                )
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+            }
+            ExitForwardOperation::MpquicSessionStart => {
+                validate_mpquic_session_request(self)?;
+            }
             ExitForwardOperation::Unspecified => {
                 return Err(ForwardingRpcError::InvalidOperation(self.operation));
             }
@@ -249,6 +411,17 @@ impl ExitForwardRequest {
     pub fn canonical_request(&self) -> &[u8] {
         &self.canonical_request
     }
+}
+
+fn validate_mpquic_session_request(request: &ExitForwardRequest) -> Result<(), ForwardingRpcError> {
+    validate_fixed_nonzero::<NODE_ID_LENGTH>(&request.exit_node_id)?;
+    if request.exit_node_id == request.control_relay_node_id {
+        return Err(ForwardingRpcError::InvalidFrame);
+    }
+    decode_canonical::<crate::MpquicSessionStartRequest>(&request.canonical_request, frame_limit())
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)
 }
 
 /// Canonical response returned over the client-facing forwarding hop.
@@ -762,6 +935,18 @@ fn validate_granted_responses(
         ExitForwardOperation::NativeProbePermit => {
             validate_exact_types(responses, &[ControlMessageType::NativeProbePermit])
         }
+        ExitForwardOperation::NativeProbeAuthorize => {
+            validate_exact_types(responses, &[ControlMessageType::RelayAuthorization])
+        }
+        ExitForwardOperation::NativeProbeReady => {
+            validate_exact_types(responses, &[ControlMessageType::NativeProbeExitReady])
+        }
+        ExitForwardOperation::NativeProbeResult => {
+            validate_exact_types(responses, &[ControlMessageType::NativeProbeExitResult])
+        }
+        ExitForwardOperation::UdpSessionStart => validate_udp_session_signal(responses),
+        ExitForwardOperation::MptcpSessionStart => validate_mptcp_session_signal(responses),
+        ExitForwardOperation::MpquicSessionStart => validate_mpquic_session_signal(responses),
         ExitForwardOperation::Unspecified => Err(ForwardingRpcError::InvalidOperation(0)),
     }
 }
@@ -835,10 +1020,80 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
         }
         ExitForwardOperation::ConfirmRelay => Ok(ControlMessageType::ExitReservationConfirmation),
         ExitForwardOperation::NativeProbePermit => Ok(ControlMessageType::NativeProbePermitRequest),
-        ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => {
+        ExitForwardOperation::FetchExitAdvertisement
+        | ExitForwardOperation::NativeProbeAuthorize
+        | ExitForwardOperation::NativeProbeReady
+        | ExitForwardOperation::NativeProbeResult
+        | ExitForwardOperation::UdpSessionStart
+        | ExitForwardOperation::MptcpSessionStart
+        | ExitForwardOperation::MpquicSessionStart
+        | ExitForwardOperation::Unspecified => {
             Err(ForwardingRpcError::InvalidOperation(operation as i32))
         }
     }
+}
+
+fn validate_udp_session_signal(responses: &[Vec<u8>]) -> Result<(), ForwardingRpcError> {
+    let [encoded] = responses else {
+        return Err(ForwardingRpcError::InvalidFrame);
+    };
+    decode_canonical::<crate::UdpExitSessionSignal>(encoded, frame_limit())
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)
+}
+
+fn validate_mptcp_session_signal(responses: &[Vec<u8>]) -> Result<(), ForwardingRpcError> {
+    let [encoded] = responses else {
+        return Err(ForwardingRpcError::InvalidFrame);
+    };
+    decode_canonical::<crate::ExitMptcpSessionSignal>(encoded, frame_limit())
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)
+}
+
+fn validate_mpquic_session_signal(responses: &[Vec<u8>]) -> Result<(), ForwardingRpcError> {
+    let [encoded] = responses else {
+        return Err(ForwardingRpcError::InvalidFrame);
+    };
+    decode_canonical::<crate::ExitMpquicSessionSignal>(encoded, frame_limit())
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)
+}
+
+fn validate_native_probe_authorization_chain(encoded: &[u8]) -> Result<(), ForwardingRpcError> {
+    let chain = decode_canonical::<NativeProbeAuthorizationChain>(
+        encoded,
+        MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+    )
+    .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+    for (signed, expected) in [
+        (
+            chain.signed_permit_request.as_slice(),
+            ControlMessageType::NativeProbePermitRequest,
+        ),
+        (
+            chain.signed_permit.as_slice(),
+            ControlMessageType::NativeProbePermit,
+        ),
+        (
+            chain.signed_exit_ready.as_slice(),
+            ControlMessageType::NativeProbeExitReady,
+        ),
+        (
+            chain.signed_relay_ready.as_slice(),
+            ControlMessageType::NativeProbeRelayReady,
+        ),
+        (
+            chain.signed_start.as_slice(),
+            ControlMessageType::NativeProbeStart,
+        ),
+    ] {
+        validate_signed_type(signed, expected)?;
+    }
+    Ok(())
 }
 
 fn validate_version(version: u32) -> Result<(), ForwardingRpcError> {
@@ -881,6 +1136,7 @@ fn invalid_data(error: impl std::fmt::Display) -> io::Error {
 mod tests {
     use futures::io::Cursor;
     use libp2p::request_response::Codec as _;
+    use volparossa_protocol::WireguardEndpoint;
 
     use super::*;
 
@@ -1081,6 +1337,24 @@ mod tests {
             assert_eq!(request.validated_operation().expect("operation"), operation);
         }
 
+        let native_chain = native_authorization_chain();
+        let request = ExitForwardRequest::new(
+            vec![1; REQUEST_ID_LENGTH],
+            relay_node.clone(),
+            relay_peer.clone(),
+            relay_public.clone(),
+            exit_peer.clone(),
+            vec![2; NODE_ID_LENGTH],
+            DEADLINE,
+            ExitForwardOperation::NativeProbeAuthorize,
+            native_chain,
+        )
+        .expect("valid native authorization chain mapping");
+        assert_eq!(
+            request.validated_operation().expect("operation"),
+            ExitForwardOperation::NativeProbeAuthorize
+        );
+
         let wrong_type = ExitForwardRequest::new(
             vec![1; REQUEST_ID_LENGTH],
             relay_node,
@@ -1093,6 +1367,59 @@ mod tests {
             envelope(ControlMessageType::RelayProbePermitRequest, Vec::new()),
         );
         assert!(matches!(wrong_type, Err(ForwardingRpcError::InvalidFrame)));
+    }
+
+    #[test]
+    fn native_ready_request_is_bounded_typed_and_endpoint_complete() {
+        let (relay_node, relay_peer, relay_public) = relay_identity();
+        let exit_peer = identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+            .to_bytes();
+        let native_ready = NativeProbeReadyForwardRequest::new(
+            envelope(ControlMessageType::NativeProbePermitRequest, Vec::new()),
+            envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+            native_endpoint_binding(),
+            envelope(ControlMessageType::NodeAdvertisement, Vec::new()),
+        )
+        .expect("native ready frame");
+        let request = ExitForwardRequest::new(
+            vec![1; REQUEST_ID_LENGTH],
+            relay_node,
+            relay_peer,
+            relay_public,
+            exit_peer,
+            vec![2; NODE_ID_LENGTH],
+            DEADLINE,
+            ExitForwardOperation::NativeProbeReady,
+            encode_canonical(&native_ready, frame_limit()).expect("native ready request"),
+        )
+        .expect("valid native readiness mapping");
+        assert_eq!(
+            request.validated_operation().expect("operation"),
+            ExitForwardOperation::NativeProbeReady
+        );
+
+        let mut invalid_binding = native_endpoint_binding();
+        invalid_binding.prepared_lease_commitment.fill(0);
+        assert!(matches!(
+            NativeProbeReadyForwardRequest::new(
+                envelope(ControlMessageType::NativeProbePermitRequest, Vec::new()),
+                envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+                invalid_binding,
+                envelope(ControlMessageType::NodeAdvertisement, Vec::new()),
+            ),
+            Err(ForwardingRpcError::InvalidFrame)
+        ));
+        assert!(matches!(
+            NativeProbeReadyForwardRequest::new(
+                envelope(ControlMessageType::NativeProbePermitRequest, Vec::new()),
+                envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+                native_endpoint_binding(),
+                envelope(ControlMessageType::NativeProbeExitReady, Vec::new()),
+            ),
+            Err(ForwardingRpcError::InvalidFrame)
+        ));
     }
 
     #[test]
@@ -1253,6 +1580,67 @@ mod tests {
                 ),
                 Err(ForwardingRpcError::InvalidFrame)
             ));
+        }
+
+        let native_authorization = ExitForwardResponse::granted(
+            vec![1; REQUEST_ID_LENGTH],
+            ExitForwardOperation::NativeProbeAuthorize,
+            vec![2; NODE_ID_LENGTH],
+            native_exit_peer.clone(),
+            vec![envelope(ControlMessageType::RelayAuthorization, Vec::new())],
+        );
+        assert!(native_authorization.is_ok());
+        let native_ready = ExitForwardResponse::granted(
+            vec![1; REQUEST_ID_LENGTH],
+            ExitForwardOperation::NativeProbeReady,
+            vec![2; NODE_ID_LENGTH],
+            native_exit_peer.clone(),
+            vec![envelope(
+                ControlMessageType::NativeProbeExitReady,
+                Vec::new(),
+            )],
+        );
+        assert!(native_ready.is_ok());
+        assert!(matches!(
+            ExitForwardResponse::granted(
+                vec![1; REQUEST_ID_LENGTH],
+                ExitForwardOperation::NativeProbeAuthorize,
+                vec![2; NODE_ID_LENGTH],
+                native_exit_peer,
+                vec![envelope(ControlMessageType::NativeProbePermit, Vec::new())],
+            ),
+            Err(ForwardingRpcError::InvalidFrame)
+        ));
+    }
+
+    fn native_authorization_chain() -> Vec<u8> {
+        encode_canonical(
+            &NativeProbeAuthorizationChain {
+                signed_permit_request: envelope(
+                    ControlMessageType::NativeProbePermitRequest,
+                    Vec::new(),
+                ),
+                signed_permit: envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+                signed_exit_ready: envelope(ControlMessageType::NativeProbeExitReady, Vec::new()),
+                signed_relay_ready: envelope(ControlMessageType::NativeProbeRelayReady, Vec::new()),
+                signed_start: envelope(ControlMessageType::NativeProbeStart, Vec::new()),
+            },
+            MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+        )
+        .expect("native authorization chain")
+    }
+
+    fn native_endpoint_binding() -> NativeProbeEndpointBinding {
+        NativeProbeEndpointBinding {
+            helper_runtime_id: vec![3; NODE_ID_LENGTH],
+            route_context_id: vec![4; REQUEST_ID_LENGTH],
+            endpoint: Some(WireguardEndpoint {
+                public_key: vec![5; PUBLIC_KEY_LENGTH],
+                underlay_ip: vec![8, 8, 8, 8],
+                listen_port: 40_001,
+            }),
+            prepared_lease_commitment: vec![6; NODE_ID_LENGTH],
+            path_id: 1,
         }
     }
 

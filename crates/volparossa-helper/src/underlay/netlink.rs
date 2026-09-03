@@ -13,12 +13,13 @@ use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_ROUTE};
 use nix::poll::PollFlags;
 use thiserror::Error;
 use volparossa_routing::is_public_routable_ip;
+use volparossa_routing::{LeasePlan, TraversalEndpointHint};
 
 use crate::deadline::{HardDeadline, wait_for_fd};
 
 use super::{
     UnderlayAddress, UnderlayCandidate, UnderlayFamily, UnderlayLink, UnderlayRoute,
-    UnderlaySelectionError, select_direct_underlay,
+    UnderlaySelectionError, select_direct_underlay, select_observed_punch_underlay,
 };
 
 const MAX_DATAGRAM_BYTES: usize = 64 * 1024;
@@ -422,8 +423,10 @@ impl NetlinkCollector {
 /// only `NETLINK_ROUTE`, and uses one deadline for all six dumps. Its result proves only local
 /// assignment plus an unambiguous main-table default route; it never infers NAT behaviour or global
 /// reachability.
-pub(crate) fn collect_consistent_direct_underlay(
+pub(crate) fn collect_consistent_underlay(
     deadline: HardDeadline,
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
 ) -> Result<UnderlayCandidate, UnderlayNetlinkError> {
     deadline.ensure_remaining()?;
     let mut collector = NetlinkCollector::connect(deadline)?;
@@ -431,7 +434,7 @@ pub(crate) fn collect_consistent_direct_underlay(
     let first = collector.collect_snapshot(deadline, &mut budget)?;
     let second = collector.collect_snapshot(deadline, &mut budget)?;
     deadline.ensure_remaining()?;
-    let selected = select_consistent(&first, &second)?;
+    let selected = select_consistent(&first, &second, leases, hints)?;
     let selected = deadline.complete(selected)?;
     Ok(selected)
 }
@@ -439,16 +442,31 @@ pub(crate) fn collect_consistent_direct_underlay(
 fn select_consistent(
     first: &UnderlaySnapshot,
     second: &UnderlaySnapshot,
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
 ) -> Result<UnderlayCandidate, UnderlayNetlinkError> {
     if first != second {
         return Err(UnderlayNetlinkError::Inconsistent);
     }
-    select_direct_underlay(&first.links, &first.addresses, &first.routes).map_err(|error| {
-        match error {
-            UnderlaySelectionError::NoCandidate => UnderlayNetlinkError::NoCandidate,
-            UnderlaySelectionError::Ambiguous => UnderlayNetlinkError::Ambiguous,
-        }
-    })
+    match select_direct_underlay(&first.links, &first.addresses, &first.routes) {
+        Ok(candidate) => Ok(candidate),
+        Err(UnderlaySelectionError::NoCandidate) => select_observed_punch_underlay(
+            &first.links,
+            &first.addresses,
+            &first.routes,
+            leases,
+            hints,
+        )
+        .map_err(map_selection_error),
+        Err(error) => Err(map_selection_error(error)),
+    }
+}
+
+const fn map_selection_error(error: UnderlaySelectionError) -> UnderlayNetlinkError {
+    match error {
+        UnderlaySelectionError::NoCandidate => UnderlayNetlinkError::NoCandidate,
+        UnderlaySelectionError::Ambiguous => UnderlayNetlinkError::Ambiguous,
+    }
 }
 
 fn send_bounded(
@@ -736,12 +754,18 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
     if payload[1] != 0 {
         return Ok(None);
     }
+    let effective_table = effective_route_table(payload[4], &attributes)?;
+    if effective_table != RT_TABLE_MAIN {
+        // Policy-routing tables do not select the physical underlay. In particular, active Client
+        // ingress owns an on-link default in its fixed private table; its routing flags and
+        // attributes must not be interpreted as ambiguity in the main-table default.
+        return Ok(None);
+    }
     if payload[2] != 0 || payload[3] != 0 || read_u32(payload, 8) != Some(0) {
         return Err(UnderlayNetlinkError::Ambiguous);
     }
     let mut destination = None;
     let mut output = None;
-    let mut table = None;
     let mut seen = 0_u64;
     for attribute in attributes {
         reject_unknown_flags(attribute.flags)?;
@@ -755,7 +779,11 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
         match attribute.kind {
             RTA_DST => destination = Some(parse_ip(attribute.value, family)?),
             RTA_OIF => output = Some(exact_u32(attribute.value)?),
-            RTA_TABLE => table = Some(exact_u32(attribute.value)?),
+            RTA_TABLE => {
+                if exact_u32(attribute.value)? != RT_TABLE_MAIN {
+                    return Err(UnderlayNetlinkError::Malformed);
+                }
+            }
             RTA_GATEWAY | RTA_PREFSRC => {
                 let _ = parse_ip(attribute.value, family)?;
             }
@@ -782,16 +810,6 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
     if ifindex == 0 {
         return Err(UnderlayNetlinkError::Ambiguous);
     }
-    let header_table = payload[4];
-    if header_table != RT_TABLE_UNSPEC
-        && table.is_some_and(|value| value != u32::from(header_table))
-    {
-        return Err(UnderlayNetlinkError::Malformed);
-    }
-    let effective_table = table.unwrap_or(u32::from(header_table));
-    if effective_table != RT_TABLE_MAIN {
-        return Ok(None);
-    }
     if payload[7] != RTN_UNICAST || payload[6] != RT_SCOPE_UNIVERSE {
         return Err(UnderlayNetlinkError::Ambiguous);
     }
@@ -803,6 +821,25 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
         main_table: true,
         universe_scope: true,
     }))
+}
+
+fn effective_route_table(
+    header_table: u8,
+    attributes: &[Attribute<'_>],
+) -> Result<u32, UnderlayNetlinkError> {
+    let mut table = None;
+    for attribute in attributes
+        .iter()
+        .filter(|attribute| attribute.kind == RTA_TABLE)
+    {
+        set_once(&mut table, exact_u32(attribute.value)?, attribute.flags)?;
+    }
+    if header_table != RT_TABLE_UNSPEC
+        && table.is_some_and(|value| value != u32::from(header_table))
+    {
+        return Err(UnderlayNetlinkError::Malformed);
+    }
+    Ok(table.unwrap_or(u32::from(header_table)))
 }
 
 #[derive(Clone, Copy)]
@@ -1379,6 +1416,46 @@ mod tests {
     }
 
     #[test]
+    fn client_ingress_non_main_onlink_default_is_ignored_before_main_route_validation() {
+        const CLIENT_INGRESS_ROUTE_TABLE: u8 = 101;
+        const RTNH_F_ONLINK: u32 = 4;
+
+        let frame = route(UnderlayFamily::Ipv4, &[]);
+        let payload_length = usize::try_from(read_u32(&frame, 0).expect("length")).expect("usize")
+            - NLMSG_HEADER_LEN;
+        let mut ingress = frame[NLMSG_HEADER_LEN..NLMSG_HEADER_LEN + payload_length].to_vec();
+        ingress[4] = CLIENT_INGRESS_ROUTE_TABLE;
+        ingress[8..12].copy_from_slice(&RTNH_F_ONLINK.to_ne_bytes());
+        let table_attribute_offset = ingress.len();
+        ingress.extend_from_slice(&attr(
+            RTA_TABLE,
+            &u32::from(CLIENT_INGRESS_ROUTE_TABLE).to_ne_bytes(),
+        ));
+        ingress.extend_from_slice(&attr(RTA_GATEWAY, &[169, 254, 240, 2]));
+
+        assert!(
+            parse(
+                DumpKind::Route,
+                &[msg(RTM_NEWROUTE, NLM_F_MULTI, SEQ, &ingress), done()]
+            )
+            .expect("irrelevant policy table")
+            .routes
+            .is_empty()
+        );
+
+        let mut conflicting = ingress;
+        let table_value = table_attribute_offset + ATTRIBUTE_HEADER_LEN;
+        conflicting[table_value..table_value + 4].copy_from_slice(&RT_TABLE_MAIN.to_ne_bytes());
+        assert!(matches!(
+            parse(
+                DumpKind::Route,
+                &[msg(RTM_NEWROUTE, NLM_F_MULTI, SEQ, &conflicting), done()]
+            ),
+            Err(UnderlayNetlinkError::Malformed)
+        ));
+    }
+
+    #[test]
     fn helper_ownership_alias_grammar_is_exact() {
         const IFNAME: &[u8] = b"vpc1deadbeef";
         const OTHER_IFNAME: &[u8] = b"vpc1feedface";
@@ -1458,19 +1535,19 @@ mod tests {
     fn double_snapshot_policy_is_exact() {
         let first = stable("8.8.8.8", UnderlayFamily::Ipv4);
         assert_eq!(
-            select_consistent(&first, &first)
+            select_consistent(&first, &first, &[], &[])
                 .expect("candidate")
                 .address,
             "8.8.8.8".parse::<IpAddr>().expect("IP")
         );
         let changed = stable("1.1.1.1", UnderlayFamily::Ipv4);
         assert!(matches!(
-            select_consistent(&first, &changed),
+            select_consistent(&first, &changed, &[], &[]),
             Err(UnderlayNetlinkError::Inconsistent)
         ));
         let empty = UnderlaySnapshot::default();
         assert!(matches!(
-            select_consistent(&empty, &empty),
+            select_consistent(&empty, &empty, &[], &[]),
             Err(UnderlayNetlinkError::NoCandidate)
         ));
         let mut ambiguous = first.clone();
@@ -1479,7 +1556,7 @@ mod tests {
             ..ambiguous.addresses[0]
         });
         assert!(matches!(
-            select_consistent(&ambiguous, &ambiguous),
+            select_consistent(&ambiguous, &ambiguous, &[], &[]),
             Err(UnderlayNetlinkError::Ambiguous)
         ));
     }

@@ -14,14 +14,15 @@ use volparossa_protocol::{
     ClientSessionCapability, ControlMessageType, ControlPayload, ExitCapacityHold,
     ExitCapacityHoldRequest, ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
     ExitReservationFinalizeRequest, FinalizedRelayPath, MAX_CONTROL_MESSAGE_SIZE,
-    MAX_CONTROL_PAYLOAD_SIZE, MAX_MASQUE_CONTEXT_ID, NATIVE_ROUTE_AUTH_BEARER_LENGTH,
-    NativeRouteIdentity, OpenTcp, ProbeAddressFamily, ProbeLegEvidence, ProtocolError,
-    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
+    MAX_CONTROL_PAYLOAD_SIZE, MAX_MASQUE_CONTEXT_ID, MAX_NATIVE_PROBE_LIFETIME_MS,
+    NATIVE_ROUTE_AUTH_BEARER_LENGTH, NativeRouteCredentialDelivery, NativeRouteCredentialError,
+    NativeRouteCredentialScope, NativeRouteIdentity, OpenTcp, ProbeAddressFamily, ProbeLegEvidence,
+    ProtocolError, RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
     RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
     UdpFlowAuthorization, WireguardEndpoint, decode_canonical, exit_confirmation_envelope_hash,
     finalized_reservation_bundle_hash, generate_nonce, native_route_auth_commitment,
-    node_id_from_public_key, sign_control_message, verify_control_message,
-    verify_relay_reservation,
+    node_id_from_public_key, seal_native_route_credential, sign_control_message,
+    verify_control_message, verify_relay_reservation,
 };
 use volparossa_wireguard::{
     ClientEndpointLease, HelperContextHandle, PublicWireGuardEndpoint, WireGuardPublicKey,
@@ -288,6 +289,7 @@ pub struct ClientNativeRouteAuthorization {
     reservation_id: [u8; ID_BYTES],
     route_context_id: [u8; ID_BYTES],
     finalize_id: [u8; ID_BYTES],
+    exit_node_id: [u8; KEY_BYTES],
     auth_bearer: Zeroizing<[u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
     identity: NativeRouteIdentity,
     expires_at_ms: u64,
@@ -310,6 +312,12 @@ impl ClientNativeRouteAuthorization {
     #[must_use]
     pub const fn finalize_id(&self) -> &[u8; ID_BYTES] {
         &self.finalize_id
+    }
+
+    /// Exact Exit identity which signed the route and owns the HPKE recipient key.
+    #[must_use]
+    pub const fn exit_node_id(&self) -> &[u8; KEY_BYTES] {
+        &self.exit_node_id
     }
 
     /// Canonical 43-byte route bearer. Callers must not log or persist it.
@@ -407,10 +415,28 @@ impl VerifiedRelayGrant {
         &self.reservation_id
     }
 
+    /// Route context shared by every relay in the finalized route.
+    #[must_use]
+    pub const fn route_context_id(&self) -> &[u8; ID_BYTES] {
+        &self.route_context_id
+    }
+
     /// Context-local path number.
     #[must_use]
     pub const fn path_id(&self) -> u32 {
         self.path_id
+    }
+
+    /// Stable identity of the independently verified data relay.
+    #[must_use]
+    pub const fn relay_node_id(&self) -> &[u8; KEY_BYTES] {
+        &self.relay_node_id
+    }
+
+    /// Exclusive expiry shared with this relay's nested Exit grant.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
     }
     /// Verified relay endpoint facing this route-attempt client.
     #[must_use]
@@ -434,6 +460,7 @@ struct ClientPathState {
 struct PendingNativeRouteAuthorization {
     reservation_id: [u8; ID_BYTES],
     route_context_id: [u8; ID_BYTES],
+    exit_node_id: [u8; KEY_BYTES],
     auth_bearer: Zeroizing<[u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
     auth_commitment: [u8; KEY_BYTES],
     masque_context_id: u64,
@@ -532,6 +559,100 @@ impl ReservationCoordinator {
             timestamp_ms,
             expires_at_ms,
             nonce: nonce.to_vec(),
+            destination_ip: Vec::new(),
+        };
+        sign_control_message(
+            &message,
+            &self.session_key,
+            timestamp_ms,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(CoordinatorError::from)
+    }
+
+    /// Sign one hostname flow pinned to the exact destination address observed by transparent
+    /// ingress. The Exit must resolve the hostname itself and accept this address only when it is
+    /// present in the current bounded DNS answer set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid hostname, address, port, scope, lifetime, or canonical
+    /// signature frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_open_tcp_pinned(
+        &self,
+        route_context_id: [u8; ID_BYTES],
+        policy_hash: [u8; KEY_BYTES],
+        hostname: &str,
+        destination_ip: IpAddr,
+        port: u16,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if timestamp_ms >= expires_at_ms {
+            return Err(CoordinatorError::Scope("TCP flow lifetime"));
+        }
+        let nonce = generate_nonce();
+        let message = OpenTcp {
+            route_context_id: route_context_id.to_vec(),
+            flow_id: random_nonzero_id().to_vec(),
+            client_ephemeral_id: self.client_session_id.to_vec(),
+            hostname: hostname.to_owned(),
+            port: u32::from(port),
+            policy_hash: policy_hash.to_vec(),
+            timestamp_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+            destination_ip: match destination_ip {
+                IpAddr::V4(address) => address.octets().to_vec(),
+                IpAddr::V6(address) => address.octets().to_vec(),
+            },
+        };
+        sign_control_message(
+            &message,
+            &self.session_key,
+            timestamp_ms,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(CoordinatorError::from)
+    }
+
+    /// Sign one policy-bound raw-IP TCP flow with this fresh route-attempt session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid port, scope, lifetime, or canonical signature frame.
+    pub fn sign_open_tcp_ip(
+        &self,
+        route_context_id: [u8; ID_BYTES],
+        policy_hash: [u8; KEY_BYTES],
+        destination_ip: IpAddr,
+        port: u16,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if timestamp_ms >= expires_at_ms {
+            return Err(CoordinatorError::Scope("TCP flow lifetime"));
+        }
+        let nonce = generate_nonce();
+        let message = OpenTcp {
+            route_context_id: route_context_id.to_vec(),
+            flow_id: random_nonzero_id().to_vec(),
+            client_ephemeral_id: self.client_session_id.to_vec(),
+            hostname: String::new(),
+            port: u32::from(port),
+            policy_hash: policy_hash.to_vec(),
+            timestamp_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+            destination_ip: match destination_ip {
+                IpAddr::V4(address) => address.octets().to_vec(),
+                IpAddr::V6(address) => address.octets().to_vec(),
+            },
         };
         sign_control_message(
             &message,
@@ -590,6 +711,167 @@ impl ReservationCoordinator {
             TimePolicy::default(),
         )
         .map_err(CoordinatorError::from)
+    }
+
+    /// Sign one visible hostname together with the kernel-observed original destination IP.
+    ///
+    /// The Exit must resolve the hostname independently and require this exact address in the
+    /// bounded answer set before it can open egress. This preserves domain policy while preventing
+    /// DNS or original-destination substitution between transparent ingress and the Exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid hostname, address, port, idle bound, scope, lifetime, or
+    /// canonical signature frame.
+    #[allow(clippy::too_many_arguments, reason = "fixed signed flow schema")]
+    pub fn sign_udp_hostname_pinned(
+        &self,
+        route_context_id: [u8; ID_BYTES],
+        policy_hash: [u8; KEY_BYTES],
+        hostname: &str,
+        destination: IpAddr,
+        port: u16,
+        idle_timeout_ms: u32,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if timestamp_ms >= expires_at_ms {
+            return Err(CoordinatorError::Scope("UDP flow lifetime"));
+        }
+        let destination_ip = match destination {
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        let nonce = generate_nonce();
+        let message = UdpFlowAuthorization {
+            route_context_id: route_context_id.to_vec(),
+            flow_id: random_nonzero_id().to_vec(),
+            client_ephemeral_id: self.client_session_id.to_vec(),
+            hostname: hostname.to_owned(),
+            destination_ip,
+            port: u32::from(port),
+            policy_hash: policy_hash.to_vec(),
+            idle_timeout_ms,
+            timestamp_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        sign_control_message(
+            &message,
+            &self.session_key,
+            timestamp_ms,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(CoordinatorError::from)
+    }
+
+    /// Sign one exact-IP UDP flow with this fresh route-attempt session.
+    ///
+    /// This is the transparent-ingress counterpart of [`Self::sign_udp_hostname`]. The exact
+    /// destination is copied from kernel original-destination evidence; the Exit still verifies
+    /// the signed tuple against the active threshold-signed policy before opening egress.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid address, port, idle bound, scope, lifetime, or canonical
+    /// signature frame.
+    #[allow(clippy::too_many_arguments, reason = "fixed signed flow schema")]
+    pub fn sign_udp_ip(
+        &self,
+        route_context_id: [u8; ID_BYTES],
+        policy_hash: [u8; KEY_BYTES],
+        destination: IpAddr,
+        port: u16,
+        idle_timeout_ms: u32,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if timestamp_ms >= expires_at_ms {
+            return Err(CoordinatorError::Scope("UDP flow lifetime"));
+        }
+        let destination_ip = match destination {
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        let nonce = generate_nonce();
+        let message = UdpFlowAuthorization {
+            route_context_id: route_context_id.to_vec(),
+            flow_id: random_nonzero_id().to_vec(),
+            client_ephemeral_id: self.client_session_id.to_vec(),
+            hostname: String::new(),
+            destination_ip,
+            port: u32::from(port),
+            policy_hash: policy_hash.to_vec(),
+            idle_timeout_ms,
+            timestamp_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        sign_control_message(
+            &message,
+            &self.session_key,
+            timestamp_ms,
+            expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(CoordinatorError::from)
+    }
+
+    /// Encrypt and sign the route bearer to the exact Exit-owned RFC 9180 recipient key.
+    ///
+    /// The returned control message may cross an untrusted Relay: it carries only public route
+    /// scope, the HPKE encapsulated key and authenticated ciphertext. The bearer remains retained
+    /// by `authorization` for the local native Client.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an expired or inconsistent authorization, invalid signed identity, randomness
+    /// failure, or canonical signing failure.
+    pub fn sign_native_route_credential_delivery(
+        &self,
+        authorization: &ClientNativeRouteAuthorization,
+        created_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        if created_at_ms >= authorization.expires_at_ms {
+            return Err(CoordinatorError::Scope("native credential lifetime"));
+        }
+        let identity = authorization.native_route_identity();
+        let nonce = generate_nonce();
+        let scope = NativeRouteCredentialScope {
+            reservation_id: authorization.reservation_id.to_vec(),
+            route_context_id: authorization.route_context_id.to_vec(),
+            finalize_id: authorization.finalize_id.to_vec(),
+            exit_node_id: authorization.exit_node_id.to_vec(),
+            client_session_id: self.client_session_id.to_vec(),
+            client_session_public_key: self.client_session_public_key().to_vec(),
+            auth_commitment: identity.auth_commitment.clone(),
+            certificate_sha256: identity.certificate_sha256.clone(),
+            spki_sha256: identity.spki_sha256.clone(),
+            masque_context_id: identity.masque_context_id,
+            client_native_instance_id: identity.client_native_instance_id.clone(),
+            exit_native_instance_id: identity.exit_native_instance_id.clone(),
+            credential_hpke_public_key: identity.credential_hpke_public_key.clone(),
+            created_at_ms,
+            expires_at_ms: authorization.expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        let sealed = seal_native_route_credential(&scope, authorization.auth_bearer())?;
+        sign_control_message(
+            &NativeRouteCredentialDelivery {
+                scope: Some(scope),
+                encapsulated_key: sealed.encapsulated_key().to_vec(),
+                ciphertext: sealed.ciphertext().to_vec(),
+            },
+            &self.session_key,
+            created_at_ms,
+            authorization.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .map_err(Into::into)
     }
 
     /// Sign a short capacity-hold request that discloses no relay selection.
@@ -1049,6 +1331,7 @@ impl ReservationCoordinator {
             PendingNativeRouteAuthorization {
                 reservation_id: intent.reservation_id,
                 route_context_id: intent.route_context_id,
+                exit_node_id: intent.exit_node_id,
                 auth_bearer,
                 auth_commitment,
                 masque_context_id: intent.masque_context_id,
@@ -1522,6 +1805,7 @@ impl ReservationCoordinator {
             reservation_id: pending.reservation_id,
             route_context_id: pending.route_context_id,
             finalize_id,
+            exit_node_id: pending.exit_node_id,
             auth_bearer: pending.auth_bearer,
             identity,
             expires_at_ms: pending.expires_at_ms,
@@ -1665,7 +1949,8 @@ fn same_probe_result(result: &RelayProbeResult, permit: &VerifiedProbePermit) ->
         && result.policy_hash == expected.policy_hash
         && result.transport == expected.transport
         && result.address_family == expected.address_family
-        && result.measured_at_ms >= expected.created_at_ms
+        && expected.created_at_ms.saturating_sub(result.measured_at_ms)
+            <= MAX_NATIVE_PROBE_LIFETIME_MS
         && result.expires_at_ms <= expected.expires_at_ms
 }
 
@@ -1809,6 +2094,9 @@ pub enum CoordinatorError {
     /// Canonical signing, signature, replay, time or parser validation failed.
     #[error("reservation protocol verification failed: {0}")]
     Protocol(#[from] ProtocolError),
+    /// RFC 9180 bearer encryption or its route binding failed.
+    #[error("reservation native credential delivery failed: {0}")]
+    NativeRouteCredential(#[from] NativeRouteCredentialError),
     /// A validly signed message did not match the selected route scope.
     #[error("reservation scope mismatch: {0}")]
     Scope(&'static str),
@@ -1829,12 +2117,13 @@ mod tests {
     use volparossa_protocol::{
         ClientSessionCapability, ControlMessageType, ExitCapacityHold, ExitCapacityHoldRequest,
         ExitConfirmationReceipt, ExitReservation, ExitReservationFinalizeRequest,
-        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NATIVE_ROUTE_AUTH_BEARER_LENGTH,
-        NativeRouteIdentity, PROTOCOL_VERSION, ProbeAddressFamily, ProbeLegEvidence,
-        RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
-        ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
-        exit_confirmation_envelope_hash, generate_nonce, native_route_auth_commitment,
-        node_id_from_public_key, sign_control_message, verify_control_message,
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, MAX_NATIVE_PROBE_LIFETIME_MS,
+        NATIVE_ROUTE_AUTH_BEARER_LENGTH, NativeRouteIdentity, OpenTcp, PROTOCOL_VERSION,
+        ProbeAddressFamily, ProbeLegEvidence, RelayAuthorization, RelayProbePermit,
+        RelayProbePermitRequest, RelayProbeResult, ReplayCache, SignedEnvelope, TimePolicy,
+        Transport, decode_canonical, encode_canonical, exit_confirmation_envelope_hash,
+        generate_nonce, native_route_auth_commitment, node_id_from_public_key,
+        sign_control_message, verify_control_message,
     };
     use volparossa_wireguard::{
         ClientEndpointLease, EndpointRole, HelperContextHandle, HelperLeaseHandle,
@@ -1844,10 +2133,58 @@ mod tests {
     use super::{
         CoordinatorError, ExitReservationIntent, RelayPathIntent, ReservationCoordinator,
         SignedExitFinalizeRequest, VerifiedExitCapacityHold, VerifiedRelayGrant,
-        VerifiedRelayProbe, generate_native_route_bearer, wire_endpoint,
+        VerifiedRelayProbe, generate_native_route_bearer, same_probe_result, wire_endpoint,
     };
 
     const NOW: u64 = 1_700_000_000_000;
+
+    #[test]
+    fn raw_ip_open_tcp_is_signed_with_the_exact_destination_bytes() {
+        let coordinator = ReservationCoordinator::new(8).unwrap();
+        let destination = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let encoded = coordinator
+            .sign_open_tcp_ip([1; 16], [2; 32], destination, 443, NOW, NOW + 60_000)
+            .unwrap();
+        let mut replay = ReplayCache::new(2).unwrap();
+        let verified = verify_control_message::<OpenTcp>(
+            &encoded,
+            NOW + 1,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .unwrap();
+        assert!(verified.message().hostname.is_empty());
+        assert_eq!(verified.message().destination_ip, vec![93, 184, 216, 34]);
+        assert_eq!(verified.message().port, 443);
+    }
+
+    #[test]
+    fn hostname_open_tcp_can_be_pinned_to_transparent_destination_bytes() {
+        let coordinator = ReservationCoordinator::new(8).unwrap();
+        let destination = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let encoded = coordinator
+            .sign_open_tcp_pinned(
+                [1; 16],
+                [2; 32],
+                "allowed.example",
+                destination,
+                443,
+                NOW,
+                NOW + 60_000,
+            )
+            .unwrap();
+        let mut replay = ReplayCache::new(2).unwrap();
+        let verified = verify_control_message::<OpenTcp>(
+            &encoded,
+            NOW + 1,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .unwrap();
+        assert_eq!(verified.message().hostname, "allowed.example");
+        assert_eq!(verified.message().destination_ip, vec![93, 184, 216, 34]);
+        assert_eq!(verified.message().port, 443);
+    }
 
     #[test]
     fn coordinators_generate_distinct_route_attempt_sessions_and_hold_has_no_relays() {
@@ -2127,6 +2464,24 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn probe_result_accepts_fresh_premeasurement_and_rejects_stale_premeasurement() {
+        let mut coordinator = ReservationCoordinator::new(8).unwrap();
+        let fixture = held_fixture(&mut coordinator, 19);
+        let probe = verified_probe_for(&mut coordinator, &fixture, 1, 23);
+        let mut result = probe.result.clone();
+
+        result.measured_at_ms = probe
+            .permit
+            .permit
+            .created_at_ms
+            .saturating_sub(MAX_NATIVE_PROBE_LIFETIME_MS);
+        assert!(same_probe_result(&result, &probe.permit));
+
+        result.measured_at_ms = result.measured_at_ms.saturating_sub(1);
+        assert!(!same_probe_result(&result, &probe.permit));
+    }
+
     fn client_endpoint(route_context_id: [u8; 16], path_id: u32) -> Option<ClientEndpointLease> {
         let path_seed = u8::try_from(path_id).ok()?;
         let port = 30_000_u16.checked_add(u16::try_from(path_id).ok()?)?;
@@ -2158,6 +2513,7 @@ mod tests {
             masque_context_id: request.masque_context_id,
             client_native_instance_id: request.client_native_instance_id.to_vec(),
             exit_native_instance_id: vec![83; 32],
+            credential_hpke_public_key: vec![84; 32],
         }
     }
 

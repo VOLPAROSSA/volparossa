@@ -6,12 +6,15 @@ mod advertisement_tests;
 mod advertisements;
 mod connection_provenance;
 mod forwarding;
+mod mpquic_session;
+mod mptcp_session;
 mod peerlink;
 mod preselection_forwarder;
 mod preselection_responder;
 mod preselection_transaction;
 mod preselection_wire;
 mod reservations;
+mod udp_session;
 
 use std::{
     collections::HashMap,
@@ -41,17 +44,27 @@ pub use advertisements::{
     advertisement_envelope_matches_peer,
 };
 use advertisements::{AdvertisementCodec, advertisement_behaviour};
-pub use connection_provenance::BoundNativeProbeControlConnection;
+pub use connection_provenance::{
+    BoundNativeProbeControlConnection, BoundNativeProbeDataRelayConnection,
+};
 use connection_provenance::{ConnectionProvenanceBehaviour, ConnectionProvenanceEvent};
 pub use forwarding::{
     EXIT_FORWARD_PROTOCOL, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_PROTOCOL,
     EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
     FORWARDING_RPC_VERSION, ForwardStatus, ForwardingRpcError, MAX_CONCURRENT_FORWARDING_STREAMS,
-    MAX_FORWARDING_FRAME_BYTES, UpstreamExitForwardRequest, UpstreamExitForwardResponse,
+    MAX_FORWARDING_FRAME_BYTES, NativeProbeReadyForwardRequest, UpstreamExitForwardRequest,
+    UpstreamExitForwardResponse,
 };
 use forwarding::{
     ExitForwardCodec, UpstreamExitForwardCodec, exit_forward_behaviour,
     exit_forward_upstream_behaviour,
+};
+pub use mpquic_session::{
+    ExitMpquicSessionSignal, MpquicSessionFrameError, MpquicSessionPathProof,
+    MpquicSessionStartRequest,
+};
+pub use mptcp_session::{
+    ExitMptcpSessionSignal, MptcpSessionFrameError, MptcpSessionPathProof, MptcpSessionStartRequest,
 };
 pub use peerlink::{PeerLink, PeerLinkError};
 use preselection_forwarder::PreselectionForwarderState;
@@ -91,6 +104,7 @@ pub use reservations::{
     MAX_DATAPATH_RELAY_FRAME_BYTES,
 };
 use reservations::{DatapathRelayCodec, datapath_relay_behaviour};
+pub use udp_session::{UdpExitSessionSignal, UdpSessionFrameError, UdpSessionStartRequest};
 use volparossa_protocol::{
     MAX_CONTROL_MESSAGE_SIZE, SignedEnvelope, decode_canonical, node_id_from_public_key,
 };
@@ -314,9 +328,17 @@ impl DiscoveryBehaviour {
         kad_config.set_kbucket_inserts(kad::BucketInserts::Manual);
         kad_config.set_record_ttl(Some(Duration::from_secs(300)));
         kad_config.set_provider_record_ttl(Some(Duration::from_secs(300)));
-        kad_config.set_provider_publication_interval(Some(Duration::from_secs(180)));
-        let kademlia =
+        // Retry capability publication inside the same bounded window as LAN discovery. A
+        // successful initial AddProvider exchange can still precede full routing convergence.
+        kad_config.set_provider_publication_interval(Some(Duration::from_secs(10)));
+        let mut kademlia =
             kad::Behaviour::with_config(local_peer_id, MemoryStore::new(local_peer_id), kad_config);
+        // Voluntary service nodes and role-less bootstrap contacts are explicit private-overlay
+        // DHT servers. Waiting for libp2p's public external-address heuristic leaves a
+        // disposable/private topology permanently in client mode, while making bootstrap-only
+        // contacts clients leaves Relay and Exit provider records with no shared storage hop.
+        // Bootstrap contacts still carry no authority: they store signed capability indexes only.
+        kademlia.set_mode(Some(kademlia_mode_for_roles(protocol_roles)));
         let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
         let dcutr = dcutr::Behaviour::new(local_peer_id);
         let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());
@@ -356,6 +378,14 @@ impl DiscoveryBehaviour {
             exit_forward_upstream,
             datapath_relay,
         }
+    }
+}
+
+const fn kademlia_mode_for_roles(roles: DiscoveryProtocolRoles) -> kad::Mode {
+    if roles.relay() || roles.exit() || !roles.client() {
+        kad::Mode::Server
+    } else {
+        kad::Mode::Client
     }
 }
 
@@ -409,6 +439,136 @@ pub enum BehaviourEvent {
     DatapathRelay(request_response::Event<DatapathRelayRequest, DatapathRelayResponse>),
 }
 
+/// Detail-free reason exact authenticated connection provenance could not be bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "variant names are the complete privacy-neutral diagnostic contract"
+)]
+#[non_exhaustive]
+pub enum PreselectionProvenanceReject {
+    RegistryPoisoned,
+    ExactConnectionMissing,
+    MultipleSiblingConnections,
+    FamilyPrefix,
+    BindGeneration,
+}
+
+/// Detail-free class emitted when an owned preselection responder rejects a request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "variant names are the complete privacy-neutral diagnostic contract"
+)]
+#[non_exhaustive]
+pub enum PreselectionResponderReject {
+    DirectRole,
+    DirectRequest,
+    DirectAuthority,
+    DirectProvenance(PreselectionProvenanceReject),
+    DirectReplay,
+    DirectResourceLimit,
+    DirectTime,
+    DirectSigning,
+    DirectResponseChannel,
+    ForwardedRequest,
+    ForwardedAuthority,
+    ForwardedTransaction,
+    ForwardedProof,
+    ForwardedReplay,
+    ForwardedResourceLimit,
+    ForwardedTime,
+    ForwardedSigning,
+    ForwardedResponseChannel,
+    ForwardedUpstreamTransport,
+    UpstreamRole,
+    UpstreamRequest,
+    UpstreamAuthority,
+    UpstreamProvenance(PreselectionProvenanceReject),
+    UpstreamReplay,
+    UpstreamResourceLimit,
+    UpstreamTime,
+    UpstreamSigning,
+    UpstreamResponseChannel,
+}
+
+impl PreselectionResponderReject {
+    /// Stable privacy-neutral event code. No peer, address, request, or payload detail is exposed.
+    #[must_use]
+    pub const fn event_code(self) -> &'static str {
+        match self {
+            Self::DirectRole => "PRESELECTION_RESPONDER_DIRECT_ROLE_REJECTED",
+            Self::DirectRequest => "PRESELECTION_RESPONDER_DIRECT_REQUEST_REJECTED",
+            Self::DirectAuthority => "PRESELECTION_RESPONDER_DIRECT_AUTHORITY_REJECTED",
+            Self::DirectProvenance(PreselectionProvenanceReject::RegistryPoisoned) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_REGISTRY_POISONED"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::ExactConnectionMissing) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_CONNECTION_MISSING"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::MultipleSiblingConnections) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_MULTIPLE_CONNECTIONS"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::FamilyPrefix) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_FAMILY_PREFIX"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::BindGeneration) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_BIND_GENERATION"
+            }
+            Self::DirectReplay => "PRESELECTION_RESPONDER_DIRECT_REPLAY_REJECTED",
+            Self::DirectResourceLimit => "PRESELECTION_RESPONDER_DIRECT_RESOURCE_LIMIT_REJECTED",
+            Self::DirectTime => "PRESELECTION_RESPONDER_DIRECT_TIME_REJECTED",
+            Self::DirectSigning => "PRESELECTION_RESPONDER_DIRECT_SIGNING_REJECTED",
+            Self::DirectResponseChannel => {
+                "PRESELECTION_RESPONDER_DIRECT_RESPONSE_CHANNEL_REJECTED"
+            }
+            Self::ForwardedRequest => "PRESELECTION_RESPONDER_FORWARDED_REQUEST_REJECTED",
+            Self::ForwardedAuthority => "PRESELECTION_RESPONDER_FORWARDED_AUTHORITY_REJECTED",
+            Self::ForwardedTransaction => "PRESELECTION_RESPONDER_FORWARDED_TRANSACTION_REJECTED",
+            Self::ForwardedProof => "PRESELECTION_RESPONDER_FORWARDED_PROOF_REJECTED",
+            Self::ForwardedReplay => "PRESELECTION_RESPONDER_FORWARDED_REPLAY_REJECTED",
+            Self::ForwardedResourceLimit => {
+                "PRESELECTION_RESPONDER_FORWARDED_RESOURCE_LIMIT_REJECTED"
+            }
+            Self::ForwardedTime => "PRESELECTION_RESPONDER_FORWARDED_TIME_REJECTED",
+            Self::ForwardedSigning => "PRESELECTION_RESPONDER_FORWARDED_SIGNING_REJECTED",
+            Self::ForwardedResponseChannel => {
+                "PRESELECTION_RESPONDER_FORWARDED_RESPONSE_CHANNEL_REJECTED"
+            }
+            Self::ForwardedUpstreamTransport => {
+                "PRESELECTION_RESPONDER_FORWARDED_UPSTREAM_TRANSPORT_REJECTED"
+            }
+            Self::UpstreamRole => "PRESELECTION_RESPONDER_UPSTREAM_ROLE_REJECTED",
+            Self::UpstreamRequest => "PRESELECTION_RESPONDER_UPSTREAM_REQUEST_REJECTED",
+            Self::UpstreamAuthority => "PRESELECTION_RESPONDER_UPSTREAM_AUTHORITY_REJECTED",
+            Self::UpstreamProvenance(PreselectionProvenanceReject::RegistryPoisoned) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_REGISTRY_POISONED"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::ExactConnectionMissing) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_CONNECTION_MISSING"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::MultipleSiblingConnections) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_MULTIPLE_CONNECTIONS"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::FamilyPrefix) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_FAMILY_PREFIX"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::BindGeneration) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_BIND_GENERATION"
+            }
+            Self::UpstreamReplay => "PRESELECTION_RESPONDER_UPSTREAM_REPLAY_REJECTED",
+            Self::UpstreamResourceLimit => {
+                "PRESELECTION_RESPONDER_UPSTREAM_RESOURCE_LIMIT_REJECTED"
+            }
+            Self::UpstreamTime => "PRESELECTION_RESPONDER_UPSTREAM_TIME_REJECTED",
+            Self::UpstreamSigning => "PRESELECTION_RESPONDER_UPSTREAM_SIGNING_REJECTED",
+            Self::UpstreamResponseChannel => {
+                "PRESELECTION_RESPONDER_UPSTREAM_RESPONSE_CHANNEL_REJECTED"
+            }
+        }
+    }
+}
+
 /// Sanitized public discovery event.
 ///
 /// Preselection request messages remain entirely service-owned. Responses for the exact active
@@ -422,6 +582,8 @@ pub enum DiscoveryEvent {
     ClientPreselectionResponse(ClientPreselectionResponseArrival),
     /// Service-sealed response to an outbound relay-to-exit observation request.
     UpstreamPreselectionResponse(UpstreamPreselectionResponseArrival),
+    /// Detail-free reason an owned preselection request was rejected before response handoff.
+    PreselectionResponderRejected(PreselectionResponderReject),
     /// Any event other than a preselection request or response message.
     Other(libp2p::swarm::SwarmEvent<BehaviourEvent>),
 }
@@ -745,7 +907,13 @@ impl DiscoveryService {
         protocol_roles: DiscoveryProtocolRoles,
     ) -> Result<Self, DiscoveryError> {
         let local_peer_id = keypair.public().to_peer_id();
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
+        // A lost startup multicast must not leave a directly attached Relay undiscoverable for
+        // libp2p-mDNS's five-minute default interval.
+        let mdns_config = mdns::Config {
+            query_interval: Duration::from_secs(10),
+            ..mdns::Config::default()
+        };
+        let mdns = mdns::tokio::Behaviour::new(mdns_config, local_peer_id)
             .map_err(|error| DiscoveryError::Build(error.to_string()))?;
         let memory_noise = noise::Config::new(&keypair)
             .map_err(|error| DiscoveryError::Build(error.to_string()))?;
@@ -1029,19 +1197,36 @@ impl DiscoveryService {
             return Err(DiscoveryError::ProtocolRole);
         }
         AdvertisementResponse::new(envelope.clone())?;
-        self.local_advertisement = Some(envelope);
+        self.preselection_responder
+            .install_local_advertisement(&mut self.local_advertisement, envelope);
         Ok(())
     }
 
     /// Stops serving a previously configured local advertisement immediately.
     pub fn clear_local_advertisement(&mut self) {
-        self.local_advertisement = None;
+        self.preselection_responder
+            .clear_local_advertisements(&mut self.local_advertisement);
     }
 
     /// Reports whether a signed local advertisement is installed.
     #[must_use]
     pub fn is_serving_local_advertisement(&self) -> bool {
         self.local_advertisement.is_some()
+    }
+
+    /// Borrows the bounded set of signed local advertisements that may still authorize an
+    /// in-flight operation, newest first.
+    ///
+    /// The first item is the advertisement currently being served. The remaining items are the
+    /// bounded, most-recently-served lineage retained by the preselection responder. These bytes
+    /// carry no authority by themselves: callers must independently verify the signature,
+    /// lifetime, policy and exact actor binding for their operation.
+    pub fn bounded_local_advertisements(&self) -> impl Iterator<Item = &[u8]> {
+        self.local_advertisement.iter().map(Vec::as_slice).chain(
+            self.preselection_responder
+                .local_advertisement_lineage()
+                .rev(),
+        )
     }
 
     /// Requests a selected relay's current signed advertisement.
@@ -1191,6 +1376,33 @@ impl DiscoveryService {
             .ok_or(DiscoveryError::ProtocolPeer)
     }
 
+    /// Bind the exact authenticated data-Relay connection carrying a native authorization chain.
+    ///
+    /// This is distinct from control-Relay Permit provenance and grants no datapath authority.
+    /// The affine token can be consumed only while replying through this service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, self connection, or stale, closed, foreign, or
+    /// otherwise untracked connection lineage.
+    pub fn bind_native_probe_data_relay_connection(
+        &self,
+        authenticated_data_relay: PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+    ) -> Result<BoundNativeProbeDataRelayConnection, DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        if authenticated_data_relay == *self.local_peer_id() {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour()
+            .connection_provenance
+            .bind_native_probe_data_relay(authenticated_data_relay, connection_id)
+            .ok_or(DiscoveryError::ProtocolPeer)
+    }
+
     /// Sends one canonical exit response to the authenticated control relay.
     ///
     /// # Errors
@@ -1256,6 +1468,115 @@ impl DiscoveryService {
             .map_err(|_| {
                 DiscoveryError::Swarm("native-probe Permit response channel closed".into())
             })
+    }
+
+    /// Consume exact authenticated data-Relay lineage while returning one native authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-authorization response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_authorization_response(
+        &mut self,
+        connection: BoundNativeProbeDataRelayConnection,
+        authenticated_data_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbeAuthorize
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_data_relay(connection, authenticated_data_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| {
+                DiscoveryError::Swarm("native-probe authorization response channel closed".into())
+            })
+    }
+
+    /// Consume exact authenticated data-Relay lineage while returning one native Exit result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-result response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_result_response(
+        &mut self,
+        connection: BoundNativeProbeDataRelayConnection,
+        authenticated_data_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbeResult
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_data_relay(connection, authenticated_data_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| {
+                DiscoveryError::Swarm("native-probe result response channel closed".into())
+            })
+    }
+
+    /// Consume exact authenticated data-Relay lineage while returning one native Exit readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-readiness response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_ready_response(
+        &mut self,
+        connection: BoundNativeProbeDataRelayConnection,
+        authenticated_data_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbeReady
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_data_relay(connection, authenticated_data_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| DiscoveryError::Swarm("native-probe Ready response channel closed".into()))
     }
 
     /// Sends one canonical request directly to a selected datapath relay.
@@ -1419,17 +1740,6 @@ impl DiscoveryService {
                     if !self.protocol_roles.relay()
                         || !datapath_request_targets_local_relay(&request, self.local_peer_id())
                     {
-                        continue;
-                    }
-                    if request.validated_operation() == Ok(DatapathRelayOperation::ExecuteProbe) {
-                        if let Ok(response) = DatapathRelayResponse::unavailable(
-                            request.request_id().to_vec(),
-                            DatapathRelayOperation::ExecuteProbe,
-                            request.relay_node_id().to_vec(),
-                            request.relay_peer_id().to_vec(),
-                        ) {
-                            let _ = self.send_datapath_relay_response(channel, response);
-                        }
                         continue;
                     }
                     return libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
@@ -1737,6 +2047,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn service_and_bootstrap_roles_are_private_kademlia_servers() {
+        assert_eq!(
+            kademlia_mode_for_roles(DiscoveryProtocolRoles::new(true, false, false)),
+            kad::Mode::Client
+        );
+        for roles in [
+            DiscoveryProtocolRoles::new(false, true, false),
+            DiscoveryProtocolRoles::new(false, false, true),
+            DiscoveryProtocolRoles::new(false, false, false),
+            DiscoveryProtocolRoles::new(true, true, true),
+        ] {
+            assert_eq!(kademlia_mode_for_roles(roles), kad::Mode::Server);
+        }
+    }
+
+    #[test]
     fn advertisement_protocol_matrix_never_serves_an_exit_only_node_directly() {
         assert_eq!(
             advertisement_protocol_directions(DiscoveryProtocolRoles::new(true, false, false)),
@@ -1819,7 +2145,7 @@ mod tests {
             bounded_prefix(&values, MAX_DISCOVERY_ADDRESSES_PER_EVENT).len(),
             MAX_DISCOVERY_ADDRESSES_PER_EVENT
         );
-        assert_eq!(bounded_prefix(&values, 0), &[]);
+        assert!(bounded_prefix(&values, 0).is_empty());
     }
 
     #[test]

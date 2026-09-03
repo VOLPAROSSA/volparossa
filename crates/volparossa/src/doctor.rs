@@ -65,14 +65,31 @@ const OVERLAY_PREFIX: [u8; 16] = [
     0xfd, 0x76, 0x6f, 0x6c, 0x70, 0x61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 const OVERLAY_PREFIX_LENGTH: u8 = 48;
-const HELPER_BOOTSTRAP_CAPABILITIES: [&str; 7] = [
+const HELPER_BOOTSTRAP_CAPABILITIES: [&str; 8] = [
     "CAP_KILL",
     "CAP_NET_ADMIN",
+    "CAP_NET_BIND_SERVICE",
     "CAP_NET_RAW",
     "CAP_SETGID",
     "CAP_SETPCAP",
     "CAP_SETUID",
     "CAP_SYS_ADMIN",
+];
+const HELPER_SERVICE_MANAGER_CONTRACT: [(&str, &str); 14] = [
+    ("Type", "simple"),
+    ("ExitType", "main"),
+    ("RemainAfterExit", "no"),
+    ("SuccessExitStatus", ""),
+    ("Restart", "on-failure"),
+    ("RestartMode", "normal"),
+    ("RestartSec", "3s"),
+    ("RestartForceExitStatus", ""),
+    ("RestartPreventExitStatus", "70 71"),
+    ("KillMode", "control-group"),
+    ("SendSIGKILL", "yes"),
+    ("FinalKillSignal", "SIGKILL"),
+    ("TimeoutStopFailureMode", "terminate"),
+    ("TimeoutStopSec", "45s"),
 ];
 
 const fn service_identity_id_is_valid(id: u32) -> bool {
@@ -478,7 +495,7 @@ fn capability_check() -> Check {
     if helper_capability_contract_matches(&service) {
         passed(
             "helper_capabilities",
-            "helper unit grants exactly the reviewed seven-capability worker bootstrap set",
+            "helper unit grants exactly the reviewed eight-capability worker bootstrap set",
         )
     } else {
         failed(
@@ -1399,12 +1416,11 @@ fn helper_has_required_custody_sandbox(service: &BTreeMap<String, String>) -> bo
         ("NotifyAccess", "main"),
         ("FileDescriptorStoreMax", "128"),
         ("FileDescriptorStorePreserve", "yes"),
-        ("KillMode", "control-group"),
-        ("SendSIGKILL", "yes"),
         ("Delegate", "no"),
         ("PrivatePIDs", "no"),
     ]
     .iter()
+    .chain(HELPER_SERVICE_MANAGER_CONTRACT.iter())
     .all(|(key, expected)| service.get(*key).is_some_and(|value| value == expected))
 }
 
@@ -2311,6 +2327,27 @@ mod tests {
     }
 
     #[test]
+    fn packaged_unprivileged_units_match_the_doctor_sandbox_contract() {
+        for (unit, kind) in [
+            (
+                include_bytes!("../../../packaging/systemd/volparossa-agent.service").as_slice(),
+                UnitKind::Agent,
+            ),
+            (
+                include_bytes!("../../../packaging/systemd/volparossa-mpquic.service").as_slice(),
+                UnitKind::Native,
+            ),
+        ] {
+            let service = parse_service_unit(unit).expect("packaged service unit");
+            assert!(unit_has_required_sandbox(&service, kind));
+
+            let mut without_private_mounts = service;
+            without_private_mounts.remove("PrivateMounts");
+            assert!(!unit_has_required_sandbox(&without_private_mounts, kind));
+        }
+    }
+
+    #[test]
     fn helper_openat2_compatibility_exception_is_kind_specific() {
         let mut helper = sandbox_fixture(UnitKind::Helper);
         assert_eq!(
@@ -2365,16 +2402,28 @@ mod tests {
             Some("yes")
         );
         assert_eq!(helper.get("NotifyAccess").map(String::as_str), Some("main"));
-        assert_eq!(
-            helper.get("KillMode").map(String::as_str),
-            Some("control-group")
-        );
-        assert_eq!(helper.get("SendSIGKILL").map(String::as_str), Some("yes"));
+        for (key, expected) in HELPER_SERVICE_MANAGER_CONTRACT {
+            assert_eq!(helper.get(key).map(String::as_str), Some(expected));
+        }
 
         for (key, relaxed) in [
             ("ProtectControlGroups", "yes"),
             ("Delegate", "yes"),
             ("PrivatePIDs", "yes"),
+            ("Type", "notify"),
+            ("ExitType", "cgroup"),
+            ("RemainAfterExit", "yes"),
+            ("SuccessExitStatus", "70"),
+            ("Restart", "always"),
+            ("RestartMode", "direct"),
+            ("RestartSec", "infinity"),
+            ("RestartForceExitStatus", "70"),
+            ("RestartPreventExitStatus", "70"),
+            ("KillMode", "mixed"),
+            ("SendSIGKILL", "no"),
+            ("FinalKillSignal", "SIGABRT"),
+            ("TimeoutStopFailureMode", "abort"),
+            ("TimeoutStopSec", "infinity"),
         ] {
             let mut service = helper.clone();
             service.insert(key.to_owned(), relaxed.to_owned());
@@ -2891,10 +2940,9 @@ mod tests {
                         ("NotifyAccess", "main"),
                         ("FileDescriptorStoreMax", "128"),
                         ("FileDescriptorStorePreserve", "yes"),
-                        ("KillMode", "control-group"),
-                        ("SendSIGKILL", "yes"),
                     ],
                 );
+                insert_fixture(&mut service, &HELPER_SERVICE_MANAGER_CONTRACT);
             }
             UnitKind::Native => {
                 insert_fixture(

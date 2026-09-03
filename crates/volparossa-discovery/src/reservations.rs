@@ -26,7 +26,10 @@ pub const LEGACY_EXIT_CONFIRMATION_PROTOCOL_V2: &str =
 /// Exact datapath-relay RPC schema version.
 pub const DATAPATH_RELAY_RPC_VERSION: u32 = 4;
 /// Fixed direct datapath-relay transport timeout.
-pub const DATAPATH_RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// A datapath Relay may perform one bounded five-second Exit RPC before it can answer the Client,
+/// so the outer hop must not expire at the same instant as its nested operation.
+pub const DATAPATH_RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum combined inbound and outbound datapath-relay streams.
 pub const MAX_CONCURRENT_DATAPATH_RELAY_STREAMS: usize = 64;
 /// Maximum canonical datapath-relay request or response frame size.
@@ -45,6 +48,18 @@ pub enum DatapathRelayOperation {
     /// Wire framing only. Production remains unavailable until a safe probe handshake exists.
     ExecuteProbe = 1,
     ReservePath = 2,
+    /// Deliver one endpoint-free native request/Permit pair to the exact data Relay.
+    NativeProbeReady = 3,
+    /// Deliver one client endpoint-bearing native start only to that same data Relay.
+    NativeProbeStart = 4,
+    /// Obtain the standard nested reservation for an exact native Start before activation.
+    NativeProbeAuthorize = 5,
+    /// Commit the exact data Relay and obtain the Exit's committed UDP session signal.
+    UdpSessionStart = 6,
+    /// Forward one exact committed MPTCP path proof set to the selected Exit.
+    MptcpSessionStart = 7,
+    /// Forward one exact committed MPQUIC path proof set to the selected Exit.
+    MpquicSessionStart = 8,
 }
 
 /// Canonical direct datapath-relay request.
@@ -132,6 +147,62 @@ impl DatapathRelayRequest {
                     &self.client_signed_request,
                     ControlMessageType::RelayReservationRequest,
                 )
+            }
+            DatapathRelayOperation::NativeProbeReady => {
+                validate_signed_type(
+                    &self.client_signed_request,
+                    ControlMessageType::NativeProbePermitRequest,
+                )?;
+                validate_signed_type(
+                    &self.exit_signed_authorization,
+                    ControlMessageType::NativeProbePermit,
+                )
+            }
+            DatapathRelayOperation::NativeProbeStart
+            | DatapathRelayOperation::NativeProbeAuthorize => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                validate_signed_type(
+                    &self.client_signed_request,
+                    ControlMessageType::NativeProbeStart,
+                )
+            }
+            DatapathRelayOperation::UdpSessionStart => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                decode_canonical::<crate::UdpSessionStartRequest>(
+                    &self.client_signed_request,
+                    frame_limit(),
+                )
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+            }
+            DatapathRelayOperation::MptcpSessionStart => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                decode_canonical::<crate::MptcpSessionStartRequest>(
+                    &self.client_signed_request,
+                    frame_limit(),
+                )
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+            }
+            DatapathRelayOperation::MpquicSessionStart => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                decode_canonical::<crate::MpquicSessionStartRequest>(
+                    &self.client_signed_request,
+                    frame_limit(),
+                )
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+                .validate()
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)
             }
             DatapathRelayOperation::Unspecified => {
                 Err(DatapathRelayRpcError::InvalidOperation(self.operation))
@@ -315,6 +386,24 @@ impl DatapathRelayResponse {
                 let expected = match operation {
                     DatapathRelayOperation::ExecuteProbe => ControlMessageType::RelayProbeResult,
                     DatapathRelayOperation::ReservePath => ControlMessageType::RelayReservation,
+                    DatapathRelayOperation::NativeProbeReady => {
+                        ControlMessageType::NativeProbeRelayReady
+                    }
+                    DatapathRelayOperation::NativeProbeStart => {
+                        ControlMessageType::NativeProbeRelayResult
+                    }
+                    DatapathRelayOperation::NativeProbeAuthorize => {
+                        ControlMessageType::RelayReservation
+                    }
+                    DatapathRelayOperation::UdpSessionStart => {
+                        return validate_udp_session_signal(&self.signed_response);
+                    }
+                    DatapathRelayOperation::MptcpSessionStart => {
+                        return validate_mptcp_session_signal(&self.signed_response);
+                    }
+                    DatapathRelayOperation::MpquicSessionStart => {
+                        return validate_mpquic_session_signal(&self.signed_response);
+                    }
                     DatapathRelayOperation::Unspecified => {
                         return Err(DatapathRelayRpcError::InvalidOperation(self.operation));
                     }
@@ -384,6 +473,27 @@ impl DatapathRelayResponse {
     pub fn signed_response(&self) -> &[u8] {
         &self.signed_response
     }
+}
+
+fn validate_udp_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcError> {
+    decode_canonical::<crate::UdpExitSessionSignal>(encoded, frame_limit())
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+}
+
+fn validate_mptcp_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcError> {
+    decode_canonical::<crate::ExitMptcpSessionSignal>(encoded, frame_limit())
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+}
+
+fn validate_mpquic_session_signal(encoded: &[u8]) -> Result<(), DatapathRelayRpcError> {
+    decode_canonical::<crate::ExitMpquicSessionSignal>(encoded, frame_limit())
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| DatapathRelayRpcError::InvalidFrame)
 }
 
 /// Datapath-relay frame validation failure.
@@ -650,6 +760,48 @@ mod tests {
         );
         assert!(reserved.is_ok());
 
+        let ready = DatapathRelayRequest::new(
+            vec![3; REQUEST_ID_LENGTH],
+            relay_node.clone(),
+            relay_peer.clone(),
+            DEADLINE,
+            DatapathRelayOperation::NativeProbeReady,
+            envelope(ControlMessageType::NativeProbePermitRequest),
+            envelope(ControlMessageType::NativeProbePermit),
+        );
+        assert!(ready.is_ok());
+        assert!(
+            DatapathRelayResponse::granted(
+                vec![3; REQUEST_ID_LENGTH],
+                DatapathRelayOperation::NativeProbeReady,
+                relay_node.clone(),
+                relay_peer.clone(),
+                envelope(ControlMessageType::NativeProbeRelayReady),
+            )
+            .is_ok()
+        );
+
+        let start = DatapathRelayRequest::new(
+            vec![4; REQUEST_ID_LENGTH],
+            relay_node.clone(),
+            relay_peer.clone(),
+            DEADLINE,
+            DatapathRelayOperation::NativeProbeStart,
+            envelope(ControlMessageType::NativeProbeStart),
+            Vec::new(),
+        );
+        assert!(start.is_ok());
+        assert!(
+            DatapathRelayResponse::granted(
+                vec![4; REQUEST_ID_LENGTH],
+                DatapathRelayOperation::NativeProbeStart,
+                relay_node.clone(),
+                relay_peer.clone(),
+                envelope(ControlMessageType::NativeProbeRelayResult),
+            )
+            .is_ok()
+        );
+
         let leaked = DatapathRelayResponse::new(
             vec![3; REQUEST_ID_LENGTH],
             DatapathRelayOperation::ReservePath,
@@ -689,6 +841,20 @@ mod tests {
             Vec::new(),
         );
         assert!(matches!(wrong, Err(DatapathRelayRpcError::InvalidFrame)));
+
+        let native_start_with_exit_bytes = DatapathRelayRequest::new(
+            vec![2; REQUEST_ID_LENGTH],
+            relay_identity().0,
+            relay_identity().1,
+            DEADLINE,
+            DatapathRelayOperation::NativeProbeStart,
+            envelope(ControlMessageType::NativeProbeStart),
+            envelope(ControlMessageType::NativeProbePermit),
+        );
+        assert!(matches!(
+            native_start_with_exit_bytes,
+            Err(DatapathRelayRpcError::InvalidFrame)
+        ));
     }
 
     fn reserve_request() -> DatapathRelayRequest {

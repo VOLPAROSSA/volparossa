@@ -13,7 +13,7 @@ fields derived from the exit-signed route scope without verifying that
 signature itself. The client adapter retains a strictly validated
 tunnel assignment, exposes it only after `ESTABLISHED`, and enforces packet
 address ownership.
-It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, exact scheduler, honest
+It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, honest
 unique-payload metric, trusted helper origin for path descriptors, and
 disposable namespace acceptance remain incomplete and fail closed where
 applicable.
@@ -138,8 +138,12 @@ applicable.
 
 There is no mock production dispatcher and no ordinary-QUIC fallback.
 `SendDatagram` and request-driven reverse polling cross the real mqvpn adapter
-for an active client session. `GetStatus` still fails closed rather than
-relabeling ACKed QUIC transport bytes as uniquely delivered payload.
+for an active client session. `GetStatus` returns the exact current client path
+set only when every path has a valid native state and complete RTT, loss,
+congestion-window, in-flight, estimated-rate, and ACKed-transport metrics.
+`data_carrying` means that xquic has ACKed transport bytes on that path;
+`delivered_bytes` remains zero because that counter is not unique inner
+payload delivery.
 
 ## Executable contract
 
@@ -363,9 +367,9 @@ The following gates remain hard blockers:
    adoption remains blocked until an affine helper-to-native capability binds
    each descriptor to the attested helper acquisition.
 2. **No unique payload-delivery metric.** xquic's counter includes QUIC
-   transport overhead and retransmission. It cannot satisfy
-   `NativePathStatus.delivered_bytes`, which promises uniquely delivered
-   payload. `GetStatus` returns `unique_delivery_metric_unsupported`.
+   transport overhead and retransmission. `GetStatus` uses it only to prove
+   per-path transport activity and leaves `NativePathStatus.delivered_bytes`
+   zero; it never relabels those bytes as unique delivered payload.
 3. **No operational exit lifecycle.** The patched mqvpn server can report a
    session-correlated inbound packet and can initialize xquic from bounded
    in-memory TLS candidate material without a caller-supplied secret pathname.
@@ -398,9 +402,12 @@ The following gates remain hard blockers:
    belongs to the exact namespace, production caller, or disposable-topology
    packet evidence, so this client-side state must not be reported as an
    operational tunnel.
-6. **No exact VOLPAROSSA EDT scheduler.** mqvpn's WLB is congestion-aware but
-   is not the required replaceable delivery-time formula. FEC, XOR, and
-   reinjection remain disabled; that does not make WLB an EDT implementation.
+6. **EDT lacks live-topology acceptance.** Production multipath client and
+   exit sessions use the dedicated VOLPAROSSA xquic callback, which chooses
+   exactly one writable path from live RTT, bytes in flight, bandwidth, cwnd,
+   and recent loss. A deterministic native contract test covers both healthy
+   choices and a congested/lossy loser. No disposable topology has yet proved
+   the expected distribution or failover with real relay paths.
 7. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
    framing, correlation, overflow, and wiping, but no disposable topology has
    yet proved an exit-originated inner datagram reaches the Rust client.

@@ -238,6 +238,7 @@ fn durable_anchor(seed: u8) -> DurablePrepareAnchor {
         executable_device: NonZeroU64::new(seed_u64 + 40).expect("non-zero device"),
         executable_inode: NonZeroU64::new(seed_u64 + 50).expect("non-zero inode"),
         service_cgroup_inode: NonZeroU64::new(seed_u64 + 60).expect("non-zero inode"),
+        service_cgroup_id: NonZeroU64::new(seed_u64 + 70).expect("non-zero cgroup id"),
     })
     .expect("valid durable anchor")
 }
@@ -549,6 +550,7 @@ fn typed_inputs_validate_complete_wire_values_and_redact_debug_output() {
         executable_device: NonZeroU64::new(1).expect("non-zero"),
         executable_inode: NonZeroU64::new(1).expect("non-zero"),
         service_cgroup_inode: NonZeroU64::new(1).expect("non-zero"),
+        service_cgroup_id: NonZeroU64::new(1).expect("non-zero"),
     });
     assert_eq!(invalid_anchor.unwrap_err(), DurableOwnershipError::Rejected);
     assert_eq!(
@@ -1559,6 +1561,252 @@ fn cleanup_confirmed_restart_evidence_settles_exact_full_set_without_cleanup_exe
         0,
         "installed cleanup and fallback manager executors must remain refusing and unused"
     );
+}
+
+#[test]
+fn exact_reaper_evidence_crosses_only_single_may_own_cas_before_startup_continues() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open reaper setup journal");
+    let (_, coordinates, _) =
+        prepopulate_custody_target(&mut journal, 0, 66, StartupCustodyPhase::MayOwnCustody);
+    drop(journal);
+
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Error, &observations_capture, None),
+        io_deadline(),
+    )
+    .expect("single MayOwn startup preflight");
+    let [target] = startup.targets() else {
+        panic!("one startup target");
+    };
+    let target = *target;
+    assert_eq!(target.phase(), StartupCustodyPhase::MayOwnCustody);
+    assert!(target.restart_plan().is_some());
+
+    let evidence = RestartMayOwnCleanupEvidence::from_target_for_test(target);
+    let [successor] = startup
+        .confirm_restart_cleanup_set(evidence)
+        .expect("exact reaper CAS")
+    else {
+        panic!("one cleanup-confirmed successor");
+    };
+    let successor = *successor;
+    assert_eq!(successor.phase(), StartupCustodyPhase::CleanupConfirmed);
+    assert!(target.same_identity_except_phase(&successor));
+    let after_cas = JournalSnapshot::decode(
+        &fs::read(&config.journal_path).expect("journal bytes after exact CAS"),
+    )
+    .expect("snapshot after exact CAS");
+    assert_eq!(
+        after_cas
+            .records
+            .get(&coordinates.ownership_id)
+            .expect("CAS record")
+            .phase,
+        OwnershipPhase::CleanupConfirmed
+    );
+    assert_eq!(
+        observations.lock().expect("executor observations").calls,
+        0,
+        "the installed general recovery executor is not used by the exact reaper CAS"
+    );
+
+    let evidence = CleanupConfirmedManagerAbsenceEvidence::from_targets_for_test(vec![successor]);
+    let actor = startup
+        .continue_cleanup_confirmed_absent(evidence)
+        .expect("continue only after separate manager-absence evidence");
+    actor.shutdown().expect("clean actor shutdown");
+    let settled = reopened_snapshot(&config);
+    let record = settled
+        .records
+        .get(&coordinates.ownership_id)
+        .expect("settled reaper record");
+    assert_eq!(record.phase, OwnershipPhase::Absent);
+    assert_eq!(record.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
+}
+
+#[test]
+fn drop_after_exact_reaper_cas_leaves_only_durable_cleanup_confirmed_for_process_restart() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal =
+        OwnershipJournal::open(config.clone()).expect("open crashpoint setup journal");
+    prepopulate_custody_target(&mut journal, 0, 67, StartupCustodyPhase::MayOwnCustody);
+    drop(journal);
+
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Error, &observations_capture, None),
+        io_deadline(),
+    )
+    .expect("pre-CAS startup");
+    let target = startup.targets()[0];
+    startup
+        .confirm_restart_cleanup_set(RestartMayOwnCleanupEvidence::from_target_for_test(target))
+        .expect("persist cleanup-confirmed CAS");
+    let after_cas = fs::read(&config.journal_path).expect("bytes after exact CAS");
+    drop(startup);
+    let snapshot = JournalSnapshot::decode(&after_cas).expect("post-CAS durable snapshot");
+    assert_eq!(snapshot.records.len(), 1);
+    assert!(
+        snapshot
+            .records
+            .values()
+            .all(|record| record.phase == OwnershipPhase::CleanupConfirmed)
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("post-crashpoint journal bytes"),
+        after_cas,
+        "dropping the startup owner must not replay or extend the cleanup CAS"
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+}
+
+#[test]
+fn exact_reaper_set_transitions_two_pending_targets_without_general_recovery() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal =
+        OwnershipJournal::open(config.clone()).expect("open two-target setup journal");
+    let (revision, _, _) =
+        prepopulate_custody_target(&mut journal, 0, 70, StartupCustodyPhase::MayOwnCustody);
+    prepopulate_custody_target(
+        &mut journal,
+        revision,
+        71,
+        StartupCustodyPhase::MayOwnPrepare,
+    );
+    drop(journal);
+
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Error, &observations_capture, None),
+        io_deadline(),
+    )
+    .expect("two-target startup preflight");
+    let prior = startup.targets().to_vec();
+    assert_eq!(prior.len(), 2);
+    assert!(
+        prior
+            .iter()
+            .any(|target| { target.phase() == StartupCustodyPhase::MayOwnCustody })
+    );
+    assert!(
+        prior
+            .iter()
+            .any(|target| { target.phase() == StartupCustodyPhase::MayOwnPrepare })
+    );
+
+    let evidence = RestartMayOwnCleanupEvidence::from_targets_for_test(prior.clone());
+    let successors = startup
+        .confirm_restart_cleanup_set(evidence)
+        .expect("exact two-target reaper transition");
+    assert_eq!(successors.len(), prior.len());
+    assert!(prior.iter().zip(successors).all(|(before, after)| {
+        after.phase() == StartupCustodyPhase::CleanupConfirmed
+            && before.same_identity_except_phase(after)
+    }));
+    let snapshot = JournalSnapshot::decode(
+        &fs::read(&config.journal_path).expect("journal bytes after two-target transition"),
+    )
+    .expect("two-target journal snapshot");
+    assert_eq!(snapshot.records.len(), 2);
+    assert!(
+        snapshot
+            .records
+            .values()
+            .all(|record| record.phase == OwnershipPhase::CleanupConfirmed)
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+}
+
+#[test]
+fn exact_reaper_set_resumes_mixed_cleanup_confirmed_and_pending_targets() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open mixed setup journal");
+    let (revision, _, _) =
+        prepopulate_custody_target(&mut journal, 0, 72, StartupCustodyPhase::CleanupConfirmed);
+    prepopulate_custody_target(
+        &mut journal,
+        revision,
+        73,
+        StartupCustodyPhase::MayOwnPrepare,
+    );
+    drop(journal);
+
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Error, &observations_capture, None),
+        io_deadline(),
+    )
+    .expect("mixed startup preflight");
+    let prior = startup.targets().to_vec();
+    let already_confirmed = prior
+        .iter()
+        .copied()
+        .find(|target| target.phase() == StartupCustodyPhase::CleanupConfirmed)
+        .expect("one prior cleanup-confirmed target");
+    let evidence = RestartMayOwnCleanupEvidence::from_targets_for_test(prior);
+    let successors = startup
+        .confirm_restart_cleanup_set(evidence)
+        .expect("mixed retry transition");
+    assert_eq!(successors.len(), 2);
+    assert!(successors.contains(&already_confirmed));
+    assert!(
+        successors
+            .iter()
+            .all(|target| target.phase() == StartupCustodyPhase::CleanupConfirmed)
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+}
+
+#[test]
+fn exact_reaper_cas_rejects_foreign_evidence_before_first_write() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open mismatch setup journal");
+    let (revision, _, _) =
+        prepopulate_custody_target(&mut journal, 0, 68, StartupCustodyPhase::MayOwnCustody);
+    prepopulate_custody_target(
+        &mut journal,
+        revision,
+        69,
+        StartupCustodyPhase::CleanupConfirmed,
+    );
+    drop(journal);
+    let before = fs::read(&config.journal_path).expect("bytes before mismatch");
+
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Error, &observations_capture, None),
+        io_deadline(),
+    )
+    .expect("mixed target preflight");
+    let evidence = RestartMayOwnCleanupEvidence::from_target_for_test(startup.targets()[0]);
+    assert_eq!(
+        startup
+            .confirm_restart_cleanup_set(evidence)
+            .expect_err("multi-target evidence cannot cross the CAS"),
+        DurableOwnershipError::RecoveryNotConfirmed
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("bytes after mismatch"),
+        before
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
 }
 
 #[test]

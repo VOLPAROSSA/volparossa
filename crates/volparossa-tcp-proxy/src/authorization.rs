@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, net::IpAddr};
 
 use subtle::ConstantTimeEq;
 use volparossa_policy::{TransportProtocol, VerifiedManifest};
@@ -31,7 +31,7 @@ impl<'a> TcpAuthorizationScope<'a> {
     }
 
     /// Verify a signed, replay-protected `OPEN_TCP` and apply the exact active
-    /// policy hash and hostname/TCP/port rule.
+    /// policy hash and exact DNS-or-raw-IP/TCP/port rule.
     ///
     /// # Errors
     ///
@@ -83,14 +83,36 @@ impl<'a> TcpAuthorizationScope<'a> {
 
         let port = u16::try_from(message.port)
             .map_err(|_| TcpProxyError::InvalidBinding("destination port"))?;
-        self.policy
-            .authorize_domain(now_ms, &message.hostname, TransportProtocol::Tcp, port)?;
+        let (hostname, destination_ip) = if message.hostname.is_empty() {
+            let destination_ip = parse_ip_bytes(&message.destination_ip)
+                .ok_or(TcpProxyError::InvalidBinding("destination IP"))?;
+            self.policy
+                .authorize_ip(now_ms, destination_ip, TransportProtocol::Tcp, port)?;
+            (None, Some(destination_ip))
+        } else {
+            self.policy.authorize_domain(
+                now_ms,
+                &message.hostname,
+                TransportProtocol::Tcp,
+                port,
+            )?;
+            let destination_ip = if message.destination_ip.is_empty() {
+                None
+            } else {
+                Some(
+                    parse_ip_bytes(&message.destination_ip)
+                        .ok_or(TcpProxyError::InvalidBinding("destination IP"))?,
+                )
+            };
+            (Some(message.hostname.clone()), destination_ip)
+        };
 
         Ok(AuthorizedTcpFlow {
             route_context_id: to_array(&message.route_context_id, "route context")?,
             flow_id: to_array(&message.flow_id, "flow id")?,
             client_ephemeral_id: to_array(&message.client_ephemeral_id, "client session identity")?,
-            hostname: message.hostname.clone(),
+            hostname,
+            destination_ip,
             port,
             expires_at_ms: verified.expires_at_ms(),
         })
@@ -104,7 +126,8 @@ pub struct AuthorizedTcpFlow {
     route_context_id: [u8; ROUTE_CONTEXT_BYTES],
     flow_id: [u8; FLOW_ID_BYTES],
     client_ephemeral_id: [u8; CLIENT_ID_BYTES],
-    hostname: String,
+    hostname: Option<String>,
+    destination_ip: Option<IpAddr>,
     port: u16,
     expires_at_ms: u64,
 }
@@ -128,11 +151,18 @@ impl AuthorizedTcpFlow {
         &self.client_ephemeral_id
     }
 
-    /// Return the canonical policy-approved hostname for exit-side resolution.
+    /// Return the canonical policy-approved hostname, when this is a DNS flow.
     /// Callers must not persist or log this value.
     #[must_use]
-    pub fn hostname(&self) -> &str {
-        &self.hostname
+    pub fn hostname(&self) -> Option<&str> {
+        self.hostname.as_deref()
+    }
+
+    /// Return the exact destination IP, when this is a raw-IP flow or a hostname flow pinned by
+    /// transparent-ingress evidence. Callers must not persist or log this value.
+    #[must_use]
+    pub const fn destination_ip(&self) -> Option<IpAddr> {
+        self.destination_ip
     }
 
     /// Return the exact policy-approved TCP port.
@@ -181,4 +211,17 @@ fn to_array<const N: usize>(value: &[u8], field: &'static str) -> Result<[u8; N]
     value
         .try_into()
         .map_err(|_| TcpProxyError::InvalidBinding(field))
+}
+
+fn parse_ip_bytes(value: &[u8]) -> Option<IpAddr> {
+    match value.len() {
+        4 => Some(IpAddr::V4(std::net::Ipv4Addr::new(
+            value[0], value[1], value[2], value[3],
+        ))),
+        16 => {
+            let octets: [u8; 16] = value.try_into().ok()?;
+            Some(IpAddr::V6(std::net::Ipv6Addr::from(octets)))
+        }
+        _ => None,
+    }
 }

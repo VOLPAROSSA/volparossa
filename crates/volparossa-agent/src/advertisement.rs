@@ -30,6 +30,9 @@ const MAX_SEQUENCE_FILE_BYTES: u64 = 32;
 pub(crate) struct LocalAdvertisementInput {
     pub(crate) roles: RolesConfig,
     pub(crate) operator_id: String,
+    pub(crate) capabilities: AdvertisementCapabilities,
+    pub(crate) capacity: AdvertisementCapacity,
+    pub(crate) origin: AdvertisementNetwork,
     pub(crate) policy_version: u64,
     pub(crate) policy_hash: [u8; 32],
     pub(crate) policy_expires_at_ms: u64,
@@ -40,6 +43,8 @@ pub(crate) struct LocalAdvertisementInput {
 pub(crate) struct SignedLocalAdvertisement {
     pub(crate) envelope: Vec<u8>,
     pub(crate) provider_keys: BTreeSet<String>,
+    pub(crate) sequence_number: u64,
+    pub(crate) expires_at_ms: u64,
 }
 
 pub(crate) struct AdvertisementPublisher {
@@ -71,7 +76,7 @@ impl AdvertisementPublisher {
         input: &LocalAdvertisementInput,
         now_ms: u64,
     ) -> Result<SignedLocalAdvertisement, AdvertisementError> {
-        if !input.roles.client || input.roles.relay || input.roles.exit {
+        if !(input.roles.relay || input.roles.exit) {
             return Err(AdvertisementError::UnavailableServiceRole);
         }
         if input.control_addresses.is_empty()
@@ -80,6 +85,7 @@ impl AdvertisementPublisher {
             || input.policy_version == 0
             || input.policy_hash == [0; 32]
             || input.policy_expires_at_ms <= now_ms
+            || !service_claims_are_consistent(input)
         {
             return Err(AdvertisementError::InvalidInput);
         }
@@ -108,42 +114,23 @@ impl AdvertisementPublisher {
             peer_id: signer.peer_id().to_bytes(),
             sequence_number,
             roles: Some(AdvertisementRoles {
-                client: true,
-                relay: false,
-                exit: false,
+                client: input.roles.client,
+                relay: input.roles.relay,
+                exit: input.roles.exit,
             }),
             capabilities: Some(AdvertisementCapabilities {
-                // No production dataplane has yet proved these transports locally.
-                tcp_mptcp: false,
-                udp_single_path: false,
-                multipath_quic: false,
                 ipv4,
                 ipv6,
-                udp_hole_punching: false,
+                ..input.capabilities.clone()
             }),
             control_addresses: input.control_addresses.iter().cloned().collect(),
             capacity: Some(AdvertisementCapacity {
-                operator_relay_limit_up_mbps: 0,
-                operator_relay_limit_down_mbps: 0,
-                operator_exit_limit_up_mbps: 0,
-                operator_exit_limit_down_mbps: 0,
-                currently_reserved_up_mbps: 0,
-                currently_reserved_down_mbps: 0,
-                estimated_free_up_mbps: 0,
-                estimated_free_down_mbps: 0,
-                active_relay_sessions: 0,
-                active_exit_sessions: 0,
-                free_relay_slots: 0,
-                free_exit_slots: 0,
                 sample_window_seconds,
+                ..input.capacity.clone()
             }),
             network: Some(AdvertisementNetwork {
-                region: "unknown".to_owned(),
-                country_code: String::new(),
-                asn: 0,
-                ipv4_prefix_hint: String::new(),
-                ipv6_prefix_hint: String::new(),
                 operator_id: input.operator_id.clone(),
+                ..input.origin.clone()
             }),
             quality: Some(AdvertisementQuality {
                 local_uptime_seconds: self.started_at.elapsed().as_secs(),
@@ -170,8 +157,28 @@ impl AdvertisementPublisher {
         Ok(SignedLocalAdvertisement {
             envelope,
             provider_keys,
+            sequence_number,
+            expires_at_ms,
         })
     }
+}
+
+fn service_claims_are_consistent(input: &LocalAdvertisementInput) -> bool {
+    let transport = input.capabilities.tcp_mptcp
+        || input.capabilities.udp_single_path
+        || input.capabilities.multipath_quic;
+    let relay_capacity = !input.roles.relay
+        || (input.capacity.operator_relay_limit_up_mbps > 0
+            && input.capacity.operator_relay_limit_down_mbps > 0);
+    let exit_capacity = !input.roles.exit
+        || (input.capacity.operator_exit_limit_up_mbps > 0
+            && input.capacity.operator_exit_limit_down_mbps > 0);
+    input.origin.asn != 0
+        && !input.origin.region.is_empty()
+        && input.origin.country_code.len() == 2
+        && transport
+        && relay_capacity
+        && exit_capacity
 }
 
 fn address_families(addresses: &BTreeSet<String>) -> Result<(bool, bool), AdvertisementError> {
@@ -392,10 +399,41 @@ mod tests {
         LocalAdvertisementInput {
             roles: RolesConfig {
                 client: true,
-                relay: false,
+                relay: true,
                 exit: false,
             },
             operator_id: "operator-test".to_owned(),
+            capabilities: AdvertisementCapabilities {
+                tcp_mptcp: true,
+                udp_single_path: true,
+                multipath_quic: true,
+                ipv4: false,
+                ipv6: false,
+                udp_hole_punching: false,
+            },
+            capacity: AdvertisementCapacity {
+                operator_relay_limit_up_mbps: 100,
+                operator_relay_limit_down_mbps: 100,
+                operator_exit_limit_up_mbps: 0,
+                operator_exit_limit_down_mbps: 0,
+                currently_reserved_up_mbps: 0,
+                currently_reserved_down_mbps: 0,
+                estimated_free_up_mbps: 100,
+                estimated_free_down_mbps: 100,
+                active_relay_sessions: 0,
+                active_exit_sessions: 0,
+                free_relay_slots: 4,
+                free_exit_slots: 0,
+                sample_window_seconds: 0,
+            },
+            origin: AdvertisementNetwork {
+                region: "test".to_owned(),
+                country_code: "NL".to_owned(),
+                asn: 64_512,
+                ipv4_prefix_hint: "44.12.34.0/24".to_owned(),
+                ipv6_prefix_hint: "2606:4700:100::/48".to_owned(),
+                operator_id: String::new(),
+            },
             policy_version: 7,
             policy_hash: [7; 32],
             policy_expires_at_ms: NOW_MS + 1_000_000,
@@ -407,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_client_refresh_is_truthful_monotonic_and_short_lived() {
+    fn signed_service_refresh_is_truthful_monotonic_and_short_lived() {
         let directory = tempdir().expect("tempdir");
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).expect("mode");
         let identity = Identity::generate();
@@ -416,7 +454,7 @@ mod tests {
         let first = publisher
             .sign(&identity, &input(), NOW_MS)
             .expect("first signed ad");
-        assert!(first.provider_keys.is_empty());
+        assert!(first.provider_keys.contains(capability::RELAY));
         let mut replay = ReplayCache::new(4).expect("replay cache");
         let first_verified = verify_control_message::<NodeAdvertisement>(
             &first.envelope,
@@ -432,7 +470,7 @@ mod tests {
             first_message.roles,
             Some(AdvertisementRoles {
                 client: true,
-                relay: false,
+                relay: true,
                 exit: false,
             })
         );
@@ -450,9 +488,9 @@ mod tests {
                 .is_some_and(|capabilities| {
                     capabilities.ipv4
                         && capabilities.ipv6
-                        && !capabilities.tcp_mptcp
-                        && !capabilities.udp_single_path
-                        && !capabilities.multipath_quic
+                        && capabilities.tcp_mptcp
+                        && capabilities.udp_single_path
+                        && capabilities.multipath_quic
                 })
         );
 
@@ -506,7 +544,7 @@ mod tests {
         ));
         assert!(!sequence_path.exists());
         let mut unavailable = input();
-        unavailable.roles.relay = true;
+        unavailable.roles.relay = false;
         assert!(matches!(
             publisher.sign(&identity, &unavailable, NOW_MS),
             Err(AdvertisementError::UnavailableServiceRole)

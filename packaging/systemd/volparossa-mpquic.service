@@ -24,6 +24,7 @@ AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+PrivateMounts=yes
 PrivateDevices=yes
 ProtectControlGroups=yes
 ProtectKernelModules=yes

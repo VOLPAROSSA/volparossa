@@ -4,10 +4,11 @@
 //! production startup stops and an operator must inspect the host explicitly. Production now opens
 //! the v3 store through one canonical locked actor before publishing its cleanup token or socket.
 //! Startup projects custody-bound `MayOwnCustody`, `MayOwnPrepare` and `CleanupConfirmed` records
-//! without mutation. The installed restart cleanup executor deliberately refuses every trusted
-//! worker-plus-kernel cleanup proof. A complete set consisting only of already durable
+//! without mutation. The installed general restart cleanup executor deliberately refuses every
+//! worker-plus-kernel cleanup proof. One startup-only affine control can confirm only the exact
+//! singleton reaper target. A complete set consisting only of already durable
 //! `CleanupConfirmed` records may receive one-shot exact-target manager-absence evidence from the
-//! external startup join; every `MayOwn` set still refuses. A separate affine production handle
+//! external startup join; every broader `MayOwn` set still refuses. A separate affine production handle
 //! admits live Prepare and can settle only its same-runtime owner after both exact proofs.
 
 #![allow(dead_code)] // The production actor is live; restart-recovery APIs remain private.
@@ -23,15 +24,15 @@ pub(crate) use actor::{
     DurableNeverDispatchedOutcome, DurableOwnershipActor, DurableOwnershipError,
     DurableOwnershipKey, DurableOwnershipPrepareHandle, DurableOwnershipSelector,
     DurablePrepareAnchor, DurablePrepareAnchorParts, DurablePrepareSettlement,
-    DurableRegistrationOutcome, DurableUndispatchedCleanupOutcome, StartupCustodyPhase,
-    StartupCustodyTarget,
+    DurableRegistrationOutcome, DurableServiceCgroupIdentity, DurableUndispatchedCleanupOutcome,
+    RestartNetworkPlan, StartupCustodyPhase, StartupCustodyTarget, StartupRestartPlan,
 };
 
 use crate::{
     deadline::HardDeadline,
     internal_protocol::{InternalEndpointRole, InternalIpPrefix, LeasePlan as InternalLeasePlan},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
-    systemd_custody::CleanupConfirmedManagerAbsenceEvidence,
+    systemd_custody::{CleanupConfirmedManagerAbsenceEvidence, RestartMayOwnCleanupEvidence},
 };
 
 /// Constructs one journal anchor without exposing actor-internal failure types outside this module.
@@ -362,6 +363,18 @@ impl ProductionOwnershipStartup {
             .map(|actor| ProductionOwnershipRuntime { actor })
     }
 
+    /// Consume one affine exact-reaper proof set while retaining the startup actor and journal lock.
+    ///
+    /// This crosses only the actor's exact pending `MayOwn* -> CleanupConfirmed` transitions. It
+    /// neither removes systemd custody nor continues startup, and a partial durable prefix remains
+    /// exactly retryable after another process crash.
+    pub(crate) fn confirm_restart_cleanup_set(
+        &mut self,
+        evidence: RestartMayOwnCleanupEvidence,
+    ) -> Result<&[StartupCustodyTarget], DurableOwnershipError> {
+        self.startup.confirm_restart_cleanup_set(evidence)
+    }
+
     /// Continue the retained startup only with fresh exact manager-absence evidence for its full
     /// canonical non-empty `CleanupConfirmed` target set.
     pub(crate) fn continue_cleanup_confirmed_absent(
@@ -501,7 +514,9 @@ const MAX_PATHS: usize = 8;
 const MAX_PATH_ID: u8 = 8;
 const MAX_LEASE_IDENTITIES: usize = 16;
 const JOURNAL_MAGIC: [u8; 8] = *b"VOLJRN3\0";
-const JOURNAL_VERSION: u16 = 3;
+// Version 4 adds the kernel cgroup ID to the durable recovery anchor. Version 3 is deliberately
+// rejected rather than interpreting an inode-only anchor as restart continuity.
+const JOURNAL_VERSION: u16 = 4;
 const DIGEST_BYTES: usize = 32;
 const DURABLE_WIREGUARD_MARKER_DOMAIN: &str =
     "VOLPAROSSA helper durable WireGuard resource marker v1";
@@ -919,6 +934,7 @@ struct PrepareRecoveryAnchorV1 {
     executable_device: NonZeroU64,
     executable_inode: NonZeroU64,
     service_cgroup_inode: NonZeroU64,
+    service_cgroup_id: NonZeroU64,
 }
 
 impl fmt::Debug for PrepareRecoveryAnchorV1 {
@@ -1663,6 +1679,7 @@ fn encode_recovery_anchor(encoded: &mut Vec<u8>, anchor: PrepareRecoveryAnchorV1
     put_u64(encoded, anchor.executable_device.get());
     put_u64(encoded, anchor.executable_inode.get());
     put_u64(encoded, anchor.service_cgroup_inode.get());
+    put_u64(encoded, anchor.service_cgroup_id.get());
 }
 
 fn encode_custody_descriptor_identity(
@@ -1773,6 +1790,7 @@ fn decode_recovery_anchor(
         executable_device: nonzero(decoder.u64()?)?,
         executable_inode: nonzero(decoder.u64()?)?,
         service_cgroup_inode: nonzero(decoder.u64()?)?,
+        service_cgroup_id: nonzero(decoder.u64()?)?,
     })
 }
 
@@ -3544,6 +3562,7 @@ mod tests {
             executable_device: nz(seed + 40),
             executable_inode: nz(seed + 50),
             service_cgroup_inode: nz(seed + 60),
+            service_cgroup_id: nz(seed + 70),
         }
     }
 
@@ -3735,7 +3754,7 @@ mod tests {
                 volparossa_routing::ContextRole::Client,
                 volparossa_routing::WireguardRole::Client,
                 [0, 1],
-                [0, 2],
+                [0, 4],
             ),
             (
                 volparossa_routing::ContextRole::Relay,
@@ -3753,7 +3772,7 @@ mod tests {
                 volparossa_routing::ContextRole::Exit,
                 volparossa_routing::WireguardRole::Exit,
                 [0, 4],
-                [0, 3],
+                [0, 1],
             ),
         ];
 
@@ -3776,7 +3795,7 @@ mod tests {
         assert_eq!(first.key(), (1, WireguardRole::Client as i32));
         assert_eq!(first.interface().len(), DERIVED_WIREGUARD_INTERFACE_BYTES);
         assert_eq!(first.local_address().octets()[14..], [0, 1]);
-        assert_eq!(first.peer_address().octets()[14..], [0, 2]);
+        assert_eq!(first.peer_address().octets()[14..], [0, 4]);
         assert_eq!(
             first.ownership_alias(),
             "volparossa:wireguard:ownership-v1:vpc123799507:\
@@ -3956,7 +3975,7 @@ mod tests {
         let encoded = snapshot.encode().expect("canonical encoding");
         assert_eq!(
             blake3::hash(&encoded).to_hex().as_str(),
-            "e01cbfd204aa20db6ce7e223b5e49eb2c9e73edb392d48025014b829df9bf69e"
+            "87e06cf4ecf82a116e083fe9c20f3155e32b9a4acb7d216b5a46b2a8f3de7eed"
         );
         let legacy_matrix = snapshot_with(vec![
             record(epoch(1), 5, 6, 7, 2, OwnershipPhase::Intent),
@@ -3967,7 +3986,7 @@ mod tests {
             blake3::hash(&legacy_matrix.encode().expect("legacy matrix encoding"))
                 .to_hex()
                 .as_str(),
-            "ddb36231c7c1c6db9a108b08dac8d7f31f46f3a0b602f134e3c1e5fe764374cd"
+            "2b2ff98eaa56ba0f4159dd9d6b57b374772c273ec1b2626d53400a2add33ac8b"
         );
         assert!(encoded.len() <= MAX_JOURNAL_BYTES);
         let decoded = JournalSnapshot::decode(&encoded).expect("canonical decoding");
@@ -3993,13 +4012,26 @@ mod tests {
             JournalSnapshot::decode(&trailing_payload),
             Err(JournalError::Corrupt)
         ));
+
+        let mut inode_only_v3 = encoded.clone();
+        inode_only_v3[8..10].copy_from_slice(&3_u16.to_le_bytes());
+        let payload_len = inode_only_v3
+            .len()
+            .checked_sub(DIGEST_BYTES)
+            .expect("encoded journal checksum");
+        let checksum = *blake3::hash(&inode_only_v3[..payload_len]).as_bytes();
+        inode_only_v3[payload_len..].copy_from_slice(&checksum);
+        assert!(matches!(
+            JournalSnapshot::decode(&inode_only_v3),
+            Err(JournalError::Corrupt)
+        ));
         assert!(!format!("{snapshot:?}").contains("03030303"));
     }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One exhaustive phase/evidence codec matrix.
     fn custody_evidence_tag_two_is_exact_bounded_and_phase_matrix_fail_closed() {
-        const RECOVERY_ANCHOR_BYTES: usize = 16 + 4 + (6 * 8);
+        const RECOVERY_ANCHOR_BYTES: usize = 16 + 4 + (7 * 8);
         const CUSTODY_EVIDENCE_BYTES: usize =
             1 + RECOVERY_ANCHOR_BYTES + CUSTODY_DESCRIPTOR_BINDING_BYTES;
 

@@ -1,0 +1,91 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Start the native transport in the one role enabled for this packaged node.
+set -eu
+
+export LC_ALL=C
+umask 077
+
+config=${VOLPAROSSA_CONFIG:-/etc/volparossa/config.yaml}
+socket=${VOLPAROSSA_MPQUIC_SOCKET:-/run/volparossa/native/mpquic.sock}
+binary=/usr/libexec/volparossa/volparossa-mpquic
+
+case "$config" in
+    /*) ;;
+    *) printf '%s\n' 'VOLPAROSSA_CONFIG must be an absolute path.' >&2; exit 64 ;;
+esac
+case "$socket" in
+    /*) ;;
+    *) printf '%s\n' 'VOLPAROSSA_MPQUIC_SOCKET must be an absolute path.' >&2; exit 64 ;;
+esac
+if [ ! -r "$config" ]; then
+    printf 'VOLPAROSSA configuration is not readable: %s\n' "$config" >&2
+    exit 66
+fi
+if [ ! -x "$binary" ]; then
+    printf 'Native VOLPAROSSA executable is unavailable: %s\n' "$binary" >&2
+    exit 69
+fi
+
+mode=$(awk '
+    BEGIN {
+        in_roles = 0
+        client = ""
+        exit_role = ""
+        invalid = 0
+    }
+    /^[^[:space:]#][^:]*:[[:space:]]*(#.*)?$/ {
+        in_roles = ($0 ~ /^roles:[[:space:]]*(#.*)?$/)
+        next
+    }
+    in_roles && /^[[:space:]]+client:[[:space:]]*/ {
+        line = $0
+        sub(/[[:space:]]*#.*/, "", line)
+        sub(/^[[:space:]]*client:[[:space:]]*/, "", line)
+        sub(/[[:space:]]*$/, "", line)
+        if (client != "" || (line != "true" && line != "false")) invalid = 1
+        client = line
+        next
+    }
+    in_roles && /^[[:space:]]+exit:[[:space:]]*/ {
+        line = $0
+        sub(/[[:space:]]*#.*/, "", line)
+        sub(/^[[:space:]]*exit:[[:space:]]*/, "", line)
+        sub(/[[:space:]]*$/, "", line)
+        if (exit_role != "" || (line != "true" && line != "false")) invalid = 1
+        exit_role = line
+        next
+    }
+    END {
+        if (invalid || client == "" || exit_role == "") {
+            print "invalid"
+        } else if (client == "true" && exit_role == "true") {
+            print "conflict"
+        } else if (client == "true") {
+            print "client"
+        } else if (exit_role == "true") {
+            print "exit"
+        } else {
+            print "disabled"
+        }
+    }
+' "$config")
+
+case "$mode" in
+    client|exit)
+        exec "$binary" --mode "$mode" --socket "$socket"
+        ;;
+    disabled)
+        printf '%s\n' 'Native transport is not required: client and exit roles are disabled.'
+        exit 0
+        ;;
+    conflict)
+        printf '%s\n' \
+            'This development package requires separate nodes for simultaneous client and exit roles.' >&2
+        exit 78
+        ;;
+    *)
+        printf '%s\n' 'The roles.client and roles.exit configuration must each be true or false.' >&2
+        exit 78
+        ;;
+esac

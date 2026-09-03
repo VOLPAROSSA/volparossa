@@ -15,13 +15,13 @@
 //! MPTCP, Relay transport handoff and every usable end-to-end datapath remain disconnected.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs,
     future::Future,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr as InternetSocketAddr},
     num::{NonZeroU32, NonZeroU64},
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Condvar, Mutex, OnceLock,
@@ -55,18 +55,26 @@ use tokio::{
     sync::{Notify, oneshot},
     task::JoinHandle,
 };
+use volparossa_mptcp::{
+    EndpointFlags, MptcpEndpoint, MptcpLimits, SynchronousKernelMptcpPathManager,
+};
 
 use crate::{
     deadline::HardDeadline,
     internal_protocol::{
-        AcquireTransportSocket, ActivateLeases, ActivatedLease, ActivatedLeases, ContextDestroyed,
-        ContextInitialised, DestroyContext, INTERNAL_WORKER_MAGIC,
-        INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext, InternalContextRole,
-        InternalEndpointRole, InternalTransportSocketKind, InternalUdpEndpoint,
-        InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult, PrepareLeases,
+        AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireTransportSocket,
+        ActivateClientIngress, ActivateLeases, ActivatedClientIngress, ActivatedLease,
+        ActivatedLeases, AddMptcpEndpoint, ClientIngressDestroyed, ClientIngressInitialised,
+        ContextDestroyed, ContextInitialised, DestroyClientIngress, DestroyContext,
+        INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, IngressReplySocketReady,
+        IngressSocketReady, InitialiseClientIngress, InitialiseContext, InternalContextRole,
+        InternalEndpointRole, InternalIngressAddressFamily, InternalIngressSocketKind,
+        InternalMptcpMode, InternalTransportSocketKind, InternalUdpEndpoint, InternalWorkerRequest,
+        InternalWorkerResponse, InternalWorkerResult, MptcpEndpointAdded, MptcpEndpointRemoved,
+        PrepareClientIngress, PrepareLeases, PreparedClientIngress, PreparedIngressSocket,
         PreparedLease, PreparedLeases, ProbeCommitLeases, ProbedLease, ProbedLeases,
-        TransportSocketReady, encode_request, internal_worker_request, internal_worker_response,
-        validate_response_for_request,
+        RemoveMptcpEndpoint, TransportSocketReady, encode_request, internal_worker_request,
+        internal_worker_response, validate_response_for_request,
     },
     kernel::{
         KernelError, NamespaceKernel, PreparedWireguardKernelProof, WireguardV3PeerConfiguration,
@@ -83,14 +91,16 @@ use crate::{
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
         CommittedSocketLease, CredentialedWorkerExecution, ExpectedUnixCredentials,
-        WorkerTransportError, create_transport_socket, enable_passcred_receiver,
-        private_credential_worker_channel, receive_credential_record,
-        receive_credential_record_with_deadline,
+        WorkerTransportError, create_client_ingress_reply_socket, create_client_ingress_socket,
+        create_transport_socket, enable_passcred_receiver, private_credential_worker_channel,
+        receive_credential_record, receive_credential_record_with_deadline,
         receive_credential_worker_destroy_response_reconciling_initialise_with_deadline,
         receive_credential_worker_request, receive_credential_worker_response_with_deadline,
         send_credential_record, send_credential_record_with_deadline,
         send_credential_worker_request_with_deadline,
-        send_credential_worker_response_with_deadline, validate_adopted_transport_socket,
+        send_credential_worker_response_with_deadline, validate_adopted_ingress_reply_socket,
+        validate_adopted_ingress_socket, validate_adopted_transport_socket,
+        wait_for_credential_worker_request,
     },
 };
 use volparossa_linux_uapi::install_close_range_on_exec;
@@ -98,10 +108,16 @@ use volparossa_routing::ContextRole as RoutingContextRole;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 use zeroize::Zeroizing;
 
+mod client_ingress_policy;
+mod dead_worker_reaper;
 mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
 mod relay_fence;
+mod restart_reaper;
+pub(crate) use dead_worker_reaper::{
+    INTERNAL_DEAD_WORKER_REAPER_ARGUMENT, run_internal_dead_worker_reaper_entry,
+};
 pub(crate) use functional_backend::{
     ExactSameRuntimeCleanupProof, ExactSameRuntimeManagerAbsenceProof,
     functional_alpha_lease_backend,
@@ -109,6 +125,12 @@ pub(crate) use functional_backend::{
 #[cfg(test)]
 pub(crate) use functional_backend::{
     exact_same_runtime_cleanup_proof_for_test, exact_same_runtime_manager_absence_proof_for_test,
+};
+pub(crate) use restart_reaper::{
+    ExactRestartReaperCleanupProof, INTERNAL_RESTART_REAPER_ARGUMENT,
+    INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT, RestartCleanupMode,
+    execute_single_restart_reaper, run_internal_restart_reaper_entry,
+    run_internal_restart_reaper_fail_stop_live_proof,
 };
 
 #[cfg(test)]
@@ -124,14 +146,16 @@ pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-work
 
 #[cfg(test)]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
+const CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 const LIVE_FDSTORE_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const PROBE_COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const TERMINATION_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_MAX_WORKERS: usize = 64;
 const DEFAULT_MAX_CACHE_ENTRIES: usize = 1_024;
 const DEFAULT_MAX_TTL: Duration = Duration::from_secs(15 * 60);
+const MAX_INGRESS_REPLY_SOCKETS: u16 = 64;
 const MAX_PROCESS_OWNERS: usize = DEFAULT_MAX_WORKERS;
 const MAX_SUPERVISORS: usize = DEFAULT_MAX_WORKERS;
 const MAX_CUSTODY_PUBLICATION_TERMINALS: usize = DEFAULT_MAX_WORKERS;
@@ -1600,6 +1624,7 @@ fn receive_deadline_bound_worker_request(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
 ) -> Result<(InternalWorkerRequest, HardDeadline), WorkerV3Error> {
+    wait_for_credential_worker_request(channel)?;
     let bound_request = receive_credential_worker_request(channel, expected_parent)?;
     let deadline = HardDeadline::from_monotonic_expiry_nanos(
         bound_request.monotonic_deadline_ns,
@@ -1797,6 +1822,340 @@ struct WorkerContext<Kernel> {
     /// moves any birth link. This is not durable authority, but it bounds same-runtime cleanup.
     staged_resources: Option<Vec<DurableWireguardResource>>,
     lease: Option<WorkerLeaseLifecycle>,
+    mptcp: Option<WorkerMptcpPathManager>,
+}
+
+struct WorkerIngressSocket {
+    descriptor: OwnedFd,
+    local: crate::internal_protocol::InternalSocketAddress,
+}
+
+struct WorkerClientIngress {
+    client_runtime_id: ContextId,
+    hard_expires_at_unix: u64,
+    _bootstrap: WorkerNetworkBootstrap,
+    kernel: NamespaceKernel,
+    ingress_ifindex: u32,
+    sockets:
+        BTreeMap<(InternalIngressSocketKind, InternalIngressAddressFamily), WorkerIngressSocket>,
+    locals: BTreeMap<
+        (InternalIngressSocketKind, InternalIngressAddressFamily),
+        crate::internal_protocol::InternalSocketAddress,
+    >,
+    acquired: BTreeSet<(InternalIngressSocketKind, InternalIngressAddressFamily)>,
+    routing: Option<crate::kernel::ClientIngressIpv4Routing>,
+    policy: Option<client_ingress_policy::ActiveClientIngressPolicy>,
+    prepared: bool,
+    active: bool,
+    reply_sockets_issued: u16,
+}
+
+impl WorkerClientIngress {
+    fn initialise(
+        value: &InitialiseClientIngress,
+        bound_context: ContextId,
+        bootstrap: WorkerNetworkBootstrap,
+        deadline: HardDeadline,
+    ) -> Result<Self, InternalWorkerResult> {
+        let runtime =
+            context_id(&value.client_runtime_id).map_err(|_| InternalWorkerResult::Invalid)?;
+        let now = current_unix_seconds().ok_or(InternalWorkerResult::Kernel)?;
+        if runtime != bound_context
+            || value.hard_expires_at_unix <= now
+            || value.hard_expires_at_unix > now.saturating_add(15 * 60)
+            || !matches!(bootstrap, WorkerNetworkBootstrap::NonRelay)
+        {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        let mut kernel =
+            NamespaceKernel::connect(deadline).map_err(|_| InternalWorkerResult::Kernel)?;
+        kernel
+            .activate_loopback(deadline)
+            .map_err(|_| InternalWorkerResult::Kernel)?;
+        let ingress_ifindex = kernel
+            .activate_client_ingress_link(runtime, deadline)
+            .map_err(|_| InternalWorkerResult::Kernel)?;
+        Ok(Self {
+            client_runtime_id: runtime,
+            hard_expires_at_unix: value.hard_expires_at_unix,
+            _bootstrap: bootstrap,
+            kernel,
+            ingress_ifindex,
+            sockets: BTreeMap::new(),
+            locals: BTreeMap::new(),
+            acquired: BTreeSet::new(),
+            routing: None,
+            policy: None,
+            prepared: false,
+            active: false,
+            reply_sockets_issued: 0,
+        })
+    }
+
+    fn prepare(&mut self) -> Result<Vec<PreparedIngressSocket>, InternalWorkerResult> {
+        if self.prepared
+            || self.active
+            || !self.sockets.is_empty()
+            || !self.locals.is_empty()
+            || !self.acquired.is_empty()
+            || self.routing.is_some()
+            || self.policy.is_some()
+        {
+            return Err(InternalWorkerResult::Conflict);
+        }
+        let mut sockets = BTreeMap::new();
+        let mut prepared = Vec::with_capacity(volparossa_routing::REQUIRED_INGRESS_SOCKETS);
+        for kind in [
+            InternalIngressSocketKind::TransparentTcpListener,
+            InternalIngressSocketKind::TransparentUdp,
+            InternalIngressSocketKind::DnsTcpListener,
+            InternalIngressSocketKind::DnsUdp,
+        ] {
+            for family in [
+                InternalIngressAddressFamily::Ipv4,
+                InternalIngressAddressFamily::Ipv6,
+            ] {
+                let (descriptor, local) = create_client_ingress_socket(kind, family)
+                    .map_err(|_| InternalWorkerResult::Kernel)?;
+                prepared.push(PreparedIngressSocket {
+                    descriptor_kind: kind as i32,
+                    address_family: family as i32,
+                    local: Some(local.clone()),
+                });
+                sockets.insert((kind, family), WorkerIngressSocket { descriptor, local });
+            }
+        }
+        self.locals = prepared
+            .iter()
+            .filter_map(|socket| {
+                Some((
+                    (
+                        InternalIngressSocketKind::try_from(socket.descriptor_kind).ok()?,
+                        InternalIngressAddressFamily::try_from(socket.address_family).ok()?,
+                    ),
+                    socket.local.clone()?,
+                ))
+            })
+            .collect();
+        if self.locals.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS {
+            return Err(InternalWorkerResult::Kernel);
+        }
+        self.sockets = sockets;
+        self.prepared = true;
+        Ok(prepared)
+    }
+
+    fn acquire(
+        &mut self,
+        request: &AcquireClientIngressSocket,
+    ) -> Result<(OwnedFd, IngressSocketReady), InternalWorkerResult> {
+        let runtime =
+            context_id(&request.client_runtime_id).map_err(|_| InternalWorkerResult::Invalid)?;
+        let kind = InternalIngressSocketKind::try_from(request.descriptor_kind)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        let family = InternalIngressAddressFamily::try_from(request.address_family)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        let identity = (kind, family);
+        if runtime != self.client_runtime_id
+            || !self.prepared
+            || self.active
+            || self.acquired.contains(&identity)
+        {
+            return Err(InternalWorkerResult::Conflict);
+        }
+        let socket = self
+            .sockets
+            .remove(&identity)
+            .ok_or(InternalWorkerResult::NotFound)?;
+        if request.expected_local.as_ref() != Some(&socket.local) {
+            self.sockets.insert(identity, socket);
+            return Err(InternalWorkerResult::Invalid);
+        }
+        self.acquired.insert(identity);
+        let ready = IngressSocketReady {
+            client_runtime_id: self.client_runtime_id.to_vec(),
+            descriptor_kind: kind as i32,
+            address_family: family as i32,
+            local: Some(socket.local),
+        };
+        Ok((socket.descriptor, ready))
+    }
+
+    fn activate(
+        &mut self,
+        request: &ActivateClientIngress,
+        deadline: HardDeadline,
+    ) -> Result<(), InternalWorkerResult> {
+        let runtime =
+            context_id(&request.client_runtime_id).map_err(|_| InternalWorkerResult::Invalid)?;
+        let identities = request
+            .identities
+            .iter()
+            .map(|identity| {
+                Some((
+                    InternalIngressSocketKind::try_from(identity.descriptor_kind).ok()?,
+                    InternalIngressAddressFamily::try_from(identity.address_family).ok()?,
+                ))
+            })
+            .collect::<Option<BTreeSet<_>>>()
+            .ok_or(InternalWorkerResult::Invalid)?;
+        if runtime != self.client_runtime_id
+            || !self.prepared
+            || self.active
+            || !self.sockets.is_empty()
+            || identities.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS
+            || identities != self.acquired
+            || self.routing.is_some()
+            || self.policy.is_some()
+            || current_unix_seconds().is_none_or(|now| now >= self.hard_expires_at_unix)
+        {
+            return Err(InternalWorkerResult::Conflict);
+        }
+        let ports = client_ingress_policy::ClientIngressPorts {
+            ipv4: self.family_ports(InternalIngressAddressFamily::Ipv4)?,
+            ipv6: self.family_ports(InternalIngressAddressFamily::Ipv6)?,
+        };
+        let routing = self
+            .kernel
+            .install_client_ingress_routing(self.ingress_ifindex, deadline)
+            .map_err(|_| InternalWorkerResult::Kernel)?;
+        let Ok(policy) = client_ingress_policy::install(
+            self.client_runtime_id,
+            self.ingress_ifindex,
+            ports,
+            deadline,
+        ) else {
+            let policy_absent =
+                client_ingress_policy::cleanup_runtime(self.client_runtime_id, deadline).is_ok();
+            let routing_absent = self
+                .kernel
+                .remove_client_ingress_routing(routing, deadline)
+                .is_ok();
+            return Err(if policy_absent && routing_absent {
+                InternalWorkerResult::Kernel
+            } else {
+                InternalWorkerResult::CleanupIncomplete
+            });
+        };
+        self.routing = Some(routing);
+        self.policy = Some(policy);
+        self.active = true;
+        Ok(())
+    }
+
+    fn acquire_reply(
+        &mut self,
+        request: &AcquireClientIngressReplySocket,
+    ) -> Result<(OwnedFd, IngressReplySocketReady), InternalWorkerResult> {
+        let runtime =
+            context_id(&request.client_runtime_id).map_err(|_| InternalWorkerResult::Invalid)?;
+        if runtime != self.client_runtime_id
+            || !self.active
+            || self.reply_sockets_issued >= MAX_INGRESS_REPLY_SOCKETS
+            || current_unix_seconds().is_none_or(|now| now >= self.hard_expires_at_unix)
+        {
+            return Err(InternalWorkerResult::Conflict);
+        }
+        let descriptor = create_client_ingress_reply_socket(request)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        self.reply_sockets_issued = self.reply_sockets_issued.saturating_add(1);
+        Ok((
+            descriptor,
+            IngressReplySocketReady {
+                client_runtime_id: runtime.to_vec(),
+                remote: request.remote.clone(),
+                application: request.application.clone(),
+            },
+        ))
+    }
+
+    fn family_ports(
+        &self,
+        family: InternalIngressAddressFamily,
+    ) -> Result<client_ingress_policy::ClientIngressFamilyPorts, InternalWorkerResult> {
+        Ok(client_ingress_policy::ClientIngressFamilyPorts {
+            transparent_tcp: self
+                .ingress_port(InternalIngressSocketKind::TransparentTcpListener, family)?,
+            transparent_udp: self
+                .ingress_port(InternalIngressSocketKind::TransparentUdp, family)?,
+            dns_tcp: self.ingress_port(InternalIngressSocketKind::DnsTcpListener, family)?,
+            dns_udp: self.ingress_port(InternalIngressSocketKind::DnsUdp, family)?,
+        })
+    }
+
+    fn ingress_port(
+        &self,
+        kind: InternalIngressSocketKind,
+        family: InternalIngressAddressFamily,
+    ) -> Result<u16, InternalWorkerResult> {
+        self.locals
+            .get(&(kind, family))
+            .and_then(|local| u16::try_from(local.port).ok())
+            .filter(|port| *port != 0)
+            .ok_or(InternalWorkerResult::Kernel)
+    }
+
+    fn cleanup(&mut self, deadline: HardDeadline) -> InternalWorkerResult {
+        let policy_result = self.policy.take().map_or(Ok(()), |policy| {
+            client_ingress_policy::remove(policy, deadline)
+        });
+        let routing_result = self.routing.take().map_or(Ok(()), |routing| {
+            self.kernel.remove_client_ingress_routing(routing, deadline)
+        });
+        self.active = false;
+        if policy_result.is_ok() && routing_result.is_ok() {
+            InternalWorkerResult::Ok
+        } else {
+            InternalWorkerResult::CleanupIncomplete
+        }
+    }
+}
+
+struct WorkerMptcpPathManager {
+    backend: SynchronousKernelMptcpPathManager,
+    route_context_id: String,
+}
+
+impl WorkerMptcpPathManager {
+    fn prepare(
+        route_context_id: ContextId,
+        accepted_addrs: u32,
+        subflows: u32,
+    ) -> Result<Self, ()> {
+        let backend = SynchronousKernelMptcpPathManager::new().map_err(|_| ())?;
+        let route_context_id = format!("vp{:032x}", u128::from_be_bytes(route_context_id));
+        backend
+            .prepare_context(
+                &route_context_id,
+                MptcpLimits {
+                    accepted_addrs,
+                    subflows,
+                },
+            )
+            .map_err(|_| ())?;
+        Ok(Self {
+            backend,
+            route_context_id,
+        })
+    }
+
+    fn add(&self, endpoint: MptcpEndpoint) -> Result<(), ()> {
+        self.backend
+            .add_path(&self.route_context_id, endpoint)
+            .map_err(|_| ())
+    }
+
+    fn remove(&self, endpoint_id: u8) -> Result<(), ()> {
+        self.backend
+            .remove_path(&self.route_context_id, endpoint_id)
+            .map_err(|_| ())
+    }
+
+    fn cleanup(&self) -> Result<(), ()> {
+        self.backend
+            .cleanup_context(&self.route_context_id)
+            .map_err(|_| ())
+    }
 }
 
 enum WorkerRelayFence {
@@ -1840,13 +2199,6 @@ enum WorkerProbeOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RelayForwardingGrowth {
-    Grew,
-    NoGrowth,
-    Terminate,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerDestroyOutcome {
     Destroyed,
     Invalid,
@@ -1869,6 +2221,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             kernel,
             staged_resources: None,
             lease: None,
+            mptcp: None,
         }
     }
 
@@ -1879,6 +2232,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         bootstrap: WorkerNetworkBootstrap,
         kernel: Kernel,
         staged_resources: Vec<DurableWireguardResource>,
+        mptcp: WorkerMptcpPathManager,
     ) -> Option<Self> {
         let relay_fence = match (role, bootstrap) {
             (
@@ -1895,11 +2249,12 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         Some(Self {
             route_context_id,
             role,
-            bound_path_id: Some(path_id),
+            bound_path_id: matches!(role, RoutingContextRole::Relay).then_some(path_id),
             relay_fence: Some(relay_fence),
             kernel,
             staged_resources: Some(staged_resources),
             lease: None,
+            mptcp: Some(mptcp),
         })
     }
 
@@ -2164,7 +2519,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             Err(failure) => {
                 return match failure.authority {
                     relay_fence::RelayFenceActivateAuthority::Restricted(restricted) => {
-                        self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                        self.relay_fence = Some(WorkerRelayFence::Restricted(*restricted));
                         RelayFenceActivationOutcome::Recoverable
                     }
                     relay_fence::RelayFenceActivateAuthority::Indeterminate(_) => {
@@ -2213,23 +2568,34 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             let Some(baseline) = ownership.activation_baseline else {
                 return WorkerProbeOutcome::Failed(InternalWorkerResult::Invalid);
             };
-            let proof = self.kernel.probe_wireguard(
-                &ownership.resource,
-                prepared.public_key,
-                prepared.listen_port,
-                peer,
-                deadline,
-            );
-            let Ok(proof) = proof else {
-                return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+            let proof = loop {
+                if deadline.ensure_remaining().is_err() {
+                    return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+                }
+                let proof = self.kernel.probe_wireguard(
+                    &ownership.resource,
+                    prepared.public_key,
+                    prepared.listen_port,
+                    peer,
+                    deadline,
+                );
+                let Ok(proof) = proof else {
+                    return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+                };
+                if proof.latest_handshake_nanoseconds >= 1_000_000_000 {
+                    return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+                }
+                if proof.latest_handshake_unix >= lease.not_before_unix
+                    && proof.received_bytes > baseline.received_bytes
+                    && proof.transmitted_bytes > baseline.transmitted_bytes
+                {
+                    break proof;
+                }
+                let Ok(remaining) = deadline.remaining() else {
+                    return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
+                };
+                thread::sleep(remaining.min(PROBE_COMMIT_POLL_INTERVAL));
             };
-            if proof.latest_handshake_unix < lease.not_before_unix
-                || proof.latest_handshake_nanoseconds >= 1_000_000_000
-                || proof.received_bytes <= baseline.received_bytes
-                || proof.transmitted_bytes <= baseline.transmitted_bytes
-            {
-                return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
-            }
             probed.push(ProbedLease {
                 path_id: lease.path_id,
                 role: lease.role,
@@ -2238,12 +2604,8 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 transmitted_bytes: proof.transmitted_bytes,
             });
         }
-        match self.prove_relay_forwarding_growth(deadline) {
-            RelayForwardingGrowth::Grew => {}
-            RelayForwardingGrowth::NoGrowth => {
-                return WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel);
-            }
-            RelayForwardingGrowth::Terminate => return WorkerProbeOutcome::Terminate,
+        if !self.prove_relay_forwarding_fence_active(deadline) {
+            return WorkerProbeOutcome::Terminate;
         }
         let ownerships = match self.lease.take() {
             Some(WorkerLeaseLifecycle::Activated(ownerships)) => ownerships,
@@ -2258,11 +2620,11 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         WorkerProbeOutcome::Committed(probed)
     }
 
-    /// Project the one immutable committed Client/Exit lease accepted by the transport factory.
+    /// Project one exact immutable Client/Exit lease accepted by the transport factory.
     ///
     /// The later request supplies only a tuple to check. The route, endpoint role and overlay
     /// address remain derived from the already committed worker-owned `WireGuard` resource.
-    fn committed_quic_udp_lease(
+    fn transport_lease(
         &self,
         operation: &AcquireTransportSocket,
     ) -> Result<CommittedSocketLease, InternalWorkerResult> {
@@ -2273,18 +2635,26 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 return Err(InternalWorkerResult::Invalid);
             }
         };
-        let Some(WorkerLeaseLifecycle::Committed(ownerships)) = self.lease.as_ref() else {
+        let kind = InternalTransportSocketKind::try_from(operation.descriptor_kind)
+            .map_err(|_| InternalWorkerResult::Invalid)?;
+        let (
+            (
+                InternalTransportSocketKind::NativeProbeUdpConnected,
+                Some(WorkerLeaseLifecycle::Activated(ownerships)),
+            )
+            | (
+                InternalTransportSocketKind::MptcpConnected
+                | InternalTransportSocketKind::MptcpListener
+                | InternalTransportSocketKind::QuicUdpUnconnected,
+                Some(WorkerLeaseLifecycle::Committed(ownerships)),
+            ),
+        ) = ((kind, self.lease.as_ref()),)
+        else {
             return Err(if self.lease.is_some() {
                 InternalWorkerResult::Conflict
             } else {
                 InternalWorkerResult::NotFound
             });
-        };
-        let [ownership] = ownerships.as_slice() else {
-            return Err(InternalWorkerResult::Invalid);
-        };
-        let Some(proof) = ownership.proof else {
-            return Err(InternalWorkerResult::Invalid);
         };
         let path_id = u8::try_from(operation.path_id)
             .ok()
@@ -2292,15 +2662,39 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             .ok_or(InternalWorkerResult::Invalid)?;
         let role = InternalEndpointRole::try_from(operation.role)
             .map_err(|_| InternalWorkerResult::Invalid)?;
-        let kind = InternalTransportSocketKind::try_from(operation.descriptor_kind)
-            .map_err(|_| InternalWorkerResult::Invalid)?;
         let expected_routing_role =
             routing_endpoint_role(operation.role).ok_or(InternalWorkerResult::Invalid)?;
+        let ownership = ownerships
+            .iter()
+            .find(|ownership| ownership.resource.key() == (path_id, expected_routing_role))
+            .ok_or(InternalWorkerResult::Invalid)?;
+        let Some(proof) = ownership.proof else {
+            return Err(InternalWorkerResult::Invalid);
+        };
         let wall_deadline_is_live = current_unix_seconds()
             .is_some_and(|now| now < ownership.resource.hard_expires_at_unix());
+        let transport_shape_is_valid = matches!(
+            (role, kind, operation.expected_remote.as_ref()),
+            (
+                InternalEndpointRole::Client,
+                InternalTransportSocketKind::MptcpConnected,
+                Some(_)
+            ) | (
+                InternalEndpointRole::Client | InternalEndpointRole::Exit,
+                InternalTransportSocketKind::QuicUdpUnconnected,
+                None
+            ) | (
+                InternalEndpointRole::Exit,
+                InternalTransportSocketKind::MptcpListener,
+                None
+            ) | (
+                InternalEndpointRole::Client | InternalEndpointRole::Exit,
+                InternalTransportSocketKind::NativeProbeUdpConnected,
+                Some(_)
+            )
+        );
         if role != expected_role
-            || kind != InternalTransportSocketKind::QuicUdpUnconnected
-            || operation.expected_remote.is_some()
+            || !transport_shape_is_valid
             || self.bound_path_id.is_some_and(|bound| bound != path_id)
             || ownership.resource.key() != (path_id, expected_routing_role)
             || proof.local_overlay_address != IpAddr::V6(ownership.resource.local_address())
@@ -2316,21 +2710,124 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         })
     }
 
-    fn prove_relay_forwarding_growth(&self, deadline: HardDeadline) -> RelayForwardingGrowth {
+    fn committed_mptcp_endpoint(
+        &self,
+        path_id: u32,
+    ) -> Result<MptcpEndpoint, InternalWorkerResult> {
+        let expected_role = match self.role {
+            RoutingContextRole::Client => volparossa_routing::WireguardRole::Client,
+            RoutingContextRole::Exit => volparossa_routing::WireguardRole::Exit,
+            RoutingContextRole::Relay | RoutingContextRole::Unspecified => {
+                return Err(InternalWorkerResult::Invalid);
+            }
+        };
+        let path_id = u8::try_from(path_id)
+            .ok()
+            .filter(|path_id| (1..=8).contains(path_id))
+            .ok_or(InternalWorkerResult::Invalid)?;
+        if self.bound_path_id.is_some_and(|bound| bound != path_id) {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        let Some(WorkerLeaseLifecycle::Committed(ownerships)) = self.lease.as_ref() else {
+            return Err(if self.lease.is_some() {
+                InternalWorkerResult::Conflict
+            } else {
+                InternalWorkerResult::NotFound
+            });
+        };
+        let ownership = ownerships
+            .iter()
+            .find(|ownership| ownership.resource.key() == (path_id, expected_role as i32))
+            .ok_or(InternalWorkerResult::Invalid)?;
+        let proof = ownership.proof.ok_or(InternalWorkerResult::Invalid)?;
+        let live = current_unix_seconds()
+            .is_some_and(|now| now < ownership.resource.hard_expires_at_unix());
+        if !live
+            || proof.ifindex == 0
+            || proof.local_overlay_address != IpAddr::V6(ownership.resource.local_address())
+        {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        Ok(MptcpEndpoint {
+            id: path_id,
+            address: proof.local_overlay_address,
+            if_index: proof.ifindex,
+            flags: EndpointFlags::empty(),
+            listener_port: None,
+        })
+    }
+
+    fn add_mptcp_endpoint(
+        &self,
+        operation: &AddMptcpEndpoint,
+        deadline: HardDeadline,
+    ) -> InternalWorkerResult {
+        if operation.route_context_id.as_slice() != self.route_context_id
+            || deadline.ensure_remaining().is_err()
+        {
+            return InternalWorkerResult::Invalid;
+        }
+        let Ok(mode) = InternalMptcpMode::try_from(operation.mode) else {
+            return InternalWorkerResult::Invalid;
+        };
+        let (flags, listener_port) = match mptcp_endpoint_flags(
+            self.role,
+            mode,
+            operation.backup,
+            operation.listener_port,
+        ) {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
+        let mut endpoint = match self.committed_mptcp_endpoint(operation.path_id) {
+            Ok(endpoint) => endpoint,
+            Err(result) => return result,
+        };
+        endpoint.flags = flags;
+        endpoint.listener_port = listener_port;
+        let Some(manager) = self.mptcp.as_ref() else {
+            return InternalWorkerResult::Invalid;
+        };
+        match manager.add(endpoint) {
+            Ok(()) if deadline.ensure_remaining().is_ok() => InternalWorkerResult::Ok,
+            Ok(()) | Err(()) => InternalWorkerResult::Kernel,
+        }
+    }
+
+    fn remove_mptcp_endpoint(
+        &self,
+        operation: &RemoveMptcpEndpoint,
+        deadline: HardDeadline,
+    ) -> InternalWorkerResult {
+        if operation.route_context_id.as_slice() != self.route_context_id
+            || deadline.ensure_remaining().is_err()
+        {
+            return InternalWorkerResult::Invalid;
+        }
+        let endpoint = match self.committed_mptcp_endpoint(operation.path_id) {
+            Ok(endpoint) => endpoint,
+            Err(result) => return result,
+        };
+        let Some(manager) = self.mptcp.as_ref() else {
+            return InternalWorkerResult::Invalid;
+        };
+        match manager.remove(endpoint.id) {
+            Ok(()) if deadline.ensure_remaining().is_ok() => InternalWorkerResult::Ok,
+            Ok(()) | Err(()) => InternalWorkerResult::Kernel,
+        }
+    }
+
+    fn prove_relay_forwarding_fence_active(&self, deadline: HardDeadline) -> bool {
         match self.relay_fence.as_ref() {
             Some(WorkerRelayFence::NonRelay) if !matches!(self.role, RoutingContextRole::Relay) => {
-                RelayForwardingGrowth::Grew
+                true
             }
             Some(WorkerRelayFence::Active {
                 authority,
-                activation_baseline: Some(baseline),
-            }) => {
-                let proof = relay_fence::verify_active_relay_fence(authority, deadline)
-                    .map(|current| current.both_allowed_directions_grew_since(baseline));
-                classify_relay_forwarding_growth(&proof)
-            }
+                activation_baseline: Some(_),
+            }) => relay_fence::verify_active_relay_fence(authority, deadline).is_ok(),
             #[cfg(test)]
-            Some(WorkerRelayFence::Fixture) => RelayForwardingGrowth::Grew,
+            Some(WorkerRelayFence::Fixture) => true,
             Some(
                 WorkerRelayFence::NonRelay
                 | WorkerRelayFence::Restricted(_)
@@ -2339,7 +2836,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                     ..
                 },
             )
-            | None => RelayForwardingGrowth::Terminate,
+            | None => false,
         }
     }
 
@@ -2404,6 +2901,12 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     }
 
     fn destroy(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
+        if let Some(manager) = self.mptcp.as_ref() {
+            if manager.cleanup().is_err() || deadline.ensure_remaining().is_err() {
+                return WorkerDestroyOutcome::CleanupIncomplete;
+            }
+            self.mptcp = None;
+        }
         let Some(lifecycle) = self.lease.as_ref() else {
             // Birth links are moved before Prepare adopts them. The exact authenticated cleanup
             // resource set therefore remains necessary even when no lifecycle exists in this
@@ -2481,7 +2984,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                     Ok(_retired) => WorkerDestroyOutcome::Destroyed,
                     Err(failure) => match failure.authority {
                         relay_fence::RelayFenceRetireAuthority::Restricted(restricted) => {
-                            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                            self.relay_fence = Some(WorkerRelayFence::Restricted(*restricted));
                             WorkerDestroyOutcome::CleanupIncomplete
                         }
                         relay_fence::RelayFenceRetireAuthority::Indeterminate(_) => {
@@ -2507,14 +3010,44 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     }
 }
 
-fn classify_relay_forwarding_growth(
-    proof: &Result<bool, relay_fence::RelayFenceError>,
-) -> RelayForwardingGrowth {
-    match proof {
-        Ok(true) => RelayForwardingGrowth::Grew,
-        Ok(false) => RelayForwardingGrowth::NoGrowth,
-        Err(_) => RelayForwardingGrowth::Terminate,
+fn mptcp_endpoint_flags(
+    role: RoutingContextRole,
+    mode: InternalMptcpMode,
+    backup: bool,
+    listener_port: u32,
+) -> Result<(EndpointFlags, Option<u16>), InternalWorkerResult> {
+    let mut flags = match (role, mode, backup) {
+        (RoutingContextRole::Client, InternalMptcpMode::Signal, _)
+        | (RoutingContextRole::Exit, InternalMptcpMode::Signal, false) => EndpointFlags::SIGNAL,
+        (RoutingContextRole::Client, InternalMptcpMode::Subflow, _) => EndpointFlags::SUBFLOW,
+        (RoutingContextRole::Client, InternalMptcpMode::SignalAndSubflow, _) => {
+            EndpointFlags::SIGNAL | EndpointFlags::SUBFLOW
+        }
+        (
+            RoutingContextRole::Relay | RoutingContextRole::Exit | RoutingContextRole::Unspecified,
+            _,
+            _,
+        )
+        | (RoutingContextRole::Client, InternalMptcpMode::Unspecified, _) => {
+            return Err(InternalWorkerResult::Invalid);
+        }
+    };
+    if backup {
+        flags.insert(EndpointFlags::BACKUP);
     }
+    let requires_listener_port =
+        role == RoutingContextRole::Exit && mode == InternalMptcpMode::Signal && !backup;
+    let listener_port = if requires_listener_port {
+        match u16::try_from(listener_port).map_err(|_| InternalWorkerResult::Invalid)? {
+            0 => None,
+            port => Some(port),
+        }
+    } else if listener_port == 0 {
+        None
+    } else {
+        return Err(InternalWorkerResult::Invalid);
+    };
+    Ok((flags, listener_port))
 }
 
 fn validate_worker_prepare(
@@ -2523,12 +3056,20 @@ fn validate_worker_prepare(
     context_role: RoutingContextRole,
 ) -> Option<Vec<DurableWireguardResource>> {
     let expected = functional_worker_endpoint_roles(context_role)?;
-    if operation.route_context_id.as_slice() != route_context_id
-        || operation.leases.len() != expected.len()
-    {
+    let valid_count = match context_role {
+        RoutingContextRole::Client | RoutingContextRole::Exit => {
+            (1..=8).contains(&operation.leases.len())
+        }
+        RoutingContextRole::Relay => operation.leases.len() == expected.len(),
+        RoutingContextRole::Unspecified => false,
+    };
+    if operation.route_context_id.as_slice() != route_context_id || !valid_count {
         return None;
     }
-    if let [first, second] = operation.leases.as_slice() {
+    if context_role == RoutingContextRole::Relay {
+        let [first, second] = operation.leases.as_slice() else {
+            return None;
+        };
         if first.path_id != second.path_id
             || first.setup_expires_at_unix != second.setup_expires_at_unix
             || first.hard_expires_at_unix != second.hard_expires_at_unix
@@ -2538,8 +3079,10 @@ fn validate_worker_prepare(
     }
 
     let mut resources = Vec::with_capacity(expected.len());
-    for (lease, (expected_role, expected_internal_role)) in
-        operation.leases.iter().zip(expected.iter().copied())
+    for (lease, (expected_role, expected_internal_role)) in operation
+        .leases
+        .iter()
+        .zip(expected.iter().copied().cycle())
     {
         if lease.role != expected_internal_role as i32
             || routing_endpoint_role(lease.role) != Some(expected_role)
@@ -2581,10 +3124,16 @@ fn validate_worker_activation(
     ownerships: &[WorkerLeaseOwnership],
 ) -> Option<Vec<(WireguardV3PeerConfiguration, PreparedWireguardKernelProof)>> {
     let expected = functional_worker_endpoint_roles(context_role)?;
-    if operation.route_context_id.as_slice() != route_context_id
-        || operation.leases.len() != expected.len()
-        || ownerships.len() != expected.len()
-    {
+    let valid_count = match context_role {
+        RoutingContextRole::Client | RoutingContextRole::Exit => {
+            (1..=8).contains(&operation.leases.len()) && ownerships.len() == operation.leases.len()
+        }
+        RoutingContextRole::Relay => {
+            operation.leases.len() == expected.len() && ownerships.len() == expected.len()
+        }
+        RoutingContextRole::Unspecified => false,
+    };
+    if operation.route_context_id.as_slice() != route_context_id || !valid_count {
         return None;
     }
     match context_role {
@@ -2620,7 +3169,7 @@ fn validate_worker_activation(
         .leases
         .iter()
         .zip(ownerships)
-        .zip(expected.iter().copied())
+        .zip(expected.iter().copied().cycle())
     {
         let prepared = ownership.proof.filter(|proof| {
             proof.ifindex != 0
@@ -2683,14 +3232,22 @@ fn validate_worker_probe(
     let Some(expected) = functional_worker_endpoint_roles(context_role) else {
         return false;
     };
+    let valid_count = match context_role {
+        RoutingContextRole::Client | RoutingContextRole::Exit => {
+            (1..=8).contains(&operation.leases.len()) && ownerships.len() == operation.leases.len()
+        }
+        RoutingContextRole::Relay => {
+            operation.leases.len() == expected.len() && ownerships.len() == expected.len()
+        }
+        RoutingContextRole::Unspecified => false,
+    };
     operation.route_context_id.as_slice() == route_context_id
-        && operation.leases.len() == expected.len()
-        && ownerships.len() == expected.len()
+        && valid_count
         && operation
             .leases
             .iter()
             .zip(ownerships)
-            .zip(expected.iter().copied())
+            .zip(expected.iter().copied().cycle())
             .all(
                 |((lease, ownership), (expected_role, expected_internal_role))| {
                     let Ok(path_id) = u8::try_from(lease.path_id) else {
@@ -2937,7 +3494,11 @@ fn initialise_child_context(
         .filter(|resources| {
             resources
                 .iter()
-                .all(|resource| resource.key().0 == bound_path_id)
+                .any(|resource| resource.key().0 == bound_path_id)
+                && (!matches!(role, RoutingContextRole::Relay)
+                    || resources
+                        .iter()
+                        .all(|resource| resource.key().0 == bound_path_id))
         })
     else {
         return Ok((InternalWorkerResult::Invalid, None, false));
@@ -2947,6 +3508,13 @@ fn initialise_child_context(
         Ok(kernel)
     }) {
         Ok(kernel) => {
+            let Ok(mptcp) = WorkerMptcpPathManager::prepare(
+                route_context_id,
+                initialise.mptcp_accepted_addrs,
+                initialise.mptcp_subflows,
+            ) else {
+                return Ok((InternalWorkerResult::Kernel, None, false));
+            };
             let bootstrap = network_bootstrap
                 .take()
                 .ok_or(WorkerV3Error::Authentication)?;
@@ -2957,6 +3525,7 @@ fn initialise_child_context(
                 bootstrap,
                 kernel,
                 staged_resources,
+                mptcp,
             )
             .ok_or(WorkerV3Error::Authentication)?;
             *context = Some(worker_context);
@@ -3099,7 +3668,7 @@ fn acquire_transport_child_context(
     }) else {
         return Ok((InternalWorkerResult::NotFound, None, None));
     };
-    let lease = match context.committed_quic_udp_lease(acquire) {
+    let lease = match context.transport_lease(acquire) {
         Ok(lease) => lease,
         Err(result) => return Ok((result, None, None)),
     };
@@ -3126,13 +3695,229 @@ fn acquire_transport_child_context(
                 role: acquire.role,
                 descriptor_kind: acquire.descriptor_kind,
                 local: acquire.expected_local.clone(),
-                remote: None,
+                remote: acquire.expected_remote.clone(),
             },
         )),
         Some(descriptor),
     ))
 }
 
+fn add_mptcp_child_context(
+    context: Option<&WorkerContext<NamespaceKernel>>,
+    operation: &AddMptcpEndpoint,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    let route_context_id = context_id(&operation.route_context_id)?;
+    let Some(context) = context.filter(|context| {
+        context.route_context_id == route_context_id && route_context_id == bound_context
+    }) else {
+        return Ok((InternalWorkerResult::NotFound, None, false));
+    };
+    let result = context.add_mptcp_endpoint(operation, deadline);
+    Ok((
+        result,
+        (result == InternalWorkerResult::Ok).then_some(
+            internal_worker_response::Outcome::MptcpEndpointAdded(MptcpEndpointAdded {
+                path_id: operation.path_id,
+            }),
+        ),
+        false,
+    ))
+}
+
+fn remove_mptcp_child_context(
+    context: Option<&WorkerContext<NamespaceKernel>>,
+    operation: &RemoveMptcpEndpoint,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    let route_context_id = context_id(&operation.route_context_id)?;
+    let Some(context) = context.filter(|context| {
+        context.route_context_id == route_context_id && route_context_id == bound_context
+    }) else {
+        return Ok((InternalWorkerResult::NotFound, None, false));
+    };
+    let result = context.remove_mptcp_endpoint(operation, deadline);
+    Ok((
+        result,
+        (result == InternalWorkerResult::Ok).then_some(
+            internal_worker_response::Outcome::MptcpEndpointRemoved(MptcpEndpointRemoved {
+                path_id: operation.path_id,
+            }),
+        ),
+        false,
+    ))
+}
+
+fn initialise_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    route_context: Option<&WorkerContext<NamespaceKernel>>,
+    network_bootstrap: &mut Option<WorkerNetworkBootstrap>,
+    request: &InitialiseClientIngress,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    if ingress.is_some() || route_context.is_some() {
+        return Ok((InternalWorkerResult::Conflict, None, false));
+    }
+    let bootstrap = network_bootstrap
+        .take()
+        .ok_or(WorkerV3Error::Authentication)?;
+    match WorkerClientIngress::initialise(request, bound_context, bootstrap, deadline) {
+        Ok(owner) => {
+            *ingress = Some(owner);
+            Ok((
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::ClientIngressInitialised(
+                    ClientIngressInitialised {
+                        client_runtime_id: request.client_runtime_id.clone(),
+                    },
+                )),
+                false,
+            ))
+        }
+        Err(result) => Ok((result, None, false)),
+    }
+}
+
+fn prepare_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &PrepareClientIngress,
+    bound_context: ContextId,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    let runtime = context_id(&request.client_runtime_id)?;
+    let Some(ingress) = ingress
+        .as_mut()
+        .filter(|owner| owner.client_runtime_id == runtime && runtime == bound_context)
+    else {
+        return Ok((InternalWorkerResult::NotFound, None, false));
+    };
+    Ok(match ingress.prepare() {
+        Ok(sockets) => (
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::PreparedClientIngress(
+                PreparedClientIngress {
+                    client_runtime_id: runtime.to_vec(),
+                    sockets,
+                },
+            )),
+            false,
+        ),
+        Err(result) => (result, None, false),
+    })
+}
+
+fn acquire_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &AcquireClientIngressSocket,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildTransportOutcome, WorkerV3Error> {
+    ensure_worker_deadline(deadline)?;
+    let runtime = context_id(&request.client_runtime_id)?;
+    let Some(ingress) = ingress
+        .as_mut()
+        .filter(|owner| owner.client_runtime_id == runtime && runtime == bound_context)
+    else {
+        return Ok((InternalWorkerResult::NotFound, None, None));
+    };
+    Ok(match ingress.acquire(request) {
+        Ok((descriptor, ready)) => (
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::IngressSocketReady(ready)),
+            Some(descriptor),
+        ),
+        Err(result) => (result, None, None),
+    })
+}
+
+fn acquire_client_ingress_reply_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &AcquireClientIngressReplySocket,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildTransportOutcome, WorkerV3Error> {
+    ensure_worker_deadline(deadline)?;
+    let runtime = context_id(&request.client_runtime_id)?;
+    let Some(ingress) = ingress
+        .as_mut()
+        .filter(|owner| owner.client_runtime_id == runtime && runtime == bound_context)
+    else {
+        return Ok((InternalWorkerResult::NotFound, None, None));
+    };
+    Ok(match ingress.acquire_reply(request) {
+        Ok((descriptor, ready)) => (
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::IngressReplySocketReady(
+                ready,
+            )),
+            Some(descriptor),
+        ),
+        Err(result) => (result, None, None),
+    })
+}
+
+fn activate_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &ActivateClientIngress,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    let runtime = context_id(&request.client_runtime_id)?;
+    let Some(ingress) = ingress
+        .as_mut()
+        .filter(|owner| owner.client_runtime_id == runtime && runtime == bound_context)
+    else {
+        return Ok((InternalWorkerResult::NotFound, None, false));
+    };
+    Ok(match ingress.activate(request, deadline) {
+        Ok(()) => (
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::ActivatedClientIngress(
+                ActivatedClientIngress {
+                    client_runtime_id: runtime.to_vec(),
+                },
+            )),
+            false,
+        ),
+        Err(result) => (result, None, false),
+    })
+}
+
+fn destroy_client_ingress_child(
+    ingress: &mut Option<WorkerClientIngress>,
+    request: &DestroyClientIngress,
+    bound_context: ContextId,
+    deadline: HardDeadline,
+) -> Result<ChildOperationOutcome, WorkerV3Error> {
+    ensure_worker_deadline(deadline)?;
+    let runtime = context_id(&request.client_runtime_id)?;
+    if runtime != bound_context {
+        return Ok((InternalWorkerResult::Invalid, None, false));
+    }
+    if ingress
+        .as_ref()
+        .is_some_and(|owner| owner.client_runtime_id != runtime)
+    {
+        return Ok((InternalWorkerResult::Conflict, None, false));
+    }
+    let result = ingress
+        .as_mut()
+        .map_or(InternalWorkerResult::Ok, |owner| owner.cleanup(deadline));
+    *ingress = None;
+    Ok((
+        result,
+        (result == InternalWorkerResult::Ok).then_some(
+            internal_worker_response::Outcome::ClientIngressDestroyed(ClientIngressDestroyed {
+                client_runtime_id: runtime.to_vec(),
+            }),
+        ),
+        true,
+    ))
+}
+
+#[allow(clippy::too_many_lines)] // The child request loop is the single authenticated state boundary.
 fn child_loop(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
@@ -3142,6 +3927,7 @@ fn child_loop(
     network_bootstrap: WorkerNetworkBootstrap,
 ) -> Result<(), WorkerV3Error> {
     let mut context: Option<WorkerContext<NamespaceKernel>> = None;
+    let mut ingress: Option<WorkerClientIngress> = None;
     let mut network_bootstrap = Some(network_bootstrap);
     let mut keys = OsWorkerKeySource;
     loop {
@@ -3189,12 +3975,69 @@ fn child_loop(
                 )?;
                 (result, outcome, false, descriptor)
             }
+            internal_worker_request::Operation::AddMptcpEndpoint(operation) => {
+                let (result, outcome, exit) =
+                    add_mptcp_child_context(context.as_ref(), operation, bound_context, deadline)?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::RemoveMptcpEndpoint(operation) => {
+                let (result, outcome, exit) = remove_mptcp_child_context(
+                    context.as_ref(),
+                    operation,
+                    bound_context,
+                    deadline,
+                )?;
+                (result, outcome, exit, None)
+            }
             internal_worker_request::Operation::DestroyContext(destroy) => {
                 let (result, outcome, exit) =
                     destroy_child_context(&mut context, destroy, bound_context, deadline)?;
                 (result, outcome, exit, None)
             }
-            _ => (InternalWorkerResult::Invalid, None, false, None),
+            internal_worker_request::Operation::InitialiseClientIngress(operation) => {
+                let (result, outcome, exit) = initialise_client_ingress_child(
+                    &mut ingress,
+                    context.as_ref(),
+                    &mut network_bootstrap,
+                    operation,
+                    bound_context,
+                    deadline,
+                )?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::PrepareClientIngress(operation) => {
+                let (result, outcome, exit) =
+                    prepare_client_ingress_child(&mut ingress, operation, bound_context)?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::AcquireClientIngressSocket(operation) => {
+                let (result, outcome, descriptor) =
+                    acquire_client_ingress_child(&mut ingress, operation, bound_context, deadline)?;
+                (result, outcome, false, descriptor)
+            }
+            internal_worker_request::Operation::AcquireClientIngressReplySocket(operation) => {
+                let (result, outcome, descriptor) = acquire_client_ingress_reply_child(
+                    &mut ingress,
+                    operation,
+                    bound_context,
+                    deadline,
+                )?;
+                (result, outcome, false, descriptor)
+            }
+            internal_worker_request::Operation::ActivateClientIngress(operation) => {
+                let (result, outcome, exit) = activate_client_ingress_child(
+                    &mut ingress,
+                    operation,
+                    bound_context,
+                    deadline,
+                )?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::DestroyClientIngress(operation) => {
+                let (result, outcome, exit) =
+                    destroy_client_ingress_child(&mut ingress, operation, bound_context, deadline)?;
+                (result, outcome, exit, None)
+            }
         };
         let response = correlated_response(&request, result, outcome)?;
         if !send_child_response_preserving_initialise_cleanup(
@@ -3276,6 +4119,12 @@ fn request_context(request: &InternalWorkerRequest) -> Result<ContextId, WorkerV
         Operation::AddMptcpEndpoint(value) => &value.route_context_id,
         Operation::RemoveMptcpEndpoint(value) => &value.route_context_id,
         Operation::AcquireTransportSocket(value) => &value.route_context_id,
+        Operation::InitialiseClientIngress(value) => &value.client_runtime_id,
+        Operation::PrepareClientIngress(value) => &value.client_runtime_id,
+        Operation::AcquireClientIngressSocket(value) => &value.client_runtime_id,
+        Operation::AcquireClientIngressReplySocket(value) => &value.client_runtime_id,
+        Operation::ActivateClientIngress(value) => &value.client_runtime_id,
+        Operation::DestroyClientIngress(value) => &value.client_runtime_id,
         Operation::DestroyContext(value) => &value.route_context_id,
     };
     context_id(bytes)
@@ -4445,6 +5294,26 @@ struct WorkerGenerationOwnership {
 }
 
 impl WorkerGenerationOwnership {
+    fn duplicate_network_namespace_pin(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<crate::worker_sandbox::PinnedWorkerNetworkNamespace, WorkerV3Error> {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = registry
+            .records
+            .get(&self.coordinates.context_id)
+            .filter(|record| record.generation == self.coordinates.worker_generation.get())
+            .ok_or(WorkerV3Error::Dead)?;
+        record
+            .process
+            .as_ref()
+            .ok_or(WorkerV3Error::Dead)?
+            .duplicate_network_namespace_pin(deadline)
+    }
+
     fn has_valid_dispatch_fence_shape(&self) -> bool {
         match (
             self.dispatch_registration,
@@ -4551,6 +5420,7 @@ fn durable_prepare_anchor_from_worker_parts(
             executable_device: parts.executable_device,
             executable_inode: parts.executable_inode,
             service_cgroup_inode: parts.service_cgroup_inode,
+            service_cgroup_id: parts.service_cgroup_id,
         },
     )
     .ok_or(WorkerV3Error::Authentication)
@@ -5420,6 +6290,54 @@ struct ConfirmedWorkerGenerationAbsent {
     coordinates: WorkerGenerationCoordinates,
 }
 
+/// The sole worker namespace capability still needed after exact generation reap.
+///
+/// The complete authenticated recovery source is consumed to construct this value. That
+/// transition closes the independently duplicated recovery namespace immediately; only the
+/// smaller restart pair remains until exact descriptor-store removal is proven.
+#[must_use = "post-reap restart custody must be removed exactly or retained for cleanup retry"]
+struct ReapedWorkerRestartCustody {
+    coordinates: WorkerGenerationCoordinates,
+    restart: crate::worker_sandbox::PinnedWorkerRestartCustody,
+}
+
+impl WorkerRecoveryIdentitySource {
+    fn into_reaped_restart_custody(
+        self,
+        reaped: &ConfirmedWorkerGenerationAbsent,
+    ) -> ReapedWorkerRestartCustody {
+        if self.pending.coordinates != reaped.coordinates {
+            std::process::abort();
+        }
+        let Self {
+            pending,
+            durable_prepare_anchor: _,
+            restart_custody,
+        } = self;
+        // Reap proof has replaced every live-process identity use. Close the authenticated
+        // recovery duplicate now instead of retaining it through parent and manager cleanup.
+        drop(pending);
+        ReapedWorkerRestartCustody {
+            coordinates: reaped.coordinates,
+            restart: restart_custody,
+        }
+    }
+}
+
+impl ReapedWorkerRestartCustody {
+    fn context_id(&self) -> ContextId {
+        self.coordinates.context_id
+    }
+
+    fn borrowed_pidfd(&self) -> BorrowedFd<'_> {
+        self.restart.borrowed_pidfd()
+    }
+
+    fn borrowed_network_namespace(&self) -> BorrowedFd<'_> {
+        self.restart.borrowed_network_namespace()
+    }
+}
+
 impl std::fmt::Debug for ConfirmedWorkerGenerationAbsent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -5828,9 +6746,11 @@ impl WorkerRegistry {
         let process = record.process.as_ref().ok_or(WorkerV3Error::Dead)?;
         let pinned_network_namespace = matches!(
             request.operation.as_ref(),
-            Some(internal_worker_request::Operation::AcquireTransportSocket(
-                _
-            ))
+            Some(
+                internal_worker_request::Operation::AcquireTransportSocket(_)
+                    | internal_worker_request::Operation::AcquireClientIngressSocket(_)
+                    | internal_worker_request::Operation::AcquireClientIngressReplySocket(_)
+            )
         )
         .then(|| process.duplicate_network_namespace_pin(deadline))
         .transpose()?;
@@ -6124,6 +7044,7 @@ impl WorkerRegistry {
         self.plan_until(context_id, generation, request, now, deadline)
     }
 
+    #[allow(clippy::too_many_lines)] // One phase transition validates and commits descriptor custody.
     fn finish(
         &mut self,
         token: PlanToken,
@@ -6223,9 +7144,11 @@ impl WorkerRegistry {
                 } else {
                     should_cache = !matches!(
                         request.operation,
-                        Some(internal_worker_request::Operation::AcquireTransportSocket(
-                            _
-                        ))
+                        Some(
+                            internal_worker_request::Operation::AcquireTransportSocket(_)
+                                | internal_worker_request::Operation::AcquireClientIngressSocket(_)
+                                | internal_worker_request::Operation::AcquireClientIngressReplySocket(_)
+                        )
                     );
                     cache_expiry = record.expires_at;
                     FinishOutcome::Committed
@@ -6727,27 +7650,46 @@ fn transition(
     use internal_worker_request::Operation;
 
     match (phase, request.operation.as_ref()) {
-        (StablePhase::Starting, Some(Operation::Initialise(_))) => {
-            Ok((StablePhase::Initialised, false))
-        }
-        (StablePhase::Initialised, Some(Operation::PrepareLeases(_))) => {
+        (
+            StablePhase::Starting,
+            Some(Operation::Initialise(_) | Operation::InitialiseClientIngress(_)),
+        ) => Ok((StablePhase::Initialised, false)),
+        (
+            StablePhase::Initialised,
+            Some(Operation::PrepareLeases(_) | Operation::PrepareClientIngress(_)),
+        )
+        | (StablePhase::Prepared, Some(Operation::AcquireClientIngressSocket(_))) => {
             Ok((StablePhase::Prepared, false))
         }
-        (StablePhase::Prepared, Some(Operation::ActivateLeases(_))) => {
-            Ok((StablePhase::Activated, false))
-        }
+        (
+            StablePhase::Prepared,
+            Some(Operation::ActivateClientIngress(_) | Operation::ActivateLeases(_)),
+        ) => Ok((StablePhase::Activated, false)),
         (StablePhase::Activated, Some(Operation::ProbeCommitLeases(_))) => {
             Ok((StablePhase::Committed, false))
         }
+        (StablePhase::Activated, Some(Operation::AcquireClientIngressReplySocket(_))) => {
+            Ok((StablePhase::Activated, false))
+        }
+        (StablePhase::Activated, Some(Operation::AcquireTransportSocket(value)))
+            if InternalTransportSocketKind::try_from(value.descriptor_kind)
+                == Ok(InternalTransportSocketKind::NativeProbeUdpConnected) =>
+        {
+            Ok((StablePhase::Activated, false))
+        }
         (
             StablePhase::Committed,
-            Some(
-                Operation::AddMptcpEndpoint(_)
-                | Operation::RemoveMptcpEndpoint(_)
-                | Operation::AcquireTransportSocket(_),
-            ),
+            Some(Operation::AddMptcpEndpoint(_) | Operation::RemoveMptcpEndpoint(_)),
         ) => Ok((StablePhase::Committed, false)),
-        (_, Some(Operation::DestroyContext(_))) => Ok((phase, true)),
+        (StablePhase::Committed, Some(Operation::AcquireTransportSocket(value)))
+            if InternalTransportSocketKind::try_from(value.descriptor_kind)
+                != Ok(InternalTransportSocketKind::NativeProbeUdpConnected) =>
+        {
+            Ok((StablePhase::Committed, false))
+        }
+        (_, Some(Operation::DestroyContext(_) | Operation::DestroyClientIngress(_))) => {
+            Ok((phase, true))
+        }
         _ => Err(WorkerV3Error::Conflict),
     }
 }
@@ -7560,6 +8502,7 @@ impl WorkerSupervisor {
         self.resolve_finish(outcome, execution).await
     }
 
+    #[allow(clippy::too_many_lines)] // Worker IO and descriptor revalidation are one custody fence.
     async fn run_call(
         &self,
         call: PlannedCall,
@@ -7606,13 +8549,50 @@ impl WorkerSupervisor {
                         .as_ref()
                         .ok_or(WorkerV3Error::Authentication)?;
                     let descriptor = execution.descriptor.take().ok_or(WorkerV3Error::Invalid)?;
-                    execution.descriptor = Some(validate_adopted_transport_socket(
+                    if let Ok(descriptor) =
+                        validate_adopted_transport_socket(expected_namespace, acquire, descriptor)
+                    {
+                        execution.descriptor = Some(descriptor);
+                    } else {
+                        // The authenticated child completed a phase-preserving Acquire and
+                        // transferred the only descriptor into this owner. Rejection drops
+                        // that descriptor, so no socket custody remains uncertain and the
+                        // committed route must stay available for a later independent flow.
+                        execution.response.result = InternalWorkerResult::Kernel as i32;
+                        execution.response.outcome = None;
+                    }
+                }
+                Some(internal_worker_request::Operation::AcquireClientIngressSocket(acquire))
+                    if execution.response.result == InternalWorkerResult::Ok as i32 =>
+                {
+                    let expected_namespace = pinned_network_namespace
+                        .as_ref()
+                        .ok_or(WorkerV3Error::Authentication)?;
+                    let descriptor = execution.descriptor.take().ok_or(WorkerV3Error::Invalid)?;
+                    execution.descriptor = Some(validate_adopted_ingress_socket(
                         expected_namespace,
                         acquire,
                         descriptor,
                     )?);
                 }
-                Some(internal_worker_request::Operation::AcquireTransportSocket(_)) => {
+                Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(
+                    acquire,
+                )) if execution.response.result == InternalWorkerResult::Ok as i32 => {
+                    let expected_namespace = pinned_network_namespace
+                        .as_ref()
+                        .ok_or(WorkerV3Error::Authentication)?;
+                    let descriptor = execution.descriptor.take().ok_or(WorkerV3Error::Invalid)?;
+                    execution.descriptor = Some(validate_adopted_ingress_reply_socket(
+                        expected_namespace,
+                        acquire,
+                        descriptor,
+                    )?);
+                }
+                Some(
+                    internal_worker_request::Operation::AcquireTransportSocket(_)
+                    | internal_worker_request::Operation::AcquireClientIngressSocket(_)
+                    | internal_worker_request::Operation::AcquireClientIngressReplySocket(_),
+                ) => {
                     if pinned_network_namespace.is_none() || execution.descriptor.is_some() {
                         return Err(WorkerV3Error::Invalid);
                     }
@@ -12567,20 +13547,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_fence_verification_errors_and_missing_authority_terminate_the_worker() {
-        assert_eq!(
-            classify_relay_forwarding_growth(&Ok(true)),
-            RelayForwardingGrowth::Grew
-        );
-        assert_eq!(
-            classify_relay_forwarding_growth(&Ok(false)),
-            RelayForwardingGrowth::NoGrowth
-        );
-        assert_eq!(
-            classify_relay_forwarding_growth(&Err(relay_fence::RelayFenceError::UnexpectedPolicy)),
-            RelayForwardingGrowth::Terminate
-        );
-
+    fn relay_commit_requires_an_active_fence_but_not_pretraffic_forwarding_growth() {
         let route_context_id = [0xbc; 16];
         let baseline = WireguardV3PeerProof {
             latest_handshake_unix: 100,
@@ -12618,7 +13585,9 @@ mod tests {
             context.activate(&worker_relay_activate(route_context_id), worker_deadline()),
             WorkerActivateOutcome::Activated(_)
         ));
+        assert!(context.prove_relay_forwarding_fence_active(worker_deadline()));
         context.relay_fence = None;
+        assert!(!context.prove_relay_forwarding_fence_active(worker_deadline()));
         assert!(matches!(
             context.probe_commit(
                 &worker_relay_probe(route_context_id, 149),
@@ -12633,7 +13602,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_relay_pair_partial_probe_is_retryable_and_never_commits_one_leg() {
+    fn worker_relay_pair_polls_partial_probe_and_never_commits_one_leg() {
         let route_context_id = [0xa8; 16];
         let baseline = WireguardV3PeerProof {
             latest_handshake_unix: 100,
@@ -12656,7 +13625,7 @@ mod tests {
             RoutingContextRole::Relay,
             FakeWorkerKernel {
                 activation_proofs: VecDeque::from([baseline, baseline]),
-                probe_proofs: VecDeque::from([complete, incomplete, complete, complete]),
+                probe_proofs: VecDeque::from([complete, incomplete, complete]),
                 ..FakeWorkerKernel::default()
             },
         );
@@ -12676,22 +13645,11 @@ mod tests {
             WorkerActivateOutcome::Activated(_)
         ));
 
-        assert!(matches!(
-            context.probe_commit(
-                &worker_relay_probe(route_context_id, 149),
-                worker_deadline(),
-            ),
-            WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel)
-        ));
-        assert!(matches!(
-            context.lease,
-            Some(WorkerLeaseLifecycle::Activated(_))
-        ));
         let WorkerProbeOutcome::Committed(probed) = context.probe_commit(
             &worker_relay_probe(route_context_id, 149),
             worker_deadline(),
         ) else {
-            panic!("complete Relay retry")
+            panic!("bounded Relay polling")
         };
         assert_eq!(probed.len(), 2);
         assert_eq!(
@@ -12701,7 +13659,7 @@ mod tests {
                 .iter()
                 .filter(|call| **call == "probe")
                 .count(),
-            4
+            3
         );
     }
 
@@ -13332,7 +14290,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_client_and_exit_project_only_their_exact_quic_udp_lease() {
+    fn committed_client_and_exit_project_only_their_exact_transport_lease() {
         for (context_seed, context_role, endpoint_role) in [
             (
                 0x91,
@@ -13345,13 +14303,52 @@ mod tests {
             let (context, exact, overlay) =
                 committed_quic_udp_worker_fixture(context_seed, context_role, endpoint_role);
             assert_eq!(
-                context.committed_quic_udp_lease(&exact),
+                context.transport_lease(&exact),
                 Ok(CommittedSocketLease {
                     route_context_id,
                     path_id: 1,
                     role: endpoint_role,
                     overlay_address: IpAddr::V6(overlay),
                 })
+            );
+            let mptcp = match endpoint_role {
+                InternalEndpointRole::Client => AcquireTransportSocket {
+                    descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
+                    expected_remote: Some(InternalSocketAddress {
+                        address: {
+                            let mut remote = overlay.octets();
+                            remote[14] ^= 1;
+                            remote.to_vec()
+                        },
+                        port: 42_092,
+                    }),
+                    ..exact.clone()
+                },
+                InternalEndpointRole::Exit => AcquireTransportSocket {
+                    descriptor_kind: InternalTransportSocketKind::MptcpListener as i32,
+                    ..exact.clone()
+                },
+                _ => unreachable!("fixture endpoint role"),
+            };
+            assert_eq!(
+                context.transport_lease(&mptcp),
+                Ok(CommittedSocketLease {
+                    route_context_id,
+                    path_id: 1,
+                    role: endpoint_role,
+                    overlay_address: IpAddr::V6(overlay),
+                })
+            );
+            let endpoint = context
+                .committed_mptcp_endpoint(1)
+                .expect("exact committed MPTCP endpoint");
+            assert_eq!(endpoint.id, 1);
+            assert_eq!(endpoint.address, IpAddr::V6(overlay));
+            assert_eq!(endpoint.if_index, 7);
+            assert!(endpoint.flags.is_empty());
+            assert_eq!(
+                context.committed_mptcp_endpoint(2),
+                Err(InternalWorkerResult::Invalid)
             );
             for changed in [
                 AcquireTransportSocket {
@@ -13362,18 +14359,89 @@ mod tests {
                     role: InternalEndpointRole::RelayClient as i32,
                     ..exact.clone()
                 },
-                AcquireTransportSocket {
+            ] {
+                assert_eq!(
+                    context.transport_lease(&changed),
+                    Err(InternalWorkerResult::Invalid)
+                );
+            }
+            let wrong_mptcp_kind = match endpoint_role {
+                InternalEndpointRole::Client => AcquireTransportSocket {
+                    descriptor_kind: InternalTransportSocketKind::MptcpListener as i32,
+                    ..exact.clone()
+                },
+                InternalEndpointRole::Exit => AcquireTransportSocket {
                     descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
                     expected_remote: exact.expected_local.clone(),
                     ..exact.clone()
                 },
-            ] {
-                assert_eq!(
-                    context.committed_quic_udp_lease(&changed),
-                    Err(InternalWorkerResult::Invalid)
-                );
-            }
+                _ => unreachable!("fixture endpoint role"),
+            };
+            assert_eq!(
+                context.transport_lease(&wrong_mptcp_kind),
+                Err(InternalWorkerResult::Invalid)
+            );
         }
+    }
+
+    #[test]
+    fn exit_mptcp_endpoint_flags_admit_only_nonbackup_signal() {
+        assert_eq!(
+            mptcp_endpoint_flags(
+                RoutingContextRole::Exit,
+                InternalMptcpMode::Signal,
+                false,
+                44_443,
+            ),
+            Ok((EndpointFlags::SIGNAL, Some(44_443)))
+        );
+        assert_eq!(
+            mptcp_endpoint_flags(
+                RoutingContextRole::Exit,
+                InternalMptcpMode::Signal,
+                false,
+                0,
+            ),
+            Ok((EndpointFlags::SIGNAL, None))
+        );
+        for (mode, backup) in [
+            (InternalMptcpMode::Signal, true),
+            (InternalMptcpMode::Subflow, false),
+            (InternalMptcpMode::SignalAndSubflow, false),
+            (InternalMptcpMode::Unspecified, false),
+        ] {
+            assert_eq!(
+                mptcp_endpoint_flags(RoutingContextRole::Exit, mode, backup, 44_443),
+                Err(InternalWorkerResult::Invalid)
+            );
+        }
+        assert_eq!(
+            mptcp_endpoint_flags(
+                RoutingContextRole::Client,
+                InternalMptcpMode::Subflow,
+                true,
+                0,
+            ),
+            Ok((EndpointFlags::SUBFLOW | EndpointFlags::BACKUP, None))
+        );
+        assert_eq!(
+            mptcp_endpoint_flags(
+                RoutingContextRole::Client,
+                InternalMptcpMode::Subflow,
+                false,
+                44_443,
+            ),
+            Err(InternalWorkerResult::Invalid)
+        );
+        assert_eq!(
+            mptcp_endpoint_flags(
+                RoutingContextRole::Relay,
+                InternalMptcpMode::Signal,
+                false,
+                0,
+            ),
+            Err(InternalWorkerResult::Invalid)
+        );
     }
 
     #[test]
@@ -13387,7 +14455,7 @@ mod tests {
             .map(|offset| acquire_start + offset)
             .expect("production child Acquire end");
         let acquire = &source[acquire_start..acquire_end];
-        assert!(acquire.contains("context.committed_quic_udp_lease(acquire)"));
+        assert!(acquire.contains("context.transport_lease(acquire)"));
         assert!(acquire.contains("create_transport_socket(lease, acquire)"));
         assert!(acquire.contains("Some(descriptor)"));
 
@@ -13407,7 +14475,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_worker_probe_remains_activated_for_a_fresh_retry() {
+    fn worker_probe_polls_stale_sample_until_bidirectional_growth() {
         let route_context_id = [0x3e; 16];
         let baseline = WireguardV3PeerProof {
             latest_handshake_unix: 100,
@@ -13420,12 +14488,20 @@ mod tests {
             RoutingContextRole::Client,
             FakeWorkerKernel {
                 activation_proof: Some(baseline),
-                probe_proof: Some(WireguardV3PeerProof {
-                    latest_handshake_unix: 150,
-                    latest_handshake_nanoseconds: 0,
-                    received_bytes: 11,
-                    transmitted_bytes: 20,
-                }),
+                probe_proofs: VecDeque::from([
+                    WireguardV3PeerProof {
+                        latest_handshake_unix: 150,
+                        latest_handshake_nanoseconds: 0,
+                        received_bytes: 11,
+                        transmitted_bytes: 20,
+                    },
+                    WireguardV3PeerProof {
+                        latest_handshake_unix: 150,
+                        latest_handshake_nanoseconds: 0,
+                        received_bytes: 11,
+                        transmitted_bytes: 21,
+                    },
+                ]),
                 ..FakeWorkerKernel::default()
             },
         );
@@ -13444,19 +14520,6 @@ mod tests {
             context.activate(&worker_activate(route_context_id), worker_deadline()),
             WorkerActivateOutcome::Activated(_)
         ));
-        assert!(matches!(
-            context.probe_commit(&worker_probe(route_context_id, 100), worker_deadline()),
-            WorkerProbeOutcome::Failed(InternalWorkerResult::Kernel)
-        ));
-        assert!(matches!(
-            context.lease,
-            Some(WorkerLeaseLifecycle::Activated(_))
-        ));
-
-        context.kernel.probe_proof = Some(WireguardV3PeerProof {
-            transmitted_bytes: 21,
-            ..context.kernel.probe_proof.expect("first probe")
-        });
         assert!(matches!(
             context.probe_commit(&worker_probe(route_context_id, 100), worker_deadline()),
             WorkerProbeOutcome::Committed(_)
@@ -14232,7 +15295,7 @@ mod tests {
     }
 
     fn fake_production_sandbox_snapshot() -> WorkerSandboxSnapshot {
-        let net_admin = 1_u64 << 12;
+        let worker_capabilities = (1_u64 << 10) | (1_u64 << 12);
         WorkerSandboxSnapshot::fixture(
             NetworkNamespaceIdentity::fixture(1, 10),
             NetworkNamespaceIdentity::fixture(1, 11),
@@ -14243,7 +15306,13 @@ mod tests {
                 u8::try_from(libc::SECCOMP_MODE_FILTER).expect("seccomp mode fits u8"),
                 4,
             ),
-            LinuxCapabilitySnapshot::fixture(0, net_admin, net_admin, net_admin, 0),
+            LinuxCapabilitySnapshot::fixture(
+                0,
+                worker_capabilities,
+                worker_capabilities,
+                worker_capabilities,
+                0,
+            ),
         )
     }
 
@@ -15663,6 +16732,7 @@ mod tests {
             executable_device: NonZeroU64::new(6).expect("executable device"),
             executable_inode: NonZeroU64::new(7).expect("executable inode"),
             service_cgroup_inode: NonZeroU64::new(8).expect("cgroup inode"),
+            service_cgroup_id: NonZeroU64::new(9).expect("cgroup id"),
         };
         let actual = durable_prepare_anchor_from_worker_parts(parts).expect("mapped anchor");
         let expected = crate::ownership_journal::durable_prepare_anchor_from_parts(
@@ -15675,6 +16745,7 @@ mod tests {
                 executable_device: NonZeroU64::new(6).expect("executable device"),
                 executable_inode: NonZeroU64::new(7).expect("executable inode"),
                 service_cgroup_inode: NonZeroU64::new(8).expect("cgroup inode"),
+                service_cgroup_id: NonZeroU64::new(9).expect("cgroup id"),
             },
         )
         .expect("expected anchor");
@@ -23376,7 +24447,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn invalid_adopted_descriptor_is_closed_and_generation_is_retired() {
+    async fn invalid_adopted_descriptor_is_closed_and_committed_generation_is_retained() {
         let context_id = [61; 16];
         let request = acquire(context_id, 46);
         let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
@@ -23405,10 +24476,16 @@ mod tests {
         });
 
         let coordinator = WorkerCoordinator::new(registry);
-        assert!(matches!(
-            coordinator.execute(context_id, generation, request).await,
-            Err(WorkerV3Error::Ambiguous)
-        ));
+        let execution = coordinator
+            .execute(context_id, generation, request)
+            .await
+            .expect("descriptor rejection is a definite flow-local kernel failure");
+        assert_eq!(
+            execution.response.result,
+            InternalWorkerResult::Kernel as i32
+        );
+        assert!(execution.response.outcome.is_none());
+        assert!(execution.descriptor.is_none());
         worker.join().expect("worker join");
         let mut byte = [0_u8; 1];
         assert_eq!(
@@ -23416,11 +24493,13 @@ mod tests {
             0,
             "namespace or shape rejection must consume and close the descriptor"
         );
-        assert!(!alive.load(Ordering::SeqCst));
+        assert!(alive.load(Ordering::SeqCst));
         assert!(matches!(
             coordinator.phase(context_id, generation),
-            Err(WorkerV3Error::Stale)
+            Ok(VisiblePhase::Stable(StablePhase::Committed))
         ));
+        assert!(coordinator.shutdown().await);
+        assert!(!alive.load(Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

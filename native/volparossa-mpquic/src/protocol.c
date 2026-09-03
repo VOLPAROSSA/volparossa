@@ -211,6 +211,15 @@ bool vmp_add_path_is_valid(const vmp_add_path_t *path)
            remote_host == UINT16_C(4);
 }
 
+static bool valid_transport_mode(uint32_t minimum_paths,
+                                 vmp_transport_mode_t transport_mode)
+{
+    return (transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC &&
+            minimum_paths >= 2U && minimum_paths <= VMP_MAX_PATHS) ||
+           (transport_mode == VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP &&
+            minimum_paths == 1U);
+}
+
 bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start)
 {
     static const uint8_t overlay_prefix[] = {
@@ -220,9 +229,10 @@ bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start)
     if (start == NULL ||
         all_zero(start->route_context_id, VMP_CONTEXT_ID_LEN) ||
         !valid_auth_secret(start->auth_secret) || start->expires_at_ms == 0U ||
-        start->minimum_paths != 1U || start->masque_context_id == 0U ||
+        !valid_transport_mode(start->minimum_paths,
+                              start->transport_mode) ||
+        start->masque_context_id == 0U ||
         start->masque_context_id > VMP_MAX_MASQUE_CONTEXT_ID ||
-        start->transport_mode != VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP ||
         all_zero(start->exit_spki_sha256, VMP_SPKI_SHA256_LEN) ||
         !valid_tls_server_name(start->tls_server_name) ||
         start->path_id == 0U || start->path_id > VMP_MAX_PATHS ||

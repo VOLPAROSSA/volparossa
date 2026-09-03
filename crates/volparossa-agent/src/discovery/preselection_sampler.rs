@@ -23,7 +23,8 @@ use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
 
 use super::{
     DirectRelayCandidateSnapshot, ForwardedExitCandidateSnapshot, RouteCandidateAdvertisement,
-    RouteCandidateSnapshot, preselection_observation::PreselectionSubjectSet,
+    RouteCandidateSnapshot, forwarded_control_projection_lineage_matches,
+    preselection_observation::PreselectionSubjectSet,
 };
 
 pub(super) const MAXIMUM_OTHER_RELAYS: usize = 8;
@@ -31,6 +32,12 @@ const MAXIMUM_LOCAL_MEASUREMENTS: usize = 64;
 const HIGH_BAND_PERCENT: u64 = 70;
 const MIDDLE_BAND_PERCENT: u64 = 20;
 const SCORE_SCALE: f64 = 1_000.0;
+const CAPACITY_WEIGHT: u64 = 30;
+const UPTIME_WEIGHT: u64 = 20;
+const DELIVERY_WEIGHT: u64 = 15;
+const REPUTATION_WEIGHT: u64 = 15;
+const BALANCE_WEIGHT: u64 = 10;
+const FREE_SLOTS_WEIGHT: u64 = 10;
 
 #[cfg_attr(
     not(test),
@@ -439,7 +446,8 @@ fn forwarded_binding_is_valid(
     let upper_expiry = capability
         .exit_advertisement_expires_at_ms
         .min(capability.policy_expires_at_ms)
-        .min(control_capability.expires_at_ms);
+        .min(control_capability.expires_at_ms)
+        .min(capability.control_relay_advertisement_expires_at_ms);
     advertisement_projection_is_valid(advertisement, sampled_at_ms)
         && body.roles.exit
         && identity_binding_is_valid(
@@ -452,15 +460,11 @@ fn forwarded_binding_is_valid(
         && body.sequence_number == capability.exit_advertisement_sequence
         && body.expires_at.as_secs() == capability.exit_advertisement_expires_at_ms / 1_000
         && advertisement.advertisement_payload_hash() == capability.exit_advertisement_payload_hash
-        && capability.control_relay_node_id == control_capability.node_id
-        && capability.control_relay_peer_id == control_capability.peer_id
-        && capability.control_relay_public_key == control_capability.public_key
-        && capability.control_relay_advertisement_sequence
-            == control_capability.advertisement_sequence
-        && capability.control_relay_advertisement_expires_at_ms
-            == control_capability.advertisement_expires_at_ms
-        && capability.control_relay_advertisement_payload_hash
-            == control_capability.advertisement_payload_hash
+        && forwarded_control_projection_lineage_matches(
+            capability,
+            control_capability,
+            sampled_at_ms.saturating_add(1),
+        )
         && capability.policy_version == snapshot.policy.version()
         && capability.policy_hash == snapshot.policy.hash()
         && capability.policy_expires_at_ms == snapshot.policy.expires_at_ms()
@@ -624,12 +628,12 @@ fn static_candidate(
     let balance = 1_000_u64 / u64::from(active_sessions.saturating_add(1));
     let slots = u64::from(free_slots.min(1_000));
     let weight = capacity
-        .saturating_mul(35)
-        .saturating_add(uptime.saturating_mul(20))
-        .saturating_add(delivery.saturating_mul(15))
-        .saturating_add(reputation.saturating_mul(15))
-        .saturating_add(balance.saturating_mul(10))
-        .saturating_add(slots.saturating_mul(5))
+        .saturating_mul(CAPACITY_WEIGHT)
+        .saturating_add(uptime.saturating_mul(UPTIME_WEIGHT))
+        .saturating_add(delivery.saturating_mul(DELIVERY_WEIGHT))
+        .saturating_add(reputation.saturating_mul(REPUTATION_WEIGHT))
+        .saturating_add(balance.saturating_mul(BALANCE_WEIGHT))
+        .saturating_add(slots.saturating_mul(FREE_SLOTS_WEIGHT))
         .max(1);
     Some(StaticCandidate {
         weight,
@@ -991,19 +995,18 @@ mod tests {
         }
         for document in [discovery, status, protocol] {
             assert!(document.contains("network_address_usable = false"));
-            assert!(document.contains("no downstream route"));
         }
         assert!(discovery.contains("opaque prepared-evidence handoff"));
         assert!(status.contains("opaque `PreparedPreselectionEvidence` handoff"));
-        assert!(discovery.contains("private callerless native-preselection child"));
-        assert!(status.contains("private callerless native attempt owner"));
-        assert!(protocol.contains("crate-private, callerless native-preselection child"));
+        assert!(discovery.contains("local `Connect` route gate now invokes"));
+        assert!(status.contains("Empty local `Connect` now derives"));
+        assert!(protocol.contains("local `Connect` route gate now invokes"));
         for document in [discovery, status, protocol] {
             assert!(document.contains("module-private, non-Clone Exit"));
         }
-        assert!(discovery.contains("It remains dormant because the current local publisher"));
-        assert!(status.contains("The normal runtime cannot currently reach that success path"));
-        assert!(protocol.contains("handler remains dormant in the current product"));
+        assert!(discovery.contains("Relay and Exit runtimes now publish"));
+        assert!(status.contains("Relay and Exit runtimes now publish"));
+        assert!(protocol.contains("Relay and Exit runtimes install"));
         assert!(status.contains(
             "| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |"
         ));
@@ -1436,7 +1439,7 @@ mod tests {
         let baseline_score = static_candidate(&baseline, ServiceRole::Relay, scope)
             .expect("baseline candidate")
             .weight;
-        assert_eq!(baseline_score, 38_550);
+        assert_eq!(baseline_score, 38_100);
 
         let mut changed = baseline.clone();
         changed.advertisement.capacity.estimated_free = bandwidth(101);
@@ -1444,7 +1447,7 @@ mod tests {
             static_candidate(&changed, ServiceRole::Relay, scope)
                 .expect("capacity candidate")
                 .weight,
-            baseline_score + 35
+            baseline_score + 30
         );
 
         changed = baseline.clone();
@@ -1489,7 +1492,7 @@ mod tests {
             static_candidate(&changed, ServiceRole::Relay, scope)
                 .expect("slot candidate")
                 .weight,
-            baseline_score + 5
+            baseline_score + 10
         );
 
         changed = baseline.clone();
@@ -1769,6 +1772,21 @@ mod tests {
         synchronize_only_forwarded_control(&mut snapshot, control_index);
 
         let original_exit = snapshot.forwarded_exits[0].clone();
+        snapshot.forwarded_exits[0]
+            .capability
+            .control_relay_advertisement_sequence = snapshot.forwarded_exits[0]
+            .capability
+            .control_relay_advertisement_sequence
+            .saturating_add(1);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "forwarded exit bound to stale control advertisement",
+        );
+        snapshot.forwarded_exits[0] = original_exit.clone();
         snapshot.forwarded_exits[0].capability.exit_public_key[0] ^= 1;
         snapshot = reject_before_entropy(
             snapshot,

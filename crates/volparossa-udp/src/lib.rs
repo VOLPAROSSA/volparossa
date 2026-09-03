@@ -16,16 +16,29 @@
 mod association;
 mod authorization;
 mod bridge;
+mod dns;
 mod endpoint;
 mod framing;
 mod path;
+mod session;
 
 pub use association::{MAX_UDP_PAYLOAD_BYTES, QuicUdpAssociation, UdpAssociationState};
 pub use authorization::{AuthorizedUdpFlow, PinnedUdpFlow, UdpAuthorizationScope};
 pub use bridge::{DatagramLimits, ExitUdpBridge, UdpBridgeStats};
-pub use endpoint::endpoint_from_bound_owned_fd;
+pub use dns::{BoundedDnsQuery, DnsQueryType, MAX_DNS_MESSAGE_BYTES, parse_dns_query};
+pub use endpoint::{ManagedQuinnEndpoint, endpoint_from_bound_owned_fd};
 pub use framing::{read_authorized_udp_flow, write_udp_authorization};
 pub use path::VerifiedSingleRelayPath;
+pub use session::{
+    CommittedQuicUdpTransport, CommittedUdpRole, ProtectedExitUdpTarget, SingleRelayUdpClient,
+    SingleRelayUdpExit, SingleRelayUdpExitListener, committed_quic_udp_socket_request,
+};
+
+/// Fixed protected-overlay port on which a committed Exit single-relay UDP session listens.
+///
+/// Both endpoint roles derive the address from the route context and path; sharing this one port
+/// removes any unsigned underlay or arbitrary-target signal from Client activation.
+pub const SINGLE_RELAY_UDP_EXIT_PORT: u16 = 44_443;
 
 use thiserror::Error;
 
@@ -52,6 +65,11 @@ pub enum UdpError {
     /// QUIC rejected an outbound datagram.
     #[error("UDP QUIC datagram send failed: {0}")]
     QuicDatagram(#[from] quinn::SendDatagramError),
+
+    /// Quinn rejected the protected peer tuple or TLS server name before the
+    /// connection attempt could start.
+    #[error("UDP QUIC connection could not be started: {0}")]
+    QuicConnect(#[from] quinn::ConnectError),
 
     /// QUIC DATAGRAM was not negotiated, so no permitted UDP fallback exists.
     #[error("QUIC DATAGRAM support was not negotiated")]

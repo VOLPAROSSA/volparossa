@@ -4,8 +4,8 @@
 //! limits. Every route requires signed exit and relay reservations. TCP and UDP
 //! flow openings reuse the replay-protected protocol and threshold-signed
 //! policy crates. The exit resolves names itself and pins only public Internet
-//! addresses. TLS on TCP/443 additionally requires a visible matching SNI and
-//! rejects ECH. UDP/443 uses a separate typestate boundary that authenticates
+//! addresses. Every hostname-authorized TCP flow additionally requires a visible matching SNI
+//! and rejects ECH. UDP/443 uses a separate typestate boundary that authenticates
 //! bounded QUIC v1 Initial packets and releases no egress-capable flow until a
 //! visible SNI exactly matches the signed destination.
 
@@ -19,6 +19,10 @@
 mod native_preselection;
 mod reservation_v4;
 
+pub use native_preselection::{
+    AcceptedNativeProbeExitReady, AcceptedNativeProbeExitResult,
+    AcceptedNativeProbeRelayAuthorization,
+};
 pub use reservation_v4::{
     AcceptedExitCapacityHold, AcceptedExitConfirmation, AcceptedRelayProbePermit, ProbeEvidence,
     ProbeEvidenceError, ProbeEvidenceVerifier,
@@ -27,7 +31,7 @@ pub use reservation_v4::{
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
 
@@ -36,6 +40,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpStream, lookup_host},
+    sync::Mutex,
     time,
 };
 use volparossa_core::{
@@ -48,16 +53,17 @@ use volparossa_inspection::{
 use volparossa_metrics::MetricsRegistry;
 use volparossa_policy::{PolicyError, VerifiedManifest, normalize_domain};
 use volparossa_protocol::{
-    MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteIdentity, ProtocolError,
+    MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteCredentialDelivery,
+    NativeRouteCredentialError, NativeRouteCredentialKeyPair, NativeRouteIdentity, ProtocolError,
     ReplayCache, SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, decode_canonical,
-    node_id_from_public_key,
+    node_id_from_public_key, verify_control_message,
 };
 use volparossa_reservation::{
     AuthorizedReservation, AvailableCapacity, CapacityLedger, LedgerLimits, ReservationError,
 };
 use volparossa_tcp_proxy::{
     AuthorizedTcpFlow, StreamTransferLimits, StreamTransferStats, TcpAuthorizationScope,
-    TcpProxyError, VerifiedMptcpRoute, proxy_bidirectional,
+    TcpProxyError, VerifiedMptcpRoute, proxy_bidirectional, read_authorized_open_tcp,
 };
 use volparossa_udp::{
     AuthorizedUdpFlow, DatagramLimits, ExitUdpBridge, QuicUdpAssociation, UdpAuthorizationScope,
@@ -210,6 +216,7 @@ pub struct ExitNativeRouteIdentityOwner {
     public_identity: NativeRouteIdentity,
     tls_certificate_pem: Zeroizing<Vec<u8>>,
     tls_private_key_pem: Zeroizing<Vec<u8>>,
+    credential_key_pair: NativeRouteCredentialKeyPair,
 }
 
 impl ExitNativeRouteIdentityOwner {
@@ -225,12 +232,20 @@ impl ExitNativeRouteIdentityOwner {
     /// bounded PEM framing are rejected.
     pub fn new(
         request: ExitNativeRouteIdentityRequest,
-        public_identity: NativeRouteIdentity,
+        mut public_identity: NativeRouteIdentity,
         tls_certificate_pem: Vec<u8>,
         tls_private_key_pem: Vec<u8>,
     ) -> Result<Self, ExitNativeRouteIdentityError> {
         let tls_certificate_pem = Zeroizing::new(tls_certificate_pem);
         let tls_private_key_pem = Zeroizing::new(tls_private_key_pem);
+        if !public_identity.credential_hpke_public_key.is_empty() {
+            return Err(ExitNativeRouteIdentityError::Rejected(
+                "native credential recipient key must be owner-generated",
+            ));
+        }
+        let credential_key_pair = NativeRouteCredentialKeyPair::generate()
+            .map_err(|_| ExitNativeRouteIdentityError::Unavailable)?;
+        public_identity.credential_hpke_public_key = credential_key_pair.public_key().to_vec();
         let exit_native_instance_id = validate_native_route_identity(&request, &public_identity)?;
         if !valid_pem(
             &tls_certificate_pem,
@@ -253,6 +268,7 @@ impl ExitNativeRouteIdentityOwner {
             public_identity,
             tls_certificate_pem,
             tls_private_key_pem,
+            credential_key_pair,
         })
     }
 
@@ -277,6 +293,16 @@ impl ExitNativeRouteIdentityOwner {
 
     fn matches_scope(&self, scope: &ExitNativeRouteAuthorizationScope) -> bool {
         self.authorization_scope() == *scope
+    }
+
+    fn open_credential(
+        &self,
+        delivery: &NativeRouteCredentialDelivery,
+    ) -> Result<Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>, ExitError>
+    {
+        self.credential_key_pair
+            .open(delivery)
+            .map_err(ExitError::NativeRouteCredential)
     }
 }
 
@@ -379,6 +405,53 @@ impl fmt::Debug for ExitNativeRouteAuthorization {
             .field("scope", &self.scope())
             .field("expires_at_ms", &self.expires_at_ms)
             .field("tls_material", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+/// One-shot native-route authorization plus the Client-created authentication bearer.
+///
+/// The bearer reached this Exit only through the Client-session-signed RFC 9180 HPKE delivery;
+/// it is never exposed to the forwarding Relay. This type deliberately implements neither
+/// [`Clone`] nor ordinary field-level [`Debug`].
+pub struct ExitNativeRouteCredentialAuthorization {
+    authorization: ExitNativeRouteAuthorization,
+    auth_bearer: Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+    client_session_id: [u8; 32],
+}
+
+impl ExitNativeRouteCredentialAuthorization {
+    /// Borrow the exact native-route TLS and public identity authorization.
+    #[must_use]
+    pub const fn authorization(&self) -> &ExitNativeRouteAuthorization {
+        &self.authorization
+    }
+
+    /// Borrow the canonical native authentication bearer. Callers must not log or persist it.
+    #[must_use]
+    pub fn auth_bearer(&self) -> &[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH] {
+        &self.auth_bearer
+    }
+
+    /// Split the one-shot authorization for direct transfer into the native backend.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ExitNativeRouteAuthorization,
+        Zeroizing<[u8; volparossa_protocol::NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+        [u8; 32],
+    ) {
+        (self.authorization, self.auth_bearer, self.client_session_id)
+    }
+}
+
+impl fmt::Debug for ExitNativeRouteCredentialAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExitNativeRouteCredentialAuthorization")
+            .field("authorization", &self.authorization)
+            .field("auth_bearer", &"<redacted>")
             .finish_non_exhaustive()
     }
 }
@@ -499,6 +572,7 @@ pub struct ExitService {
     native_probe_request_replay: ReplayCache,
     confirmation_replay: ReplayCache,
     relay_confirmation_replay: ReplayCache,
+    native_credential_replay: ReplayCache,
     route_replay: ReplayCache,
     flow_replay: ReplayCache,
     ledger: Option<CapacityLedger>,
@@ -507,6 +581,10 @@ pub struct ExitService {
     permit_response_cache:
         HashMap<[u8; NODE_ID_BYTES], CachedControlResponse<AcceptedRelayProbePermit>>,
     native_probe_permit_ledger: native_preselection::NativeProbePermitLedger,
+    native_probe_ready_owners:
+        HashMap<[u8; ID_BYTES], native_preselection::IssuedNativeProbeExitReady>,
+    native_probe_authorization_cache:
+        HashMap<[u8; NODE_ID_BYTES], native_preselection::CachedNativeProbeRelayAuthorization>,
     finalize_response_cache:
         HashMap<[u8; NODE_ID_BYTES], CachedControlResponse<AcceptedExitReservationBundle>>,
     confirmation_response_cache:
@@ -594,6 +672,7 @@ impl ExitService {
             native_probe_request_replay: ReplayCache::new(config.replay_capacity)?,
             confirmation_replay: ReplayCache::new(config.replay_capacity)?,
             relay_confirmation_replay: ReplayCache::new(config.replay_capacity)?,
+            native_credential_replay: ReplayCache::new(config.replay_capacity)?,
             route_replay: ReplayCache::new(config.replay_capacity)?,
             flow_replay: ReplayCache::new(config.replay_capacity)?,
             config,
@@ -603,6 +682,8 @@ impl ExitService {
             native_probe_permit_ledger: native_preselection::NativeProbePermitLedger::new(
                 response_cache_capacity,
             ),
+            native_probe_ready_owners: HashMap::with_capacity(response_cache_capacity),
+            native_probe_authorization_cache: HashMap::with_capacity(response_cache_capacity),
             finalize_response_cache: HashMap::with_capacity(response_cache_capacity),
             confirmation_response_cache: HashMap::with_capacity(response_cache_capacity),
             response_cache_capacity,
@@ -732,6 +813,33 @@ impl ExitService {
         }
     }
 
+    /// Consume one activated TCP route into a self-contained multi-flow egress owner.
+    ///
+    /// The returned owner keeps the verified multipath route, current threshold-signed policy,
+    /// independent bounded replay state, and metrics needed by a background datapath task. The
+    /// reservation remains allocated in this service until the caller reports completion through
+    /// [`Self::release`]. Consuming [`ActiveTcpRoute`] makes this transition one-shot.
+    ///
+    /// # Errors
+    ///
+    /// An inactive/expired reservation or policy, or unavailable replay capacity, fails closed.
+    pub fn detach_tcp_egress_route(
+        &self,
+        route: ActiveTcpRoute,
+        now_ms: u64,
+    ) -> Result<ActiveTcpEgressRoute, ExitError> {
+        self.ensure_active_reservation(&route.reservation_id)?;
+        route.route.ensure_active_at(now_ms)?;
+        self.policy.ensure_active_at(now_ms)?;
+        Ok(ActiveTcpEgressRoute {
+            route: route.route,
+            reservation_id: route.reservation_id,
+            policy: self.policy.clone(),
+            flow_replay: Mutex::new(ReplayCache::new(self.config.replay_capacity)?),
+            metrics: self.metrics.clone(),
+        })
+    }
+
     /// Verify and consume one client-signed UDP flow for an active relay path.
     ///
     /// This general path deliberately rejects UDP/443. Other exact policy
@@ -830,9 +938,9 @@ impl ExitService {
 
     /// Run one authorized ordinary-TCP egress stream with bounded buffering.
     ///
-    /// The destination name is resolved only here at the exit. TCP/443 first
-    /// consumes and validates a bounded visible `ClientHello`, forwards those
-    /// exact bytes unchanged, then streams both directions. ECH, missing SNI,
+    /// The destination name is resolved only here at the exit. Every hostname flow first consumes
+    /// and validates a bounded visible `ClientHello`, forwards those exact bytes unchanged, then
+    /// streams both directions. ECH, missing SNI,
     /// private/reserved resolution results and timeout/byte-limit violations
     /// all close the flow.
     ///
@@ -844,78 +952,22 @@ impl ExitService {
     pub async fn run_tcp_egress<C>(
         &self,
         flow: &AuthorizedTcpFlow,
-        mut protected_client: C,
+        protected_client: C,
         now_ms: u64,
         limits: TcpEgressLimits,
     ) -> Result<StreamTransferStats, ExitError>
     where
         C: AsyncRead + AsyncWrite + Unpin,
     {
-        flow.ensure_active_at(now_ms)?;
-        self.policy.ensure_active_at(now_ms)?;
-
-        let initial = if flow.port() == 443 {
-            match time::timeout(
-                limits.client_hello_timeout,
-                read_client_hello_prefix(&mut protected_client, flow.hostname()),
-            )
-            .await
-            {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(error)) => {
-                    self.record_policy_denial();
-                    return Err(error);
-                }
-                Err(_elapsed) => {
-                    self.record_policy_denial();
-                    return Err(ExitError::EgressTimeout("TLS ClientHello"));
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        let mut destination = resolve_and_connect(
-            flow.hostname(),
-            flow.port(),
-            limits.dns_timeout,
-            limits.connect_timeout,
+        run_tcp_egress_with_policy(
+            &self.policy,
+            self.metrics.as_ref(),
+            flow,
+            protected_client,
+            now_ms,
+            limits,
         )
-        .await?;
-        if !initial.is_empty() {
-            time::timeout(
-                limits.transfer.idle_timeout(),
-                destination.write_all(&initial),
-            )
-            .await
-            .map_err(|_| ExitError::EgressTimeout("initial TLS forwarding"))??;
-        }
-        let prefix_bytes = u64::try_from(initial.len())
-            .map_err(|_| ExitError::InvalidGrant("ClientHello length"))?;
-        let remaining_up = limits
-            .transfer
-            .maximum_client_to_exit_bytes()
-            .checked_sub(prefix_bytes)
-            .filter(|remaining| *remaining > 0)
-            .ok_or(TcpProxyError::ByteLimit)?;
-        let adjusted = StreamTransferLimits::new(
-            limits.transfer.buffer_bytes(),
-            remaining_up,
-            limits.transfer.maximum_exit_to_client_bytes(),
-            limits.transfer.idle_timeout(),
-        )?;
-        let mut statistics = proxy_bidirectional(protected_client, destination, adjusted).await?;
-        statistics.client_to_exit_bytes = statistics
-            .client_to_exit_bytes
-            .checked_add(prefix_bytes)
-            .ok_or(TcpProxyError::ByteLimit)?;
-        if let Some(metrics) = &self.metrics {
-            metrics.record_throughput(
-                statistics.client_to_exit_bytes,
-                statistics.exit_to_client_bytes,
-            );
-        }
-        Ok(statistics)
+        .await
     }
     /// Consume the exact stored native-route TLS owner once.
     ///
@@ -967,6 +1019,125 @@ impl ExitService {
         })
     }
 
+    /// Verify and consume one Client-to-Exit encrypted native-route bearer.
+    ///
+    /// The delivery is authenticated by the fresh Client session and replay protected before its
+    /// RFC 9180 ciphertext is opened with the route owner's private recipient key. Every public
+    /// field is then matched to the finalized reservation, exact native instances and signed TLS
+    /// identity. A forwarding Relay can carry this message but cannot learn or substitute the
+    /// bearer.
+    ///
+    /// # Errors
+    ///
+    /// Disabled, expired, unconfirmed, replayed, cross-scoped, undecryptable, unknown or
+    /// already-consumed ownership is rejected. Failed local correlation rolls back only the
+    /// provisional replay entry; a successful delivery remains permanently replay protected.
+    pub fn take_native_route_authorization_with_credential(
+        &mut self,
+        scope: &ExitNativeRouteAuthorizationScope,
+        signed_delivery: &[u8],
+        now_ms: u64,
+    ) -> Result<ExitNativeRouteCredentialAuthorization, ExitError> {
+        self.require_enabled()?;
+        self.purge_expired(now_ms);
+        self.policy.ensure_active_at(now_ms)?;
+        let reservation_key = text_id::<ReservationId>(scope.request.reservation_id())?;
+        let verified = verify_control_message::<NativeRouteCredentialDelivery>(
+            signed_delivery,
+            now_ms,
+            TimePolicy::default(),
+            &mut self.native_credential_replay,
+        )?;
+        let replay_entry = (*verified.sender_id(), *verified.nonce());
+
+        let result = (|| {
+            let state = self
+                .endpoint_states
+                .get(&reservation_key)
+                .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+            if state.phase != ExitReservationPhase::Finalized
+                || state.expires_at_ms <= now_ms
+                || state.paths.is_empty()
+                || state.paths.iter().any(|path| {
+                    path.relay_exit_endpoint.is_none() || path.relay_reservation_hash.is_none()
+                })
+            {
+                return Err(ExitError::ConfirmationRequired);
+            }
+            let owner = self
+                .native_route_identity_owners
+                .get(&reservation_key)
+                .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+            if !owner.matches_scope(scope) {
+                return Err(ExitError::NativeRouteAuthorizationMismatch);
+            }
+            let delivery_scope = verified
+                .message()
+                .scope
+                .as_ref()
+                .ok_or(ExitError::NativeRouteAuthorizationMismatch)?;
+            let identity = owner.public_identity();
+            let request = scope.request();
+            let finalize_matches = state.finalize_id.as_ref().is_some_and(|finalize_id| {
+                delivery_scope.finalize_id.as_slice() == finalize_id
+                    && finalize_id == request.finalize_id()
+            });
+            let exact_scope = delivery_scope.reservation_id.as_slice() == request.reservation_id()
+                && delivery_scope.route_context_id.as_slice() == request.route_context_id()
+                && delivery_scope.exit_node_id.as_slice() == self.config.node_id
+                && delivery_scope.client_session_id.as_slice() == state.client_session_id
+                && delivery_scope.client_session_public_key.as_slice()
+                    == state.client_session_public_key
+                && verified.sender_id() == &state.client_session_id
+                && verified.sender_public_key() == &state.client_session_public_key
+                && delivery_scope.auth_commitment.as_slice() == request.auth_commitment()
+                && delivery_scope.auth_commitment == identity.auth_commitment
+                && delivery_scope.certificate_sha256 == identity.certificate_sha256
+                && delivery_scope.spki_sha256 == identity.spki_sha256
+                && delivery_scope.masque_context_id == request.masque_context_id()
+                && delivery_scope.masque_context_id == identity.masque_context_id
+                && delivery_scope.client_native_instance_id.as_slice()
+                    == request.client_native_instance_id()
+                && delivery_scope.client_native_instance_id == identity.client_native_instance_id
+                && delivery_scope.exit_native_instance_id.as_slice()
+                    == scope.exit_native_instance_id()
+                && delivery_scope.exit_native_instance_id == identity.exit_native_instance_id
+                && delivery_scope.credential_hpke_public_key == identity.credential_hpke_public_key
+                && delivery_scope.created_at_ms >= state.created_at_ms
+                && delivery_scope.expires_at_ms == state.expires_at_ms
+                && verified.expires_at_ms() == state.expires_at_ms
+                && finalize_matches;
+            if !exact_scope {
+                return Err(ExitError::NativeRouteAuthorizationMismatch);
+            }
+
+            let auth_bearer = owner.open_credential(verified.message())?;
+            let owner = self
+                .native_route_identity_owners
+                .remove(&reservation_key)
+                .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+            Ok(ExitNativeRouteCredentialAuthorization {
+                authorization: ExitNativeRouteAuthorization {
+                    owner,
+                    expires_at_ms: state.expires_at_ms,
+                },
+                auth_bearer,
+                client_session_id: state
+                    .client_session_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ExitError::NativeRouteAuthorizationMismatch)?,
+            })
+        })();
+
+        if result.is_err() {
+            let _ = self
+                .native_credential_replay
+                .rollback(&replay_entry.0, &replay_entry.1);
+        }
+        result
+    }
+
     /// Explicitly release one route allocation.
     ///
     /// # Errors
@@ -988,6 +1159,8 @@ impl ExitService {
         self.confirmation_response_cache.retain(|_, cached| {
             cached.response.confirmed_path().reservation_id() != reservation_id
         });
+        self.native_probe_authorization_cache
+            .retain(|_, cached| cached.response.reservation_id() != reservation_id);
         Ok(())
     }
 
@@ -1044,6 +1217,12 @@ impl ExitService {
                     hex::encode(cached.response.confirmed_path().reservation_id()).as_str(),
                 )
         });
+        self.native_probe_authorization_cache.retain(|_, cached| {
+            cached.expires_at_ms > now_ms
+                && !removed_ids.contains(hex::encode(cached.response.reservation_id()).as_str())
+        });
+        self.native_probe_ready_owners
+            .retain(|_, ready| ready.expires_at_ms > now_ms);
         self.native_probe_permit_ledger.purge_expired(now_ms);
         self.sync_metrics();
         removed.len()
@@ -1404,6 +1583,89 @@ impl ActiveTcpRoute {
     }
 }
 
+/// One independently runnable TCP egress route detached from the discovery actor.
+///
+/// This affine owner authorizes exactly scoped client flow openings with route-local replay state.
+/// It never creates or accepts a transport itself: callers must supply a genuine protected MPTCP
+/// TLS stream. The original [`ActiveTcpRoute`] is consumed when this value is created.
+pub struct ActiveTcpEgressRoute {
+    route: VerifiedMptcpRoute,
+    reservation_id: [u8; ID_BYTES],
+    policy: VerifiedManifest,
+    flow_replay: Mutex<ReplayCache>,
+    metrics: Option<MetricsRegistry>,
+}
+
+impl ActiveTcpEgressRoute {
+    /// Return the still-allocated reservation identifier for completion reporting.
+    #[must_use]
+    pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
+        &self.reservation_id
+    }
+
+    /// Read and verify exactly one bounded signed `OPEN_TCP` frame from the protected stream.
+    ///
+    /// # Errors
+    ///
+    /// Malformed framing, timeout, invalid signature, replay, route/policy mismatch and denied
+    /// destinations all fail closed before any ordinary Internet connection is opened.
+    pub async fn read_authorized_open_tcp<R>(
+        &self,
+        reader: &mut R,
+        now_ms: u64,
+        timeout: Duration,
+    ) -> Result<AuthorizedTcpFlow, ExitError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        self.route.ensure_active_at(now_ms)?;
+        self.policy.ensure_active_at(now_ms)?;
+        let scope = TcpAuthorizationScope::new(&self.route, &self.policy);
+        let mut flow_replay = self.flow_replay.lock().await;
+        let result = read_authorized_open_tcp(
+            reader,
+            &scope,
+            now_ms,
+            TimePolicy::default(),
+            &mut flow_replay,
+            timeout,
+        )
+        .await;
+        if matches!(&result, Err(TcpProxyError::Policy(_))) {
+            if let Some(metrics) = &self.metrics {
+                metrics.record_policy_denial();
+            }
+        }
+        result.map_err(ExitError::from)
+    }
+
+    /// Resolve and proxy one authorized flow over the supplied protected client stream.
+    ///
+    /// # Errors
+    ///
+    /// Expiry, policy, DNS, connect, inspection, I/O and transfer-limit failures close the flow.
+    pub async fn run_tcp_egress<C>(
+        &self,
+        flow: &AuthorizedTcpFlow,
+        protected_client: C,
+        now_ms: u64,
+        limits: TcpEgressLimits,
+    ) -> Result<StreamTransferStats, ExitError>
+    where
+        C: AsyncRead + AsyncWrite + Unpin,
+    {
+        run_tcp_egress_with_policy(
+            &self.policy,
+            self.metrics.as_ref(),
+            flow,
+            protected_client,
+            now_ms,
+            limits,
+        )
+        .await
+    }
+}
+
 /// An exit-verified single relay path, consumable by one UDP association.
 pub struct ActiveUdpPath {
     path: VerifiedSingleRelayPath,
@@ -1421,6 +1683,12 @@ impl ActiveUdpPath {
     #[must_use]
     pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
         &self.reservation_id
+    }
+
+    /// Consume the activated service grant into the exact verified transport path.
+    #[must_use]
+    pub fn into_verified_path(self) -> VerifiedSingleRelayPath {
+        self.path
     }
 }
 
@@ -1525,6 +1793,7 @@ impl fmt::Debug for ExitReservationState {
 pub struct ConfirmedExitPath {
     reservation_id: [u8; ID_BYTES],
     path_id: u32,
+    relay_exit_endpoint: PublicWireGuardEndpoint,
     relay_exit_public_key: WireGuardPublicKey,
     exit_public_key: WireGuardPublicKey,
 }
@@ -1540,6 +1809,12 @@ impl ConfirmedExitPath {
     #[must_use]
     pub const fn path_id(&self) -> u32 {
         self.path_id
+    }
+
+    /// Confirmed public Relay endpoint for the relay-to-Exit link.
+    #[must_use]
+    pub const fn relay_exit_endpoint(&self) -> PublicWireGuardEndpoint {
+        self.relay_exit_endpoint
     }
 
     /// Relay public key on the relay-to-exit link.
@@ -1747,20 +2022,34 @@ where
 }
 
 async fn resolve_and_connect(
-    hostname: &str,
+    hostname: Option<&str>,
+    destination_ip: Option<IpAddr>,
     port: u16,
     dns_timeout: Duration,
     connect_timeout: Duration,
 ) -> Result<TcpStream, ExitError> {
-    let resolved = time::timeout(dns_timeout, lookup_host((hostname, port)))
-        .await
-        .map_err(|_| ExitError::EgressTimeout("DNS"))??;
-    let mut addresses = Vec::new();
-    for address in resolved.take(MAX_DNS_RESULTS) {
-        if permitted_egress(address.ip()) && !addresses.contains(&address) {
-            addresses.push(address);
+    let addresses = if let Some(hostname) = hostname {
+        let resolved = time::timeout(dns_timeout, lookup_host((hostname, port)))
+            .await
+            .map_err(|_| ExitError::EgressTimeout("DNS"))??;
+        let mut addresses = Vec::new();
+        for address in resolved.take(MAX_DNS_RESULTS) {
+            if permitted_egress(address.ip())
+                && destination_ip.is_none_or(|pinned| pinned == address.ip())
+                && !addresses.contains(&address)
+            {
+                addresses.push(address);
+            }
         }
-    }
+        addresses
+    } else if let Some(destination_ip) = destination_ip {
+        if !permitted_egress(destination_ip) {
+            return Err(ExitError::ResolutionFailed);
+        }
+        vec![SocketAddr::new(destination_ip, port)]
+    } else {
+        return Err(ExitError::ResolutionFailed);
+    };
     if addresses.is_empty() {
         return Err(ExitError::ResolutionFailed);
     }
@@ -1779,6 +2068,90 @@ async fn resolve_and_connect(
     .await
     .map_err(|_| ExitError::EgressTimeout("TCP connect"))?
     .map_err(ExitError::Io)
+}
+
+async fn run_tcp_egress_with_policy<C>(
+    policy: &VerifiedManifest,
+    metrics: Option<&MetricsRegistry>,
+    flow: &AuthorizedTcpFlow,
+    mut protected_client: C,
+    now_ms: u64,
+    limits: TcpEgressLimits,
+) -> Result<StreamTransferStats, ExitError>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    flow.ensure_active_at(now_ms)?;
+    policy.ensure_active_at(now_ms)?;
+
+    let initial = if flow.hostname().is_some() {
+        let hostname = flow.hostname().ok_or(ExitError::ResolutionFailed)?;
+        match time::timeout(
+            limits.client_hello_timeout,
+            read_client_hello_prefix(&mut protected_client, hostname),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                if let Some(metrics) = metrics {
+                    metrics.record_policy_denial();
+                }
+                return Err(error);
+            }
+            Err(_elapsed) => {
+                if let Some(metrics) = metrics {
+                    metrics.record_policy_denial();
+                }
+                return Err(ExitError::EgressTimeout("TLS ClientHello"));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut destination = resolve_and_connect(
+        flow.hostname(),
+        flow.destination_ip(),
+        flow.port(),
+        limits.dns_timeout,
+        limits.connect_timeout,
+    )
+    .await?;
+    if !initial.is_empty() {
+        time::timeout(
+            limits.transfer.idle_timeout(),
+            destination.write_all(&initial),
+        )
+        .await
+        .map_err(|_| ExitError::EgressTimeout("initial TLS forwarding"))??;
+    }
+    let prefix_bytes =
+        u64::try_from(initial.len()).map_err(|_| ExitError::InvalidGrant("ClientHello length"))?;
+    let remaining_up = limits
+        .transfer
+        .maximum_client_to_exit_bytes()
+        .checked_sub(prefix_bytes)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(TcpProxyError::ByteLimit)?;
+    let adjusted = StreamTransferLimits::new(
+        limits.transfer.buffer_bytes(),
+        remaining_up,
+        limits.transfer.maximum_exit_to_client_bytes(),
+        limits.transfer.idle_timeout(),
+    )?;
+    let mut statistics = proxy_bidirectional(protected_client, destination, adjusted).await?;
+    statistics.client_to_exit_bytes = statistics
+        .client_to_exit_bytes
+        .checked_add(prefix_bytes)
+        .ok_or(TcpProxyError::ByteLimit)?;
+    if let Some(metrics) = metrics {
+        metrics.record_throughput(
+            statistics.client_to_exit_bytes,
+            statistics.exit_to_client_bytes,
+        );
+    }
+    Ok(statistics)
 }
 
 fn permitted_egress(address: IpAddr) -> bool {
@@ -1851,6 +2224,10 @@ fn validate_native_route_identity(
     let exit_native_instance_id =
         <[u8; NODE_ID_BYTES]>::try_from(&identity.exit_native_instance_id[..])
             .map_err(|_| ExitNativeRouteIdentityError::Rejected("invalid exit native instance"))?;
+    let credential_hpke_public_key =
+        <[u8; NODE_ID_BYTES]>::try_from(&identity.credential_hpke_public_key[..]).map_err(
+            |_| ExitNativeRouteIdentityError::Rejected("invalid native credential recipient key"),
+        )?;
     if identity.auth_commitment.as_slice() != request.auth_commitment
         || identity.masque_context_id != request.masque_context_id
         || identity.client_native_instance_id.as_slice() != request.client_native_instance_id
@@ -1858,6 +2235,7 @@ fn validate_native_route_identity(
         || certificate_sha256 == [0; NODE_ID_BYTES]
         || spki_sha256 == [0; NODE_ID_BYTES]
         || exit_native_instance_id == [0; NODE_ID_BYTES]
+        || credential_hpke_public_key == [0; NODE_ID_BYTES]
         || !canonical_dns_name(&identity.tls_server_name)
     {
         return Err(ExitNativeRouteIdentityError::Rejected(
@@ -1988,6 +2366,10 @@ pub enum ExitError {
     /// Native route public identity or private ownership was unavailable or invalid.
     #[error("exit native route identity failed: {0}")]
     NativeRouteIdentity(#[from] ExitNativeRouteIdentityError),
+    /// RFC 9180 native bearer delivery was malformed, undecryptable or contradicted its public
+    /// commitment.
+    #[error("exit native route credential delivery failed: {0}")]
+    NativeRouteCredential(#[from] NativeRouteCredentialError),
     /// The route-scoped native authorization was absent or already consumed.
     #[error("exit native route authorization is unavailable or already consumed")]
     NativeRouteAuthorizationUnavailable,
@@ -2058,15 +2440,22 @@ mod tests {
     use ring::aead;
 
     use ed25519_dalek::{Signer as _, SigningKey};
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        sync::Arc,
+        time::Duration,
+    };
+    use tokio::io::AsyncWriteExt as _;
 
     use volparossa_core::Bandwidth;
     use volparossa_metrics::MetricsRegistry;
     use volparossa_policy::{DestinationRule, ProtocolPort, TransportProtocol};
     use volparossa_protocol::{
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteCredentialDelivery,
         NativeRouteIdentity, ProbeAddressFamily, ProbeLegEvidence, ProtocolError, RelayProbePermit,
-        RelayProbeResult, RelayReservation, ReplayCache, TimePolicy, Transport, generate_nonce,
-        node_id_from_public_key, sign_control_message, verify_control_message,
+        RelayProbeResult, RelayReservation, ReplayCache, SignedEnvelope, TimePolicy, Transport,
+        decode_canonical, generate_nonce, node_id_from_public_key, sign_control_message,
+        verify_control_message,
     };
     use volparossa_relay::{RelayService, RelayServiceConfig};
     use volparossa_reservation::{
@@ -2078,8 +2467,9 @@ mod tests {
         AcceptedExitReservation, ExitError, ExitNativeRouteAuthorizationScope,
         ExitNativeRouteIdentityError, ExitNativeRouteIdentityOwner,
         ExitNativeRouteIdentityProvider, ExitNativeRouteIdentityRequest, ExitService,
-        ExitServiceConfig, PendingQuicUdpFlow, ProbeEvidence, ProbeEvidenceError,
-        ProbeEvidenceVerifier, Udp443InspectionProgress, inspect_tls_client_hello,
+        ExitServiceConfig, InspectionError, PendingQuicUdpFlow, ProbeEvidence, ProbeEvidenceError,
+        ProbeEvidenceVerifier, StreamTransferLimits, TcpEgressLimits, Udp443InspectionProgress,
+        inspect_tls_client_hello,
     };
     use volparossa_wireguard::{
         ClientEndpointLease, EndpointRole, ExitEndpointLease, HelperContextHandle,
@@ -2275,6 +2665,7 @@ mod tests {
                 masque_context_id: request.masque_context_id(),
                 client_native_instance_id: request.client_native_instance_id().to_vec(),
                 exit_native_instance_id: request.exit_native_instance_id().to_vec(),
+                credential_hpke_public_key: Vec::new(),
             },
             TEST_TLS_CERTIFICATE_PEM.to_vec(),
             TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
@@ -3104,6 +3495,62 @@ mod tests {
     }
 
     #[test]
+    fn native_route_bearer_is_hpke_delivered_client_to_exit_once() {
+        let (mut service, mut route) = admit_route(
+            2,
+            &[Transport::MultipathQuic],
+            Vec::new(),
+            MetricsRegistry::new(),
+        );
+        let scope = route.accepted.native_route_authorization_scope();
+        let client_authorization = route
+            .coordinator
+            .take_native_route_authorization(*scope.request().finalize_id(), NOW_MS)
+            .expect("fully confirmed client native authorization");
+        let expected_bearer = *client_authorization.auth_bearer();
+        let signed_delivery = route
+            .coordinator
+            .sign_native_route_credential_delivery(&client_authorization, NOW_MS)
+            .expect("HPKE-sealed Client credential delivery");
+
+        let envelope =
+            decode_canonical::<SignedEnvelope>(&signed_delivery, MAX_CONTROL_MESSAGE_SIZE)
+                .expect("signed delivery envelope");
+        let opaque = decode_canonical::<NativeRouteCredentialDelivery>(
+            &envelope.payload,
+            MAX_CONTROL_PAYLOAD_SIZE,
+        )
+        .expect("credential payload");
+        assert!(
+            !opaque
+                .ciphertext
+                .windows(expected_bearer.len())
+                .any(|window| window == expected_bearer),
+            "the Relay-visible ciphertext must not contain the bearer in plaintext"
+        );
+
+        let exit_authorization = service
+            .take_native_route_authorization_with_credential(&scope, &signed_delivery, NOW_MS)
+            .expect("authenticated Exit credential admission");
+        assert_eq!(exit_authorization.auth_bearer(), &expected_bearer);
+        assert_eq!(
+            exit_authorization.authorization().scope(),
+            scope,
+            "the decrypted bearer must retain the exact native owner"
+        );
+        assert!(format!("{exit_authorization:?}").contains("<redacted>"));
+
+        assert!(matches!(
+            service.take_native_route_authorization_with_credential(
+                &scope,
+                &signed_delivery,
+                NOW_MS
+            ),
+            Err(ExitError::Protocol(ProtocolError::Replay))
+        ));
+    }
+
+    #[test]
     fn native_route_owner_rejects_mismatched_public_scope_and_malformed_pem() {
         let request = ExitNativeRouteIdentityRequest::new(
             [1; 16], [2; 16], [3; 16], [4; 32], 5, [6; 32], [8; 32],
@@ -3117,6 +3564,7 @@ mod tests {
             masque_context_id: request.masque_context_id(),
             client_native_instance_id: request.client_native_instance_id().to_vec(),
             exit_native_instance_id: request.exit_native_instance_id().to_vec(),
+            credential_hpke_public_key: Vec::new(),
         };
         let owner = ExitNativeRouteIdentityOwner::new(
             request,
@@ -3385,6 +3833,105 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn detached_tcp_egress_owner_reads_one_bounded_signed_open() {
+        let rule = DestinationRule::exact_domain(
+            "allowed.example",
+            [ProtocolPort::new(TransportProtocol::Tcp, 80).unwrap()],
+        )
+        .unwrap();
+        let (mut service, admitted) = admit_route(
+            2,
+            &[Transport::TcpMptcp],
+            vec![rule],
+            MetricsRegistry::new(),
+        );
+        let relays = admitted
+            .signed_relays
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let active = service
+            .bind_tcp_route(&admitted.accepted, &relays, NOW_MS)
+            .unwrap();
+        let reservation_id = *active.reservation_id();
+        let signed_open = admitted.sign_open_tcp(service.policy_hash(), "allowed.example", 80);
+        let detached = service
+            .detach_tcp_egress_route(active, NOW_MS)
+            .expect("detached route");
+        assert_eq!(detached.reservation_id(), &reservation_id);
+
+        let (mut client, mut exit) = tokio::io::duplex(MAX_CONTROL_MESSAGE_SIZE * 2);
+        let writer = tokio::spawn(async move {
+            volparossa_tcp_proxy::write_open_tcp(&mut client, &signed_open, Duration::from_secs(1))
+                .await
+        });
+        let flow = detached
+            .read_authorized_open_tcp(&mut exit, NOW_MS, Duration::from_secs(1))
+            .await
+            .expect("authorized flow");
+        writer.await.unwrap().unwrap();
+        assert_eq!(flow.hostname(), Some("allowed.example"));
+        assert_eq!(flow.port(), 80);
+        service.release(&reservation_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn detached_tcp_egress_owner_authorizes_independent_concurrent_flows() {
+        let rule = DestinationRule::exact_domain(
+            "allowed.example",
+            [80_u16, 81].map(|port| ProtocolPort::new(TransportProtocol::Tcp, port).unwrap()),
+        )
+        .unwrap();
+        let (mut service, admitted) = admit_route(
+            2,
+            &[Transport::TcpMptcp],
+            vec![rule],
+            MetricsRegistry::new(),
+        );
+        let relays = admitted
+            .signed_relays
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let route = service
+            .bind_tcp_route(&admitted.accepted, &relays, NOW_MS)
+            .unwrap();
+        let detached = Arc::new(
+            service
+                .detach_tcp_egress_route(route, NOW_MS)
+                .expect("detached route"),
+        );
+        let mut readers = Vec::new();
+        for port in [80_u16, 81] {
+            let signed = admitted.sign_open_tcp(service.policy_hash(), "allowed.example", port);
+            let (mut writer, mut reader) = tokio::io::duplex(MAX_CONTROL_MESSAGE_SIZE * 2);
+            let route = Arc::clone(&detached);
+            readers.push(tokio::spawn(async move {
+                let send = tokio::spawn(async move {
+                    volparossa_tcp_proxy::write_open_tcp(
+                        &mut writer,
+                        &signed,
+                        Duration::from_secs(1),
+                    )
+                    .await
+                });
+                let flow = route
+                    .read_authorized_open_tcp(&mut reader, NOW_MS, Duration::from_secs(1))
+                    .await
+                    .expect("authorized concurrent flow");
+                send.await.unwrap().unwrap();
+                flow.port()
+            }));
+        }
+        let mut ports = Vec::new();
+        for reader in readers {
+            ports.push(reader.await.unwrap());
+        }
+        ports.sort_unstable();
+        assert_eq!(ports, [80, 81]);
+    }
+
     #[test]
     fn udp_443_fails_closed_without_quic_client_hello_evidence() {
         let rule = DestinationRule::exact_domain(
@@ -3486,6 +4033,47 @@ mod tests {
             inspect_tls_client_hello(&ech, "allowed.example"),
             Err(ExitError::EncryptedClientHello)
         ));
+    }
+
+    #[tokio::test]
+    async fn hostname_egress_on_nonstandard_port_requires_visible_sni_before_dns() {
+        let rule = DestinationRule::exact_domain(
+            "allowed.invalid",
+            [ProtocolPort::new(TransportProtocol::Tcp, 18_443).unwrap()],
+        )
+        .unwrap();
+        let metrics = MetricsRegistry::new();
+        let (mut service, admitted) =
+            admit_route(2, &[Transport::TcpMptcp], vec![rule], metrics.clone());
+        let relays = admitted
+            .signed_relays
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let route = service
+            .bind_tcp_route(&admitted.accepted, &relays, NOW_MS)
+            .unwrap();
+        let open = admitted.sign_open_tcp(service.policy_hash(), "allowed.invalid", 18_443);
+        let flow = service.authorize_tcp_open(&route, &open, NOW_MS).unwrap();
+        let (mut application, protected) = tokio::io::duplex(64);
+        application.write_all(&[23, 3, 3, 0, 1, 0]).await.unwrap();
+        let transfer =
+            StreamTransferLimits::new(1_024, 4_096, 4_096, Duration::from_secs(1)).unwrap();
+        let limits = TcpEgressLimits::new(
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+            transfer,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            service
+                .run_tcp_egress(&flow, protected, NOW_MS, limits)
+                .await,
+            Err(ExitError::Inspection(InspectionError::InvalidTlsRecord(_)))
+        ));
+        assert_eq!(metrics.snapshot().policy_denials, 1);
     }
 
     #[test]

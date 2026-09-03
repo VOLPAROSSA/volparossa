@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Local control protocol version implemented by v1.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
 /// Maximum complete local control payload.
 pub const MAX_CONTROL_FRAME: usize = 256 * 1024;
 /// Maximum list entries returned in one response.
@@ -43,7 +43,7 @@ pub struct ControlRequest {
 pub mod control_request {
     use prost::Oneof;
 
-    use super::{Empty, LogQuery, RoleChange};
+    use super::{ConnectRequest, Empty, LogQuery, RoleChange};
 
     /// Exactly one supported CLI-to-agent operation.
     #[derive(Clone, PartialEq, Oneof)]
@@ -53,7 +53,7 @@ pub mod control_request {
         Status(Empty),
         /// Establish route contexts according to current policy.
         #[prost(message, tag = "11")]
-        Connect(Empty),
+        Connect(ConnectRequest),
         /// Drain and remove all route contexts.
         #[prost(message, tag = "12")]
         Disconnect(Empty),
@@ -84,6 +84,17 @@ pub mod control_request {
 /// Empty operation payload.
 #[derive(Clone, Copy, PartialEq, Eq, Message)]
 pub struct Empty {}
+
+/// Explicit transport requested for a new client route.
+///
+/// The optional field keeps decoding older empty Connect messages deterministic; current clients
+/// always send a value so multipath and single-path route evidence cannot be confused.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct ConnectRequest {
+    /// Requested product transport, or absent for the legacy configured-profile selection.
+    #[prost(enumeration = "SessionTransport", optional, tag = "1")]
+    pub transport: Option<i32>,
+}
 
 /// Independently configurable node role.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
@@ -581,6 +592,12 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         .as_ref()
         .ok_or(ControlProtocolError::Invalid("missing operation"))?
     {
+        control_request::Operation::Connect(connect) => {
+            if let Some(transport) = connect.transport {
+                SessionTransport::try_from(transport)
+                    .map_err(|_| ControlProtocolError::Invalid("connect transport"))?;
+            }
+        }
         control_request::Operation::SetRole(change) => {
             let role = NodeRole::try_from(change.role)
                 .map_err(|_| ControlProtocolError::Invalid("role"))?;
@@ -596,7 +613,6 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
             }
         }
         control_request::Operation::Status(_)
-        | control_request::Operation::Connect(_)
         | control_request::Operation::Disconnect(_)
         | control_request::Operation::Peers(_)
         | control_request::Operation::Paths(_)
@@ -748,6 +764,16 @@ mod tests {
     fn request_round_trip_is_bounded_and_typed() {
         let encoded = encode_request(&status_request()).expect("valid request");
         assert_eq!(decode_request(&encoded).expect("decode"), status_request());
+
+        let connect = ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![8; 16],
+            operation: Some(control_request::Operation::Connect(ConnectRequest {
+                transport: Some(SessionTransport::MultipathQuic as i32),
+            })),
+        };
+        let encoded = encode_request(&connect).expect("typed connect request");
+        assert_eq!(decode_request(&encoded).expect("decode connect"), connect);
     }
 
     #[test]
@@ -760,6 +786,11 @@ mod tests {
         request.operation = Some(control_request::Operation::SetRole(RoleChange {
             role: NodeRole::Client as i32,
             enabled: false,
+        }));
+        assert!(encode_request(&request).is_err());
+
+        request.operation = Some(control_request::Operation::Connect(ConnectRequest {
+            transport: Some(99),
         }));
         assert!(encode_request(&request).is_err());
     }

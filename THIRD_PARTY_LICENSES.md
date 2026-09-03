@@ -333,7 +333,7 @@ The following required contracts and evidence remain unresolved:
    independent signed-reservation verification, preverified affine replay
    handoff, and cryptographic certificate/key/name/SPKI consistency over the
    in-message TLS material;
-5. the exact replaceable VOLPAROSSA estimated-delivery-time scheduler;
+5. disposable-topology proof of the patched EDT scheduler over real relay paths;
 6. disposable-topology proof that an exit-originated inner datagram traverses
    the native queue/poll boundary and reaches the Rust client;
 7. end-to-end dynamic path removal and failover across real relay paths; and
@@ -424,6 +424,7 @@ is rejected.
 | serde, serde_json, serde_yaml, prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
 | rust-libp2p and Quinn | decentralised control plane and QUIC | MIT |
 | rustls, ring, ed25519-dalek, x25519-dalek, Argon2 | transport, identity, and key protection | mixed permissive licenses; inspect every resolved crate |
+| `hpke` 0.14.0 (`rust-hpke`) | RFC 9180 route-credential sealing, exact crates.io pin in `Cargo.lock` | MIT/Apache-2.0; upstream `https://github.com/rozbb/rust-hpke` |
 | rusqlite and SQLite bundle | bounded local peer/session state | MIT for wrapper; SQLite is public domain |
 | rtnetlink, netlink-sys, wireguard-uapi, nix, libc | Linux networking and OS boundary | mixed permissive licenses; inspect every resolved crate |
 

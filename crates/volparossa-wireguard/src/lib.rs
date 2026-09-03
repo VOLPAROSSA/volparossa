@@ -635,7 +635,8 @@ impl PublicPathPlan {
             return Err(WireGuardError::InvalidPathId);
         }
         let expected_prefix = overlay_prefix(self.route_context_id, self.path_id)?;
-        if self.prefix != expected_prefix || self.addresses != overlay_addresses(expected_prefix) {
+        if self.prefix != expected_prefix || self.addresses != addresses_in_prefix(expected_prefix)
+        {
             return Err(WireGuardError::InvalidTopology);
         }
         let keys = [
@@ -667,7 +668,7 @@ impl PublicPathPlan {
         exit_key: WireGuardPublicKey,
     ) -> Result<Self, WireGuardError> {
         let prefix = overlay_prefix(route_context_id, path_id)?;
-        let addresses = overlay_addresses(prefix);
+        let addresses = addresses_in_prefix(prefix);
         let plan = Self {
             route_context_id,
             path_id,
@@ -683,7 +684,7 @@ impl PublicPathPlan {
     }
 }
 
-fn overlay_addresses(prefix: Ipv6Net) -> OverlayAddresses {
+fn addresses_in_prefix(prefix: Ipv6Net) -> OverlayAddresses {
     let base = prefix.network().segments();
     let address = |host| {
         Ipv6Addr::new(
@@ -696,6 +697,23 @@ fn overlay_addresses(prefix: Ipv6Net) -> OverlayAddresses {
         relay_exit: address(3),
         exit: address(4),
     }
+}
+
+/// Derives the complete canonical overlay address set for one route path.
+///
+/// This is the public address counterpart to [`overlay_prefix`]. Transport
+/// owners use it to prove that a helper-returned socket is bound to the Client
+/// or Exit endpoint inside the selected two-link path, rather than to an
+/// underlay address that could bypass the Relay.
+///
+/// # Errors
+///
+/// Returns an error when the route context or path identifier is invalid.
+pub fn overlay_addresses(
+    route_context_id: [u8; 16],
+    path_id: u8,
+) -> Result<OverlayAddresses, WireGuardError> {
+    overlay_prefix(route_context_id, path_id).map(addresses_in_prefix)
 }
 
 /// Derives the `fd76:6f6c:7061:.../112` ULA prefix without exposing identity material.
@@ -1005,7 +1023,7 @@ mod tests {
         let second_prefix = overlay_prefix(route, 2).expect("second path");
         assert_ne!(first_prefix, second_prefix);
         assert_eq!(first_prefix.prefix_len(), 112);
-        let addresses = overlay_addresses(first_prefix);
+        let addresses = addresses_in_prefix(first_prefix);
         assert_ne!(addresses.client, addresses.exit);
     }
 

@@ -1,10 +1,15 @@
 //! Strict, fail-closed configuration for all VOLPAROSSA processes.
 
-use std::{collections::HashSet, fmt, fs, path::Path};
+use std::{
+    collections::HashSet,
+    fmt, fs,
+    net::{Ipv4Addr, Ipv6Addr},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use volparossa_core::OperatorId;
+use volparossa_core::{MAX_BANDWIDTH_MBPS, OperatorId};
 
 /// Wire protocol version implemented by this release.
 pub const PROTOCOL_VERSION: u16 = 4;
@@ -175,6 +180,7 @@ impl Config {
             3_600,
         )?;
         validate_network_addresses(&self.network)?;
+        validate_advertisement_origin(self.roles, &self.network)?;
         validate_selection(&self.selection)?;
         validate_capacity(self.roles, &self.capacity)?;
         validate_routing(self.runtime_mode, &self.routing)?;
@@ -211,6 +217,16 @@ pub struct NetworkConfig {
     pub candidate_pool_size: usize,
     /// Maximum advertisement lifetime.
     pub advertisement_ttl_seconds: u64,
+    /// Self-declared coarse service region used only as an untrusted diversity hint.
+    pub advertised_region: String,
+    /// Self-declared ISO-like country code used only as an untrusted diversity hint.
+    pub advertised_country_code: String,
+    /// Self-declared non-zero origin ASN used only as an untrusted diversity hint.
+    pub advertised_asn: u32,
+    /// Canonical IPv4 /24 origin hint for service-role selection.
+    pub advertised_ipv4_prefix: Option<String>,
+    /// Canonical IPv6 /48 origin hint for service-role selection.
+    pub advertised_ipv6_prefix: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -223,6 +239,11 @@ impl Default for NetworkConfig {
             bootstrap_peers: Vec::new(),
             candidate_pool_size: 200,
             advertisement_ttl_seconds: 300,
+            advertised_region: "unknown".into(),
+            advertised_country_code: "ZZ".into(),
+            advertised_asn: 0,
+            advertised_ipv4_prefix: None,
+            advertised_ipv6_prefix: None,
         }
     }
 }
@@ -310,6 +331,20 @@ pub struct RoutingConfig {
     pub kill_switch: bool,
     /// Explicitly unsafe development-only client-to-exit bypass.
     pub direct_exit_debug: bool,
+    /// Address family used by the first client route attempt.
+    pub client_address_family: ClientAddressFamily,
+    /// Minimum client-route upload capacity in decimal Mbps.
+    pub client_minimum_upload_mbps: u32,
+    /// Minimum client-route download capacity in decimal Mbps.
+    pub client_minimum_download_mbps: u32,
+    /// Locally available upload capacity used to bound preselection in decimal Mbps.
+    pub client_local_upload_mbps: u32,
+    /// Locally available download capacity used to bound preselection in decimal Mbps.
+    pub client_local_download_mbps: u32,
+    /// Conservative upload ceiling for one preselection attempt in decimal Mbps.
+    pub client_capacity_ceiling_upload_mbps: u32,
+    /// Conservative download ceiling for one preselection attempt in decimal Mbps.
+    pub client_capacity_ceiling_download_mbps: u32,
 }
 
 impl Default for RoutingConfig {
@@ -319,8 +354,26 @@ impl Default for RoutingConfig {
             maximum_active_contexts: 64,
             kill_switch: true,
             direct_exit_debug: false,
+            client_address_family: ClientAddressFamily::Ipv4,
+            client_minimum_upload_mbps: 10,
+            client_minimum_download_mbps: 10,
+            client_local_upload_mbps: 100,
+            client_local_download_mbps: 100,
+            client_capacity_ceiling_upload_mbps: 80,
+            client_capacity_ceiling_download_mbps: 80,
         }
     }
+}
+
+/// Explicit address family for the first client route attempt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAddressFamily {
+    /// Use IPv4 advertisements and native path evidence.
+    #[default]
+    Ipv4,
+    /// Use IPv6 advertisements and native path evidence.
+    Ipv6,
 }
 
 /// Supported TCP tunnel type.
@@ -528,6 +581,87 @@ fn validate_network_addresses(network: &NetworkConfig) -> Result<(), ConfigError
     )
 }
 
+fn validate_advertisement_origin(
+    roles: RolesConfig,
+    network: &NetworkConfig,
+) -> Result<(), ConfigError> {
+    if network.advertised_region.is_empty()
+        || network.advertised_region.len() > 32
+        || !network.advertised_region.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(validation(
+            "network.advertised_region",
+            "must be 1..=32 lowercase ASCII letters, digits, '-' or '_'",
+        ));
+    }
+    if network.advertised_country_code.len() != 2
+        || !network
+            .advertised_country_code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(validation(
+            "network.advertised_country_code",
+            "must contain exactly two uppercase ASCII letters",
+        ));
+    }
+    if let Some(prefix) = network.advertised_ipv4_prefix.as_deref() {
+        if !canonical_ipv4_prefix(prefix) {
+            return Err(validation(
+                "network.advertised_ipv4_prefix",
+                "must be a canonical IPv4 /24 network",
+            ));
+        }
+    }
+    if let Some(prefix) = network.advertised_ipv6_prefix.as_deref() {
+        if !canonical_ipv6_prefix(prefix) {
+            return Err(validation(
+                "network.advertised_ipv6_prefix",
+                "must be a canonical IPv6 /48 network",
+            ));
+        }
+    }
+    if roles.relay || roles.exit {
+        if network.advertised_asn == 0 {
+            return Err(validation(
+                "network.advertised_asn",
+                "an enabled relay or exit requires a non-zero origin ASN hint",
+            ));
+        }
+        if network.advertised_ipv4_prefix.is_none() && network.advertised_ipv6_prefix.is_none() {
+            return Err(validation(
+                "network.advertised_ipv4_prefix",
+                "an enabled relay or exit requires an IPv4 /24 or IPv6 /48 origin hint",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_ipv4_prefix(value: &str) -> bool {
+    let Some((address, prefix)) = value.rsplit_once('/') else {
+        return false;
+    };
+    let Ok(address) = address.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    prefix == "24" && address.octets()[3] == 0 && format!("{address}/24") == value
+}
+
+fn canonical_ipv6_prefix(value: &str) -> bool {
+    let Some((address, prefix)) = value.rsplit_once('/') else {
+        return false;
+    };
+    let Ok(address) = address.parse::<Ipv6Addr>() else {
+        return false;
+    };
+    prefix == "48"
+        && address.octets()[6..].iter().all(|byte| *byte == 0)
+        && format!("{address}/48") == value
+}
+
 fn validate_address_list(
     field: &'static str,
     values: &[String],
@@ -671,6 +805,50 @@ fn validate_routing(mode: RuntimeMode, routing: &RoutingConfig) -> Result<(), Co
             "direct client-exit connections are development-only and disclose the client address",
         ));
     }
+    for (field, value) in [
+        (
+            "routing.client_minimum_upload_mbps",
+            routing.client_minimum_upload_mbps,
+        ),
+        (
+            "routing.client_minimum_download_mbps",
+            routing.client_minimum_download_mbps,
+        ),
+        (
+            "routing.client_local_upload_mbps",
+            routing.client_local_upload_mbps,
+        ),
+        (
+            "routing.client_local_download_mbps",
+            routing.client_local_download_mbps,
+        ),
+        (
+            "routing.client_capacity_ceiling_upload_mbps",
+            routing.client_capacity_ceiling_upload_mbps,
+        ),
+        (
+            "routing.client_capacity_ceiling_download_mbps",
+            routing.client_capacity_ceiling_download_mbps,
+        ),
+    ] {
+        validate_range(field, value, 1, MAX_BANDWIDTH_MBPS)?;
+    }
+    if routing.client_capacity_ceiling_upload_mbps < routing.client_minimum_upload_mbps
+        || routing.client_capacity_ceiling_download_mbps < routing.client_minimum_download_mbps
+    {
+        return Err(validation(
+            "routing.client_capacity_ceiling_upload_mbps",
+            "client capacity ceiling must satisfy the minimum in both directions",
+        ));
+    }
+    if routing.client_local_upload_mbps < routing.client_capacity_ceiling_upload_mbps
+        || routing.client_local_download_mbps < routing.client_capacity_ceiling_download_mbps
+    {
+        return Err(validation(
+            "routing.client_local_upload_mbps",
+            "local client capacity must satisfy the conservative ceiling in both directions",
+        ));
+    }
     Ok(())
 }
 
@@ -787,6 +965,18 @@ mod tests {
         assert!(!config.roles.exit);
         assert!(config.routing.kill_switch);
         assert!(!config.routing.direct_exit_debug);
+        assert_eq!(
+            config.routing.client_address_family,
+            ClientAddressFamily::Ipv4
+        );
+        assert!(
+            config.routing.client_local_upload_mbps
+                >= config.routing.client_capacity_ceiling_upload_mbps
+        );
+        assert!(
+            config.routing.client_capacity_ceiling_upload_mbps
+                >= config.routing.client_minimum_upload_mbps
+        );
         assert!(config.quic.require_multipath);
         assert_eq!(config.quic.minimum_paths, 2);
         assert!(!config.quic.allow_degraded_single_path);
@@ -874,7 +1064,26 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.network.operator_id = Some("operator-a".to_owned());
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.12.34.0/24".to_owned());
         config.validate().expect("fully explicit exit is valid");
+    }
+
+    #[test]
+    fn service_origin_hints_are_explicit_and_canonical() {
+        let mut config = Config::default();
+        config.roles.relay = true;
+        config.network.operator_id = Some("operator-relay".to_owned());
+        config.capacity.maximum_relay_sessions = 4;
+        config.capacity.relay_upload_limit_mbps = 100;
+        config.capacity.relay_download_limit_mbps = 100;
+        assert!(config.validate().is_err());
+
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.12.34.1/24".to_owned());
+        assert!(config.validate().is_err());
+        config.network.advertised_ipv4_prefix = Some("44.12.34.0/24".to_owned());
+        config.validate().expect("canonical service origin hints");
     }
 
     #[test]
@@ -886,6 +1095,31 @@ mod tests {
         config.routing.direct_exit_debug = false;
         config.privacy.persist_domain_logs = true;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn client_route_profile_is_positive_bounded_and_monotone() {
+        let mut config = Config::default();
+        config.routing.client_minimum_upload_mbps = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_capacity_ceiling_download_mbps =
+            config.routing.client_minimum_download_mbps - 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_local_upload_mbps =
+            config.routing.client_capacity_ceiling_upload_mbps - 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_local_download_mbps = MAX_BANDWIDTH_MBPS + 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_address_family = ClientAddressFamily::Ipv6;
+        config.validate().expect("IPv6 client profile validates");
     }
 
     #[test]

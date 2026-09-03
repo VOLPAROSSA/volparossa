@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeSet,
     fmt::Write as _,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
 use prost::Message;
@@ -33,6 +33,9 @@ pub const MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES: usize = MAX_HELPER_FRAME;
 pub const MAX_HELPER_SIGNED_CLIENT_RELAY_REQUEST_BYTES: usize = MAX_HELPER_FRAME;
 /// Maximum distinct paths in one route context.
 pub const MAX_HELPER_PATHS: u32 = 8;
+/// At most one IPv6 and one IPv4 observation may be attached to each lease; a Relay owns two
+/// endpoint roles per path.
+pub const MAX_HELPER_TRAVERSAL_HINTS: usize = MAX_HELPER_PATHS as usize * 4;
 /// Fixed upper bound shared with signed reservation rate fields.
 pub const MAX_HELPER_RATE_MBPS: u32 = 1_000_000;
 /// Opaque helper handle length.
@@ -52,7 +55,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -62,10 +65,10 @@ pub mod helper_request {
     use prost::Oneof;
 
     use super::{
-        AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeaseBatch,
-        AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, CommitLeaseBatch, DestroyClientIngress,
-        DestroyContext, PrepareClientIngress, PrepareLeaseBatch, ReconcileExpiredPrepare,
-        RemoveMptcpEndpoint,
+        AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
+        ActivateClientIngress, ActivateLeaseBatch, AddMptcpEndpoint, BindHelperRuntime,
+        CleanupOwned, CommitLeaseBatch, DestroyClientIngress, DestroyContext, PrepareClientIngress,
+        PrepareLeaseBatch, ReconcileExpiredPrepare, RemoveMptcpEndpoint,
     };
 
     /// Exactly one typed operation.
@@ -95,7 +98,7 @@ pub mod helper_request {
         /// Prove that one exact, expired, ambiguously dispatched Prepare left no context.
         #[prost(message, tag = "28")]
         ReconcileExpiredPrepare(ReconcileExpiredPrepare),
-        /// Destroy every resource owned by this helper runtime.
+        /// Destroy the closed resource scope owned by this helper runtime.
         #[prost(message, tag = "29")]
         CleanupOwned(CleanupOwned),
         /// Prepare a helper-owned client ingress runtime, independent of route contexts.
@@ -113,6 +116,9 @@ pub mod helper_request {
         /// Read this helper process's non-secret per-start identity.
         #[prost(message, tag = "35")]
         BindHelperRuntime(BindHelperRuntime),
+        /// Acquire one exact connected family-matched reply socket for an active ingress flow.
+        #[prost(message, tag = "36")]
+        AcquireIngressReplySocket(AcquireIngressReplySocket),
     }
 }
 
@@ -128,6 +134,21 @@ pub enum ContextRole {
     Relay = 2,
     /// Policy-limited exit context.
     Exit = 3,
+}
+
+/// Exact resource class selected by an authenticated cleanup request.
+///
+/// Route-only cleanup deliberately preserves the independently owned, runtime-long Client ingress
+/// capability so a disconnected agent can establish another route without restarting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum CleanupScope {
+    /// Invalid protobuf default.
+    Unspecified = 0,
+    /// Every resource owned by this helper runtime, including Client ingress.
+    AllOwnedResources = 1,
+    /// Route contexts and their transport state, preserving Client ingress.
+    RouteContextsOnly = 2,
 }
 
 /// Endpoint purpose. Zero is deliberately invalid on the wire.
@@ -154,6 +175,8 @@ pub enum UnderlayEvidence {
     Unspecified = 0,
     /// Public unicast address assigned directly to the unique selected default-route interface.
     DirectAssigned = 1,
+    /// Public address observed by the exact authenticated peer for coordinated UDP punching.
+    ObservedUdpPunch = 2,
 }
 
 /// Closed set of Linux MPTCP endpoint behaviours.
@@ -182,7 +205,16 @@ pub enum TransportSocketKind {
     MptcpListener = 2,
     /// Bound, explicitly unconnected UDP socket for Quinn.
     QuicUdpUnconnected = 3,
+    /// Probe-only connected UDP socket available only while the exact context is Activated.
+    NativeProbeUdpConnected = 4,
 }
+
+/// Fixed Client-side port for one helper-scoped native challenge datagram.
+pub const NATIVE_PROBE_CLIENT_PORT: u16 = 41_910;
+/// Fixed Exit-side port for one helper-scoped native challenge datagram.
+pub const NATIVE_PROBE_EXIT_PORT: u16 = 41_911;
+/// Exact native challenge/response payload size.
+pub const NATIVE_PROBE_DATAGRAM_BYTES: usize = 32;
 
 /// Concrete transport address; wildcard addresses, zero ports and names are unrepresentable.
 #[derive(Clone, PartialEq, Message)]
@@ -334,6 +366,23 @@ pub struct DestroyClientIngress {
     #[prost(bytes = "vec", tag = "2")]
     pub ingress_handle: Vec<u8>,
 }
+
+/// Acquire one non-retargetable transparent UDP reply socket for an active ingress flow.
+#[derive(Clone, PartialEq, Message)]
+pub struct AcquireIngressReplySocket {
+    /// Exact client runtime returned by prepare.
+    #[prost(bytes = "vec", tag = "1")]
+    pub client_runtime_id: Vec<u8>,
+    /// Opaque helper-issued ingress handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub ingress_handle: Vec<u8>,
+    /// Original Internet tuple which must become the reply socket's local tuple.
+    #[prost(message, optional, tag = "3")]
+    pub remote: Option<IngressSocketAddress>,
+    /// Kernel-observed application tuple which must become the connected peer.
+    #[prost(message, optional, tag = "4")]
+    pub application: Option<IngressSocketAddress>,
+}
 /// Public UDP endpoint. The helper never accepts a local listen address from the agent.
 #[derive(Clone, PartialEq, Message)]
 pub struct PublicUdpEndpoint {
@@ -354,6 +403,29 @@ pub struct LeasePlan {
     /// Endpoint role allowed by the surrounding context role.
     #[prost(enumeration = "WireguardRole", tag = "2")]
     pub role: i32,
+}
+
+/// One bounded public-address observation tied to an exact route/path/role and control peer.
+///
+/// The helper treats this only as a candidate for the already fixed `WireGuard` listen port. The
+/// final endpoint is subsequently signed into the reservation protocol before peer activation.
+#[derive(Clone, PartialEq, Message)]
+pub struct TraversalEndpointHint {
+    /// Existing path 1..=8.
+    #[prost(uint32, tag = "1")]
+    pub path_id: u32,
+    /// Exact endpoint role from the containing prepare plan.
+    #[prost(enumeration = "WireguardRole", tag = "2")]
+    pub role: i32,
+    /// Non-zero route actor identity (node ID, or ephemeral client-session ID).
+    #[prost(bytes = "vec", tag = "3")]
+    pub observer_id: Vec<u8>,
+    /// Authenticated libp2p peer that supplied the Identify observation.
+    #[prost(bytes = "vec", tag = "4")]
+    pub observer_peer_id: Vec<u8>,
+    /// Four or sixteen public-unicast address bytes, without a peer-controlled port.
+    #[prost(bytes = "vec", tag = "5")]
+    pub observed_address: Vec<u8>,
 }
 
 /// Atomically prepare all local endpoint roles for a route context.
@@ -380,6 +452,9 @@ pub struct PrepareLeaseBatch {
     /// Hard context deadline, at most 15 minutes after helper receipt.
     #[prost(uint64, tag = "7")]
     pub hard_expires_at_unix: u64,
+    /// Optional exact-peer observations used only when no directly assigned public underlay exists.
+    #[prost(message, repeated, tag = "8")]
+    pub traversal_hints: Vec<TraversalEndpointHint>,
 }
 
 /// Minimal canonical topology needed to recover one possibly dispatched Prepare.
@@ -477,9 +552,10 @@ pub struct LeaseActivation {
     /// and enforces resource bounds but does not verify or grant authority from them.
     #[prost(bytes = "vec", tag = "8")]
     pub signed_relay_reservation: Vec<u8>,
-    /// Exact canonical client-session-signed `RelayReservationRequest` accepted by this relay.
+    /// Exact canonical client-session authority accepted for this activation.
     ///
-    /// Only `RelayClient` may carry these bounded opaque bytes. Cryptographic verification and
+    /// `RelayClient` carries its signed `RelayReservationRequest`; a native-probe `Exit` carries
+    /// the complete canonical `NativeProbeAuthorizationChain`. Cryptographic verification and
     /// request-to-reservation commitment checks remain the production backend's responsibility.
     #[prost(bytes = "vec", tag = "9")]
     pub signed_client_relay_request: Vec<u8>,
@@ -556,6 +632,10 @@ pub struct AddMptcpEndpoint {
     /// Backup-only path.
     #[prost(bool, tag = "5")]
     pub backup: bool,
+    /// Optional alternate TCP listener port for an Exit signal; zero uses the initial port and is
+    /// required for every other endpoint.
+    #[prost(uint32, tag = "6")]
+    pub listener_port: u32,
 }
 
 /// Remove one exactly owned MPTCP endpoint.
@@ -572,12 +652,15 @@ pub struct RemoveMptcpEndpoint {
     pub path_id: u32,
 }
 
-/// Global cleanup authenticates with a fixed-width process-start token.
+/// Scoped cleanup authenticates with a fixed-width process-start token.
 #[derive(Clone, PartialEq, Message, Zeroize, ZeroizeOnDrop)]
 pub struct CleanupOwned {
     /// Random 32-byte cleanup token.
     #[prost(bytes = "vec", tag = "1")]
     pub cleanup_token: Vec<u8>,
+    /// Closed resource class; zero is invalid.
+    #[prost(enumeration = "CleanupScope", tag = "2")]
+    pub scope: i32,
 }
 
 /// Stable helper result. Zero is never a valid response.
@@ -629,7 +712,7 @@ pub struct HelperResponse {
     /// Operation-specific success output; absent on failure.
     #[prost(
         oneof = "helper_response::Outcome",
-        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35"
+        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36"
     )]
     pub outcome: Option<helper_response::Outcome>,
 }
@@ -640,8 +723,8 @@ pub mod helper_response {
 
     use super::{
         ActivatedClientIngress, ActivatedLeaseBatch, CommittedLeaseBatch, DestroyedClientIngress,
-        DestroyedContext, Empty, HelperRuntime, IngressSocketReady, PreparedClientIngress,
-        PreparedLeaseBatch, ReconciledExpiredPrepare, TransportSocketReady,
+        DestroyedContext, Empty, HelperRuntime, IngressReplySocketReady, IngressSocketReady,
+        PreparedClientIngress, PreparedLeaseBatch, ReconciledExpiredPrepare, TransportSocketReady,
     };
 
     /// Exactly one successful outcome.
@@ -683,6 +766,9 @@ pub mod helper_response {
         /// Non-secret identity of the helper process serving this connection.
         #[prost(message, tag = "35")]
         HelperRuntime(HelperRuntime),
+        /// Exact endpoints of one connected transparent IPv4 reply descriptor.
+        #[prost(message, tag = "36")]
+        IngressReplySocketReady(IngressReplySocketReady),
     }
 }
 
@@ -889,6 +975,23 @@ pub struct ActivatedClientIngress {
     pub ingress_handle: Vec<u8>,
 }
 
+/// Metadata bound to one separately transferred connected ingress reply descriptor.
+#[derive(Clone, PartialEq, Message)]
+pub struct IngressReplySocketReady {
+    /// Echoed ephemeral client runtime identifier.
+    #[prost(bytes = "vec", tag = "1")]
+    pub client_runtime_id: Vec<u8>,
+    /// Exact helper-issued ingress handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub ingress_handle: Vec<u8>,
+    /// Kernel-revalidated local tuple, equal to the original remote.
+    #[prost(message, optional, tag = "3")]
+    pub remote: Option<IngressSocketAddress>,
+    /// Kernel-revalidated connected peer, equal to the intercepted application.
+    #[prost(message, optional, tag = "4")]
+    pub application: Option<IngressSocketAddress>,
+}
+
 /// Idempotent client-ingress destruction result.
 #[derive(Clone, PartialEq, Message)]
 pub struct DestroyedClientIngress {
@@ -1055,6 +1158,32 @@ pub fn ingress_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperProt
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// Derive the exact binding sent atomically with one connected ingress reply descriptor.
+///
+/// # Errors
+///
+/// Returns an error unless value is a valid successful ingress reply-socket response.
+pub fn ingress_reply_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperProtocolError> {
+    validate_response(value)?;
+    let Some(helper_response::Outcome::IngressReplySocketReady(ready)) = value.outcome.as_ref()
+    else {
+        return Err(HelperProtocolError::Invalid("ingress reply FD outcome"));
+    };
+    let canonical = value.encode_to_vec();
+    let canonical_length = u32::try_from(canonical.len())
+        .map_err(|_| HelperProtocolError::Invalid("ingress reply FD response length"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"VOLPAROSSA helper ingress reply descriptor binding v3\0");
+    hasher.update(&value.protocol_version.to_be_bytes());
+    hasher.update(&value.request_id);
+    hasher.update(&value.operation_digest);
+    hasher.update(&ready.client_runtime_id);
+    hasher.update(&ready.ingress_handle);
+    hasher.update(&canonical_length.to_be_bytes());
+    hasher.update(&canonical);
+    Ok(*hasher.finalize().as_bytes())
+}
+
 /// Derive the binding for either descriptor-bearing helper success outcome.
 ///
 /// # Errors
@@ -1064,6 +1193,9 @@ pub fn descriptor_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperP
     match value.outcome.as_ref() {
         Some(helper_response::Outcome::TransportSocketReady(_)) => transport_fd_binding(value),
         Some(helper_response::Outcome::IngressSocketReady(_)) => ingress_fd_binding(value),
+        Some(helper_response::Outcome::IngressReplySocketReady(_)) => {
+            ingress_reply_fd_binding(value)
+        }
         _ => Err(HelperProtocolError::Invalid("descriptor FD outcome")),
     }
 }
@@ -1132,11 +1264,24 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
             )
         }
         Operation::DestroyClientIngress(_) => "destroy one owned client ingress runtime".to_owned(),
+        Operation::AcquireIngressReplySocket(_) => {
+            "acquire one connected client-ingress UDP reply descriptor".to_owned()
+        }
         Operation::BindHelperRuntime(value) if value.prepare_intent.is_some() => {
             "bind helper runtime and pre-register one Prepare intent".to_owned()
         }
         Operation::BindHelperRuntime(_) => "read helper runtime identity".to_owned(),
-        Operation::CleanupOwned(_) => "destroy all helper-owned resources".to_owned(),
+        Operation::CleanupOwned(value) => match CleanupScope::try_from(value.scope)
+            .map_err(|_| HelperProtocolError::Invalid("cleanup scope"))?
+        {
+            CleanupScope::AllOwnedResources => "destroy all helper-owned resources".to_owned(),
+            CleanupScope::RouteContextsOnly => {
+                "destroy helper-owned route contexts; preserve client ingress".to_owned()
+            }
+            CleanupScope::Unspecified => {
+                return Err(HelperProtocolError::Invalid("cleanup scope"));
+            }
+        },
     };
     output.push_str("; audit_digest=");
     for byte in &operation_digest(value)?[..8] {
@@ -1204,9 +1349,17 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 if role == WireguardRole::RelayClient {
                     if lease.signed_client_relay_request.is_empty() {
                         return Err(HelperProtocolError::Invalid(
-                            "missing signed client relay request",
+                            "missing signed client activation authority",
                         ));
                     }
+                    signed_client_relay_request_bytes = signed_client_relay_request_bytes
+                        .checked_add(lease.signed_client_relay_request.len())
+                        .ok_or(HelperProtocolError::Invalid(
+                            "signed client relay request aggregate size",
+                        ))?;
+                } else if role == WireguardRole::Exit
+                    && !lease.signed_client_relay_request.is_empty()
+                {
                     signed_client_relay_request_bytes = signed_client_relay_request_bytes
                         .checked_add(lease.signed_client_relay_request.len())
                         .ok_or(HelperProtocolError::Invalid(
@@ -1251,6 +1404,9 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 .map_err(|_| HelperProtocolError::Invalid("MPTCP mode"))?;
             if mode == MptcpEndpointMode::Unspecified {
                 return Err(HelperProtocolError::Invalid("MPTCP mode"));
+            }
+            if u16::try_from(operation.listener_port).is_err() {
+                return Err(HelperProtocolError::Invalid("MPTCP listener port"));
             }
             Ok(())
         }
@@ -1332,6 +1488,26 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
             runtime(&operation.client_runtime_id)?;
             handle(&operation.ingress_handle)
         }
+        Operation::AcquireIngressReplySocket(operation) => {
+            runtime(&operation.client_runtime_id)?;
+            handle(&operation.ingress_handle)?;
+            let remote = concrete_ingress_address(
+                operation
+                    .remote
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
+            )?;
+            let application = concrete_ingress_address(
+                operation
+                    .application
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
+            )?;
+            if remote == application || remote.is_ipv4() != application.is_ipv4() {
+                return Err(HelperProtocolError::Invalid("ingress reply address pair"));
+            }
+            Ok(())
+        }
         Operation::BindHelperRuntime(operation) => {
             operation.prepare_intent.as_ref().map_or(Ok(()), |intent| {
                 if value.request_id == intent.prepare_request_id {
@@ -1351,8 +1527,15 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 validate_closed_prepare_plan(closed_plan.context_role, &closed_plan.leases)
             })
         }
-        Operation::CleanupOwned(operation) if operation.cleanup_token.len() == 32 => Ok(()),
-        Operation::CleanupOwned(_) => Err(HelperProtocolError::Invalid("cleanup token")),
+        Operation::CleanupOwned(operation) if operation.cleanup_token.len() != 32 => {
+            Err(HelperProtocolError::Invalid("cleanup token"))
+        }
+        Operation::CleanupOwned(operation) => match CleanupScope::try_from(operation.scope).ok() {
+            Some(CleanupScope::AllOwnedResources | CleanupScope::RouteContextsOnly) => Ok(()),
+            Some(CleanupScope::Unspecified) | None => {
+                Err(HelperProtocolError::Invalid("cleanup scope"))
+            }
+        },
     }
 }
 
@@ -1366,7 +1549,53 @@ fn validate_prepare(value: &PrepareLeaseBatch) -> Result<(), HelperProtocolError
     {
         return Err(HelperProtocolError::Invalid("prepare bounds"));
     }
-    validate_closed_prepare_plan(value.role, &value.leases)
+    validate_closed_prepare_plan(value.role, &value.leases)?;
+    validate_traversal_hints(&value.leases, &value.traversal_hints)
+}
+
+fn validate_traversal_hints(
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
+) -> Result<(), HelperProtocolError> {
+    if hints.len() > MAX_HELPER_TRAVERSAL_HINTS {
+        return Err(HelperProtocolError::Invalid("traversal hint count"));
+    }
+    let lease_identities = leases
+        .iter()
+        .map(|lease| (lease.path_id, lease.role))
+        .collect::<BTreeSet<_>>();
+    let mut identities = BTreeSet::new();
+    let mut previous = None;
+    for hint in hints {
+        path_role(hint.path_id, hint.role)?;
+        if !lease_identities.contains(&(hint.path_id, hint.role))
+            || hint.observer_id.len() != 32
+            || hint.observer_id.iter().all(|byte| *byte == 0)
+            || hint.observer_peer_id.is_empty()
+            || hint.observer_peer_id.len() > 64
+            || hint.observer_peer_id.iter().all(|byte| *byte == 0)
+        {
+            return Err(HelperProtocolError::Invalid("traversal hint lineage"));
+        }
+        let address = parse_public_address(&hint.observed_address)?;
+        let family = u8::from(address.is_ipv4()); // IPv6 sorts before IPv4.
+        let key = (
+            hint.path_id,
+            hint.role,
+            family,
+            hint.observed_address.as_slice(),
+            hint.observer_peer_id.as_slice(),
+        );
+        if previous.as_ref().is_some_and(|previous| previous >= &key)
+            || !identities.insert((hint.path_id, hint.role, family))
+        {
+            return Err(HelperProtocolError::Invalid(
+                "non-canonical traversal hints",
+            ));
+        }
+        previous = Some(key);
+    }
+    Ok(())
 }
 
 fn validate_closed_prepare_plan(
@@ -1465,9 +1694,10 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
                         .as_ref()
                         .ok_or(HelperProtocolError::Invalid("public endpoint"))?,
                 )?;
-                if UnderlayEvidence::try_from(lease.underlay_evidence)
-                    != Ok(UnderlayEvidence::DirectAssigned)
-                {
+                if !matches!(
+                    UnderlayEvidence::try_from(lease.underlay_evidence),
+                    Ok(UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch)
+                ) {
                     return Err(HelperProtocolError::Invalid("underlay evidence"));
                 }
                 Ok((lease.path_id, lease.role))
@@ -1513,6 +1743,26 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
         ),
         Outcome::PreparedClientIngress(value) => validate_prepared_ingress_outcome(value),
         Outcome::IngressSocketReady(value) => validate_ingress_ready_outcome(value),
+        Outcome::IngressReplySocketReady(value) => {
+            runtime(&value.client_runtime_id)?;
+            handle(&value.ingress_handle)?;
+            let remote = concrete_ingress_address(
+                value
+                    .remote
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
+            )?;
+            let application = concrete_ingress_address(
+                value
+                    .application
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
+            )?;
+            if remote == application || remote.is_ipv4() != application.is_ipv4() {
+                return Err(HelperProtocolError::Invalid("ingress reply address pair"));
+            }
+            Ok(())
+        }
         Outcome::ActivatedClientIngress(value) => {
             runtime(&value.client_runtime_id)?;
             handle(&value.ingress_handle)
@@ -1726,6 +1976,39 @@ fn ingress_local(
     Ok(())
 }
 
+fn concrete_ingress_address(
+    value: &IngressSocketAddress,
+) -> Result<SocketAddr, HelperProtocolError> {
+    let port = u16::try_from(value.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(HelperProtocolError::Invalid("ingress reply UDP port"))?;
+    match value.address.as_slice() {
+        bytes if bytes.len() == 4 => {
+            let address = Ipv4Addr::from(
+                <[u8; 4]>::try_from(bytes)
+                    .map_err(|_| HelperProtocolError::Invalid("ingress reply IPv4 address"))?,
+            );
+            if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST
+            {
+                return Err(HelperProtocolError::Invalid("ingress reply IPv4 address"));
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        bytes if bytes.len() == 16 => {
+            let address = Ipv6Addr::from(
+                <[u8; 16]>::try_from(bytes)
+                    .map_err(|_| HelperProtocolError::Invalid("ingress reply IPv6 address"))?,
+            );
+            if address.is_unspecified() || address.is_multicast() {
+                return Err(HelperProtocolError::Invalid("ingress reply IPv6 address"));
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        _ => Err(HelperProtocolError::Invalid("ingress reply address family")),
+    }
+}
+
 fn bound_context(context_id: &[u8], context_handle: &[u8]) -> Result<(), HelperProtocolError> {
     context(context_id)?;
     handle(context_handle)
@@ -1773,7 +2056,12 @@ fn endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
     if !(1..=65_535).contains(&value.port) {
         return Err(HelperProtocolError::Invalid("UDP port"));
     }
-    let address = match value.address.as_slice() {
+    let _address = parse_public_address(&value.address)?;
+    Ok(())
+}
+
+fn parse_public_address(bytes: &[u8]) -> Result<IpAddr, HelperProtocolError> {
+    let address = match bytes {
         bytes if bytes.len() == 4 => IpAddr::V4(Ipv4Addr::from(
             <[u8; 4]>::try_from(bytes).map_err(|_| HelperProtocolError::Invalid("IPv4"))?,
         )),
@@ -1786,7 +2074,7 @@ fn endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
     if !safe {
         return Err(HelperProtocolError::Invalid("public IP address"));
     }
-    Ok(())
+    Ok(address)
 }
 
 fn validate_transport_tuple(
@@ -1802,7 +2090,7 @@ fn validate_transport_tuple(
     let local =
         transport_address(local.ok_or(HelperProtocolError::Invalid("transport local address"))?)?;
     match kind {
-        TransportSocketKind::MptcpConnected => {
+        TransportSocketKind::MptcpConnected | TransportSocketKind::NativeProbeUdpConnected => {
             let remote = transport_address(
                 remote.ok_or(HelperProtocolError::Invalid("transport remote address"))?,
             )?;
@@ -1937,6 +2225,7 @@ mod tests {
                     leases,
                     setup_expires_at_unix: 120,
                     hard_expires_at_unix: 900,
+                    traversal_hints: Vec::new(),
                 },
             )),
         }
@@ -2032,6 +2321,7 @@ mod tests {
             request_id: vec![0x31; 16],
             operation: Some(helper_request::Operation::CleanupOwned(CleanupOwned {
                 cleanup_token: vec![0xa5; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             })),
         };
         let canonical = Zeroizing::new(request.encode_to_vec());
@@ -2195,6 +2485,70 @@ mod tests {
     }
 
     #[test]
+    fn traversal_hints_are_exact_bounded_and_canonical() {
+        let mut request = prepare(ContextRole::Client, vec![plan(1, WireguardRole::Client)]);
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) = request.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        let ipv6 = TraversalEndpointHint {
+            path_id: 1,
+            role: WireguardRole::Client as i32,
+            observer_id: vec![7; 32],
+            observer_peer_id: vec![8; 38],
+            observed_address: "2606:4700:4700::1111"
+                .parse::<Ipv6Addr>()
+                .expect("IPv6")
+                .octets()
+                .to_vec(),
+        };
+        let ipv4 = TraversalEndpointHint {
+            observed_address: vec![8, 8, 8, 8],
+            ..ipv6.clone()
+        };
+        batch.traversal_hints = vec![ipv6.clone(), ipv4.clone()];
+        assert!(encode_request(&request).is_ok());
+
+        let mut noncanonical = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            noncanonical.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints.reverse();
+        assert!(encode_request(&noncanonical).is_err());
+
+        let mut duplicate_family = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            duplicate_family.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints = vec![ipv4.clone(), ipv4.clone()];
+        assert!(encode_request(&duplicate_family).is_err());
+
+        let mut foreign_path = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            foreign_path.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints[0].path_id = 2;
+        assert!(encode_request(&foreign_path).is_err());
+
+        let mut private = request;
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) = private.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints = vec![TraversalEndpointHint {
+            observed_address: vec![192, 168, 1, 1],
+            ..ipv4
+        }];
+        assert!(encode_request(&private).is_err());
+    }
+
+    #[test]
     fn external_wire_has_no_private_key_or_free_overlay_fields() {
         let value = prepare(ContextRole::Client, vec![plan(1, WireguardRole::Client)]);
         let encoded = encode_request(&value).expect("encode");
@@ -2316,7 +2670,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_endpoint_requires_direct_assigned_evidence_and_nonzero_port() {
+    fn prepared_endpoint_requires_known_underlay_evidence_and_nonzero_port() {
         let response = HelperResponse {
             protocol_version: HELPER_PROTOCOL_VERSION,
             request_id: vec![8; 16],
@@ -2341,6 +2695,13 @@ mod tests {
             )),
         };
         assert!(encode_response(&response).is_ok());
+        let mut punch = response.clone();
+        let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = punch.outcome.as_mut()
+        else {
+            panic!("prepared");
+        };
+        batch.leases[0].underlay_evidence = UnderlayEvidence::ObservedUdpPunch as i32;
+        assert!(encode_response(&punch).is_ok());
         let mut wrong = response;
         let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = wrong.outcome.as_mut()
         else {
@@ -2495,11 +2856,27 @@ mod tests {
                 ingress_handle: vec![8; 32],
             }),
         );
+        let reply = ingress_request(
+            35,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(IngressSocketAddress {
+                    address: vec![8, 8, 8, 8],
+                    port: 443,
+                }),
+                application: Some(IngressSocketAddress {
+                    address: vec![192, 0, 2, 20],
+                    port: 50_000,
+                }),
+            }),
+        );
         for (request, tag) in [
             (prepare, [0xfa, 0x01]),
             (acquire, [0x82, 0x02]),
             (activate, [0x8a, 0x02]),
             (destroy, [0x92, 0x02]),
+            (reply, [0xa2, 0x02]),
         ] {
             let bytes = request.encode_to_vec();
             assert!(bytes.windows(2).any(|window| window == tag));
@@ -2828,7 +3205,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_client_relay_request_is_required_only_for_relay_client_and_binds_the_digest() {
+    fn signed_client_activation_authority_is_role_scoped_and_binds_the_digest() {
         let signed_request = vec![0xa5, 0x5a, 0x01, 0x00];
         let lease = relay_client_activation(1, signed_request.clone());
         let lease_wire = lease.encode_to_vec();
@@ -2857,15 +3234,16 @@ mod tests {
         assert!(matches!(
             validate_request(&missing),
             Err(HelperProtocolError::Invalid(
-                "missing signed client relay request"
+                "missing signed client activation authority"
             ))
         ));
 
-        for role in [
-            WireguardRole::Client,
-            WireguardRole::RelayExit,
-            WireguardRole::Exit,
-        ] {
+        let mut native_exit = activation_lease(1, vec![0xa5]);
+        native_exit.role = WireguardRole::Exit as i32;
+        native_exit.signed_client_relay_request = vec![0x5a];
+        assert!(validate_request(&activate(vec![native_exit])).is_ok());
+
+        for role in [WireguardRole::Client, WireguardRole::RelayExit] {
             let mut cross_role = activation_lease(1, vec![0xa5]);
             cross_role.role = role as i32;
             cross_role.maximum_up_mbps = u32::from(role == WireguardRole::RelayExit);
@@ -3587,5 +3965,111 @@ mod tests {
             ingress_fd_binding(&changed_family).expect("changed family binding"),
             binding
         );
+    }
+
+    #[test]
+    fn ingress_reply_descriptor_binding_commits_exact_flow_tuple() {
+        let remote = IngressSocketAddress {
+            address: vec![8, 8, 8, 8],
+            port: 443,
+        };
+        let application = IngressSocketAddress {
+            address: vec![192, 0, 2, 20],
+            port: 50_000,
+        };
+        let request = ingress_request(
+            35,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(remote.clone()),
+                application: Some(application.clone()),
+            }),
+        );
+        let response = HelperResponse {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: HelperResult::Ok as i32,
+            diagnostic_code: "INGRESS_REPLY_SOCKET_READY".to_owned(),
+            operation_digest: operation_digest(&request).expect("digest").to_vec(),
+            outcome: Some(helper_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                    remote: Some(remote),
+                    application: Some(application),
+                },
+            )),
+        };
+        let binding = ingress_reply_fd_binding(&response).expect("reply binding");
+        assert_eq!(descriptor_fd_binding(&response).expect("generic"), binding);
+
+        let mut changed = response;
+        let Some(helper_response::Outcome::IngressReplySocketReady(ready)) =
+            changed.outcome.as_mut()
+        else {
+            panic!("reply outcome");
+        };
+        ready.application.as_mut().expect("application").port += 1;
+        assert_ne!(
+            ingress_reply_fd_binding(&changed).expect("changed tuple"),
+            binding
+        );
+    }
+
+    #[test]
+    fn ingress_reply_protocol_accepts_exact_ipv6_and_rejects_mixed_families() {
+        let remote = IngressSocketAddress {
+            address: Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
+                .octets()
+                .to_vec(),
+            port: 53,
+        };
+        let application = IngressSocketAddress {
+            address: Ipv6Addr::new(0xfd76, 0, 0, 0, 0, 0, 0, 7).octets().to_vec(),
+            port: 50_001,
+        };
+        let mut request = ingress_request(
+            36,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(remote.clone()),
+                application: Some(application.clone()),
+            }),
+        );
+        assert!(encode_request(&request).is_ok());
+
+        let response = HelperResponse {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: HelperResult::Ok as i32,
+            diagnostic_code: "INGRESS_REPLY_SOCKET_READY".to_owned(),
+            operation_digest: operation_digest(&request).expect("IPv6 digest").to_vec(),
+            outcome: Some(helper_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                    remote: Some(remote),
+                    application: Some(application),
+                },
+            )),
+        };
+        assert!(encode_response(&response).is_ok());
+        assert_ne!(
+            ingress_reply_fd_binding(&response).expect("IPv6 binding"),
+            [0; 32]
+        );
+
+        let Some(helper_request::Operation::AcquireIngressReplySocket(reply)) =
+            request.operation.as_mut()
+        else {
+            panic!("reply request");
+        };
+        reply.application = Some(IngressSocketAddress {
+            address: vec![192, 0, 2, 20],
+            port: 50_001,
+        });
+        assert!(encode_request(&request).is_err());
     }
 }

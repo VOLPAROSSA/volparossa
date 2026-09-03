@@ -13,6 +13,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::envelope::fixed_array;
+use crate::messages::validate_rate;
 use crate::{
     ControlMessageType, ControlPayload, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
     ObservationAddressFamily, ObservationNetworkPrefix, PROTOCOL_VERSION, PreselectionActorBinding,
@@ -24,15 +25,18 @@ use crate::{
 const ID_LENGTH: usize = 16;
 const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 32;
-/// Minimum preselection pool: the control Relay plus one alternative data Relay.
-pub const MIN_NATIVE_PROBE_CANDIDATES: usize = 2;
-/// Maximum preselection pool: the control Relay plus eight alternatives.
-///
-/// This nine-candidate pool is not the admitted route's independent maximum of eight simultaneous
-/// paths.
-pub const MAX_NATIVE_PROBE_CANDIDATES: usize = 9;
+/// Minimum exact selected data-Relay set for one native attempt.
+pub const MIN_NATIVE_PROBE_CANDIDATES: usize = 1;
+/// Maximum exact selected data-Relay set for one native attempt.
+pub const MAX_NATIVE_PROBE_CANDIDATES: usize = 8;
+/// Maximum helper path identity admitted inside one shared native route context.
+pub const MAX_NATIVE_PROBE_PATHS: usize = 8;
 /// Hard wall-clock lifetime of one native-preselection attempt and every message within it.
-pub const MAX_NATIVE_PROBE_LIFETIME_MS: u64 = 30 * 1_000;
+///
+/// The same signed chain currently owns the established native route. Five minutes leaves the
+/// bounded setup transaction enough headroom for useful multi-flow MPTCP/MPQUIC service while
+/// keeping every route authorization short-lived.
+pub const MAX_NATIVE_PROBE_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const CANDIDATE_SET_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-candidate-set/v4\0";
 const CHALLENGE_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-challenge/v4\0";
 const PERMIT_REQUEST_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-permit-request/v4\0";
@@ -42,6 +46,10 @@ const RELAY_READY_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-relay-ready/v4\
 const START_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-start/v4\0";
 const EXIT_RESULT_HASH_DOMAIN: &[u8] = b"volparossa/native-probe-exit-result/v4\0";
 const PREPARED_LEASE_COMMITMENT_DOMAIN: &[u8] = b"volparossa/native-probe-prepared-lease/v4\0";
+/// Largest canonical bundle accepted by the Exit authorization provider.
+pub const MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE: usize = 32 * 1024;
+/// Largest identity-bound Exit control multiaddress carried by one native Permit.
+pub const MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES: usize = 1_024;
 
 /// Exact endpoint-free candidate set consumed from one A1 prepared-evidence handoff.
 #[allow(missing_docs)]
@@ -105,6 +113,15 @@ pub struct NativeProbePathScope {
     pub challenge_hash: Vec<u8>,
     #[prost(uint64, tag = "16")]
     pub attempt_expires_at_ms: u64,
+    /// Exact number of native paths that must complete inside this attempt.
+    #[prost(uint32, tag = "17")]
+    pub required_path_count: u32,
+    /// Client-requested upload capacity reserved for this exact path.
+    #[prost(uint64, tag = "18")]
+    pub reserved_up_mbps: u64,
+    /// Client-requested download capacity reserved for this exact path.
+    #[prost(uint64, tag = "19")]
+    pub reserved_down_mbps: u64,
 }
 
 /// Ephemeral-client-signed endpoint-free request for one Exit permit.
@@ -121,7 +138,11 @@ pub struct NativeProbePermitRequest {
     pub nonce: Vec<u8>,
 }
 
-/// Exit-signed endpoint-free authorization for one exact request.
+/// Exit-signed dataplane-endpoint-free authorization for one exact request.
+///
+/// `exit_control_address` is one bounded control-plane multiaddress cryptographically bound to the
+/// Exit identity. It is transported opaquely through the client and consumed only by the selected
+/// data Relay when it dispatches the Ready RPC.
 #[allow(missing_docs)]
 #[derive(Clone, PartialEq, Message)]
 pub struct NativeProbePermit {
@@ -135,15 +156,17 @@ pub struct NativeProbePermit {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "5")]
     pub nonce: Vec<u8>,
+    #[prost(string, tag = "6")]
+    pub exit_control_address: String,
 }
 
 /// One helper-prepared endpoint bound to a non-secret helper runtime and shared route context.
 ///
 /// `prepared_lease_commitment` is a domain-separated digest containing the helper's secret,
 /// random 256-bit lease handle. It is not a deterministic or brute-forceable endpoint digest.
-/// All four endpoints of one path carry `route_context_id == scope.probe_id`; endpoints on
-/// different nodes have different helper runtimes, while the `RelayClient` and `RelayExit`
-/// endpoints share one Relay helper runtime.
+/// All endpoints in one attempt carry `route_context_id == scope.attempt_id`; the exact path is
+/// `scope.candidate_ordinal`. Endpoints on different nodes have different helper runtimes, while
+/// the `RelayClient` and `RelayExit` endpoints share one Relay helper runtime.
 #[allow(missing_docs)]
 #[derive(Clone, PartialEq, Message)]
 pub struct NativeProbeEndpointBinding {
@@ -155,6 +178,9 @@ pub struct NativeProbeEndpointBinding {
     pub endpoint: Option<WireguardEndpoint>,
     #[prost(bytes = "vec", tag = "4")]
     pub prepared_lease_commitment: Vec<u8>,
+    /// Exact context-local helper path bound by the signed scope.
+    #[prost(uint32, tag = "5")]
+    pub path_id: u32,
 }
 
 /// Exit-signed readiness delivered only to the exact data Relay.
@@ -175,6 +201,9 @@ pub struct NativeProbeExitReady {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "7")]
     pub nonce: Vec<u8>,
+    /// Per-process Exit incarnation that signed and owns this prepared endpoint.
+    #[prost(bytes = "vec", tag = "8")]
+    pub exit_boot_id: Vec<u8>,
 }
 
 /// Relay-signed client-facing readiness carrying only the `RelayClient` endpoint.
@@ -215,6 +244,25 @@ pub struct NativeProbeStart {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "7")]
     pub nonce: Vec<u8>,
+}
+
+/// Canonical signed phase chain forwarded by the exact data Relay to the selected Exit.
+///
+/// The bundle adds no authority of its own. The Exit independently verifies every nested
+/// signature and exact phase hash before issuing a standard [`crate::RelayAuthorization`].
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeProbeAuthorizationChain {
+    #[prost(bytes = "vec", tag = "1")]
+    pub signed_permit_request: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signed_permit: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub signed_exit_ready: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub signed_relay_ready: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub signed_start: Vec<u8>,
 }
 
 /// Endpoint-free helper commit facts for one exact prepared lease.
@@ -319,9 +367,9 @@ pub struct NativeProbeRelayResult {
 
 /// Exact request plus Exit permit after both signatures and cross-bindings passed.
 pub struct VerifiedNativeProbePermit {
-    _signed_request: Vec<u8>,
+    signed_request: Vec<u8>,
     signed_permit: Vec<u8>,
-    _request: VerifiedControlMessage<NativeProbePermitRequest>,
+    request: VerifiedControlMessage<NativeProbePermitRequest>,
     permit: VerifiedControlMessage<NativeProbePermit>,
 }
 
@@ -345,6 +393,16 @@ pub struct VerifiedNativeProbeStartForRelay {
     relay_ready: IssuedNativeProbeRelayReady,
     signed_start: Vec<u8>,
     start: VerifiedControlMessage<NativeProbeStart>,
+}
+
+/// Independently verified native phase chain accepted by the selected Exit.
+pub struct VerifiedNativeProbeAuthorizationChain {
+    _permit_request: VerifiedControlMessage<NativeProbePermitRequest>,
+    _permit: VerifiedControlMessage<NativeProbePermit>,
+    exit_ready: VerifiedControlMessage<NativeProbeExitReady>,
+    relay_ready: VerifiedControlMessage<NativeProbeRelayReady>,
+    start: VerifiedControlMessage<NativeProbeStart>,
+    signed_start: Vec<u8>,
 }
 
 /// Exit result verified after start by the exact endpoint-owning data Relay.
@@ -375,14 +433,327 @@ pub struct IssuedNativeProbeStart {
 
 /// Complete cryptographic result chain. It is not helper or datapath evidence by itself.
 pub struct VerifiedNativeProbeResult {
-    _start: IssuedNativeProbeStart,
-    _client_lease: NativeProbeLeaseProof,
+    start: IssuedNativeProbeStart,
+    client_lease: NativeProbeLeaseProof,
     _relay_result: VerifiedControlMessage<NativeProbeRelayResult>,
-    _exit_result: VerifiedControlMessage<NativeProbeExitResult>,
+    exit_result: VerifiedControlMessage<NativeProbeExitResult>,
+}
+
+impl VerifiedNativeProbeResult {
+    /// Borrow the exact signed path scope retained by this terminal result chain.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.start.relay_ready.scope()
+    }
+
+    /// Borrow the helper incarnation which committed the Client endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if verified state is corrupted after construction. Result verification rejects
+    /// a missing, zero, or incorrectly sized helper runtime identifier.
+    #[must_use]
+    pub fn client_helper_runtime_id(&self) -> &[u8; KEY_LENGTH] {
+        self.client_lease
+            .helper_runtime_id
+            .as_slice()
+            .try_into()
+            .expect("verified native Client lease has one helper runtime identifier")
+    }
+
+    /// Borrow the helper incarnation which committed the Exit endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if verified state is corrupted after construction. Result verification rejects
+    /// an absent, zero, or incorrectly sized Exit lease runtime identifier.
+    #[must_use]
+    pub fn exit_helper_runtime_id(&self) -> &[u8; KEY_LENGTH] {
+        self.exit_result
+            .message()
+            .exit_lease
+            .as_ref()
+            .expect("verified native Exit result has one lease proof")
+            .helper_runtime_id
+            .as_slice()
+            .try_into()
+            .expect("verified native Exit lease has one helper runtime identifier")
+    }
+}
+
+impl VerifiedNativeProbePermit {
+    /// Borrow the exact path scope after both dataplane-endpoint-free signatures and bindings
+    /// passed.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal verified control message has been corrupted after
+    /// construction. The verifier rejects a Permit without this scope.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.permit
+            .message()
+            .scope
+            .as_ref()
+            .expect("verified native Permit always carries a scope")
+    }
+
+    /// Borrow the signed, identity-bound Exit control multiaddress for the selected data Relay.
+    #[must_use]
+    pub fn exit_control_address(&self) -> &str {
+        &self.permit.message().exit_control_address
+    }
+}
+
+impl VerifiedNativeProbeRelayReady {
+    /// Borrow the exact path scope retained by the verified data-Relay readiness.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal verified control message has been corrupted after
+    /// construction. The verifier rejects readiness without this scope.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.relay_ready
+            .message()
+            .scope
+            .as_ref()
+            .expect("verified native Relay readiness always carries a scope")
+    }
+
+    /// Borrow the helper-prepared `RelayClient` endpoint disclosed only to this client.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal verified control message has been corrupted after
+    /// construction. The verifier rejects readiness without this endpoint.
+    #[must_use]
+    pub fn relay_client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.relay_ready
+            .message()
+            .relay_client_endpoint
+            .as_ref()
+            .expect("verified native Relay readiness always carries an endpoint")
+    }
+
+    /// Absolute signed expiry of this readiness phase.
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.relay_ready.message().expires_at_ms
+    }
 }
 
 impl IssuedNativeProbeStart {
     /// Borrow the exact client-signed start for delivery only to the selected data Relay.
+    #[must_use]
+    pub fn encoded_start(&self) -> &[u8] {
+        &self.signed_start
+    }
+}
+
+impl VerifiedNativeProbeStartForRelay {
+    /// Encode the complete signed chain for independent verification by the selected Exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the canonical bounded bundle cannot be encoded.
+    pub fn authorization_chain(&self) -> Result<Vec<u8>, ProtocolError> {
+        encode_canonical(
+            &NativeProbeAuthorizationChain {
+                signed_permit_request: self.relay_ready.exit_ready.permit.signed_request.clone(),
+                signed_permit: self.relay_ready.exit_ready.permit.signed_permit.clone(),
+                signed_exit_ready: self.relay_ready.exit_ready.signed_exit_ready.clone(),
+                signed_relay_ready: self.relay_ready.signed_relay_ready.clone(),
+                signed_start: self.signed_start.clone(),
+            },
+            MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+        )
+    }
+
+    /// Borrow the exact client-signed Start accepted by this data Relay.
+    #[must_use]
+    pub fn encoded_start(&self) -> &[u8] {
+        &self.signed_start
+    }
+
+    /// Borrow the exact verified native path scope.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internally verified Start is corrupted after construction.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.start
+            .message()
+            .scope
+            .as_ref()
+            .expect("verified native Start always carries a scope")
+    }
+
+    /// Borrow the helper-prepared Client endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internally verified Start is corrupted after construction.
+    #[must_use]
+    pub fn client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.start
+            .message()
+            .client_endpoint
+            .as_ref()
+            .expect("verified native Start always carries a Client endpoint")
+    }
+
+    /// Borrow the helper-prepared `RelayClient` endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally issued Relay readiness is corrupted after construction.
+    #[must_use]
+    pub fn relay_client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.relay_ready
+            .relay_ready
+            .relay_client_endpoint
+            .as_ref()
+            .expect("issued native Relay readiness always carries a RelayClient endpoint")
+    }
+
+    /// Borrow the helper-prepared `RelayExit` endpoint.
+    #[must_use]
+    pub fn relay_exit_endpoint(&self) -> &NativeProbeEndpointBinding {
+        &self.relay_ready.relay_exit_endpoint
+    }
+
+    /// Borrow the helper-prepared Exit endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally verified Exit readiness is corrupted after construction.
+    #[must_use]
+    pub fn exit_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.relay_ready
+            .exit_ready
+            .exit_ready
+            .message()
+            .exit_endpoint
+            .as_ref()
+            .expect("verified native Exit readiness always carries an Exit endpoint")
+    }
+
+    /// Return the exact signed Start creation time.
+    #[must_use]
+    pub fn started_at_ms(&self) -> u64 {
+        self.start.message().started_at_ms
+    }
+
+    /// Return the exclusive signed Start expiry.
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.start.message().expires_at_ms
+    }
+
+    /// Borrow the process-local Exit incarnation bound by signed readiness.
+    #[must_use]
+    pub fn exit_boot_id(&self) -> &[u8] {
+        &self
+            .relay_ready
+            .exit_ready
+            .exit_ready
+            .message()
+            .exit_boot_id
+    }
+}
+
+impl VerifiedNativeProbeAuthorizationChain {
+    /// Borrow the exact native path scope shared by every verified phase.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internally verified Start is corrupted after construction.
+    #[must_use]
+    pub fn scope(&self) -> &NativeProbePathScope {
+        self.start
+            .message()
+            .scope
+            .as_ref()
+            .expect("verified native authorization always carries a scope")
+    }
+
+    /// Borrow the helper-prepared Client endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internally verified Start is corrupted after construction.
+    #[must_use]
+    pub fn client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.start
+            .message()
+            .client_endpoint
+            .as_ref()
+            .expect("verified native authorization always carries a Client endpoint")
+    }
+
+    /// Borrow the helper-prepared `RelayClient` endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally verified Relay readiness is corrupted after construction.
+    #[must_use]
+    pub fn relay_client_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.relay_ready
+            .message()
+            .relay_client_endpoint
+            .as_ref()
+            .expect("verified native authorization always carries a RelayClient endpoint")
+    }
+
+    /// Borrow the helper-prepared `RelayExit` endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally verified Exit readiness is corrupted after construction.
+    #[must_use]
+    pub fn relay_exit_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.exit_ready
+            .message()
+            .relay_exit_endpoint
+            .as_ref()
+            .expect("verified native authorization always carries a RelayExit endpoint")
+    }
+
+    /// Borrow the helper-prepared Exit endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internally verified Exit readiness is corrupted after construction.
+    #[must_use]
+    pub fn exit_endpoint(&self) -> &NativeProbeEndpointBinding {
+        self.exit_ready
+            .message()
+            .exit_endpoint
+            .as_ref()
+            .expect("verified native authorization always carries an Exit endpoint")
+    }
+
+    /// Borrow the process-local Exit incarnation bound by signed readiness.
+    #[must_use]
+    pub fn exit_boot_id(&self) -> &[u8] {
+        &self.exit_ready.message().exit_boot_id
+    }
+
+    /// Return the exact signed Start creation time.
+    #[must_use]
+    pub fn started_at_ms(&self) -> u64 {
+        self.start.message().started_at_ms
+    }
+
+    /// Return the exclusive signed Start expiry.
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.start.message().expires_at_ms
+    }
+
+    /// Borrow the exact client-signed Start accepted by both authorities.
     #[must_use]
     pub fn encoded_start(&self) -> &[u8] {
         &self.signed_start
@@ -427,14 +798,14 @@ impl NativeProbeCandidateSet {
         )?;
         if !(MIN_NATIVE_PROBE_CANDIDATES..=MAX_NATIVE_PROBE_CANDIDATES)
             .contains(&self.data_relays.len())
-            || self.data_relays.first() != Some(control)
             || same_actor(control, exit)
         {
             return Err(ProtocolError::InvalidField("native candidate set shape"));
         }
         for (index, relay) in self.data_relays.iter().enumerate() {
             relay.validate("native candidate data relay")?;
-            if same_actor(relay, exit)
+            if same_actor(relay, control)
+                || same_actor(relay, exit)
                 || self.data_relays[..index]
                     .iter()
                     .any(|earlier| same_actor(earlier, relay))
@@ -465,12 +836,15 @@ impl NativeProbePathScope {
         require_nonzero::<ID_LENGTH>(&self.probe_id, "native scope probe_id")?;
         require_nonzero::<KEY_LENGTH>(&self.candidate_set_hash, "native scope set hash")?;
         require_nonzero::<KEY_LENGTH>(&self.challenge_hash, "native scope challenge hash")?;
-        if !(1..=u32::try_from(MAX_NATIVE_PROBE_CANDIDATES).unwrap_or(u32::MAX))
+        validate_rate(self.reserved_up_mbps, "native scope reserved_up_mbps")?;
+        validate_rate(self.reserved_down_mbps, "native scope reserved_down_mbps")?;
+        if !(1..=u32::try_from(MAX_NATIVE_PROBE_PATHS).unwrap_or(u32::MAX))
             .contains(&self.candidate_ordinal)
+            || !(1..=u32::try_from(MAX_NATIVE_PROBE_PATHS).unwrap_or(u32::MAX))
+                .contains(&self.required_path_count)
+            || self.candidate_ordinal > self.required_path_count
         {
-            return Err(ProtocolError::InvalidField(
-                "native scope candidate ordinal",
-            ));
+            return Err(ProtocolError::InvalidField("native scope path cardinality"));
         }
         let relay = required_actor(self.data_relay.as_ref(), "native scope data relay")?;
         let control = required_actor(self.control.as_ref(), "native scope control")?;
@@ -496,6 +870,24 @@ impl NativeProbePathScope {
             &self.policy_hash,
             self.policy_expires_at_ms,
         )?;
+        match Transport::try_from(self.transport)
+            .map_err(|_| ProtocolError::InvalidField("native scope transport path cardinality"))?
+        {
+            Transport::UdpSinglePath if self.required_path_count != 1 => {
+                return Err(ProtocolError::InvalidField(
+                    "native scope UDP path cardinality",
+                ));
+            }
+            Transport::TcpMptcp | Transport::MultipathQuic if self.required_path_count < 2 => {
+                return Err(ProtocolError::InvalidField(
+                    "native scope multipath cardinality",
+                ));
+            }
+            Transport::Unspecified => {
+                return Err(ProtocolError::InvalidField("native scope transport"));
+            }
+            Transport::UdpSinglePath | Transport::TcpMptcp | Transport::MultipathQuic => {}
+        }
         if self.attempt_expires_at_ms == 0
             || self.attempt_expires_at_ms > self.policy_expires_at_ms
             || self.attempt_expires_at_ms > actor_ceiling(relay)
@@ -521,7 +913,8 @@ impl NativeProbeEndpointBinding {
             .as_ref()
             .ok_or(ProtocolError::InvalidField("native endpoint"))?;
         endpoint.validate("native endpoint")?;
-        if self.route_context_id != scope.probe_id
+        if self.route_context_id != scope.attempt_id
+            || self.path_id != scope.candidate_ordinal
             || !endpoint_family_matches(endpoint, scope_family(scope)?)
         {
             return Err(ProtocolError::InvalidField("native endpoint scope"));
@@ -538,7 +931,7 @@ impl NativeProbeLeaseProof {
             &self.prepared_lease_commitment,
             "native prepared lease commitment",
         )?;
-        if self.route_context_id != scope.probe_id
+        if self.route_context_id != scope.attempt_id
             || self.latest_handshake_unix == 0
             || self.received_bytes_after_baseline == 0
             || self.transmitted_bytes_after_baseline == 0
@@ -595,6 +988,14 @@ impl ControlPayload for NativeProbePermit {
         let scope = required_scope(self.scope.as_ref())?;
         validate_phase_lifetime(self.issued_at_ms, self.expires_at_ms, scope)?;
         require_nonzero::<NONCE_LENGTH>(&self.nonce, "native permit nonce")?;
+        if self.exit_control_address.is_empty()
+            || self.exit_control_address.len() > MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES
+            || !self.exit_control_address.is_ascii()
+        {
+            return Err(ProtocolError::InvalidField(
+                "native permit Exit control address",
+            ));
+        }
         Ok(())
     }
 
@@ -633,6 +1034,7 @@ impl ControlPayload for NativeProbeExitReady {
         {
             return Err(ProtocolError::InvalidField("native exit ready endpoints"));
         }
+        require_nonzero::<ID_LENGTH>(&self.exit_boot_id, "native Exit-ready boot ID")?;
         validate_phase_lifetime(self.ready_at_ms, self.expires_at_ms, scope)?;
         require_nonzero::<NONCE_LENGTH>(&self.nonce, "native exit ready nonce")?;
         Ok(())
@@ -649,6 +1051,103 @@ impl ControlPayload for NativeProbeExitReady {
             "native exit ready envelope",
         )
     }
+}
+
+/// Decode and independently verify the complete native authorization chain at the selected Exit.
+///
+/// The verifier uses a private bounded replay cache because the entire bundle is one transaction;
+/// the stateful Exit service separately provides exact-request idempotency. This avoids consuming
+/// valid nested nonces when a later phase in a substituted bundle fails.
+///
+/// # Errors
+///
+/// Returns an error for an oversized/non-canonical bundle, any invalid signature or lifetime,
+/// wrong phase hash, endpoint topology mismatch, or inconsistent scope.
+pub fn verify_native_probe_authorization_chain(
+    encoded: &[u8],
+    now_ms: u64,
+) -> Result<VerifiedNativeProbeAuthorizationChain, ProtocolError> {
+    let chain: NativeProbeAuthorizationChain =
+        decode_canonical(encoded, MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE)?;
+    let mut replay = ReplayCache::new(5)?;
+    let permit = verify_native_probe_permit(
+        chain.signed_permit_request,
+        chain.signed_permit,
+        now_ms,
+        &mut replay,
+    )?;
+    let exit_ready =
+        verify_native_probe_exit_ready(permit, chain.signed_exit_ready, now_ms, &mut replay)?;
+    let expected_permit = native_probe_permit_hash(&exit_ready.permit.signed_permit)?;
+    let expected_exit_ready = native_probe_exit_ready_hash(&exit_ready.signed_exit_ready)?;
+    let relay_ready = verify_control_message::<NativeProbeRelayReady>(
+        &chain.signed_relay_ready,
+        now_ms,
+        native_time_policy(),
+        &mut replay,
+    )?;
+    let relay_client = relay_ready
+        .message()
+        .relay_client_endpoint
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField("native RelayClient endpoint"))?;
+    let relay_exit = exit_ready
+        .exit_ready
+        .message()
+        .relay_exit_endpoint
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField("native RelayExit endpoint"))?;
+    let exit_endpoint = exit_ready
+        .exit_ready
+        .message()
+        .exit_endpoint
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField("native Exit endpoint"))?;
+    if relay_ready.message().scope != exit_ready.exit_ready.message().scope
+        || relay_ready.message().permit_hash != expected_permit
+        || relay_ready.message().exit_ready_hash != expected_exit_ready
+        || relay_ready.message().expires_at_ms > exit_ready.exit_ready.message().expires_at_ms
+        || !bindings_form_relay_exit_topology(relay_client, relay_exit, exit_endpoint)
+    {
+        return Err(ProtocolError::InvalidField(
+            "native authorization Relay-ready binding",
+        ));
+    }
+    let expected_relay_ready = native_probe_relay_ready_hash(&chain.signed_relay_ready)?;
+    let start = verify_control_message::<NativeProbeStart>(
+        &chain.signed_start,
+        now_ms,
+        native_time_policy(),
+        &mut replay,
+    )?;
+    let client_endpoint = start
+        .message()
+        .client_endpoint
+        .as_ref()
+        .ok_or(ProtocolError::InvalidField("native Client endpoint"))?;
+    if start.message().scope != relay_ready.message().scope
+        || start.message().permit_hash != expected_permit
+        || start.message().relay_ready_hash != expected_relay_ready
+        || start.message().expires_at_ms > relay_ready.message().expires_at_ms
+        || !bindings_form_four_role_topology(
+            client_endpoint,
+            relay_client,
+            relay_exit,
+            exit_endpoint,
+        )
+    {
+        return Err(ProtocolError::InvalidField(
+            "native authorization Start binding",
+        ));
+    }
+    Ok(VerifiedNativeProbeAuthorizationChain {
+        _permit_request: exit_ready.permit.request,
+        _permit: exit_ready.permit.permit,
+        exit_ready: exit_ready.exit_ready,
+        relay_ready,
+        start,
+        signed_start: chain.signed_start,
+    })
 }
 
 impl ControlPayload for NativeProbeRelayReady {
@@ -974,9 +1473,9 @@ pub fn verify_native_probe_permit(
         return Err(ProtocolError::InvalidField("native permit request binding"));
     }
     Ok(VerifiedNativeProbePermit {
-        _signed_request: signed_request,
+        signed_request,
         signed_permit,
-        _request: request,
+        request,
         permit,
     })
 }
@@ -1521,10 +2020,10 @@ pub fn verify_native_probe_result(
         return Err(ProtocolError::InvalidField("native Exit-result binding"));
     }
     Ok(VerifiedNativeProbeResult {
-        _start: start,
-        _client_lease: client_lease,
+        start,
+        client_lease,
         _relay_result: verified_relay,
-        _exit_result: exit,
+        exit_result: exit,
     })
 }
 
@@ -1822,12 +2321,13 @@ mod tests {
             let control_actor = actor(&control, 2);
             let relay_actor = actor(&relay, 3);
             let exit_actor = actor(&exit, 4);
+            let first_data_relay = actor(&SigningKey::from_bytes(&[5; 32]), 5);
             let set = NativeProbeCandidateSet {
                 protocol_version: PROTOCOL_VERSION,
                 preselection_batch_id: vec![9; 16],
                 control: Some(control_actor.clone()),
                 exit: Some(exit_actor.clone()),
-                data_relays: vec![control_actor.clone(), relay_actor.clone()],
+                data_relays: vec![first_data_relay, relay_actor.clone()],
                 transport: Transport::TcpMptcp as i32,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 policy_version: 7,
@@ -1855,6 +2355,9 @@ mod tests {
                 policy_expires_at_ms: EXPIRY + 30_000,
                 challenge_hash: native_probe_challenge_hash(&challenge).to_vec(),
                 attempt_expires_at_ms: EXPIRY,
+                required_path_count: 2,
+                reserved_up_mbps: 10,
+                reserved_down_mbps: 20,
             };
             Self {
                 client,
@@ -1884,6 +2387,7 @@ mod tests {
                 issued_at_ms: NOW + 1,
                 expires_at_ms: EXPIRY,
                 nonce: vec![11; 32],
+                exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
             };
             sign(&permit, &self.exit, NOW + 1, EXPIRY, [11; 32])
         }
@@ -1922,6 +2426,7 @@ mod tests {
                 ready_at_ms: NOW + 2,
                 expires_at_ms: EXPIRY,
                 nonce: vec![12; 32],
+                exit_boot_id: vec![0xb0; 16],
             };
             sign(&ready, &self.exit, NOW + 2, EXPIRY, [12; 32])
         }
@@ -1943,20 +2448,21 @@ mod tests {
     fn endpoint(port: u8, key: [u8; 32], address: [u8; 4]) -> NativeProbeEndpointBinding {
         NativeProbeEndpointBinding {
             helper_runtime_id: vec![helper_runtime_seed(port); 32],
-            route_context_id: vec![2; 16],
+            route_context_id: vec![1; 16],
             endpoint: Some(WireguardEndpoint {
                 public_key: key.to_vec(),
                 underlay_ip: address.to_vec(),
                 listen_port: 10_000 + u32::from(port),
             }),
             prepared_lease_commitment: vec![port; 32],
+            path_id: 2,
         }
     }
 
     fn lease(seed: u8) -> NativeProbeLeaseProof {
         NativeProbeLeaseProof {
             helper_runtime_id: vec![helper_runtime_seed(seed); 32],
-            route_context_id: vec![2; 16],
+            route_context_id: vec![1; 16],
             prepared_lease_commitment: vec![seed; 32],
             latest_handshake_unix: NOW / 1_000,
             received_bytes_after_baseline: 64,
@@ -2097,7 +2603,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_set_is_canonical_endpoint_free_and_control_first() {
+    fn candidate_set_is_canonical_endpoint_free_and_control_separate() {
         let fixture = Fixture::new();
         let set = NativeProbeCandidateSet {
             protocol_version: PROTOCOL_VERSION,
@@ -2105,7 +2611,7 @@ mod tests {
             control: fixture.scope.control.clone(),
             exit: fixture.scope.exit.clone(),
             data_relays: vec![
-                fixture.scope.control.clone().expect("control"),
+                actor(&SigningKey::from_bytes(&[5; 32]), 5),
                 fixture.scope.data_relay.clone().expect("relay"),
             ],
             transport: fixture.scope.transport,
@@ -2121,16 +2627,23 @@ mod tests {
             set
         );
         assert!(set.validate().is_ok());
-        let mut wrong_first = set.clone();
-        wrong_first.data_relays.swap(0, 1);
-        assert!(wrong_first.validate().is_err());
+        let mut reordered = set.clone();
+        reordered.data_relays.swap(0, 1);
+        assert!(reordered.validate().is_ok());
+        assert_ne!(
+            native_probe_candidate_set_hash(&reordered).expect("reordered hash"),
+            native_probe_candidate_set_hash(&set).expect("original hash")
+        );
+        let mut control_as_data = set;
+        control_as_data.data_relays[0] = control_as_data.control.clone().expect("control");
+        assert!(control_as_data.validate().is_err());
     }
 
     #[test]
     fn nine_preselection_candidates_are_distinct_from_the_eight_path_route_bound() {
         let fixture = Fixture::new();
         let control = fixture.scope.control.clone().expect("control");
-        let mut candidates = vec![control.clone()];
+        let mut candidates = Vec::new();
         for seed in 10_u8..=17 {
             candidates.push(actor(&SigningKey::from_bytes(&[seed; 32]), seed));
         }
@@ -2147,19 +2660,43 @@ mod tests {
             policy_hash: fixture.scope.policy_hash.clone(),
             policy_expires_at_ms: fixture.scope.policy_expires_at_ms,
         };
-        assert!(set.validate().is_ok(), "control plus eight alternatives");
+        assert!(set.validate().is_ok(), "eight selected data Relays");
 
         let mut ninth_alternative = actor(&SigningKey::from_bytes(&[18; 32]), 18);
         ninth_alternative.advertisement_sequence = 18;
-        set.data_relays.push(ninth_alternative);
-        assert!(set.validate().is_err(), "ten candidates must fail closed");
+        set.data_relays.push(ninth_alternative.clone());
+        assert!(set.validate().is_err(), "nine data Relays must fail closed");
 
-        let mut ninth_ordinal = fixture.scope.clone();
-        ninth_ordinal.candidate_ordinal = 9;
-        ninth_ordinal.data_relay = Some(candidates[8].clone());
-        assert!(ninth_ordinal.validate().is_ok());
-        ninth_ordinal.candidate_ordinal = 10;
-        assert!(ninth_ordinal.validate().is_err());
+        let mut bounded_ordinal = fixture.scope.clone();
+        bounded_ordinal.required_path_count = 8;
+        bounded_ordinal.candidate_ordinal = 8;
+        bounded_ordinal.data_relay = Some(candidates[7].clone());
+        assert!(bounded_ordinal.validate().is_ok());
+        bounded_ordinal.candidate_ordinal = 9;
+        bounded_ordinal.data_relay = Some(ninth_alternative);
+        assert!(bounded_ordinal.validate().is_err());
+    }
+
+    #[test]
+    fn native_path_scope_requires_protocol_bounded_reserved_capacity() {
+        let fixture = Fixture::new();
+        assert!(fixture.scope.validate().is_ok());
+
+        let mut zero_upload = fixture.scope.clone();
+        zero_upload.reserved_up_mbps = 0;
+        assert!(zero_upload.validate().is_err());
+
+        let mut zero_download = fixture.scope.clone();
+        zero_download.reserved_down_mbps = 0;
+        assert!(zero_download.validate().is_err());
+
+        let mut excessive_upload = fixture.scope.clone();
+        excessive_upload.reserved_up_mbps = u64::MAX;
+        assert!(excessive_upload.validate().is_err());
+
+        let mut excessive_download = fixture.scope;
+        excessive_download.reserved_down_mbps = u64::MAX;
+        assert!(excessive_download.validate().is_err());
     }
 
     #[test]
@@ -2181,9 +2718,12 @@ mod tests {
             replay.is_empty(),
             "cross-binding failure must roll back both entries"
         );
-        assert!(
+        let verified =
             verify_native_probe_permit(request.clone(), permit.clone(), NOW + 2, &mut replay)
-                .is_ok()
+                .expect("exact Permit");
+        assert_eq!(
+            verified.exit_control_address(),
+            "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit"
         );
         assert!(matches!(
             verify_native_probe_permit(request, permit, NOW + 2, &mut replay),
@@ -2247,7 +2787,7 @@ mod tests {
     }
 
     #[test]
-    fn every_endpoint_and_lease_binding_is_scoped_to_the_exact_probe_id() {
+    fn every_endpoint_and_lease_binding_is_scoped_to_the_shared_attempt_id() {
         let fixture = Fixture::new();
         for binding in [
             endpoint(21, [1; 32], [81, 1, 1, 1]),
@@ -2345,6 +2885,7 @@ mod tests {
             issued_at_ms: NOW,
             expires_at_ms: EXPIRY,
             nonce: vec![25; 32],
+            exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
         };
         let early_permit = sign(&early_permit, &fixture.exit, NOW, EXPIRY, [25; 32]);
         let mut early_exit_replay = ReplayCache::new(16).expect("replay");
@@ -2369,6 +2910,7 @@ mod tests {
             issued_at_ms: NOW + 20,
             expires_at_ms: EXPIRY,
             nonce: vec![26; 32],
+            exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
         };
         let late_permit = sign(&late_permit, &fixture.exit, NOW + 20, EXPIRY, [26; 32]);
         let early_ready = NativeProbeRelayReady {
@@ -2400,6 +2942,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one complete signed native chain smoke keeps every phase transition visible"
+    )]
     fn exact_relay_and_client_chains_verify_once_with_endpoint_bound_helper_proofs() {
         let fixture = Fixture::new();
         let request = fixture.signed_request();
@@ -2462,6 +3008,27 @@ mod tests {
             &mut relay_replay,
         )
         .expect("Relay binds Client endpoint to its local RelayClient endpoint");
+        let authorization_chain = verified_start
+            .authorization_chain()
+            .expect("canonical authorization chain");
+        let verified_authorization =
+            verify_native_probe_authorization_chain(&authorization_chain, NOW + 4)
+                .expect("Exit independently verifies all five signed phases");
+        assert_eq!(verified_authorization.scope(), &fixture.scope);
+        assert_eq!(
+            verified_authorization.encoded_start(),
+            start.encoded_start()
+        );
+        assert_eq!(verified_authorization.exit_boot_id(), &[0xb0; ID_LENGTH]);
+        let mut substituted: NativeProbeAuthorizationChain = decode_canonical(
+            &authorization_chain,
+            MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+        )
+        .expect("authorization bundle");
+        substituted.signed_start = permit_bytes.clone();
+        let substituted = encode_canonical(&substituted, MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE)
+            .expect("substituted bundle");
+        assert!(verify_native_probe_authorization_chain(&substituted, NOW + 4).is_err());
         let verified_exit_result = verify_native_probe_exit_result_for_relay(
             verified_start,
             signed_exit_result,
@@ -2967,9 +3534,9 @@ mod tests {
         let source = include_str!("native_preselection_probe.rs");
         let product = source.split_once("#[cfg(test)]").expect("test boundary").0;
         for forbidden in [
-            concat!("control", "_address"),
-            concat!("control", "_endpoint"),
-            concat!("direct", "_exit"),
+            concat!("pub control", "_address"),
+            concat!("pub control", "_endpoint"),
+            concat!("pub direct", "_exit"),
         ] {
             assert!(
                 !product.contains(forbidden),

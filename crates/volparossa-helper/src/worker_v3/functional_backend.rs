@@ -1,7 +1,8 @@
 //! Process-owned functional-alpha lease backend.
 //!
-//! This adapter proves one live helper-runtime Client/Exit singleton or one atomic
-//! RelayClient+RelayExit pair. It uses the real authenticated worker, a real anonymous network
+//! This adapter proves a bounded set of live helper-runtime Client/Exit contexts or atomic
+//! RelayClient+RelayExit pairs. Every owner stays keyed to its exact immutable backend lineage.
+//! It uses the real authenticated worker, a real anonymous network
 //! namespace and kernel `WireGuard` UAPI. Activate verifies the signed role-specific local and peer
 //! authority, then installs and reads back the complete exact peer set plus its main-table IPv6
 //! `/128` link routes. A Relay worker starts behind a policy-drop baseline, enables forwarding only
@@ -11,30 +12,43 @@
 //! Relay forwarding; it does not yet claim a complete client-to-destination datapath or
 //! crash/restart recovery. Production Prepare now completes the durable journal plus systemd
 //! descriptor-store handoff before child/kernel mutation, and same-runtime clean teardown settles
-//! that exact custody. An exact committed Client or Exit singleton can additionally hand off one
-//! bound, explicitly unconnected QUIC UDP descriptor. MPTCP, Relay transport handoff and all route
-//! manager/datapath callers remain unavailable. Inherited-custody recovery after a helper restart
-//! remains fail-closed.
+//! that exact custody. An exact committed Client or Exit context can additionally hand off one
+//! bound transport descriptor: unconnected QUIC UDP for either role, connected genuine MPTCP for
+//! Client, or a genuine MPTCP listener for Exit. Relay transport handoff and all route-manager
+//! datapath callers remain unavailable. Inherited-custody recovery after a helper restart remains
+//! fail-closed.
 
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    collections::{BTreeMap, BTreeSet},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    ops::{Deref, DerefMut},
     os::fd::{AsRawFd as _, OwnedFd},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use nix::ifaddrs::getifaddrs;
 use rustix::time::{ClockId, clock_gettime};
+use sha2::{Digest as _, Sha256};
 use volparossa_protocol::{
-    ClientSessionCapability, ExitReservation, ProtocolError, RelayAuthorization, RelayReservation,
-    RelayReservationRequest, ReplayCache, TimePolicy, VerifiedControlMessage, WireguardEndpoint,
-    relay_reservation_request_sha256, verify_control_message, verify_relay_reservation,
+    ClientSessionCapability, ControlMessageType, ExitReservation, MAX_CONTROL_MESSAGE_SIZE,
+    NativeProbeStart, ObservationAddressFamily, ProtocolError, RelayAuthorization,
+    RelayReservation, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy,
+    VerifiedControlMessage, VerifiedNativeProbeAuthorizationChain, WireguardEndpoint,
+    decode_canonical, native_probe_prepared_lease_commitment, native_probe_start_hash,
+    relay_reservation_request_sha256, verify_control_message,
+    verify_native_probe_authorization_chain, verify_relay_reservation,
 };
 use volparossa_routing::{
-    AcquireTransportSocket, ActivateLeaseBatch, ClosedPreparePlan, ContextRole,
-    HELPER_HANDLE_BYTES, LeasePlan as RoutingLeasePlan, PrepareIntent, PrepareLeaseBatch,
-    PublicUdpEndpoint, TransportSocketAddress, TransportSocketKind,
+    AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress,
+    ActivateLeaseBatch, AddMptcpEndpoint, ClosedPreparePlan, ContextRole, DestroyClientIngress,
+    HELPER_HANDLE_BYTES, IngressAddressFamily, IngressSocketAddress, IngressSocketKind,
+    LeasePlan as RoutingLeasePlan, MptcpEndpointMode, NATIVE_PROBE_CLIENT_PORT,
+    NATIVE_PROBE_EXIT_PORT, PrepareClientIngress, PrepareIntent, PrepareLeaseBatch,
+    PublicUdpEndpoint, RemoveMptcpEndpoint, TransportSocketAddress, TransportSocketKind,
     UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
 };
+use volparossa_wireguard::overlay_addresses;
 
 use crate::{
     deadline::HardDeadline,
@@ -42,37 +56,53 @@ use crate::{
         AsyncLeaseBackend, BackendAction, BackendBinding, BackendCompletion, BackendDestroy,
         BackendError, BackendFuture, BackendLineage, BackendPhase, BackendProbe, BackendRequest,
         BackendRuntimeCompletion, BackendRuntimeRequest, ConfirmedAbsent, ContextPhase,
-        KernelCounters, OperationKind, PreparedKernelLease,
+        IngressBackendAction, IngressBackendBinding, IngressBackendCompletion,
+        IngressBackendRequest, KernelCounters, OperationKind, PreparedKernelIngressSocket,
+        PreparedKernelLease,
     },
     internal_protocol::{
-        AcquireTransportSocket as InternalAcquireTransportSocket, ActivateLeases, DestroyContext,
-        INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext,
-        InternalContextRole, InternalEndpointRole, InternalIpPrefix, InternalSocketAddress,
-        InternalTransportSocketKind, InternalUdpEndpoint, InternalWorkerRequest,
-        InternalWorkerResult, LeaseActivation as InternalLeaseActivation,
-        LeasePlan as InternalLeasePlan, LeaseProbe, PrepareLeases, ProbeCommitLeases,
-        internal_worker_request, internal_worker_response,
+        AcquireClientIngressReplySocket as InternalAcquireClientIngressReplySocket,
+        AcquireClientIngressSocket as InternalAcquireClientIngressSocket,
+        AcquireTransportSocket as InternalAcquireTransportSocket,
+        ActivateClientIngress as InternalActivateClientIngress, ActivateLeases,
+        AddMptcpEndpoint as InternalAddMptcpEndpoint,
+        DestroyClientIngress as InternalDestroyClientIngress, DestroyContext,
+        INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, IngressSocketIdentity,
+        InitialiseClientIngress, InitialiseContext, InternalContextRole, InternalEndpointRole,
+        InternalIngressAddressFamily, InternalIngressSocketKind, InternalIpPrefix,
+        InternalMptcpMode, InternalSocketAddress, InternalTransportSocketKind, InternalUdpEndpoint,
+        InternalWorkerRequest, InternalWorkerResult, LeaseActivation as InternalLeaseActivation,
+        LeasePlan as InternalLeasePlan, LeaseProbe,
+        PrepareClientIngress as InternalPrepareClientIngress, PrepareLeases, ProbeCommitLeases,
+        RemoveMptcpEndpoint as InternalRemoveMptcpEndpoint, internal_worker_request,
+        internal_worker_response,
     },
-    kernel::{BirthLinkError, BirthNamespaceKernel, LiveWireguardLeaseOwner},
+    kernel::{
+        BirthLinkError, BirthNamespaceKernel, ClientIngressParentIpv4Routing,
+        LiveClientIngressVeth, LiveWireguardLeaseOwner,
+    },
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
     ownership_journal::{
         DurableCleanupConfirmed, DurableCleanupOutcome, DurableIntentRegistration,
         DurableManagerAbsentOutcome, DurableOwnershipPrepareHandle, DurablePrepareSettlement,
         DurableWireguardResource,
     },
-    underlay::{UnderlayCandidate, collect_consistent_direct_underlay},
+    underlay::{UnderlayCandidate, collect_consistent_underlay},
 };
 
 use super::{
     ConfirmedWorkerGenerationAbsent, DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_MAX_TTL,
     DurableFunctionalPrepareFailure, DurableFunctionalPrepareInput,
     DurableFunctionalWorkerOwnership, DurablePrepareTerminalSelector,
-    DurablePrepareTerminalSettlement, ShutdownStatus, WorkerCoordinator, WorkerGenerationOwnership,
-    WorkerGenerationReap, WorkerLifecycleAdmission, WorkerRecoveryIdentitySource, WorkerRegistry,
-    WorkerV3Error,
+    DurablePrepareTerminalSettlement, ReapedWorkerRestartCustody, ShutdownStatus,
+    WorkerCoordinator, WorkerGenerationOwnership, WorkerGenerationReap, WorkerLifecycleAdmission,
+    WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
+    dead_worker_reaper::{
+        DeadWorkerCleanupPlan, DeadWorkerNamespaceReaper, ProductionDeadWorkerNamespaceReaper,
+    },
 };
 
-const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 1;
+const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 64;
 const MARKER_DOMAIN: &[u8] = b"VOLPAROSSA functional alpha WireGuard owner v1";
 const REQUEST_ID_DOMAIN: &[u8] = b"VOLPAROSSA functional alpha worker request v1";
 const STAGE_INITIALISE: u8 = 1;
@@ -81,13 +111,22 @@ const STAGE_ACTIVATE: u8 = 3;
 const STAGE_DESTROY: u8 = 4;
 const STAGE_PROBE_COMMIT: u8 = 5;
 const STAGE_ACQUIRE_TRANSPORT: u8 = 6;
-const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
+const STAGE_ADD_MPTCP_ENDPOINT: u8 = 7;
+const STAGE_REMOVE_MPTCP_ENDPOINT: u8 = 8;
+const STAGE_INITIALISE_INGRESS: u8 = 9;
+const STAGE_PREPARE_INGRESS: u8 = 10;
+const STAGE_ACQUIRE_INGRESS: u8 = 11;
+const STAGE_ACTIVATE_INGRESS: u8 = 12;
+const STAGE_DESTROY_INGRESS: u8 = 13;
+const STAGE_ACQUIRE_INGRESS_REPLY: u8 = 14;
+const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 1;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
 /// Install the deliberately narrow process-owned backend used only by the production server.
 pub(crate) fn functional_alpha_lease_backend(
     durable_ownership: DurableOwnershipPrepareHandle,
+    trusted_agent_uid: u32,
 ) -> Arc<dyn AsyncLeaseBackend> {
     Arc::new(FunctionalAlphaLeaseBackend {
         coordinator: WorkerCoordinator::new(WorkerRegistry::new(
@@ -96,8 +135,16 @@ pub(crate) fn functional_alpha_lease_backend(
             DEFAULT_MAX_TTL,
         )),
         relay_replay: Mutex::new(functional_alpha_replay_cache()),
-        state: Mutex::new(None),
+        state: Mutex::new(OpenLeaseState::default()),
+        ingress_coordinator: WorkerCoordinator::new(WorkerRegistry::new(
+            1,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        )),
+        ingress_state: Mutex::new(None),
+        trusted_agent_uid,
         durable_ownership: Some(durable_ownership),
+        dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
     })
 }
 
@@ -110,14 +157,39 @@ fn functional_alpha_replay_cache() -> ReplayCache {
 
 struct FunctionalAlphaLeaseBackend {
     coordinator: WorkerCoordinator,
+    ingress_coordinator: WorkerCoordinator,
     relay_replay: Mutex<ReplayCache>,
-    state: Mutex<Option<OpenLeaseEntry>>,
+    state: Mutex<OpenLeaseState>,
+    ingress_state: Mutex<Option<OpenIngressEntry>>,
+    trusted_agent_uid: u32,
     /// Always present in production. `None` exists only for narrow unit fixtures which never
     /// execute Prepare.
     durable_ownership: Option<DurableOwnershipPrepareHandle>,
+    dead_worker_reaper: Arc<dyn DeadWorkerNamespaceReaper>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenIngressPhase {
+    Prepared,
+    Active,
+    Quarantined,
+}
+
+struct OpenIngressEntry {
+    helper_runtime_id: [u8; 32],
+    client_runtime_id: [u8; 16],
+    backend_generation: u64,
+    worker: Option<WorkerGenerationOwnership>,
+    ingress_link: Option<LiveClientIngressVeth>,
+    parent_routing: Option<ClientIngressParentIpv4Routing>,
+    parent_policy: Option<super::client_ingress_policy::ActiveParentClientIngressPolicy>,
+    worker_generation: u64,
+    sockets: BTreeMap<(i32, i32), IngressSocketAddress>,
+    acquired: BTreeSet<(i32, i32)>,
+    phase: OpenIngressPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct OpenLineageKey {
     helper_runtime_id: [u8; 32],
     context_id: [u8; 16],
@@ -143,6 +215,66 @@ impl From<BackendLineage> for OpenLineageKey {
             setup_expires_at_boottime_ns: value.setup_expires_at_boottime_ns,
             hard_expires_at_boottime_ns: value.hard_expires_at_boottime_ns,
         }
+    }
+}
+
+/// Bounded process ownership indexed by the complete immutable backend lineage.
+///
+/// The engine issues the opaque context handle only after Prepare completes; its exact handle is
+/// validated by the engine before every subsequent backend dispatch. The backend therefore owns
+/// contexts by the stronger stable tuple available across the entire lifecycle: helper runtime,
+/// route context, backend generation, Prepare identity and both expiry clocks.
+#[derive(Default)]
+struct OpenLeaseState(BTreeMap<OpenLineageKey, OpenLeaseEntry>);
+
+impl Deref for OpenLeaseState {
+    type Target = BTreeMap<OpenLineageKey, OpenLeaseEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for OpenLeaseState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[cfg(test)]
+impl From<Option<OpenLeaseEntry>> for OpenLeaseState {
+    fn from(entry: Option<OpenLeaseEntry>) -> Self {
+        let mut state = Self::default();
+        if let Some(entry) = entry {
+            let key = entry.key;
+            state.insert(key, entry);
+        }
+        state
+    }
+}
+
+#[cfg(test)]
+impl OpenLeaseState {
+    /// Compatibility view for legacy single-context fixtures. New multi-context tests use exact
+    /// keyed lookup and production code never relies on this view.
+    fn as_ref(&self) -> Option<&OpenLeaseEntry> {
+        assert!(self.len() <= 1, "single-context fixture view");
+        self.values().next()
+    }
+
+    fn as_mut(&mut self) -> Option<&mut OpenLeaseEntry> {
+        assert!(self.len() <= 1, "single-context fixture view");
+        self.values_mut().next()
+    }
+
+    fn is_none(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn take(&mut self) -> Option<OpenLeaseEntry> {
+        assert!(self.len() <= 1, "single-context fixture view");
+        let key = self.keys().next().copied()?;
+        self.remove(&key)
     }
 }
 
@@ -195,7 +327,10 @@ struct OpenLeaseEntry {
     key: OpenLineageKey,
     context_role: ContextRole,
     worker: Option<WorkerGenerationOwnership>,
+    /// Complete live-worker recovery authority, retained only until exact generation reap.
     recovery: Option<WorkerRecoveryIdentitySource>,
+    /// The sole post-reap namespace capability, retained only until exact manager absence.
+    restart_custody: Option<ReapedWorkerRestartCustody>,
     durable: Option<DurableLeaseCustody>,
     durable_prepare_terminal: Option<DurablePrepareTerminalSelector>,
     wireguard: Vec<LiveWireguardLeaseOwner>,
@@ -397,8 +532,9 @@ impl FunctionalAlphaLeaseBackend {
         let registration =
             DurableIntentRegistration::try_from_wire(binding.lineage.helper_runtime_id, &intent)
                 .map_err(|_| BackendError::Invalid)?;
-        let underlay = collect_consistent_direct_underlay(operation_deadline)
-            .map_err(|_| BackendError::Unavailable)?;
+        let underlay =
+            collect_consistent_underlay(operation_deadline, &value.leases, &value.traversal_hints)
+                .map_err(|_| BackendError::Unavailable)?;
         self.reserve_entry(key, context_role, underlay)?;
         {
             let mut state = lock_state(&self.state);
@@ -441,10 +577,10 @@ impl FunctionalAlphaLeaseBackend {
                     std::process::abort();
                 }
                 let state = lock_state(&self.state);
-                let entry = state.as_ref().unwrap_or_else(|| {
+                let entry = exact_entry(&state, key).unwrap_or_else(|_| {
                     std::process::abort();
                 });
-                if entry.key != key || entry.durable_prepare_terminal != Some(selector) {
+                if entry.durable_prepare_terminal != Some(selector) {
                     std::process::abort();
                 }
                 return Err(BackendError::CleanupIncomplete);
@@ -544,7 +680,14 @@ impl FunctionalAlphaLeaseBackend {
                     address: ip_bytes(underlay.address),
                     port: u32::from(lease.listen_port),
                 },
-                evidence: RoutingUnderlayEvidence::DirectAssigned,
+                evidence: match underlay.evidence {
+                    crate::underlay::UnderlayEvidence::DirectAssigned => {
+                        RoutingUnderlayEvidence::DirectAssigned
+                    }
+                    crate::underlay::UnderlayEvidence::ObservedUdpPunch => {
+                        RoutingUnderlayEvidence::ObservedUdpPunch
+                    }
+                },
             })
             .collect())
     }
@@ -556,29 +699,39 @@ impl FunctionalAlphaLeaseBackend {
         underlay: UnderlayCandidate,
     ) -> Result<(), BackendError> {
         let mut state = lock_state(&self.state);
-        if state.is_some() {
+        if state.contains_key(&key) {
+            return Err(BackendError::Invalid);
+        }
+        if state.len() >= MAX_FUNCTIONAL_ALPHA_CONTEXTS {
             return Err(BackendError::Capacity);
         }
-        *state = Some(OpenLeaseEntry {
+        let replaced = state.insert(
             key,
-            context_role,
-            worker: None,
-            recovery: None,
-            durable: None,
-            durable_prepare_terminal: None,
-            wireguard: Vec::new(),
-            prepare: PrepareLeases {
-                route_context_id: key.context_id.to_vec(),
-                leases: Vec::new(),
+            OpenLeaseEntry {
+                key,
+                context_role,
+                worker: None,
+                recovery: None,
+                restart_custody: None,
+                durable: None,
+                durable_prepare_terminal: None,
+                wireguard: Vec::new(),
+                prepare: PrepareLeases {
+                    route_context_id: key.context_id.to_vec(),
+                    leases: Vec::new(),
+                },
+                underlay,
+                prepared: Vec::new(),
+                activated: Vec::new(),
+                phase: OpenLeasePhase::Reserved,
+                birth_may_exist: Vec::new(),
+                child_cleanup: None,
+                worker_cleanup: None,
             },
-            underlay,
-            prepared: Vec::new(),
-            activated: Vec::new(),
-            phase: OpenLeasePhase::Reserved,
-            birth_may_exist: Vec::new(),
-            child_cleanup: None,
-            worker_cleanup: None,
-        });
+        );
+        if replaced.is_some() {
+            std::process::abort();
+        }
         Ok(())
     }
 
@@ -631,7 +784,7 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<(), BackendError> {
         let recovery = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             let worker = entry
                 .worker
                 .as_ref()
@@ -653,7 +806,7 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<(), BackendError> {
         let (generation, context_role, prepare) = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             let generation = entry
                 .worker
                 .as_ref()
@@ -706,9 +859,17 @@ impl FunctionalAlphaLeaseBackend {
             BirthNamespaceKernel::connect(deadline).map_err(|_| BackendError::Kernel)?;
         let resource_count = {
             let state = lock_state(&self.state);
-            exact_entry(state.as_ref(), key)?.wireguard.len()
+            exact_entry(&state, key)?.wireguard.len()
         };
-        if !(1..=2).contains(&resource_count) {
+        let valid_resource_count = match exact_entry(&lock_state(&self.state), key)
+            .ok()
+            .map(|entry| entry.context_role)
+        {
+            Some(ContextRole::Client | ContextRole::Exit) => (1..=8).contains(&resource_count),
+            Some(ContextRole::Relay) => resource_count == 2,
+            Some(ContextRole::Unspecified) | None => false,
+        };
+        if !valid_resource_count {
             return Err(BackendError::Invalid);
         }
         for index in 0..resource_count {
@@ -769,7 +930,7 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<PreparedWorkerLease>, BackendError> {
         let (generation, prepare) = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             let generation = entry
                 .worker
                 .as_ref()
@@ -805,7 +966,7 @@ impl FunctionalAlphaLeaseBackend {
         let now_ms = unix_milliseconds()?;
         let (prepared, plan) = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             if entry.phase != OpenLeasePhase::Prepared {
                 return Err(BackendError::Invalid);
             }
@@ -922,7 +1083,7 @@ impl FunctionalAlphaLeaseBackend {
         };
         let activated = {
             let state = lock_state(&self.state);
-            let entry = exact_entry(state.as_ref(), key)?;
+            let entry = exact_entry(&state, key)?;
             if entry.phase != OpenLeasePhase::Activated {
                 return Err(BackendError::Invalid);
             }
@@ -1017,7 +1178,7 @@ impl FunctionalAlphaLeaseBackend {
         let operation_deadline = worker_operation_deadline(deadline)?;
         let generation = {
             let state = lock_state(&self.state);
-            validate_committed_acquire_entry(exact_entry(state.as_ref(), key)?, &value, &internal)?
+            validate_acquire_entry(exact_entry(&state, key)?, &value, &internal)?
         };
         let request = worker_request(
             worker_attempt_request_id(key, STAGE_ACQUIRE_TRANSPORT, binding),
@@ -1045,8 +1206,8 @@ impl FunctionalAlphaLeaseBackend {
 
         let still_exact = {
             let state = lock_state(&self.state);
-            exact_entry(state.as_ref(), key).is_ok_and(|entry| {
-                validate_committed_acquire_entry(entry, &value, &internal) == Ok(generation)
+            exact_entry(&state, key).is_ok_and(|entry| {
+                validate_acquire_entry(entry, &value, &internal) == Ok(generation)
             })
         };
         if !still_exact || deadline.ensure_remaining().is_err() || ensure_hard_is_live(key).is_err()
@@ -1061,6 +1222,127 @@ impl FunctionalAlphaLeaseBackend {
             // reserved tail remains available to the engine's exact rollback/destroy call.
             BackendError::CleanupIncomplete
         })
+    }
+
+    async fn add_mptcp_endpoint_one(
+        &self,
+        binding: BackendBinding,
+        value: AddMptcpEndpoint,
+    ) -> Result<(), BackendError> {
+        let (key, generation, context_role) = validate_mptcp_endpoint_binding(
+            &self.state,
+            binding,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::AddMptcpEndpoint,
+        )?;
+        let mode = validated_mptcp_endpoint_mode(
+            context_role,
+            value.mode,
+            value.backup,
+            value.listener_port,
+        )?;
+        let deadline = prepare_deadline(binding)?;
+        let request = worker_request(
+            worker_attempt_request_id(key, STAGE_ADD_MPTCP_ENDPOINT, binding),
+            internal_worker_request::Operation::AddMptcpEndpoint(InternalAddMptcpEndpoint {
+                route_context_id: key.context_id.to_vec(),
+                path_id: value.path_id,
+                mode: mode as i32,
+                backup: value.backup,
+                listener_port: value.listener_port,
+            }),
+        );
+        let execution = self
+            .coordinator
+            .execute_until(
+                key.context_id,
+                generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let Some(execution) = execution.ok() else {
+            return Err(BackendError::CleanupIncomplete);
+        };
+        let exact = execution.response.result == InternalWorkerResult::Ok as i32
+            && matches!(
+                execution.response.outcome,
+                Some(internal_worker_response::Outcome::MptcpEndpointAdded(ref added))
+                    if added.path_id == value.path_id
+            )
+            && execution.descriptor.is_none();
+        if !exact {
+            return Err(response_error(Ok(execution)));
+        }
+        validate_mptcp_endpoint_binding(
+            &self.state,
+            binding,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::AddMptcpEndpoint,
+        )?;
+        deadline
+            .complete(())
+            .map_err(|_| BackendError::CleanupIncomplete)
+    }
+
+    async fn remove_mptcp_endpoint_one(
+        &self,
+        binding: BackendBinding,
+        value: RemoveMptcpEndpoint,
+    ) -> Result<(), BackendError> {
+        let (key, generation, _) = validate_mptcp_endpoint_binding(
+            &self.state,
+            binding,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::RemoveMptcpEndpoint,
+        )?;
+        let deadline = prepare_deadline(binding)?;
+        let request = worker_request(
+            worker_attempt_request_id(key, STAGE_REMOVE_MPTCP_ENDPOINT, binding),
+            internal_worker_request::Operation::RemoveMptcpEndpoint(InternalRemoveMptcpEndpoint {
+                route_context_id: key.context_id.to_vec(),
+                path_id: value.path_id,
+            }),
+        );
+        let execution = self
+            .coordinator
+            .execute_until(
+                key.context_id,
+                generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let Some(execution) = execution.ok() else {
+            return Err(BackendError::CleanupIncomplete);
+        };
+        let exact = execution.response.result == InternalWorkerResult::Ok as i32
+            && matches!(
+                execution.response.outcome,
+                Some(internal_worker_response::Outcome::MptcpEndpointRemoved(ref removed))
+                    if removed.path_id == value.path_id
+            )
+            && execution.descriptor.is_none();
+        if !exact {
+            return Err(response_error(Ok(execution)));
+        }
+        validate_mptcp_endpoint_binding(
+            &self.state,
+            binding,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::RemoveMptcpEndpoint,
+        )?;
+        deadline
+            .complete(())
+            .map_err(|_| BackendError::CleanupIncomplete)
     }
 
     async fn cleanup_after_failure(
@@ -1088,15 +1370,10 @@ impl FunctionalAlphaLeaseBackend {
     ) -> bool {
         let prepare_terminal = {
             let state = lock_state(&self.state);
-            state.as_ref().and_then(|entry| {
-                if entry.key == key
-                    && entry.phase == OpenLeasePhase::DurableHandoffPending
-                    && entry.worker.is_none()
-                {
-                    entry.durable_prepare_terminal
-                } else {
-                    None
-                }
+            state.get(&key).and_then(|entry| {
+                (entry.phase == OpenLeasePhase::DurableHandoffPending && entry.worker.is_none())
+                    .then_some(entry.durable_prepare_terminal)
+                    .flatten()
             })
         };
         if let Some(selector) = prepare_terminal {
@@ -1122,10 +1399,8 @@ impl FunctionalAlphaLeaseBackend {
                 }
             }
         }
-        if lock_state(&self.state).as_ref().is_some_and(|entry| {
-            entry.key == key
-                && entry.phase == OpenLeasePhase::DurableHandoffPending
-                && entry.worker.is_none()
+        if lock_state(&self.state).get(&key).is_some_and(|entry| {
+            entry.phase == OpenLeasePhase::DurableHandoffPending && entry.worker.is_none()
         }) {
             // The coordinator retains the exact failed handoff terminal. No local cleanup path may
             // erase the corresponding durable record or make shutdown appear complete.
@@ -1133,9 +1408,8 @@ impl FunctionalAlphaLeaseBackend {
         }
         let generation = entry_generation(&self.state, key).ok();
         let should_destroy = request_child_destroy
-            && lock_state(&self.state).as_ref().is_some_and(|entry| {
-                entry.key == key
-                    && entry.child_cleanup.is_none()
+            && lock_state(&self.state).get(&key).is_some_and(|entry| {
+                entry.child_cleanup.is_none()
                     && matches!(
                         entry.phase,
                         OpenLeasePhase::InitialiseCleanupPending
@@ -1167,19 +1441,6 @@ impl FunctionalAlphaLeaseBackend {
             }
         }
 
-        if lock_state(&self.state).as_ref().is_some_and(|entry| {
-            entry.key == key
-                && entry.durable.as_ref().is_some_and(|custody| {
-                    matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
-                })
-                && entry.child_cleanup.is_none()
-        }) {
-            // Exact child cleanup did not complete. Keep the worker and all recovery authority
-            // available for a later same-runtime Destroy retry; process death is not namespace
-            // cleanup evidence while PID 1 still owns the published namespace descriptor.
-            return false;
-        }
-
         let worker = {
             let mut state = lock_state(&self.state);
             let Ok(entry) = exact_entry_mut(&mut state, key) else {
@@ -1194,25 +1455,32 @@ impl FunctionalAlphaLeaseBackend {
             {
                 WorkerGenerationReap::Confirmed(proof) => {
                     // Process death alone does not destroy an anonymous network namespace while
-                    // duplicated recovery descriptors still pin it. Consume those descriptors
-                    // immediately after exact reap confirmation, before any fallible parent-link
-                    // cleanup or later deadline check can retain the entry for retry.
-                    let recovery = {
-                        let mut state = lock_state(&self.state);
-                        let Ok(entry) = exact_entry_mut(&mut state, key) else {
-                            return false;
-                        };
-                        if entry.durable.is_none() {
-                            drop(proof);
-                            entry.recovery.take()
-                        } else {
-                            if entry.worker_cleanup.replace(proof).is_some() {
-                                std::process::abort();
-                            }
-                            None
-                        }
+                    // duplicated recovery descriptors still pin it. Exact reap replaces the
+                    // live-process identity proof: close the complete authenticated duplicate
+                    // immediately and retain only the smaller restart pair needed for exact
+                    // descriptor-store removal.
+                    let mut state = lock_state(&self.state);
+                    let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                        return false;
                     };
-                    drop(recovery);
+                    if entry.restart_custody.is_some() {
+                        std::process::abort();
+                    }
+                    let recovery = entry.recovery.take();
+                    if entry.durable.is_none() {
+                        drop(proof);
+                        drop(recovery);
+                    } else {
+                        let Some(recovery) = recovery else {
+                            std::process::abort();
+                        };
+                        let restart_custody = recovery.into_reaped_restart_custody(&proof);
+                        if entry.worker_cleanup.replace(proof).is_some()
+                            || entry.restart_custody.replace(restart_custody).is_some()
+                        {
+                            std::process::abort();
+                        }
+                    }
                 }
                 WorkerGenerationReap::Retained { ownership, .. } => {
                     let mut state = lock_state(&self.state);
@@ -1222,6 +1490,71 @@ impl FunctionalAlphaLeaseBackend {
                     return false;
                 }
             }
+        }
+
+        let dead_worker_cleanup = {
+            let mut state = lock_state(&self.state);
+            let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                return false;
+            };
+            let required = entry.durable.as_ref().is_some_and(|custody| {
+                matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+            }) && entry.child_cleanup.is_none();
+            if required {
+                // A missing Destroy response is no longer terminal once the exact generation is
+                // proven absent. At that point only the retained namespace pair can execute and
+                // prove cleanup; keeping MayOwn forever would pin the dead namespace forever.
+                if entry.worker.is_some()
+                    || entry.recovery.is_some()
+                    || entry.worker_cleanup.is_none()
+                {
+                    return false;
+                }
+                let Ok(plan) = DeadWorkerCleanupPlan::new(
+                    key.context_id,
+                    entry.context_role,
+                    entry.prepare.clone(),
+                ) else {
+                    return false;
+                };
+                let Some(restart_custody) = entry.restart_custody.take() else {
+                    return false;
+                };
+                Some((restart_custody, plan))
+            } else {
+                None
+            }
+        };
+        if let Some((restart_custody, plan)) = dead_worker_cleanup {
+            let cleanup = self.dead_worker_reaper.cleanup(
+                &plan,
+                restart_custody.borrowed_network_namespace(),
+                deadline,
+            );
+            let mut state = lock_state(&self.state);
+            let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                std::process::abort();
+            };
+            if entry.restart_custody.replace(restart_custody).is_some() {
+                std::process::abort();
+            }
+            let Ok(proof) = cleanup else {
+                return false;
+            };
+            if !proof.matches_context(key.context_id) || entry.child_cleanup.is_some() {
+                std::process::abort();
+            }
+            entry.child_cleanup = Some(ExactChildCleanupConfirmed { key });
+        }
+
+        if lock_state(&self.state).get(&key).is_some_and(|entry| {
+            entry.durable.as_ref().is_some_and(|custody| {
+                matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+            }) && entry.child_cleanup.is_none()
+        }) {
+            // Neither the ordinary child nor the post-reap namespace reaper proved exact cleanup.
+            // Retain every remaining affine owner for a bounded later retry.
+            return false;
         }
 
         let parent_absent = {
@@ -1258,15 +1591,12 @@ impl FunctionalAlphaLeaseBackend {
         if !parent_absent || deadline.ensure_remaining().is_err() {
             return false;
         }
-        let durable_cleanup_ready = lock_state(&self.state)
-            .as_ref()
-            .filter(|entry| entry.key == key)
-            .and_then(|entry| {
-                entry.durable.as_ref().map(|custody| {
-                    !matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
-                        || (entry.child_cleanup.is_some() && entry.worker_cleanup.is_some())
-                })
-            });
+        let durable_cleanup_ready = lock_state(&self.state).get(&key).and_then(|entry| {
+            entry.durable.as_ref().map(|custody| {
+                !matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+                    || (entry.child_cleanup.is_some() && entry.worker_cleanup.is_some())
+            })
+        });
         if let Some(cleanup_ready) = durable_cleanup_ready {
             if !cleanup_ready {
                 return false;
@@ -1292,12 +1622,12 @@ impl FunctionalAlphaLeaseBackend {
         let Some(handle) = self.durable_ownership.as_ref() else {
             return false;
         };
-        let (mut custody, recovery, child, worker) = {
+        let (mut custody, mut restart_custody, child, worker) = {
             let mut state = lock_state(&self.state);
             let Ok(entry) = exact_entry_mut(&mut state, key) else {
                 return false;
             };
-            if entry.durable.is_none() || entry.recovery.is_none() {
+            if entry.durable.is_none() || entry.recovery.is_some() {
                 return false;
             }
             if entry
@@ -1315,15 +1645,26 @@ impl FunctionalAlphaLeaseBackend {
             {
                 return false;
             }
+            let manager_absence_proven = entry.durable.as_ref().is_some_and(|custody| {
+                matches!(
+                    custody.settlement,
+                    DurableJournalSettlement::ManagerRemovalProven(_)
+                )
+            });
+            if manager_absence_proven != entry.restart_custody.is_none()
+                || entry
+                    .restart_custody
+                    .as_ref()
+                    .is_some_and(|restart| restart.context_id() != key.context_id)
+            {
+                return false;
+            }
             let Some(custody) = entry.durable.take() else {
-                std::process::abort();
-            };
-            let Some(recovery) = entry.recovery.take() else {
                 std::process::abort();
             };
             (
                 custody,
-                recovery,
+                entry.restart_custody.take(),
                 entry.child_cleanup.take(),
                 entry.worker_cleanup.take(),
             )
@@ -1354,7 +1695,7 @@ impl FunctionalAlphaLeaseBackend {
                     }
                     DurableCleanupOutcome::Retained { proof, .. } => {
                         custody.settlement = DurableJournalSettlement::CleanupProven(proof);
-                        self.restore_durable_cleanup(key, custody, recovery);
+                        self.restore_durable_cleanup(key, custody, restart_custody);
                         return false;
                     }
                 }
@@ -1362,27 +1703,82 @@ impl FunctionalAlphaLeaseBackend {
             settlement => settlement,
         };
 
-        let Ok(pair) = crate::systemd_fdstore::BorrowedCustodyPair::new(
-            recovery.restart_custody.borrowed_pidfd(),
-            recovery.restart_custody.borrowed_network_namespace(),
-        ) else {
-            self.restore_durable_cleanup(key, custody, recovery);
-            return false;
-        };
-        let Ok(binding) = pair.descriptor_binding() else {
-            self.restore_durable_cleanup(key, custody, recovery);
-            return false;
-        };
+        if !matches!(
+            custody.settlement,
+            DurableJournalSettlement::ManagerRemovalProven(_)
+        ) {
+            let Some(restart) = restart_custody.as_ref() else {
+                std::process::abort();
+            };
+            let Ok(pair) = crate::systemd_fdstore::BorrowedCustodyPair::new(
+                restart.borrowed_pidfd(),
+                restart.borrowed_network_namespace(),
+            ) else {
+                self.restore_durable_cleanup(key, custody, restart_custody);
+                return false;
+            };
+            let Ok(binding) = pair.descriptor_binding() else {
+                self.restore_durable_cleanup(key, custody, restart_custody);
+                return false;
+            };
 
-        custody.settlement = match custody.settlement {
-            DurableJournalSettlement::CleanupConfirmed(cleanup) => {
-                let Some(baseline) = custody.attestation.removal_baseline() else {
-                    custody.settlement = DurableJournalSettlement::CleanupConfirmed(cleanup);
-                    self.restore_durable_cleanup(key, custody, recovery);
-                    return false;
-                };
-                match crate::systemd_fdstore::remove_current_process_custody(
-                    baseline,
+            custody.settlement = match custody.settlement {
+                DurableJournalSettlement::CleanupConfirmed(cleanup) => {
+                    let Some(baseline) = custody.attestation.removal_baseline() else {
+                        custody.settlement = DurableJournalSettlement::CleanupConfirmed(cleanup);
+                        self.restore_durable_cleanup(key, custody, restart_custody);
+                        return false;
+                    };
+                    match crate::systemd_fdstore::remove_current_process_custody(
+                        baseline,
+                        custody.custody_name,
+                        binding.clone(),
+                        pair,
+                        deadline,
+                    )
+                    .await
+                    {
+                        Ok(proof) => {
+                            if proof
+                                .verify_exact_target(custody.custody_name, &binding)
+                                .is_err()
+                            {
+                                custody.settlement =
+                                    DurableJournalSettlement::CleanupConfirmed(cleanup);
+                                self.restore_durable_cleanup(key, custody, restart_custody);
+                                return false;
+                            }
+                            DurableJournalSettlement::ManagerRemovalProven(
+                                ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
+                                    cleanup,
+                                    proof.into_same_runtime_manager_proof(),
+                                ),
+                            )
+                        }
+                        Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
+                            custody.settlement =
+                                DurableJournalSettlement::CleanupConfirmed(cleanup);
+                            self.restore_durable_cleanup(key, custody, restart_custody);
+                            return false;
+                        }
+                        Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
+                            attempt_id,
+                            ..
+                        }) => {
+                            custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                                cleanup,
+                                attempt_id,
+                            };
+                            self.restore_durable_cleanup(key, custody, restart_custody);
+                            return false;
+                        }
+                    }
+                }
+                DurableJournalSettlement::RemovalAmbiguous {
+                    cleanup,
+                    attempt_id,
+                } => match crate::systemd_fdstore::reconcile_current_process_removal(
+                    attempt_id,
                     custody.custody_name,
                     binding.clone(),
                     pair,
@@ -1390,14 +1786,16 @@ impl FunctionalAlphaLeaseBackend {
                 )
                 .await
                 {
-                    Ok(proof) => {
+                    crate::systemd_fdstore::RemovalInventoryReconciliation::ExactRemoved(proof) => {
                         if proof
                             .verify_exact_target(custody.custody_name, &binding)
                             .is_err()
                         {
-                            custody.settlement =
-                                DurableJournalSettlement::CleanupConfirmed(cleanup);
-                            self.restore_durable_cleanup(key, custody, recovery);
+                            custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                                cleanup,
+                                attempt_id,
+                            };
+                            self.restore_durable_cleanup(key, custody, restart_custody);
                             return false;
                         }
                         DurableJournalSettlement::ManagerRemovalProven(
@@ -1407,139 +1805,96 @@ impl FunctionalAlphaLeaseBackend {
                             ),
                         )
                     }
-                    Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
-                        custody.settlement = DurableJournalSettlement::CleanupConfirmed(cleanup);
-                        self.restore_durable_cleanup(key, custody, recovery);
+                    crate::systemd_fdstore::RemovalInventoryReconciliation::ExactStillPresent(
+                        evidence,
+                    ) => {
+                        custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
+                            cleanup,
+                            evidence: Box::new(evidence),
+                        };
+                        self.restore_durable_cleanup(key, custody, restart_custody);
                         return false;
                     }
-                    Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
-                        attempt_id,
+                    crate::systemd_fdstore::RemovalInventoryReconciliation::Unresolved {
                         ..
-                    }) => {
+                    } => {
                         custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
                             cleanup,
                             attempt_id,
                         };
-                        self.restore_durable_cleanup(key, custody, recovery);
+                        self.restore_durable_cleanup(key, custody, restart_custody);
                         return false;
                     }
-                }
-            }
-            DurableJournalSettlement::RemovalAmbiguous {
-                cleanup,
-                attempt_id,
-            } => match crate::systemd_fdstore::reconcile_current_process_removal(
-                attempt_id,
-                custody.custody_name,
-                binding.clone(),
-                pair,
-                deadline,
-            )
-            .await
-            {
-                crate::systemd_fdstore::RemovalInventoryReconciliation::ExactRemoved(proof) => {
-                    if proof
-                        .verify_exact_target(custody.custody_name, &binding)
-                        .is_err()
-                    {
-                        custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
-                            cleanup,
-                            attempt_id,
-                        };
-                        self.restore_durable_cleanup(key, custody, recovery);
-                        return false;
-                    }
-                    DurableJournalSettlement::ManagerRemovalProven(
-                        ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
-                            cleanup,
-                            proof.into_same_runtime_manager_proof(),
-                        ),
+                },
+                DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence } => {
+                    match crate::systemd_fdstore::retry_current_process_removal(
+                        &evidence,
+                        custody.custody_name,
+                        binding.clone(),
+                        pair,
+                        deadline,
                     )
-                }
-                crate::systemd_fdstore::RemovalInventoryReconciliation::ExactStillPresent(
-                    evidence,
-                ) => {
-                    custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
-                        cleanup,
-                        evidence: Box::new(evidence),
-                    };
-                    self.restore_durable_cleanup(key, custody, recovery);
-                    return false;
-                }
-                crate::systemd_fdstore::RemovalInventoryReconciliation::Unresolved { .. } => {
-                    custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
-                        cleanup,
-                        attempt_id,
-                    };
-                    self.restore_durable_cleanup(key, custody, recovery);
-                    return false;
-                }
-            },
-            DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence } => {
-                match crate::systemd_fdstore::retry_current_process_removal(
-                    &evidence,
-                    custody.custody_name,
-                    binding.clone(),
-                    pair,
-                    deadline,
-                )
-                .await
-                {
-                    Ok(proof) => {
-                        if proof
-                            .verify_exact_target(custody.custody_name, &binding)
-                            .is_err()
-                        {
+                    .await
+                    {
+                        Ok(proof) => {
+                            if proof
+                                .verify_exact_target(custody.custody_name, &binding)
+                                .is_err()
+                            {
+                                custody.settlement =
+                                    DurableJournalSettlement::RemovalRetryAuthorized {
+                                        cleanup,
+                                        evidence,
+                                    };
+                                self.restore_durable_cleanup(key, custody, restart_custody);
+                                return false;
+                            }
+                            DurableJournalSettlement::ManagerRemovalProven(
+                                ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
+                                    cleanup,
+                                    proof.into_same_runtime_manager_proof(),
+                                ),
+                            )
+                        }
+                        Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
                             custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
                                 cleanup,
                                 evidence,
                             };
-                            self.restore_durable_cleanup(key, custody, recovery);
+                            self.restore_durable_cleanup(key, custody, restart_custody);
                             return false;
                         }
-                        DurableJournalSettlement::ManagerRemovalProven(
-                            ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
-                                cleanup,
-                                proof.into_same_runtime_manager_proof(),
-                            ),
-                        )
-                    }
-                    Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
-                        custody.settlement =
-                            DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence };
-                        self.restore_durable_cleanup(key, custody, recovery);
-                        return false;
-                    }
-                    Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
-                        attempt_id,
-                        ..
-                    }) => {
-                        custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
-                            cleanup,
+                        Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
                             attempt_id,
-                        };
-                        self.restore_durable_cleanup(key, custody, recovery);
-                        return false;
+                            ..
+                        }) => {
+                            custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                                cleanup,
+                                attempt_id,
+                            };
+                            self.restore_durable_cleanup(key, custody, restart_custody);
+                            return false;
+                        }
                     }
                 }
-            }
-            settlement @ DurableJournalSettlement::ManagerRemovalProven(_) => settlement,
-            DurableJournalSettlement::MayOwn(_) | DurableJournalSettlement::CleanupProven(_) => {
-                std::process::abort()
-            }
-        };
+                settlement @ DurableJournalSettlement::ManagerRemovalProven(_) => settlement,
+                DurableJournalSettlement::MayOwn(_)
+                | DurableJournalSettlement::CleanupProven(_) => std::process::abort(),
+            };
+        }
 
         let DurableJournalSettlement::ManagerRemovalProven(proof) = custody.settlement else {
             std::process::abort();
         };
+        // Manager absence has replaced the last use of the restart pair. Close its pidfd and
+        // network namespace before the journal terminal is confirmed or any Destroy response can
+        // be constructed. A retained journal proof no longer carries local kernel custody.
+        drop(restart_custody.take());
         match handle.confirm_manager_absent_until(proof, deadline) {
-            DurableManagerAbsentOutcome::Absent => {
-                drop(recovery);
-                true
-            }
+            DurableManagerAbsentOutcome::Absent => true,
             DurableManagerAbsentOutcome::Retained { proof, .. } => {
                 custody.settlement = DurableJournalSettlement::ManagerRemovalProven(proof);
-                self.restore_durable_cleanup(key, custody, recovery);
+                self.restore_durable_cleanup(key, custody, None);
                 false
             }
         }
@@ -1549,17 +1904,25 @@ impl FunctionalAlphaLeaseBackend {
         &self,
         key: OpenLineageKey,
         custody: DurableLeaseCustody,
-        recovery: WorkerRecoveryIdentitySource,
+        restart_custody: Option<ReapedWorkerRestartCustody>,
     ) {
         let mut state = lock_state(&self.state);
         let Ok(entry) = exact_entry_mut(&mut state, key) else {
             std::process::abort();
         };
-        if entry.durable.is_some() || entry.recovery.is_some() {
+        let manager_absence_proven = matches!(
+            custody.settlement,
+            DurableJournalSettlement::ManagerRemovalProven(_)
+        );
+        if entry.durable.is_some()
+            || entry.recovery.is_some()
+            || entry.restart_custody.is_some()
+            || manager_absence_proven != restart_custody.is_none()
+        {
             std::process::abort();
         }
         entry.durable = Some(custody);
-        entry.recovery = Some(recovery);
+        entry.restart_custody = restart_custody;
     }
 
     async fn destroy_one(
@@ -1570,10 +1933,7 @@ impl FunctionalAlphaLeaseBackend {
         let key = validate_destroy_binding(binding, value)?;
         let target_is_open = {
             let state = lock_state(&self.state);
-            match state.as_ref() {
-                Some(entry) if entry.key == key => true,
-                None | Some(_) => false,
-            }
+            state.contains_key(&key)
         };
         let deadline = HardDeadline::at(binding.call_deadline.into_std())
             .map_err(|_| BackendError::CleanupIncomplete)?;
@@ -1588,6 +1948,710 @@ impl FunctionalAlphaLeaseBackend {
                 .map_err(|_| BackendError::CleanupIncomplete)
         } else {
             Err(BackendError::CleanupIncomplete)
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        clippy::manual_let_else,
+        clippy::single_match_else
+    )] // Admission and every exact rollback path are intentionally one transaction.
+    async fn prepare_ingress_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: PrepareClientIngress,
+    ) -> Result<Vec<PreparedKernelIngressSocket>, BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::Prepare,
+        )?;
+        let deadline = ingress_deadline(binding)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| BackendError::Kernel)?
+            .as_secs();
+        let ttl = value
+            .hard_expires_at_unix
+            .checked_sub(now)
+            .map(Duration::from_secs)
+            .filter(|ttl| !ttl.is_zero() && *ttl <= DEFAULT_MAX_TTL)
+            .ok_or(BackendError::Invalid)?;
+        if self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Err(BackendError::Capacity);
+        }
+        let worker = match self
+            .ingress_coordinator
+            .reserve_spawn_register_for_context_until(
+                binding.client_runtime_id,
+                ContextRole::Client,
+                1,
+                ttl,
+                deadline,
+            ) {
+            WorkerLifecycleAdmission::Registered(worker) => worker,
+            WorkerLifecycleAdmission::Rejected(error) => return Err(definite_worker_error(&error)),
+            WorkerLifecycleAdmission::Retained { ownership, .. } => {
+                self.retain_failed_ingress(binding, ownership);
+                return Err(BackendError::CleanupIncomplete);
+            }
+        };
+        let worker_generation = worker.coordinates.worker_generation.get();
+        let ingress_link = {
+            let target_namespace = match worker.duplicate_network_namespace_pin(deadline) {
+                Ok(namespace) => namespace,
+                Err(_) => {
+                    self.retain_failed_ingress(binding, worker);
+                    let _ = self
+                        .cleanup_ingress_exact(
+                            binding.client_runtime_id,
+                            binding.generation,
+                            deadline,
+                        )
+                        .await;
+                    return Err(BackendError::CleanupIncomplete);
+                }
+            };
+            let mut kernel = match BirthNamespaceKernel::connect(deadline) {
+                Ok(kernel) => kernel,
+                Err(_) => {
+                    drop(target_namespace);
+                    self.retain_failed_ingress(binding, worker);
+                    let _ = self
+                        .cleanup_ingress_exact(
+                            binding.client_runtime_id,
+                            binding.generation,
+                            deadline,
+                        )
+                        .await;
+                    return Err(BackendError::CleanupIncomplete);
+                }
+            };
+            let target_namespace_fd = match target_namespace.verified_descriptor() {
+                Ok(descriptor) => descriptor.as_raw_fd(),
+                Err(_) => {
+                    drop(target_namespace);
+                    self.retain_failed_ingress(binding, worker);
+                    let _ = self
+                        .cleanup_ingress_exact(
+                            binding.client_runtime_id,
+                            binding.generation,
+                            deadline,
+                        )
+                        .await;
+                    return Err(BackendError::CleanupIncomplete);
+                }
+            };
+            match kernel.create_client_ingress_veth(
+                binding.client_runtime_id,
+                target_namespace_fd,
+                deadline,
+            ) {
+                Ok(link) => link,
+                Err(_) => {
+                    drop(target_namespace);
+                    self.retain_failed_ingress(binding, worker);
+                    let _ = self
+                        .cleanup_ingress_exact(
+                            binding.client_runtime_id,
+                            binding.generation,
+                            deadline,
+                        )
+                        .await;
+                    return Err(BackendError::CleanupIncomplete);
+                }
+            }
+        };
+        {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.is_some() {
+                drop(state);
+                self.retain_failed_ingress(binding, worker);
+                return Err(BackendError::CleanupIncomplete);
+            }
+            *state = Some(OpenIngressEntry {
+                helper_runtime_id: binding.helper_runtime_id,
+                client_runtime_id: binding.client_runtime_id,
+                backend_generation: binding.generation,
+                worker: Some(worker),
+                ingress_link: Some(ingress_link),
+                parent_routing: None,
+                parent_policy: None,
+                worker_generation,
+                sockets: BTreeMap::new(),
+                acquired: BTreeSet::new(),
+                phase: OpenIngressPhase::Quarantined,
+            });
+        }
+        let initialise = worker_request(
+            ingress_worker_request_id(binding, STAGE_INITIALISE_INGRESS),
+            internal_worker_request::Operation::InitialiseClientIngress(InitialiseClientIngress {
+                client_runtime_id: binding.client_runtime_id.to_vec(),
+                hard_expires_at_unix: value.hard_expires_at_unix,
+            }),
+        );
+        let operation_deadline = worker_operation_deadline(deadline)?;
+        let initialised = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                initialise,
+                operation_deadline,
+            )
+            .await
+            .is_ok_and(|execution| {
+                execution.descriptor.is_none()
+                    && execution.response.result == InternalWorkerResult::Ok as i32
+                    && matches!(
+                        execution.response.outcome.as_ref(),
+                        Some(internal_worker_response::Outcome::ClientIngressInitialised(result))
+                            if result.client_runtime_id.as_slice() == binding.client_runtime_id
+                    )
+            });
+        if !initialised {
+            let _ = self
+                .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+                .await;
+            return Err(BackendError::CleanupIncomplete);
+        }
+        let prepare = worker_request(
+            ingress_worker_request_id(binding, STAGE_PREPARE_INGRESS),
+            internal_worker_request::Operation::PrepareClientIngress(
+                InternalPrepareClientIngress {
+                    client_runtime_id: binding.client_runtime_id.to_vec(),
+                },
+            ),
+        );
+        let execution = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                prepare,
+                operation_deadline,
+            )
+            .await;
+        let Some(sockets) = execution.ok().and_then(|execution| {
+            if execution.descriptor.is_some()
+                || execution.response.result != InternalWorkerResult::Ok as i32
+            {
+                return None;
+            }
+            match execution.response.outcome {
+                Some(internal_worker_response::Outcome::PreparedClientIngress(result))
+                    if result.client_runtime_id.as_slice() == binding.client_runtime_id =>
+                {
+                    canonical_worker_ingress_sockets(result.sockets)
+                }
+                _ => None,
+            }
+        }) else {
+            let _ = self
+                .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+                .await;
+            return Err(BackendError::CleanupIncomplete);
+        };
+        let addresses = sockets
+            .iter()
+            .map(|socket| {
+                (
+                    (socket.descriptor_kind, socket.address_family),
+                    socket.local.clone(),
+                )
+            })
+            .collect();
+        let mut state = self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Ok(entry) = exact_ingress_entry_mut(&mut state, binding) else {
+            return Err(BackendError::CleanupIncomplete);
+        };
+        entry.sockets = addresses;
+        entry.phase = OpenIngressPhase::Prepared;
+        Ok(sockets)
+    }
+
+    async fn acquire_ingress_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: AcquireIngressSocket,
+    ) -> Result<OwnedFd, BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::Acquire,
+        )?;
+        let deadline = ingress_deadline(binding)?;
+        let (worker_generation, local) = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = exact_ingress_entry_mut(&mut state, binding)?;
+            let identity = (value.descriptor_kind, value.address_family);
+            if entry.phase != OpenIngressPhase::Prepared || entry.acquired.contains(&identity) {
+                return Err(BackendError::Invalid);
+            }
+            let local = entry
+                .sockets
+                .get(&identity)
+                .cloned()
+                .ok_or(BackendError::Invalid)?;
+            entry.acquired.insert(identity);
+            (entry.worker_generation, local)
+        };
+        let internal = InternalAcquireClientIngressSocket {
+            client_runtime_id: binding.client_runtime_id.to_vec(),
+            descriptor_kind: internal_ingress_kind(value.descriptor_kind)? as i32,
+            address_family: internal_ingress_family(value.address_family)? as i32,
+            expected_local: Some(InternalSocketAddress {
+                address: local.address.clone(),
+                port: local.port,
+            }),
+        };
+        let request = worker_request(
+            ingress_worker_request_id(binding, STAGE_ACQUIRE_INGRESS),
+            internal_worker_request::Operation::AcquireClientIngressSocket(internal.clone()),
+        );
+        let execution = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let mut execution = execution.map_err(|_| BackendError::CleanupIncomplete)?;
+        let exact = execution.response.result == InternalWorkerResult::Ok as i32
+            && matches!(
+                execution.response.outcome.as_ref(),
+                Some(internal_worker_response::Outcome::IngressSocketReady(ready))
+                    if ready.client_runtime_id.as_slice() == binding.client_runtime_id
+                        && ready.descriptor_kind == internal.descriptor_kind
+                        && ready.address_family == internal.address_family
+                        && ready.local == internal.expected_local
+            );
+        if !exact {
+            drop(execution.descriptor.take());
+            return Err(BackendError::CleanupIncomplete);
+        }
+        execution
+            .descriptor
+            .take()
+            .ok_or(BackendError::CleanupIncomplete)
+    }
+
+    async fn acquire_ingress_reply_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: AcquireIngressReplySocket,
+    ) -> Result<OwnedFd, BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::AcquireReply,
+        )?;
+        let deadline = ingress_deadline(binding)?;
+        let application =
+            ingress_reply_address(value.application.as_ref().ok_or(BackendError::Invalid)?)?;
+        prove_local_ingress_application(application.ip(), deadline)?;
+        let worker_generation = {
+            let state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = exact_ingress_entry(state.as_ref(), binding)?;
+            if entry.phase != OpenIngressPhase::Active {
+                return Err(BackendError::Invalid);
+            }
+            entry.worker_generation
+        };
+        let internal = InternalAcquireClientIngressReplySocket {
+            client_runtime_id: binding.client_runtime_id.to_vec(),
+            remote: value.remote.as_ref().map(|endpoint| InternalSocketAddress {
+                address: endpoint.address.clone(),
+                port: endpoint.port,
+            }),
+            application: value
+                .application
+                .as_ref()
+                .map(|endpoint| InternalSocketAddress {
+                    address: endpoint.address.clone(),
+                    port: endpoint.port,
+                }),
+        };
+        let request = worker_request(
+            ingress_worker_request_id(binding, STAGE_ACQUIRE_INGRESS_REPLY),
+            internal_worker_request::Operation::AcquireClientIngressReplySocket(internal.clone()),
+        );
+        let execution = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let mut execution = execution.map_err(|_| BackendError::CleanupIncomplete)?;
+        let exact = execution.response.result == InternalWorkerResult::Ok as i32
+            && matches!(
+                execution.response.outcome.as_ref(),
+                Some(internal_worker_response::Outcome::IngressReplySocketReady(ready))
+                    if ready.client_runtime_id.as_slice() == binding.client_runtime_id
+                        && ready.remote == internal.remote
+                        && ready.application == internal.application
+            );
+        if !exact {
+            drop(execution.descriptor.take());
+            return Err(BackendError::CleanupIncomplete);
+        }
+        execution
+            .descriptor
+            .take()
+            .ok_or(BackendError::CleanupIncomplete)
+    }
+
+    #[allow(clippy::too_many_lines, clippy::single_match_else)] // Parent and worker policy activation share one exact rollback transaction.
+    async fn activate_ingress_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: ActivateClientIngress,
+    ) -> Result<(), BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::Activate,
+        )?;
+        let deadline = ingress_deadline(binding)?;
+        let (worker_generation, identities) = {
+            let state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = exact_ingress_entry(state.as_ref(), binding)?;
+            if entry.phase != OpenIngressPhase::Prepared
+                || entry.acquired.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS
+            {
+                return Err(BackendError::Invalid);
+            }
+            let identities = entry
+                .acquired
+                .iter()
+                .map(|(kind, family)| {
+                    Ok(IngressSocketIdentity {
+                        descriptor_kind: internal_ingress_kind(*kind)? as i32,
+                        address_family: internal_ingress_family(*family)? as i32,
+                    })
+                })
+                .collect::<Result<Vec<_>, BackendError>>()?;
+            (entry.worker_generation, identities)
+        };
+        let parent_routing = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = exact_ingress_entry_mut(&mut state, binding)?;
+            if entry.parent_routing.is_some() || entry.parent_policy.is_some() {
+                return Err(BackendError::Invalid);
+            }
+            let link = entry.ingress_link.as_ref().ok_or(BackendError::Invalid)?;
+            let mut kernel = BirthNamespaceKernel::connect(deadline)
+                .map_err(|_| BackendError::CleanupIncomplete)?;
+            let routing = kernel
+                .install_client_ingress_parent_routing(link, deadline)
+                .map_err(|_| BackendError::CleanupIncomplete)?;
+            let coordinates = (routing.parent_ifindex(), routing.loopback_ifindex());
+            entry.parent_routing = Some(routing);
+            coordinates
+        };
+        let parent_policy = super::client_ingress_policy::install_parent(
+            binding.client_runtime_id,
+            parent_routing.0,
+            parent_routing.1,
+            self.trusted_agent_uid,
+            deadline,
+        );
+        match parent_policy {
+            Ok(policy) => {
+                let mut state = self
+                    .ingress_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let entry = exact_ingress_entry_mut(&mut state, binding)?;
+                entry.parent_policy = Some(policy);
+            }
+            Err(_) => {
+                let _ = super::client_ingress_policy::cleanup_parent_runtime(
+                    binding.client_runtime_id,
+                    deadline,
+                );
+                let _ = self
+                    .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+                    .await;
+                return Err(BackendError::CleanupIncomplete);
+            }
+        }
+        let request = worker_request(
+            ingress_worker_request_id(binding, STAGE_ACTIVATE_INGRESS),
+            internal_worker_request::Operation::ActivateClientIngress(
+                InternalActivateClientIngress {
+                    client_runtime_id: binding.client_runtime_id.to_vec(),
+                    identities,
+                },
+            ),
+        );
+        let execution = self
+            .ingress_coordinator
+            .execute_until(
+                binding.client_runtime_id,
+                worker_generation,
+                request,
+                worker_operation_deadline(deadline)?,
+            )
+            .await;
+        let exact = execution.is_ok_and(|execution| {
+            execution.descriptor.is_none()
+                && execution.response.result == InternalWorkerResult::Ok as i32
+                && matches!(
+                    execution.response.outcome.as_ref(),
+                    Some(internal_worker_response::Outcome::ActivatedClientIngress(result))
+                        if result.client_runtime_id.as_slice() == binding.client_runtime_id
+                )
+        });
+        if !exact {
+            let _ = self
+                .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+                .await;
+            return Err(BackendError::CleanupIncomplete);
+        }
+        let mut state = self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        exact_ingress_entry_mut(&mut state, binding)?.phase = OpenIngressPhase::Active;
+        Ok(())
+    }
+
+    async fn destroy_ingress_one(
+        &self,
+        binding: IngressBackendBinding,
+        value: DestroyClientIngress,
+    ) -> Result<ConfirmedAbsent, BackendError> {
+        validate_ingress_backend_binding(
+            binding,
+            &value.client_runtime_id,
+            IngressBackendAction::Destroy,
+        )?;
+        let deadline = ingress_deadline(binding).map_err(|_| BackendError::CleanupIncomplete)?;
+        if self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_none()
+        {
+            return Ok(ConfirmedAbsent);
+        }
+        if self
+            .cleanup_ingress_exact(binding.client_runtime_id, binding.generation, deadline)
+            .await
+        {
+            Ok(ConfirmedAbsent)
+        } else {
+            Err(BackendError::CleanupIncomplete)
+        }
+    }
+
+    fn retain_failed_ingress(
+        &self,
+        binding: IngressBackendBinding,
+        worker: WorkerGenerationOwnership,
+    ) {
+        let worker_generation = worker.coordinates.worker_generation.get();
+        let mut state = self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.is_none() {
+            *state = Some(OpenIngressEntry {
+                helper_runtime_id: binding.helper_runtime_id,
+                client_runtime_id: binding.client_runtime_id,
+                backend_generation: binding.generation,
+                worker: Some(worker),
+                ingress_link: None,
+                parent_routing: None,
+                parent_policy: None,
+                worker_generation,
+                sockets: BTreeMap::new(),
+                acquired: BTreeSet::new(),
+                phase: OpenIngressPhase::Quarantined,
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // Exact worker, link, and journal cleanup is one transaction.
+    async fn cleanup_ingress_exact(
+        &self,
+        client_runtime_id: [u8; 16],
+        backend_generation: u64,
+        deadline: HardDeadline,
+    ) -> bool {
+        let (worker_generation, should_dispatch) = {
+            let state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(entry) = state.as_ref().filter(|entry| {
+                entry.client_runtime_id == client_runtime_id
+                    && entry.backend_generation == backend_generation
+            }) else {
+                return true;
+            };
+            (entry.worker_generation, entry.worker.is_some())
+        };
+        if should_dispatch {
+            let binding = IngressBackendBinding {
+                helper_runtime_id: [1; 32],
+                client_runtime_id,
+                generation: backend_generation,
+                request_id: client_runtime_id,
+                request_digest: [0xd2; 32],
+                action: IngressBackendAction::Destroy,
+                call_deadline: tokio::time::Instant::now(),
+            };
+            let destroy = worker_request(
+                ingress_worker_request_id(binding, STAGE_DESTROY_INGRESS),
+                internal_worker_request::Operation::DestroyClientIngress(
+                    InternalDestroyClientIngress {
+                        client_runtime_id: client_runtime_id.to_vec(),
+                    },
+                ),
+            );
+            let _ = self
+                .ingress_coordinator
+                .execute_until(client_runtime_id, worker_generation, destroy, deadline)
+                .await;
+        }
+        let worker = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.as_mut().and_then(|entry| entry.worker.take())
+        };
+        if let Some(worker) = worker {
+            match self
+                .ingress_coordinator
+                .settle_and_terminate_lifecycle_until(worker, deadline)
+            {
+                WorkerGenerationReap::Confirmed(_) => {}
+                WorkerGenerationReap::Retained { ownership, .. } => {
+                    let mut state = self
+                        .ingress_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(entry) = state.as_mut() {
+                        entry.worker = Some(*ownership);
+                        entry.phase = OpenIngressPhase::Quarantined;
+                    }
+                    return false;
+                }
+            }
+        }
+        let parent_policy = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.as_mut().and_then(|entry| entry.parent_policy.take())
+        };
+        if let Some(parent_policy) = parent_policy {
+            if super::client_ingress_policy::remove_parent(&parent_policy, deadline).is_err() {
+                let mut state = self
+                    .ingress_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = state.as_mut() {
+                    entry.parent_policy = Some(parent_policy);
+                    entry.phase = OpenIngressPhase::Quarantined;
+                }
+                return false;
+            }
+        }
+        let parent_routing = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.as_mut().and_then(|entry| entry.parent_routing.take())
+        };
+        if let Some(parent_routing) = parent_routing {
+            let removed = BirthNamespaceKernel::connect(deadline).and_then(|mut kernel| {
+                kernel.remove_client_ingress_parent_routing(&parent_routing, deadline)
+            });
+            if removed.is_err() {
+                let mut state = self
+                    .ingress_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = state.as_mut() {
+                    entry.parent_routing = Some(parent_routing);
+                    entry.phase = OpenIngressPhase::Quarantined;
+                }
+                return false;
+            }
+        }
+        let ingress_link = {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.as_mut().and_then(|entry| entry.ingress_link.take())
+        };
+        if let Some(ingress_link) = ingress_link {
+            let removed = BirthNamespaceKernel::connect(deadline)
+                .and_then(|mut kernel| kernel.delete_client_ingress_veth(&ingress_link, deadline));
+            if removed.is_err() {
+                let mut state = self
+                    .ingress_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = state.as_mut() {
+                    entry.ingress_link = Some(ingress_link);
+                    entry.phase = OpenIngressPhase::Quarantined;
+                }
+                return false;
+            }
+        }
+        let mut state = self
+            .ingress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.as_ref().is_some_and(|entry| {
+            entry.client_runtime_id == client_runtime_id
+                && entry.backend_generation == backend_generation
+                && entry.worker.is_none()
+                && entry.ingress_link.is_none()
+                && entry.parent_routing.is_none()
+                && entry.parent_policy.is_none()
+        }) {
+            *state = None;
+            true
+        } else {
+            false
         }
     }
 }
@@ -1640,6 +2704,93 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
         )
     }
 
+    fn add_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<AddMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(
+            async move { completion.complete(self.add_mptcp_endpoint_one(binding, value).await) },
+        )
+    }
+
+    fn remove_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<RemoveMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move {
+            completion.complete(self.remove_mptcp_endpoint_one(binding, value).await)
+        })
+    }
+
+    fn prepare_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<PrepareClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<Vec<PreparedKernelIngressSocket>>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.prepare_ingress_one(binding, value).await,
+            }
+        })
+    }
+
+    fn acquire_client_ingress_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressSocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.acquire_ingress_one(binding, value).await,
+            }
+        })
+    }
+
+    fn acquire_client_ingress_reply_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressReplySocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.acquire_ingress_reply_one(binding, value).await,
+            }
+        })
+    }
+
+    fn activate_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<ActivateClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<()>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.activate_ingress_one(binding, value).await,
+            }
+        })
+    }
+
+    fn destroy_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<DestroyClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<ConfirmedAbsent>> {
+        let (binding, value) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: self.destroy_ingress_one(binding, value).await,
+            }
+        })
+    }
+
     fn transport_socket_supported(
         self: Arc<Self>,
         request: BackendRuntimeRequest,
@@ -1650,8 +2801,8 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
                 .map_err(|_| BackendError::Unavailable);
             let runtime_matches = binding.helper_runtime_id.iter().any(|byte| *byte != 0)
                 && lock_state(&self.state)
-                    .as_ref()
-                    .is_none_or(|entry| entry.key.helper_runtime_id == binding.helper_runtime_id);
+                    .values()
+                    .all(|entry| entry.key.helper_runtime_id == binding.helper_runtime_id);
             if binding.action != crate::engine::BackendRuntimeAction::QueryTransportSocket
                 || !runtime_matches
             {
@@ -1671,14 +2822,36 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
             let result = match deadline {
                 Err(error) => Err(error),
                 Ok(deadline) => {
-                    let key = lock_state(&self.state).as_ref().map(|entry| entry.key);
-                    if let Some(key) = key {
+                    let ingress = self
+                        .ingress_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .map(|entry| (entry.client_runtime_id, entry.backend_generation));
+                    if let Some((client_runtime_id, backend_generation)) = ingress {
+                        if !self
+                            .cleanup_ingress_exact(client_runtime_id, backend_generation, deadline)
+                            .await
+                        {
+                            return request.complete(Err(BackendError::CleanupIncomplete));
+                        }
+                    }
+                    let keys = lock_state(&self.state).keys().copied().collect::<Vec<_>>();
+                    for key in keys {
                         if !self.cleanup_exact(key, deadline, true).await {
                             return request.complete(Err(BackendError::CleanupIncomplete));
                         }
                     }
-                    if self.coordinator.shutdown_until(deadline).await == ShutdownStatus::Confirmed
-                        && lock_state(&self.state).is_none()
+                    if self.ingress_coordinator.shutdown_until(deadline).await
+                        == ShutdownStatus::Confirmed
+                        && self.coordinator.shutdown_until(deadline).await
+                            == ShutdownStatus::Confirmed
+                        && self
+                            .ingress_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .is_none()
+                        && lock_state(&self.state).is_empty()
                     {
                         Ok(())
                     } else {
@@ -1881,14 +3054,22 @@ fn validate_activate_batch_binding(
         return Err(BackendError::Invalid);
     }
     match context {
-        ContextRole::Client | ContextRole::Exit => {
-            let [activation] = value.leases.as_slice() else {
+        ContextRole::Client => {
+            if value.leases.iter().any(|activation| {
+                activation.maximum_up_mbps != 0
+                    || activation.maximum_down_mbps != 0
+                    || !activation.signed_client_relay_request.is_empty()
+            }) {
                 return Err(BackendError::Invalid);
-            };
-            if activation.maximum_up_mbps != 0
-                || activation.maximum_down_mbps != 0
-                || !activation.signed_client_relay_request.is_empty()
-            {
+            }
+        }
+        ContextRole::Exit => {
+            let native_authority = !value.leases[0].signed_client_relay_request.is_empty();
+            if value.leases.iter().any(|activation| {
+                activation.maximum_up_mbps != 0
+                    || activation.maximum_down_mbps != 0
+                    || activation.signed_client_relay_request.is_empty() == native_authority
+            }) {
                 return Err(BackendError::Invalid);
             }
         }
@@ -2000,6 +3181,7 @@ fn validate_probe_batch_binding(
     ))
 }
 
+#[allow(clippy::too_many_lines)] // The complete typed socket allowlist is deliberately co-located.
 fn validate_acquire_transport_binding(
     binding: BackendBinding,
     value: &AcquireTransportSocket,
@@ -2013,22 +3195,86 @@ fn validate_acquire_transport_binding(
     let role = functional_lease_role_for_wireguard(value.role).ok_or(BackendError::Invalid)?;
     let descriptor_kind =
         TransportSocketKind::try_from(value.descriptor_kind).map_err(|_| BackendError::Invalid)?;
-    if descriptor_kind != TransportSocketKind::QuicUdpUnconnected
-        || !matches!(role.context, ContextRole::Client | ContextRole::Exit)
-    {
+    let allowed = matches!(
+        (role.context, descriptor_kind),
+        (
+            ContextRole::Client | ContextRole::Exit,
+            TransportSocketKind::QuicUdpUnconnected | TransportSocketKind::NativeProbeUdpConnected
+        ) | (ContextRole::Client, TransportSocketKind::MptcpConnected)
+            | (ContextRole::Exit, TransportSocketKind::MptcpListener)
+    );
+    if !allowed {
         return Err(BackendError::Unavailable);
     }
-    let (local_address, local_port) =
-        parse_quic_overlay_socket_address(value.expected_local.as_ref())?;
-    // `operation_generation` is the engine's exact current Committed-context generation. The
+    let (local_address, local_port) = parse_overlay_socket_address(value.expected_local.as_ref())?;
+    let (internal_kind, expected_remote) = match descriptor_kind {
+        TransportSocketKind::QuicUdpUnconnected => {
+            if value.expected_remote.is_some() {
+                return Err(BackendError::Invalid);
+            }
+            (InternalTransportSocketKind::QuicUdpUnconnected, None)
+        }
+        TransportSocketKind::MptcpConnected => {
+            let (remote_address, remote_port) =
+                parse_overlay_socket_address(value.expected_remote.as_ref())?;
+            if remote_address == local_address && remote_port == local_port {
+                return Err(BackendError::Invalid);
+            }
+            (
+                InternalTransportSocketKind::MptcpConnected,
+                Some(InternalSocketAddress {
+                    address: remote_address.octets().to_vec(),
+                    port: u32::from(remote_port),
+                }),
+            )
+        }
+        TransportSocketKind::NativeProbeUdpConnected => {
+            let (remote_address, remote_port) =
+                parse_overlay_socket_address(value.expected_remote.as_ref())?;
+            if remote_address == local_address
+                || !native_probe_transport_tuple_matches(
+                    context_id,
+                    value.path_id,
+                    value.role,
+                    local_address,
+                    local_port,
+                    remote_address,
+                    remote_port,
+                )
+            {
+                return Err(BackendError::Invalid);
+            }
+            (
+                InternalTransportSocketKind::NativeProbeUdpConnected,
+                Some(InternalSocketAddress {
+                    address: remote_address.octets().to_vec(),
+                    port: u32::from(remote_port),
+                }),
+            )
+        }
+        TransportSocketKind::MptcpListener => {
+            if value.expected_remote.is_some() {
+                return Err(BackendError::Invalid);
+            }
+            (InternalTransportSocketKind::MptcpListener, None)
+        }
+        TransportSocketKind::Unspecified => return Err(BackendError::Invalid),
+    };
+    let (required_backend_phase, required_context_phase) =
+        if descriptor_kind == TransportSocketKind::NativeProbeUdpConnected {
+            (BackendPhase::Activated, ContextPhase::Activated)
+        } else {
+            (BackendPhase::Committed, ContextPhase::Committed)
+        };
+    // `operation_generation` is the engine's exact current stable-context generation. The
     // lineage's `backend_generation` deliberately remains the stable Prepare generation across
     // Activate and Probe/Commit. The engine owns exact current-generation checks before dispatch
     // and again before accepting the completion; this adapter must validate both identities
     // without incorrectly requiring them to be equal.
     if binding.action != BackendAction::AcquireTransportSocket
-        || binding.phase != BackendPhase::Committed
+        || binding.phase != required_backend_phase
         || binding.operation_kind != OperationKind::Acquire
-        || binding.prior_phase != Some(ContextPhase::Committed)
+        || binding.prior_phase != Some(required_context_phase)
         || binding.operation_sequence == 0
         || binding.operation_generation == 0
         || binding.request_id.iter().all(|byte| *byte == 0)
@@ -2048,7 +3294,6 @@ fn validate_acquire_transport_binding(
         || value.context_handle.len() != HELPER_HANDLE_BYTES
         || value.context_handle.iter().all(|byte| *byte == 0)
         || !(1..=8).contains(&value.path_id)
-        || value.expected_remote.is_some()
     {
         return Err(BackendError::Invalid);
     }
@@ -2061,14 +3306,106 @@ fn validate_acquire_transport_binding(
             route_context_id: context_id.to_vec(),
             path_id: value.path_id,
             role: role.internal_endpoint as i32,
-            descriptor_kind: InternalTransportSocketKind::QuicUdpUnconnected as i32,
+            descriptor_kind: internal_kind as i32,
             expected_local: Some(InternalSocketAddress {
                 address: local_address.octets().to_vec(),
                 port: u32::from(local_port),
             }),
-            expected_remote: None,
+            expected_remote,
         },
     ))
+}
+
+fn validate_mptcp_endpoint_binding(
+    state: &Mutex<OpenLeaseState>,
+    binding: BackendBinding,
+    route_context_id: &[u8],
+    context_handle: &[u8],
+    path_id: u32,
+    action: BackendAction,
+) -> Result<(OpenLineageKey, u64, ContextRole), BackendError> {
+    let context_id: [u8; 16] = route_context_id
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    let key = OpenLineageKey::from(binding.lineage);
+    if !matches!(
+        action,
+        BackendAction::AddMptcpEndpoint | BackendAction::RemoveMptcpEndpoint
+    ) || binding.action != action
+        || binding.phase != BackendPhase::Committed
+        || binding.prior_phase != Some(ContextPhase::Committed)
+        || binding.operation_kind != OperationKind::MptcpEndpoint
+        || binding.operation_sequence == 0
+        || binding.operation_generation == 0
+        || binding.request_id.iter().all(|byte| *byte == 0)
+        || binding.request_digest.iter().all(|byte| *byte == 0)
+        || context_id != key.context_id
+        || !(1..=8).contains(&path_id)
+        || context_handle.len() != HELPER_HANDLE_BYTES
+        || context_handle.iter().all(|byte| *byte == 0)
+    {
+        return Err(BackendError::Invalid);
+    }
+    ensure_hard_is_live(key)?;
+    let state = lock_state(state);
+    let entry = exact_entry(&state, key)?;
+    let generation = entry
+        .worker
+        .as_ref()
+        .ok_or(BackendError::CleanupIncomplete)?
+        .coordinates
+        .worker_generation
+        .get();
+    let role = match entry.context_role {
+        ContextRole::Client => WireguardRole::Client as i32,
+        ContextRole::Exit => WireguardRole::Exit as i32,
+        ContextRole::Unspecified | ContextRole::Relay => return Err(BackendError::Invalid),
+    };
+    let exact = entry.phase == OpenLeasePhase::Committed
+        && entry.wireguard.iter().any(|wireguard| {
+            wireguard.resource().key() == (u8::try_from(path_id).unwrap_or(0), role)
+        })
+        && entry
+            .prepared
+            .iter()
+            .any(|lease| (lease.path_id, lease.role) == (path_id, role))
+        && entry
+            .activated
+            .iter()
+            .any(|lease| (lease.prepared.path_id, lease.prepared.role) == (path_id, role));
+    if !exact {
+        return Err(BackendError::Invalid);
+    }
+    Ok((key, generation, entry.context_role))
+}
+
+fn validated_mptcp_endpoint_mode(
+    context_role: ContextRole,
+    mode: i32,
+    backup: bool,
+    listener_port: u32,
+) -> Result<InternalMptcpMode, BackendError> {
+    let mode = MptcpEndpointMode::try_from(mode).map_err(|_| BackendError::Invalid)?;
+    let requires_listener_port =
+        context_role == ContextRole::Exit && mode == MptcpEndpointMode::Signal && !backup;
+    let listener_port_is_valid = if requires_listener_port {
+        u16::try_from(listener_port).is_ok()
+    } else {
+        listener_port == 0
+    };
+    if mode == MptcpEndpointMode::Unspecified
+        || matches!(context_role, ContextRole::Unspecified | ContextRole::Relay)
+        || (context_role == ContextRole::Exit && (mode != MptcpEndpointMode::Signal || backup))
+        || !listener_port_is_valid
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(match mode {
+        MptcpEndpointMode::Signal => InternalMptcpMode::Signal,
+        MptcpEndpointMode::Subflow => InternalMptcpMode::Subflow,
+        MptcpEndpointMode::SignalAndSubflow => InternalMptcpMode::SignalAndSubflow,
+        MptcpEndpointMode::Unspecified => return Err(BackendError::Invalid),
+    })
 }
 
 #[cfg(test)]
@@ -2079,7 +3416,7 @@ pub(super) fn validate_acquire_transport_binding_for_engine_test(
     validate_acquire_transport_binding(binding, value).map(|_| ())
 }
 
-fn parse_quic_overlay_socket_address(
+fn parse_overlay_socket_address(
     value: Option<&TransportSocketAddress>,
 ) -> Result<(Ipv6Addr, u16), BackendError> {
     let value = value.ok_or(BackendError::Invalid)?;
@@ -2096,6 +3433,74 @@ fn parse_quic_overlay_socket_address(
     Ok((address, port))
 }
 
+const fn public_transport_kind_to_internal(
+    kind: TransportSocketKind,
+) -> Option<InternalTransportSocketKind> {
+    match kind {
+        TransportSocketKind::MptcpConnected => Some(InternalTransportSocketKind::MptcpConnected),
+        TransportSocketKind::MptcpListener => Some(InternalTransportSocketKind::MptcpListener),
+        TransportSocketKind::QuicUdpUnconnected => {
+            Some(InternalTransportSocketKind::QuicUdpUnconnected)
+        }
+        TransportSocketKind::NativeProbeUdpConnected => {
+            Some(InternalTransportSocketKind::NativeProbeUdpConnected)
+        }
+        TransportSocketKind::Unspecified => None,
+    }
+}
+
+fn native_probe_transport_tuple_matches(
+    context_id: [u8; 16],
+    path_id: u32,
+    role: i32,
+    local_address: Ipv6Addr,
+    local_port: u16,
+    remote_address: Ipv6Addr,
+    remote_port: u16,
+) -> bool {
+    let Ok(path_id) = u8::try_from(path_id) else {
+        return false;
+    };
+    let Ok(addresses) = overlay_addresses(context_id, path_id) else {
+        return false;
+    };
+    match WireguardRole::try_from(role) {
+        Ok(WireguardRole::Client) => {
+            (local_address, local_port, remote_address, remote_port)
+                == (
+                    addresses.client,
+                    NATIVE_PROBE_CLIENT_PORT,
+                    addresses.exit,
+                    NATIVE_PROBE_EXIT_PORT,
+                )
+        }
+        Ok(WireguardRole::Exit) => {
+            (local_address, local_port, remote_address, remote_port)
+                == (
+                    addresses.exit,
+                    NATIVE_PROBE_EXIT_PORT,
+                    addresses.client,
+                    NATIVE_PROBE_CLIENT_PORT,
+                )
+        }
+        Ok(WireguardRole::Unspecified | WireguardRole::RelayClient | WireguardRole::RelayExit)
+        | Err(_) => false,
+    }
+}
+
+fn transport_remote_matches(
+    public: Option<&TransportSocketAddress>,
+    internal: Option<&InternalSocketAddress>,
+) -> bool {
+    match (public, internal) {
+        (None, None) => true,
+        (Some(public), Some(internal)) => {
+            public.address == internal.address && public.port == internal.port
+        }
+        (None | Some(_), None | Some(_)) => false,
+    }
+}
+
 fn ensure_hard_is_live(key: OpenLineageKey) -> Result<(), BackendError> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2108,25 +3513,28 @@ fn ensure_hard_is_live(key: OpenLineageKey) -> Result<(), BackendError> {
     Ok(())
 }
 
-fn validate_committed_acquire_entry(
+fn validate_acquire_entry(
     entry: &OpenLeaseEntry,
     value: &AcquireTransportSocket,
     internal: &InternalAcquireTransportSocket,
 ) -> Result<u64, BackendError> {
     let role = functional_lease_role_for_wireguard(value.role).ok_or(BackendError::Invalid)?;
-    let [wireguard] = entry.wireguard.as_slice() else {
+    let Some(index) = entry.wireguard.iter().position(|wireguard| {
+        wireguard.resource().key() == (u8::try_from(value.path_id).unwrap_or(0), value.role)
+    }) else {
         return Err(BackendError::Invalid);
     };
-    let [prepare] = entry.prepare.leases.as_slice() else {
-        return Err(BackendError::Invalid);
-    };
-    let [prepared] = entry.prepared.as_slice() else {
-        return Err(BackendError::Invalid);
-    };
-    let [activated] = entry.activated.as_slice() else {
-        return Err(BackendError::Invalid);
-    };
-    let [birth_may_exist] = entry.birth_may_exist.as_slice() else {
+    let Some((wireguard, prepare, prepared, activated, birth_may_exist)) = entry
+        .wireguard
+        .get(index)
+        .zip(entry.prepare.leases.get(index))
+        .zip(entry.prepared.get(index))
+        .zip(entry.activated.get(index))
+        .zip(entry.birth_may_exist.get(index))
+        .map(|((((wireguard, prepare), prepared), activated), birth)| {
+            (wireguard, prepare, prepared, activated, birth)
+        })
+    else {
         return Err(BackendError::Invalid);
     };
     let worker = entry
@@ -2142,9 +3550,16 @@ fn validate_committed_acquire_entry(
     let exact_prepare_local = prepare.local_overlay_address.as_ref().is_some_and(|local| {
         local.prefix_length == 128 && local.address.as_slice() == expected_overlay_bytes
     });
+    let required_phase = if TransportSocketKind::try_from(value.descriptor_kind)
+        == Ok(TransportSocketKind::NativeProbeUdpConnected)
+    {
+        OpenLeasePhase::Activated
+    } else {
+        OpenLeasePhase::Committed
+    };
     if !matches!(role.context, ContextRole::Client | ContextRole::Exit)
         || entry.context_role != role.context
-        || entry.phase != OpenLeasePhase::Committed
+        || entry.phase != required_phase
         || entry.child_cleanup.is_some()
         || entry.worker_cleanup.is_some()
         || entry.durable_prepare_terminal.is_some()
@@ -2152,8 +3567,14 @@ fn validate_committed_acquire_entry(
         || internal.route_context_id.as_slice() != entry.key.context_id
         || internal.path_id != value.path_id
         || internal.role != role.internal_endpoint as i32
-        || internal.descriptor_kind != InternalTransportSocketKind::QuicUdpUnconnected as i32
-        || internal.expected_remote.is_some()
+        || InternalTransportSocketKind::try_from(internal.descriptor_kind).ok()
+            != TransportSocketKind::try_from(value.descriptor_kind)
+                .ok()
+                .and_then(public_transport_kind_to_internal)
+        || !transport_remote_matches(
+            value.expected_remote.as_ref(),
+            internal.expected_remote.as_ref(),
+        )
         || !exact_internal_local
         || wireguard.resource().key() != (u8::try_from(value.path_id).unwrap_or(0), value.role)
         || wireguard.resource().hard_expires_at_unix() != entry.key.hard_expires_at_unix
@@ -2193,7 +3614,7 @@ fn classify_acquire_transport_execution(
                     && ready.role == request.role
                     && ready.descriptor_kind == request.descriptor_kind
                     && ready.local == request.expected_local
-                    && ready.remote.is_none()
+                    && ready.remote == request.expected_remote
         );
         return match (exact, execution.descriptor.take()) {
             (true, Some(descriptor)) => AcquireTransportExecution::Ready(descriptor),
@@ -2311,7 +3732,10 @@ const fn destroy_operation_shape_is_valid(binding: BackendBinding) -> bool {
         (OperationKind::Prepare, None)
             | (OperationKind::Activate, Some(ContextPhase::Prepared))
             | (OperationKind::Probe, Some(ContextPhase::Activated))
-            | (OperationKind::Acquire, Some(ContextPhase::Committed))
+            | (
+                OperationKind::Acquire,
+                Some(ContextPhase::Activated | ContextPhase::Committed),
+            )
             | (OperationKind::Destroy, Some(_))
             | (
                 OperationKind::Reconcile,
@@ -2383,18 +3807,20 @@ fn validate_functional_lease_batch_shape(
     match context {
         ContextRole::Client | ContextRole::Exit => {
             if leases.is_empty()
+                || leases.len() > 8
                 || leases.iter().any(|lease| {
                     functional_lease_role(context as i32, lease.role).is_none()
                         || !(1..=8).contains(&lease.path_id)
                 })
+                || leases.iter().enumerate().any(|(index, lease)| {
+                    leases[index + 1..]
+                        .iter()
+                        .any(|other| other.path_id == lease.path_id)
+                })
             {
                 return Err(BackendError::Invalid);
             }
-            if leases.len() == 1 {
-                Ok(())
-            } else {
-                Err(BackendError::Unavailable)
-            }
+            Ok(())
         }
         ContextRole::Relay => {
             let [client, exit] = leases else {
@@ -2496,7 +3922,7 @@ fn internal_prepare_batch_plan(
     key: OpenLineageKey,
     leases: &[RoutingLeasePlan],
 ) -> Result<PrepareLeases, BackendError> {
-    if resources.len() != leases.len() || !(1..=2).contains(&leases.len()) {
+    if resources.len() != leases.len() || leases.is_empty() || leases.len() > 8 {
         return Err(BackendError::Invalid);
     }
     let leases = resources
@@ -2568,7 +3994,8 @@ fn verified_internal_activate_batch_plan(
 ) -> Result<ActivateLeases, BackendError> {
     if resources.len() != prepared.len()
         || prepared.len() != activations.len()
-        || !(1..=2).contains(&prepared.len())
+        || prepared.is_empty()
+        || prepared.len() > 8
     {
         return Err(BackendError::Invalid);
     }
@@ -2624,9 +4051,27 @@ fn verified_internal_activate_batch_plan(
 
 struct VerifiedActivationAuthority {
     context: ContextRole,
-    request: Option<VerifiedControlMessage<RelayReservationRequest>>,
-    relay: VerifiedControlMessage<RelayReservation>,
+    client_request: Option<VerifiedRelayClientRequest>,
+    paths: Vec<VerifiedPathActivationAuthority>,
+}
+
+struct VerifiedPathActivationAuthority {
+    relay: Option<VerifiedControlMessage<RelayReservation>>,
     exit: VerifiedControlMessage<RelayAuthorization>,
+    native_exit: Option<VerifiedNativeProbeAuthorizationChain>,
+}
+
+enum VerifiedRelayClientRequest {
+    Reservation {
+        request: Box<VerifiedControlMessage<RelayReservationRequest>>,
+        capability: Box<VerifiedControlMessage<ClientSessionCapability>>,
+        exit_reservation: Box<VerifiedControlMessage<ExitReservation>>,
+    },
+    NativeStart {
+        start: Box<VerifiedControlMessage<NativeProbeStart>>,
+        signed_sha256: [u8; 32],
+        start_hash: [u8; 32],
+    },
 }
 
 #[allow(
@@ -2642,7 +4087,7 @@ fn verify_activation_authority(
     replay_cache: &mut ReplayCache,
     replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
 ) -> Result<VerifiedActivationAuthority, BackendError> {
-    let (request, capability, exit_reservation) = if context == ContextRole::Relay {
+    let client_request = if context == ContextRole::Relay {
         let [client, exit] = activations else {
             return Err(BackendError::Invalid);
         };
@@ -2651,66 +4096,119 @@ fn verify_activation_authority(
         {
             return Err(BackendError::Invalid);
         }
-        let verified = verify_control_message::<RelayReservationRequest>(
+        Some(verify_relay_client_request(
             &client.signed_client_relay_request,
             now_ms,
-            TimePolicy::default(),
             replay_cache,
-        )
-        .map_err(|error| protocol_backend_error(&error))?;
-        replay_keys.push((*verified.sender_id(), *verified.nonce()));
-        let verified_capability = verify_control_message::<ClientSessionCapability>(
-            &verified.message().client_session_capability,
-            now_ms,
-            TimePolicy::default(),
-            replay_cache,
-        )
-        .map_err(|error| protocol_backend_error(&error))?;
-        replay_keys.push((
-            *verified_capability.sender_id(),
-            *verified_capability.nonce(),
-        ));
-        let verified_exit_reservation = verify_control_message::<ExitReservation>(
-            &verified.message().exit_reservation,
-            now_ms,
-            TimePolicy::default(),
-            replay_cache,
-        )
-        .map_err(|error| protocol_backend_error(&error))?;
-        replay_keys.push((
-            *verified_exit_reservation.sender_id(),
-            *verified_exit_reservation.nonce(),
-        ));
-        (
-            Some(verified),
-            Some(verified_capability),
-            Some(verified_exit_reservation),
-        )
+            replay_keys,
+        )?)
     } else {
-        (None, None, None)
+        None
     };
+    let mut paths = Vec::with_capacity(if context == ContextRole::Relay {
+        1
+    } else {
+        prepared.len()
+    });
+    if context == ContextRole::Relay {
+        if activations.iter().skip(1).any(|activation| {
+            activation.signed_relay_reservation != activations[0].signed_relay_reservation
+        }) || prepared
+            .iter()
+            .any(|lease| lease.path_id != prepared[0].path_id)
+        {
+            return Err(BackendError::Invalid);
+        }
+        let path = verify_path_activation_authority(
+            key,
+            &prepared[0],
+            &activations[0],
+            now_ms,
+            replay_cache,
+            replay_keys,
+        )?;
+        match client_request.as_ref().ok_or(BackendError::Invalid)? {
+            VerifiedRelayClientRequest::Reservation {
+                request,
+                capability,
+                exit_reservation,
+            } if verified_relay_request_scope(
+                request,
+                capability,
+                exit_reservation,
+                path.relay.as_ref().ok_or(BackendError::Invalid)?,
+                &path.exit,
+            ) => {}
+            VerifiedRelayClientRequest::NativeStart {
+                start,
+                signed_sha256,
+                start_hash,
+            } if verified_native_start_scope(
+                key,
+                start,
+                signed_sha256,
+                start_hash,
+                path.relay.as_ref().ok_or(BackendError::Invalid)?,
+                &path.exit,
+            ) => {}
+            _ => return Err(BackendError::Invalid),
+        }
+        paths.push(path);
+    } else {
+        for (prepared, activation) in prepared.iter().zip(activations) {
+            paths.push(
+                if context == ContextRole::Exit
+                    && !activation.signed_client_relay_request.is_empty()
+                {
+                    verify_native_exit_path_activation_authority(
+                        key,
+                        prepared,
+                        activation,
+                        now_ms,
+                        replay_cache,
+                        replay_keys,
+                    )?
+                } else {
+                    verify_path_activation_authority(
+                        key,
+                        prepared,
+                        activation,
+                        now_ms,
+                        replay_cache,
+                        replay_keys,
+                    )?
+                },
+            );
+        }
+    }
+    Ok(VerifiedActivationAuthority {
+        context,
+        client_request,
+        paths,
+    })
+}
+
+fn verify_path_activation_authority(
+    key: OpenLineageKey,
+    prepared: &PreparedWorkerLease,
+    activation: &volparossa_routing::LeaseActivation,
+    now_ms: u64,
+    replay_cache: &mut ReplayCache,
+    replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
+) -> Result<VerifiedPathActivationAuthority, BackendError> {
     let (relay, exit) = verify_relay_reservation(
-        &activations[0].signed_relay_reservation,
+        &activation.signed_relay_reservation,
         now_ms,
         TimePolicy::default(),
         replay_cache,
     )
-    .map_err(|error| {
-        rollback_replay_entries(replay_cache, replay_keys);
-        protocol_backend_error(&error)
-    })?;
+    .map_err(|error| protocol_backend_error(&error))?;
     replay_keys.push((*relay.sender_id(), *relay.nonce()));
     replay_keys.push((*exit.sender_id(), *exit.nonce()));
-
     let relay_message = relay.message();
     let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
-    if activations.iter().skip(1).any(|activation| {
-        activation.signed_relay_reservation != activations[0].signed_relay_reservation
-    }) || relay_message.route_context_id.as_slice() != key.context_id
-        || relay_message.path_id != prepared[0].path_id
-        || prepared
-            .iter()
-            .any(|lease| lease.path_id != relay_message.path_id)
+    if relay_message.route_context_id.as_slice() != key.context_id
+        || relay_message.path_id != prepared.path_id
         || relay.expires_at_ms() < hard_expires_at_ms
         || exit.expires_at_ms() < hard_expires_at_ms
         || !signer_matches_peer_id(relay.sender_public_key(), &relay_message.relay_peer_id)
@@ -2719,23 +4217,272 @@ fn verify_activation_authority(
     {
         return Err(BackendError::Invalid);
     }
-    if context == ContextRole::Relay
-        && !verified_relay_request_scope(
-            request.as_ref().ok_or(BackendError::Invalid)?,
-            capability.as_ref().ok_or(BackendError::Invalid)?,
-            exit_reservation.as_ref().ok_or(BackendError::Invalid)?,
-            &relay,
-            &exit,
-        )
+    Ok(VerifiedPathActivationAuthority {
+        relay: Some(relay),
+        exit,
+        native_exit: None,
+    })
+}
+
+fn verify_native_exit_path_activation_authority(
+    key: OpenLineageKey,
+    prepared: &PreparedWorkerLease,
+    activation: &volparossa_routing::LeaseActivation,
+    now_ms: u64,
+    replay_cache: &mut ReplayCache,
+    replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
+) -> Result<VerifiedPathActivationAuthority, BackendError> {
+    let native_exit =
+        verify_native_probe_authorization_chain(&activation.signed_client_relay_request, now_ms)
+            .map_err(|error| protocol_backend_error(&error))?;
+    let exit = verify_control_message::<RelayAuthorization>(
+        &activation.signed_relay_reservation,
+        now_ms,
+        TimePolicy::default(),
+        replay_cache,
+    )
+    .map_err(|error| protocol_backend_error(&error))?;
+    replay_keys.push((*exit.sender_id(), *exit.nonce()));
+    verify_native_exit_authorization_scope(key, prepared, activation, &native_exit, &exit)?;
+    Ok(VerifiedPathActivationAuthority {
+        relay: None,
+        exit,
+        native_exit: Some(native_exit),
+    })
+}
+
+fn verify_native_exit_authorization_scope(
+    key: OpenLineageKey,
+    prepared: &PreparedWorkerLease,
+    activation: &volparossa_routing::LeaseActivation,
+    chain: &VerifiedNativeProbeAuthorizationChain,
+    authorization: &VerifiedControlMessage<RelayAuthorization>,
+) -> Result<(), BackendError> {
+    let scope = chain.scope();
+    let data_relay = scope.data_relay.as_ref().ok_or(BackendError::Invalid)?;
+    let control = scope.control.as_ref().ok_or(BackendError::Invalid)?;
+    let exit = scope.exit.as_ref().ok_or(BackendError::Invalid)?;
+    let client_endpoint = chain
+        .client_endpoint()
+        .endpoint
+        .as_ref()
+        .ok_or(BackendError::Invalid)?;
+    let exit_binding = chain.exit_endpoint();
+    let exit_endpoint = exit_binding
+        .endpoint
+        .as_ref()
+        .ok_or(BackendError::Invalid)?;
+    let message = authorization.message();
+    let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
+    let start_hash = native_probe_start_hash(chain.encoded_start())
+        .map_err(|error| protocol_backend_error(&error))?;
+    let lease_handle: [u8; 32] = activation
+        .lease_handle
+        .as_slice()
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    let prepared_commitment = native_probe_prepared_lease_commitment(
+        &key.helper_runtime_id,
+        &key.context_id,
+        &lease_handle,
+        exit_endpoint,
+    )
+    .map_err(|error| protocol_backend_error(&error))?;
+
+    if authorization.sender_public_key().as_slice() != exit.public_key
+        || !signer_matches_peer_id(authorization.sender_public_key(), &exit.peer_id)
+        || authorization.expires_at_ms() < hard_expires_at_ms
+        || message.reservation_id != scope.probe_id
+        || message.route_context_id.as_slice() != key.context_id
+        || message.path_id != prepared.path_id
+        || message.path_id != scope.candidate_ordinal
+        || message.relay_node_id != data_relay.node_id
+        || message.relay_peer_id != data_relay.peer_id
+        || message.exit_node_id != exit.node_id
+        || message.exit_peer_id != exit.peer_id
+        || message.client_session_id != scope.client_session_id
+        || message.client_session_public_key != scope.client_session_public_key
+        || message.allowed_transports.as_slice() != [scope.transport]
+        || message.maximum_up_mbps != scope.reserved_up_mbps
+        || message.maximum_down_mbps != scope.reserved_down_mbps
+        || message.client_wireguard_public_key != client_endpoint.public_key
+        || message.exit_wireguard_endpoint.as_ref() != Some(exit_endpoint)
+        || message.policy_hash != scope.policy_hash
+        || message.created_at_ms != chain.started_at_ms()
+        || message.expires_at_ms != chain.expires_at_ms()
+        || message.capability_id != scope.attempt_id
+        || message.exit_boot_id != chain.exit_boot_id()
+        || message.hold_id != scope.probe_id
+        || message.finalize_id.as_slice() != &start_hash[..16]
+        || message.control_relay_node_id != control.node_id
+        || message.control_relay_peer_id != control.peer_id
+        || exit_binding.helper_runtime_id.as_slice() != key.helper_runtime_id
+        || exit_binding.route_context_id.as_slice() != key.context_id
+        || exit_binding.path_id != prepared.path_id
+        || exit_binding.prepared_lease_commitment.as_slice() != prepared_commitment
     {
         return Err(BackendError::Invalid);
     }
-    Ok(VerifiedActivationAuthority {
-        context,
-        request,
-        relay,
-        exit,
-    })
+    Ok(())
+}
+
+fn verify_relay_client_request(
+    encoded: &[u8],
+    now_ms: u64,
+    replay_cache: &mut ReplayCache,
+    replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
+) -> Result<VerifiedRelayClientRequest, BackendError> {
+    let envelope: SignedEnvelope = decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE)
+        .map_err(|error| protocol_backend_error(&error))?;
+    match ControlMessageType::try_from(envelope.message_type) {
+        Ok(ControlMessageType::RelayReservationRequest) => {
+            let request = verify_control_message::<RelayReservationRequest>(
+                encoded,
+                now_ms,
+                TimePolicy::default(),
+                replay_cache,
+            )
+            .map_err(|error| protocol_backend_error(&error))?;
+            replay_keys.push((*request.sender_id(), *request.nonce()));
+            let capability = verify_control_message::<ClientSessionCapability>(
+                &request.message().client_session_capability,
+                now_ms,
+                TimePolicy::default(),
+                replay_cache,
+            )
+            .map_err(|error| protocol_backend_error(&error))?;
+            replay_keys.push((*capability.sender_id(), *capability.nonce()));
+            let exit_reservation = verify_control_message::<ExitReservation>(
+                &request.message().exit_reservation,
+                now_ms,
+                TimePolicy::default(),
+                replay_cache,
+            )
+            .map_err(|error| protocol_backend_error(&error))?;
+            replay_keys.push((*exit_reservation.sender_id(), *exit_reservation.nonce()));
+            Ok(VerifiedRelayClientRequest::Reservation {
+                request: Box::new(request),
+                capability: Box::new(capability),
+                exit_reservation: Box::new(exit_reservation),
+            })
+        }
+        Ok(ControlMessageType::NativeProbeStart) => {
+            let start = verify_control_message::<NativeProbeStart>(
+                encoded,
+                now_ms,
+                TimePolicy::default(),
+                replay_cache,
+            )
+            .map_err(|error| protocol_backend_error(&error))?;
+            replay_keys.push((*start.sender_id(), *start.nonce()));
+            let start_hash =
+                native_probe_start_hash(encoded).map_err(|error| protocol_backend_error(&error))?;
+            Ok(VerifiedRelayClientRequest::NativeStart {
+                start: Box::new(start),
+                signed_sha256: Sha256::digest(encoded).into(),
+                start_hash,
+            })
+        }
+        _ => Err(BackendError::Invalid),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native Start must independently bind every actor and grant scope"
+)]
+fn verified_native_start_scope(
+    key: OpenLineageKey,
+    start: &VerifiedControlMessage<NativeProbeStart>,
+    signed_sha256: &[u8; 32],
+    start_hash: &[u8; 32],
+    relay: &VerifiedControlMessage<RelayReservation>,
+    authorization: &VerifiedControlMessage<RelayAuthorization>,
+) -> bool {
+    let start_message = start.message();
+    let relay_message = relay.message();
+    let authorization_message = authorization.message();
+    let Some(scope) = start_message.scope.as_ref() else {
+        return false;
+    };
+    let Some(data_relay) = scope.data_relay.as_ref() else {
+        return false;
+    };
+    let Some(control_relay) = scope.control.as_ref() else {
+        return false;
+    };
+    let Some(exit) = scope.exit.as_ref() else {
+        return false;
+    };
+    let Some(client_binding) = start_message.client_endpoint.as_ref() else {
+        return false;
+    };
+    let Some(client_endpoint) = client_binding.endpoint.as_ref() else {
+        return false;
+    };
+    let Some(relay_client_endpoint) = relay_message.relay_client_wireguard_endpoint.as_ref() else {
+        return false;
+    };
+    let Some(relay_exit_endpoint) = relay_message.relay_exit_wireguard_endpoint.as_ref() else {
+        return false;
+    };
+    let Some(exit_endpoint) = authorization_message.exit_wireguard_endpoint.as_ref() else {
+        return false;
+    };
+    let family_matches = [
+        client_endpoint,
+        relay_client_endpoint,
+        relay_exit_endpoint,
+        exit_endpoint,
+    ]
+    .iter()
+    .all(|endpoint| native_endpoint_family_matches(scope.address_family, endpoint));
+    let finalize_id = &start_hash[..16];
+
+    start.sender_public_key().as_slice() == scope.client_session_public_key
+        && start.sender_public_key().as_slice() == relay_message.client_session_public_key
+        && start.sender_public_key() != relay.sender_public_key()
+        && start.sender_public_key() != authorization.sender_public_key()
+        && scope.attempt_id.as_slice() == key.context_id
+        && scope.probe_id == relay_message.reservation_id
+        && scope.attempt_id == relay_message.route_context_id
+        && scope.attempt_id == relay_message.capability_id
+        && scope.client_session_id == relay_message.client_session_id
+        && scope.client_session_public_key == relay_message.client_session_public_key
+        && data_relay.node_id == relay_message.relay_node_id
+        && data_relay.peer_id == relay_message.relay_peer_id
+        && data_relay.public_key.as_slice() == relay.sender_public_key()
+        && control_relay.node_id == relay_message.control_relay_node_id
+        && control_relay.peer_id == relay_message.control_relay_peer_id
+        && exit.node_id == relay_message.exit_node_id
+        && exit.peer_id == relay_message.exit_peer_id
+        && exit.public_key.as_slice() == authorization.sender_public_key()
+        && relay_message.path_id == scope.candidate_ordinal
+        && relay_message.allowed_transports.as_slice() == [scope.transport]
+        && relay_message.maximum_up_mbps == scope.reserved_up_mbps
+        && relay_message.maximum_down_mbps == scope.reserved_down_mbps
+        && authorization_message.maximum_up_mbps == scope.reserved_up_mbps
+        && authorization_message.maximum_down_mbps == scope.reserved_down_mbps
+        && relay_message.policy_hash == scope.policy_hash
+        && relay_message.created_at_ms == start_message.started_at_ms
+        && relay_message.expires_at_ms == start_message.expires_at_ms
+        && relay_message.expires_at_ms <= scope.attempt_expires_at_ms
+        && relay_message.hold_id == scope.probe_id
+        && relay_message.finalize_id.as_slice() == finalize_id
+        && relay_message.signed_client_relay_request_sha256.as_slice() == signed_sha256
+        && relay_message.client_wireguard_public_key == client_endpoint.public_key
+        && client_binding.helper_runtime_id.as_slice() != key.helper_runtime_id
+        && family_matches
+}
+
+fn native_endpoint_family_matches(family: i32, endpoint: &WireguardEndpoint) -> bool {
+    matches!(
+        (
+            ObservationAddressFamily::try_from(family),
+            endpoint.underlay_ip.len()
+        ),
+        (Ok(ObservationAddressFamily::Ipv4), 4) | (Ok(ObservationAddressFamily::Ipv6), 16)
+    )
 }
 
 fn verified_relay_request_scope(
@@ -2823,54 +4570,65 @@ fn verified_activation_endpoints(
 ) -> Result<Vec<VerifiedWireguardEndpoint>, BackendError> {
     match authority.context {
         ContextRole::Client => {
-            let [prepared] = prepared else {
-                return Err(BackendError::Invalid);
-            };
-            if authority
-                .relay
-                .message()
-                .client_wireguard_public_key
-                .as_slice()
-                != prepared.public_key
-            {
+            if authority.paths.len() != prepared.len() {
                 return Err(BackendError::Invalid);
             }
             authority
-                .relay
-                .message()
-                .relay_client_wireguard_endpoint
-                .as_ref()
-                .and_then(verified_wireguard_endpoint)
-                .map(|endpoint| vec![endpoint])
-                .ok_or(BackendError::Invalid)
+                .paths
+                .iter()
+                .zip(prepared)
+                .map(|(path, prepared)| {
+                    let relay = path.relay.as_ref().ok_or(BackendError::Invalid)?;
+                    if relay.message().client_wireguard_public_key.as_slice() != prepared.public_key
+                    {
+                        return Err(BackendError::Invalid);
+                    }
+                    relay
+                        .message()
+                        .relay_client_wireguard_endpoint
+                        .as_ref()
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)
+                })
+                .collect()
         }
         ContextRole::Exit => {
-            let [prepared] = prepared else {
-                return Err(BackendError::Invalid);
-            };
-            let signed_local = authority
-                .exit
-                .message()
-                .exit_wireguard_endpoint
-                .as_ref()
-                .and_then(verified_wireguard_endpoint)
-                .ok_or(BackendError::Invalid)?;
-            if (
-                signed_local.public_key,
-                signed_local.address,
-                signed_local.port,
-            ) != (prepared.public_key, underlay.address, prepared.listen_port)
-            {
+            if authority.paths.len() != prepared.len() {
                 return Err(BackendError::Invalid);
             }
             authority
-                .relay
-                .message()
-                .relay_exit_wireguard_endpoint
-                .as_ref()
-                .and_then(verified_wireguard_endpoint)
-                .map(|endpoint| vec![endpoint])
-                .ok_or(BackendError::Invalid)
+                .paths
+                .iter()
+                .zip(prepared)
+                .map(|(path, prepared)| {
+                    let (signed_local, relay_exit) = if let Some(chain) = &path.native_exit {
+                        (
+                            chain.exit_endpoint().endpoint.as_ref(),
+                            chain.relay_exit_endpoint().endpoint.as_ref(),
+                        )
+                    } else {
+                        let relay = path.relay.as_ref().ok_or(BackendError::Invalid)?;
+                        (
+                            path.exit.message().exit_wireguard_endpoint.as_ref(),
+                            relay.message().relay_exit_wireguard_endpoint.as_ref(),
+                        )
+                    };
+                    let signed_local = signed_local
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)?;
+                    if (
+                        signed_local.public_key,
+                        signed_local.address,
+                        signed_local.port,
+                    ) != (prepared.public_key, underlay.address, prepared.listen_port)
+                    {
+                        return Err(BackendError::Invalid);
+                    }
+                    relay_exit
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)
+                })
+                .collect()
         }
         ContextRole::Relay => {
             verified_relay_activation_endpoints(authority, prepared, underlay, activations)
@@ -2879,6 +4637,10 @@ fn verified_activation_endpoints(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the complete Relay grant and two endpoint bindings remain one fail-closed check"
+)]
 fn verified_relay_activation_endpoints(
     authority: &VerifiedActivationAuthority,
     prepared: &[PreparedWorkerLease],
@@ -2891,21 +4653,52 @@ fn verified_relay_activation_endpoints(
     let [client_activation, exit_activation] = activations else {
         return Err(BackendError::Invalid);
     };
-    let verified_request = authority.request.as_ref().ok_or(BackendError::Invalid)?;
-    let request = verified_request.message();
-    let relay = authority.relay.message();
-    let request_hash =
-        relay_reservation_request_sha256(&client_activation.signed_client_relay_request)
-            .map_err(|_| BackendError::Invalid)?;
+    let client_request = authority
+        .client_request
+        .as_ref()
+        .ok_or(BackendError::Invalid)?;
+    let [path] = authority.paths.as_slice() else {
+        return Err(BackendError::Invalid);
+    };
+    let relay_authority = path.relay.as_ref().ok_or(BackendError::Invalid)?;
+    let relay = relay_authority.message();
+    let (request_sender, request_hash, client_peer) = match client_request {
+        VerifiedRelayClientRequest::Reservation { request, .. } => (
+            request.sender_public_key(),
+            relay_reservation_request_sha256(&client_activation.signed_client_relay_request)
+                .map_err(|_| BackendError::Invalid)?,
+            request
+                .message()
+                .client_wireguard_endpoint
+                .as_ref()
+                .and_then(verified_wireguard_endpoint)
+                .ok_or(BackendError::Invalid)?,
+        ),
+        VerifiedRelayClientRequest::NativeStart {
+            start,
+            signed_sha256,
+            ..
+        } => (
+            start.sender_public_key(),
+            *signed_sha256,
+            start
+                .message()
+                .client_endpoint
+                .as_ref()
+                .and_then(|binding| binding.endpoint.as_ref())
+                .and_then(verified_wireguard_endpoint)
+                .ok_or(BackendError::Invalid)?,
+        ),
+    };
     let signed_hash: [u8; 32] = relay
         .signed_client_relay_request_sha256
         .as_slice()
         .try_into()
         .map_err(|_| BackendError::Invalid)?;
     if request_hash != signed_hash
-        || verified_request.sender_public_key().as_slice() != relay.client_session_public_key
-        || verified_request.sender_public_key() == authority.relay.sender_public_key()
-        || verified_request.sender_public_key() == authority.exit.sender_public_key()
+        || request_sender.as_slice() != relay.client_session_public_key
+        || request_sender == relay_authority.sender_public_key()
+        || request_sender == path.exit.sender_public_key()
         || client_activation.maximum_up_mbps
             != u32::try_from(relay.maximum_up_mbps).map_err(|_| BackendError::Invalid)?
         || client_activation.maximum_down_mbps
@@ -2944,12 +4737,7 @@ fn verified_relay_activation_endpoints(
     ) {
         return Err(BackendError::Invalid);
     }
-    let client_peer = request
-        .client_wireguard_endpoint
-        .as_ref()
-        .and_then(verified_wireguard_endpoint)
-        .ok_or(BackendError::Invalid)?;
-    let exit_peer = authority
+    let exit_peer = path
         .exit
         .message()
         .exit_wireguard_endpoint
@@ -3314,7 +5102,7 @@ fn matches_prepared_batch(
     else {
         return None;
     };
-    if prepared.leases.len() != leases.len() || !(1..=2).contains(&leases.len()) {
+    if prepared.leases.len() != leases.len() || leases.is_empty() || leases.len() > 8 {
         return None;
     }
     let mut output = Vec::with_capacity(leases.len());
@@ -3358,7 +5146,7 @@ fn matches_activated_batch(
     else {
         return None;
     };
-    if activated.leases.len() != prepared.len() || !(1..=2).contains(&prepared.len()) {
+    if activated.leases.len() != prepared.len() || prepared.is_empty() || prepared.len() > 8 {
         return None;
     }
     activated
@@ -3410,7 +5198,7 @@ fn matches_probed_batch(
     else {
         return None;
     };
-    if probed.leases.len() != activated.len() || !(1..=2).contains(&activated.len()) {
+    if probed.leases.len() != activated.len() || activated.is_empty() || activated.len() > 8 {
         return None;
     }
     probed
@@ -3479,6 +5267,198 @@ fn prepare_deadline(binding: BackendBinding) -> Result<HardDeadline, BackendErro
     HardDeadline::at(binding.call_deadline.into_std()).map_err(|_| BackendError::Unavailable)
 }
 
+fn ingress_deadline(binding: IngressBackendBinding) -> Result<HardDeadline, BackendError> {
+    HardDeadline::at(binding.call_deadline.into_std()).map_err(|_| BackendError::Unavailable)
+}
+
+fn validate_ingress_backend_binding(
+    binding: IngressBackendBinding,
+    client_runtime_id: &[u8],
+    action: IngressBackendAction,
+) -> Result<(), BackendError> {
+    if binding.action != action
+        || binding.helper_runtime_id.iter().all(|byte| *byte == 0)
+        || binding.client_runtime_id.iter().all(|byte| *byte == 0)
+        || binding.generation == 0
+        || binding.request_id.iter().all(|byte| *byte == 0)
+        || binding.request_digest.iter().all(|byte| *byte == 0)
+        || client_runtime_id != binding.client_runtime_id
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(())
+}
+
+fn ingress_worker_request_id(binding: IngressBackendBinding, stage: u8) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"VOLPAROSSA functional ingress worker request v1\0");
+    hasher.update(&binding.helper_runtime_id);
+    hasher.update(&binding.client_runtime_id);
+    hasher.update(&binding.generation.to_be_bytes());
+    hasher.update(&binding.request_id);
+    hasher.update(&binding.request_digest);
+    hasher.update(&[stage]);
+    let mut request_id = [0; 16];
+    request_id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    request_id
+}
+
+fn internal_ingress_kind(value: i32) -> Result<InternalIngressSocketKind, BackendError> {
+    match IngressSocketKind::try_from(value).map_err(|_| BackendError::Invalid)? {
+        IngressSocketKind::TransparentTcpListener => {
+            Ok(InternalIngressSocketKind::TransparentTcpListener)
+        }
+        IngressSocketKind::TransparentUdp => Ok(InternalIngressSocketKind::TransparentUdp),
+        IngressSocketKind::DnsTcpListener => Ok(InternalIngressSocketKind::DnsTcpListener),
+        IngressSocketKind::DnsUdp => Ok(InternalIngressSocketKind::DnsUdp),
+        IngressSocketKind::Unspecified => Err(BackendError::Invalid),
+    }
+}
+
+fn internal_ingress_family(value: i32) -> Result<InternalIngressAddressFamily, BackendError> {
+    match IngressAddressFamily::try_from(value).map_err(|_| BackendError::Invalid)? {
+        IngressAddressFamily::Ipv4 => Ok(InternalIngressAddressFamily::Ipv4),
+        IngressAddressFamily::Ipv6 => Ok(InternalIngressAddressFamily::Ipv6),
+        IngressAddressFamily::Unspecified => Err(BackendError::Invalid),
+    }
+}
+
+fn ingress_reply_address(value: &IngressSocketAddress) -> Result<SocketAddr, BackendError> {
+    let port = u16::try_from(value.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(BackendError::Invalid)?;
+    match value.address.as_slice() {
+        bytes if bytes.len() == 4 => {
+            let address =
+                Ipv4Addr::from(<[u8; 4]>::try_from(bytes).map_err(|_| BackendError::Invalid)?);
+            if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST
+            {
+                return Err(BackendError::Invalid);
+            }
+            Ok(SocketAddr::V4(SocketAddrV4::new(address, port)))
+        }
+        bytes if bytes.len() == 16 => {
+            let address =
+                Ipv6Addr::from(<[u8; 16]>::try_from(bytes).map_err(|_| BackendError::Invalid)?);
+            if address.is_unspecified() || address.is_multicast() {
+                return Err(BackendError::Invalid);
+            }
+            Ok(SocketAddr::V6(SocketAddrV6::new(address, port, 0, 0)))
+        }
+        _ => Err(BackendError::Invalid),
+    }
+}
+
+fn prove_local_ingress_application(
+    application: IpAddr,
+    deadline: HardDeadline,
+) -> Result<(), BackendError> {
+    deadline
+        .ensure_remaining()
+        .map_err(|_| BackendError::Unavailable)?;
+    let local = getifaddrs()
+        .map_err(|_| BackendError::Unavailable)?
+        .filter_map(|interface| match interface.address.as_ref() {
+            Some(address) if application.is_ipv4() => address
+                .as_sockaddr_in()
+                .copied()
+                .map(SocketAddrV4::from)
+                .map(SocketAddr::V4),
+            Some(address) => address
+                .as_sockaddr_in6()
+                .copied()
+                .map(SocketAddrV6::from)
+                .map(SocketAddr::V6),
+            None => None,
+        })
+        .any(|address| address.ip() == application);
+    deadline
+        .complete(local)
+        .map_err(|_| BackendError::Unavailable)?
+        .then_some(())
+        .ok_or(BackendError::Invalid)
+}
+
+fn canonical_worker_ingress_sockets(
+    sockets: Vec<crate::internal_protocol::PreparedIngressSocket>,
+) -> Option<Vec<PreparedKernelIngressSocket>> {
+    if sockets.len() != volparossa_routing::REQUIRED_INGRESS_SOCKETS {
+        return None;
+    }
+    let mut canonical = BTreeMap::new();
+    for socket in sockets {
+        let kind = InternalIngressSocketKind::try_from(socket.descriptor_kind).ok()?;
+        let family = InternalIngressAddressFamily::try_from(socket.address_family).ok()?;
+        if kind == InternalIngressSocketKind::Unspecified
+            || family == InternalIngressAddressFamily::Unspecified
+        {
+            return None;
+        }
+        let local = socket.local?;
+        let external_kind = match kind {
+            InternalIngressSocketKind::TransparentTcpListener => {
+                IngressSocketKind::TransparentTcpListener
+            }
+            InternalIngressSocketKind::TransparentUdp => IngressSocketKind::TransparentUdp,
+            InternalIngressSocketKind::DnsTcpListener => IngressSocketKind::DnsTcpListener,
+            InternalIngressSocketKind::DnsUdp => IngressSocketKind::DnsUdp,
+            InternalIngressSocketKind::Unspecified => return None,
+        };
+        let external_family = match family {
+            InternalIngressAddressFamily::Ipv4 => IngressAddressFamily::Ipv4,
+            InternalIngressAddressFamily::Ipv6 => IngressAddressFamily::Ipv6,
+            InternalIngressAddressFamily::Unspecified => return None,
+        };
+        let external = PreparedKernelIngressSocket {
+            descriptor_kind: external_kind as i32,
+            address_family: external_family as i32,
+            local: IngressSocketAddress {
+                address: local.address,
+                port: local.port,
+            },
+        };
+        if canonical
+            .insert(
+                (external.descriptor_kind, external.address_family),
+                external,
+            )
+            .is_some()
+        {
+            return None;
+        }
+    }
+    (canonical.len() == volparossa_routing::REQUIRED_INGRESS_SOCKETS)
+        .then(|| canonical.into_values().collect())
+}
+
+fn exact_ingress_entry(
+    entry: Option<&OpenIngressEntry>,
+    binding: IngressBackendBinding,
+) -> Result<&OpenIngressEntry, BackendError> {
+    entry
+        .filter(|entry| {
+            entry.helper_runtime_id == binding.helper_runtime_id
+                && entry.client_runtime_id == binding.client_runtime_id
+                && entry.backend_generation == binding.generation
+        })
+        .ok_or(BackendError::Invalid)
+}
+
+fn exact_ingress_entry_mut(
+    entry: &mut Option<OpenIngressEntry>,
+    binding: IngressBackendBinding,
+) -> Result<&mut OpenIngressEntry, BackendError> {
+    entry
+        .as_mut()
+        .filter(|entry| {
+            entry.helper_runtime_id == binding.helper_runtime_id
+                && entry.client_runtime_id == binding.client_runtime_id
+                && entry.backend_generation == binding.generation
+        })
+        .ok_or(BackendError::Invalid)
+}
+
 fn worker_operation_deadline(deadline: HardDeadline) -> Result<HardDeadline, BackendError> {
     deadline
         .before_tail(WORKER_FAIL_CLOSED_RETIREMENT_TAIL)
@@ -3496,11 +5476,11 @@ fn definite_worker_error(error: &WorkerV3Error) -> BackendError {
 }
 
 fn entry_generation(
-    state: &Mutex<Option<OpenLeaseEntry>>,
+    state: &Mutex<OpenLeaseState>,
     key: OpenLineageKey,
 ) -> Result<u64, BackendError> {
     let state = lock_state(state);
-    let worker = exact_entry(state.as_ref(), key)?
+    let worker = exact_entry(&state, key)?
         .worker
         .as_ref()
         .ok_or(BackendError::CleanupIncomplete)?;
@@ -3508,32 +5488,22 @@ fn entry_generation(
 }
 
 fn exact_entry(
-    state: Option<&OpenLeaseEntry>,
+    state: &OpenLeaseState,
     key: OpenLineageKey,
 ) -> Result<&OpenLeaseEntry, BackendError> {
-    state
-        .filter(|entry| entry.key == key)
-        .ok_or(BackendError::CleanupIncomplete)
+    state.get(&key).ok_or(BackendError::CleanupIncomplete)
 }
 
 fn exact_entry_mut(
-    state: &mut Option<OpenLeaseEntry>,
+    state: &mut OpenLeaseState,
     key: OpenLineageKey,
 ) -> Result<&mut OpenLeaseEntry, BackendError> {
-    state
-        .as_mut()
-        .filter(|entry| entry.key == key)
-        .ok_or(BackendError::CleanupIncomplete)
+    state.get_mut(&key).ok_or(BackendError::CleanupIncomplete)
 }
 
-fn remove_exact_entry(state: &Mutex<Option<OpenLeaseEntry>>, key: OpenLineageKey) -> bool {
+fn remove_exact_entry(state: &Mutex<OpenLeaseState>, key: OpenLineageKey) -> bool {
     let mut state = lock_state(state);
-    if state.as_ref().is_some_and(|entry| entry.key == key) {
-        *state = None;
-        true
-    } else {
-        false
-    }
+    state.remove(&key).is_some()
 }
 
 fn custody_context_id(custody: &DurableLeaseCustody) -> [u8; 16] {
@@ -3547,9 +5517,7 @@ fn custody_context_id(custody: &DurableLeaseCustody) -> [u8; 16] {
     }
 }
 
-fn lock_state(
-    state: &Mutex<Option<OpenLeaseEntry>>,
-) -> std::sync::MutexGuard<'_, Option<OpenLeaseEntry>> {
+fn lock_state(state: &Mutex<OpenLeaseState>) -> std::sync::MutexGuard<'_, OpenLeaseState> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3594,9 +5562,14 @@ mod tests {
     use nix::unistd::{getegid, geteuid};
     use tempfile::tempdir;
     use volparossa_protocol::{
-        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, RelayAuthorization, RelayReservation,
-        SignedEnvelope, Transport, decode_canonical, generate_nonce, node_id_from_public_key,
-        sign_control_message,
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
+        MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE, NativeProbeAuthorizationChain,
+        NativeProbeEndpointBinding, NativeProbeExitReady, NativeProbePathScope, NativeProbePermit,
+        NativeProbePermitRequest, NativeProbeRelayReady, NativeProbeStart,
+        PreselectionActorBinding, RelayAuthorization, RelayReservation, SignedEnvelope, Transport,
+        decode_canonical, encode_canonical, generate_nonce, native_probe_exit_ready_hash,
+        native_probe_permit_hash, native_probe_permit_request_hash, native_probe_relay_ready_hash,
+        node_id_from_public_key, sign_control_message,
     };
     use volparossa_test_support::SignedRouteFixture;
 
@@ -3613,6 +5586,14 @@ mod tests {
         },
     };
 
+    fn test_ingress_coordinator() -> WorkerCoordinator {
+        WorkerCoordinator::new(WorkerRegistry::new(
+            1,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ))
+    }
+
     fn backend_with_state(state: Option<OpenLeaseEntry>) -> FunctionalAlphaLeaseBackend {
         FunctionalAlphaLeaseBackend {
             coordinator: WorkerCoordinator::new(WorkerRegistry::new(
@@ -3620,9 +5601,13 @@ mod tests {
                 DEFAULT_MAX_CACHE_ENTRIES,
                 DEFAULT_MAX_TTL,
             )),
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(state),
+            state: Mutex::new(state.into()),
+            ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: None,
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         }
     }
 
@@ -3678,9 +5663,13 @@ mod tests {
         (
             FunctionalAlphaLeaseBackend {
                 coordinator,
+                ingress_coordinator: test_ingress_coordinator(),
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
-                state: Mutex::new(Some(entry)),
+                state: Mutex::new(Some(entry).into()),
+                ingress_state: Mutex::new(None),
+                trusted_agent_uid: 1_001,
                 durable_ownership: None,
+                dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
             },
             peer,
             alive,
@@ -3699,6 +5688,7 @@ mod tests {
             }],
             setup_expires_at_unix: open_key.setup_expires_at_unix,
             hard_expires_at_unix: open_key.hard_expires_at_unix,
+            traversal_hints: Vec::new(),
         }
     }
 
@@ -3802,6 +5792,7 @@ mod tests {
             context_role: role.context,
             worker: None,
             recovery: None,
+            restart_custody: None,
             durable: None,
             durable_prepare_terminal: None,
             wireguard: vec![wireguard],
@@ -3843,6 +5834,7 @@ mod tests {
             context_role: ContextRole::Relay,
             worker: None,
             recovery: None,
+            restart_custody: None,
             durable: None,
             durable_prepare_terminal: None,
             birth_may_exist: vec![false; wireguard.len()],
@@ -3868,6 +5860,19 @@ mod tests {
         binding.prior_phase = Some(ContextPhase::Committed);
         // Prepare owns the stable backend generation. Activate and Probe/Commit rotate the
         // engine's operation generation before a production Acquire can be dispatched.
+        binding.operation_generation = key.backend_generation.saturating_add(2);
+        binding
+    }
+
+    fn mptcp_endpoint_binding(key: OpenLineageKey, action: BackendAction) -> BackendBinding {
+        let mut binding = binding(
+            key,
+            OperationKind::MptcpEndpoint,
+            BackendPhase::Committed,
+            action,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        );
+        binding.prior_phase = Some(ContextPhase::Committed);
         binding.operation_generation = key.backend_generation.saturating_add(2);
         binding
     }
@@ -3970,14 +5975,61 @@ mod tests {
         (
             Arc::new(FunctionalAlphaLeaseBackend {
                 coordinator,
+                ingress_coordinator: test_ingress_coordinator(),
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
-                state: Mutex::new(Some(entry)),
+                state: Mutex::new(Some(entry).into()),
+                ingress_state: Mutex::new(None),
+                trusted_agent_uid: 1_001,
                 durable_ownership: None,
+                dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
             }),
             peer,
             alive,
             overlay,
         )
+    }
+
+    fn add_committed_transport_path(
+        backend: &FunctionalAlphaLeaseBackend,
+        key: OpenLineageKey,
+        role: WireguardRole,
+        path_id: u32,
+    ) -> Ipv6Addr {
+        let lease = RoutingLeasePlan {
+            path_id,
+            role: role as i32,
+        };
+        let wireguard = process_owned_resource(key, &lease).expect("additional live owner");
+        let overlay = wireguard.resource().local_address();
+        let mut prepare = internal_prepare_plan(wireguard.resource(), key, &lease);
+        let prepared = PreparedWorkerLease {
+            path_id,
+            role: role as i32,
+            public_key: [0x72_u8.wrapping_add(u8::try_from(path_id).unwrap_or(0)); 32],
+            listen_port: 31_337_u16.saturating_add(u16::try_from(path_id).unwrap_or(0)),
+        };
+        let activated = ActivatedWorkerLease {
+            prepared,
+            peer_public_key: [0x73_u8.wrapping_add(u8::try_from(path_id).unwrap_or(0)); 32],
+            baseline: KernelCounters {
+                path_id,
+                role: role as i32,
+                latest_handshake_unix: 1,
+                received_bytes: 2,
+                transmitted_bytes: 3,
+            },
+        };
+        let mut state = lock_state(&backend.state);
+        let entry = state.as_mut().expect("committed entry");
+        entry.wireguard.push(wireguard);
+        entry
+            .prepare
+            .leases
+            .push(prepare.leases.pop().expect("additional prepare lease"));
+        entry.prepared.push(prepared);
+        entry.activated.push(activated);
+        entry.birth_may_exist.push(true);
+        overlay
     }
 
     fn bound_freebind_udp(address: Ipv6Addr) -> (OwnedFd, u16) {
@@ -4023,7 +6075,7 @@ mod tests {
                     role: acquire.role,
                     descriptor_kind: acquire.descriptor_kind,
                     local: acquire.expected_local.clone(),
-                    remote: None,
+                    remote: acquire.expected_remote.clone(),
                 },
             )),
         )
@@ -4285,7 +6337,7 @@ mod tests {
                 .expect("well-formed but different Acquire request");
             let state = lock_state(&backend.state);
             assert_eq!(
-                validate_committed_acquire_entry(
+                validate_acquire_entry(
                     state.as_ref().expect("committed entry"),
                     &changed,
                     &changed_internal,
@@ -4294,7 +6346,7 @@ mod tests {
             );
         }
 
-        let unsupported_mptcp = AcquireTransportSocket {
+        let supported_mptcp = AcquireTransportSocket {
             descriptor_kind: TransportSocketKind::MptcpConnected as i32,
             expected_remote: Some(TransportSocketAddress {
                 address: {
@@ -4307,8 +6359,18 @@ mod tests {
             ..value.clone()
         };
         assert_eq!(
-            validate_acquire_transport_binding(binding, &unsupported_mptcp),
-            Err(BackendError::Unavailable)
+            validate_acquire_transport_binding(binding, &supported_mptcp).and_then(
+                |(_, internal)| {
+                    let state = lock_state(&backend.state);
+                    validate_acquire_entry(
+                        state.as_ref().expect("committed entry"),
+                        &supported_mptcp,
+                        &internal,
+                    )
+                    .map(|_| ())
+                }
+            ),
+            Ok(())
         );
         let unsupported_relay = AcquireTransportSocket {
             role: WireguardRole::RelayClient as i32,
@@ -4350,12 +6412,8 @@ mod tests {
             validate_acquire_transport_binding(binding, &value).expect("exact Acquire binding");
         let generation = {
             let state = lock_state(&backend.state);
-            validate_committed_acquire_entry(
-                state.as_ref().expect("committed entry"),
-                &value,
-                &internal,
-            )
-            .expect("exact committed singleton")
+            validate_acquire_entry(state.as_ref().expect("committed entry"), &value, &internal)
+                .expect("exact committed singleton")
         };
         assert_ne!(generation, 0);
         assert_acquire_binding_fail_closed(binding, &value);
@@ -4365,13 +6423,151 @@ mod tests {
             let mut state = lock_state(&backend.state);
             state.as_mut().expect("committed entry").phase = OpenLeasePhase::Activated;
             assert_eq!(
-                validate_committed_acquire_entry(state.as_ref().expect("entry"), &value, &internal,),
+                validate_acquire_entry(state.as_ref().expect("entry"), &value, &internal,),
                 Err(BackendError::Invalid)
             );
             state.as_mut().expect("committed entry").phase = OpenLeasePhase::Committed;
         }
         drop(peer);
         retire_transport_fixture(&backend, key).await;
+    }
+
+    #[tokio::test]
+    async fn committed_multipath_transport_acquire_selects_the_exact_requested_path() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = live_key([0x83; 16], now);
+        let (backend, peer, _alive, first_overlay) =
+            committed_transport_backend(key, WireguardRole::Client);
+        let second_overlay = add_committed_transport_path(&backend, key, WireguardRole::Client, 2);
+        let binding = acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+        let mut value = acquire_value(key, WireguardRole::Client, second_overlay, 41_002);
+        value.path_id = 2;
+        let (_, internal) =
+            validate_acquire_transport_binding(binding, &value).expect("path two Acquire binding");
+        {
+            let state = lock_state(&backend.state);
+            validate_acquire_entry(
+                state.as_ref().expect("multipath committed entry"),
+                &value,
+                &internal,
+            )
+            .expect("path two belongs to the shared committed context");
+        }
+
+        let wrong_path = AcquireTransportSocket {
+            path_id: 1,
+            ..value.clone()
+        };
+        let (_, wrong_internal) = validate_acquire_transport_binding(binding, &wrong_path)
+            .expect("well-formed but mismatched path binding");
+        {
+            let state = lock_state(&backend.state);
+            assert_eq!(
+                validate_acquire_entry(
+                    state.as_ref().expect("multipath committed entry"),
+                    &wrong_path,
+                    &wrong_internal,
+                ),
+                Err(BackendError::Invalid)
+            );
+        }
+        assert_ne!(first_overlay, second_overlay);
+        drop(peer);
+        retire_transport_fixture(&backend, key).await;
+    }
+
+    #[tokio::test]
+    async fn committed_exit_mptcp_signal_binding_is_exact_and_role_closed() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let exit_key = live_key([0x84; 16], now);
+        let (exit, exit_peer, _alive, _) =
+            committed_transport_backend(exit_key, WireguardRole::Exit);
+        let binding = mptcp_endpoint_binding(exit_key, BackendAction::AddMptcpEndpoint);
+        assert_eq!(
+            validate_mptcp_endpoint_binding(
+                &exit.state,
+                binding,
+                &exit_key.context_id,
+                &[0x71; HELPER_HANDLE_BYTES],
+                1,
+                BackendAction::AddMptcpEndpoint,
+            )
+            .map(|(_, _, role)| role),
+            Ok(ContextRole::Exit)
+        );
+        assert_eq!(
+            validated_mptcp_endpoint_mode(
+                ContextRole::Exit,
+                MptcpEndpointMode::Signal as i32,
+                false,
+                44_443,
+            ),
+            Ok(InternalMptcpMode::Signal)
+        );
+        assert_eq!(
+            validated_mptcp_endpoint_mode(
+                ContextRole::Exit,
+                MptcpEndpointMode::Signal as i32,
+                false,
+                0,
+            ),
+            Ok(InternalMptcpMode::Signal)
+        );
+        for (mode, backup) in [
+            (MptcpEndpointMode::Signal, true),
+            (MptcpEndpointMode::Subflow, false),
+            (MptcpEndpointMode::SignalAndSubflow, false),
+        ] {
+            assert_eq!(
+                validated_mptcp_endpoint_mode(ContextRole::Exit, mode as i32, backup, 44_443),
+                Err(BackendError::Invalid)
+            );
+        }
+        assert_eq!(
+            validated_mptcp_endpoint_mode(
+                ContextRole::Client,
+                MptcpEndpointMode::Subflow as i32,
+                false,
+                44_443,
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(
+            validate_mptcp_endpoint_binding(
+                &exit.state,
+                binding,
+                &exit_key.context_id,
+                &[0x71; HELPER_HANDLE_BYTES],
+                2,
+                BackendAction::AddMptcpEndpoint,
+            ),
+            Err(BackendError::Invalid)
+        );
+        drop(exit_peer);
+        retire_transport_fixture(&exit, exit_key).await;
+
+        let relay_key = live_key([0x85; 16], now);
+        let (relay, relay_peer, _alive, _) =
+            committed_transport_backend(relay_key, WireguardRole::RelayClient);
+        assert_eq!(
+            validate_mptcp_endpoint_binding(
+                &relay.state,
+                mptcp_endpoint_binding(relay_key, BackendAction::AddMptcpEndpoint),
+                &relay_key.context_id,
+                &[0x71; HELPER_HANDLE_BYTES],
+                1,
+                BackendAction::AddMptcpEndpoint,
+            ),
+            Err(BackendError::Invalid)
+        );
+        drop(relay_peer);
+        retire_transport_fixture(&relay, relay_key).await;
     }
 
     #[tokio::test]
@@ -4523,7 +6719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descriptor_shape_mismatch_is_closed_and_cleans_the_ambiguous_generation() {
+    async fn descriptor_shape_mismatch_is_closed_and_retains_the_committed_generation() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("fixture time")
@@ -4562,10 +6758,7 @@ mod tests {
         let completion = Arc::clone(&backend)
             .acquire_transport_socket(BackendRequest::new(binding, value))
             .await;
-        assert_eq!(
-            completion.result.err(),
-            Some(BackendError::CleanupIncomplete)
-        );
+        assert_eq!(completion.result.err(), Some(BackendError::Kernel));
         worker.join().expect("fake worker thread");
         observer
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -4577,8 +6770,13 @@ mod tests {
                 .expect("rejected descriptor closed"),
             0
         );
+        assert!(alive.load(Ordering::SeqCst));
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::Committed)
+        );
+        retire_transport_fixture(&backend, key).await;
         assert!(!alive.load(Ordering::SeqCst));
-        assert!(lock_state(&backend.state).is_none());
     }
 
     #[tokio::test]
@@ -4726,6 +6924,7 @@ mod tests {
             }],
             setup_expires_at_unix: key.setup_expires_at_unix,
             hard_expires_at_unix: key.hard_expires_at_unix,
+            traversal_hints: Vec::new(),
         };
         (binding, value)
     }
@@ -5095,6 +7294,67 @@ mod tests {
     }
 
     #[test]
+    fn functional_context_owners_are_bounded_and_removed_by_exact_lineage() {
+        let backend = backend_with_state(None);
+        let keys = (0..MAX_FUNCTIONAL_ALPHA_CONTEXTS)
+            .map(|index| {
+                let discriminator = u8::try_from(index + 1).expect("bounded context index");
+                OpenLineageKey {
+                    context_id: [discriminator; 16],
+                    backend_generation: u64::try_from(index + 1)
+                        .expect("bounded context generation"),
+                    prepare_request_id: [discriminator; 16],
+                    prepare_operation_digest: [discriminator; 32],
+                    ..key()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for context in &keys {
+            assert_eq!(
+                backend.reserve_entry(*context, ContextRole::Client, fixture_underlay()),
+                Ok(())
+            );
+        }
+        {
+            let state = lock_state(&backend.state);
+            assert_eq!(state.len(), MAX_FUNCTIONAL_ALPHA_CONTEXTS);
+            for context in &keys {
+                assert_eq!(
+                    exact_entry(&state, *context).map(|entry| entry.key),
+                    Ok(*context)
+                );
+            }
+        }
+
+        assert_eq!(
+            backend.reserve_entry(keys[0], ContextRole::Client, fixture_underlay()),
+            Err(BackendError::Invalid)
+        );
+        let overflow = OpenLineageKey {
+            context_id: [0x7f; 16],
+            backend_generation: 0x7f,
+            prepare_request_id: [0x7f; 16],
+            prepare_operation_digest: [0x7f; 32],
+            ..key()
+        };
+        assert_eq!(
+            backend.reserve_entry(overflow, ContextRole::Client, fixture_underlay()),
+            Err(BackendError::Capacity)
+        );
+
+        assert!(remove_exact_entry(&backend.state, keys[0]));
+        assert!(exact_entry(&lock_state(&backend.state), keys[1]).is_ok());
+        assert_eq!(
+            backend.reserve_entry(overflow, ContextRole::Client, fixture_underlay()),
+            Ok(())
+        );
+        assert!(!remove_exact_entry(&backend.state, keys[0]));
+        assert!(remove_exact_entry(&backend.state, overflow));
+        assert!(exact_entry(&lock_state(&backend.state), keys[1]).is_ok());
+    }
+
+    #[test]
     fn production_prepare_order_is_fail_closed() {
         let source = include_str!("functional_backend.rs");
         let prepare_start = source
@@ -5144,6 +7404,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the source-order regression audits one indivisible cleanup transaction"
+    )]
     fn production_clean_settlement_order_is_fail_closed() {
         let source = include_str!("functional_backend.rs");
         let cleanup_start = source
@@ -5157,15 +7421,24 @@ mod tests {
         let child_cleanup_classified = source[..cleanup_start]
             .rfind("classify_exact_child_cleanup(entry, key, execution.as_ref().ok())")
             .expect("phase/birth-classified child cleanup authority");
-        let retain_without_child_cleanup = source[..cleanup_start]
-            .rfind("// Exact child cleanup did not complete.")
-            .expect("unproven child cleanup retention");
         let exact_worker_reap = source[..cleanup_start]
             .rfind("WorkerGenerationReap::Confirmed(proof) =>")
             .expect("exact worker-generation reap");
+        let live_recovery_consumed = source[..cleanup_start]
+            .rfind("recovery.into_reaped_restart_custody(&proof)")
+            .expect("live recovery consumed after exact reap");
         let worker_reap_recorded = source[..cleanup_start]
             .rfind("entry.worker_cleanup.replace(proof)")
             .expect("affine worker reap evidence retention");
+        let dead_worker_reaper = source[..cleanup_start]
+            .rfind("self.dead_worker_reaper.cleanup(")
+            .expect("exact post-reap namespace cleanup");
+        let reaper_cleanup_recorded = source[..cleanup_start]
+            .rfind("entry.child_cleanup = Some(ExactChildCleanupConfirmed { key });")
+            .expect("post-reap namespace cleanup authority");
+        let retain_without_child_cleanup = source[..cleanup_start]
+            .rfind("// Neither the ordinary child nor the post-reap namespace reaper")
+            .expect("unproven child cleanup retention");
         let kernel_absent = source[..cleanup_start]
             .rfind("if !parent_absent")
             .expect("kernel absence gate");
@@ -5179,10 +7452,13 @@ mod tests {
             .rfind("self.settle_durable_cleanup(key, parent, deadline).await")
             .expect("durable cleanup call");
         assert!(
-            child_cleanup_classified < retain_without_child_cleanup
-                && retain_without_child_cleanup < exact_worker_reap
-                && exact_worker_reap < worker_reap_recorded
-                && worker_reap_recorded < kernel_absent
+            child_cleanup_classified < exact_worker_reap
+                && exact_worker_reap < live_recovery_consumed
+                && live_recovery_consumed < worker_reap_recorded
+                && worker_reap_recorded < dead_worker_reaper
+                && dead_worker_reaper < reaper_cleanup_recorded
+                && reaper_cleanup_recorded < retain_without_child_cleanup
+                && retain_without_child_cleanup < kernel_absent
                 && kernel_absent < all_cleanup_evidence
                 && all_cleanup_evidence < parent_absence
                 && parent_absence < durable_call
@@ -5218,6 +7494,9 @@ mod tests {
         let retry_manager_proof = cleanup
             .rfind("ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(")
             .expect("retry opaque manager-absence proof mint");
+        let restart_custody_released = cleanup
+            .find("drop(restart_custody.take());")
+            .expect("post-manager-proof restart custody release");
         let manager_absent = cleanup
             .find("handle.confirm_manager_absent_until(proof, deadline)")
             .expect("Absent transition");
@@ -5231,8 +7510,147 @@ mod tests {
                 && retry_authority < fdstore_retry
                 && fdstore_retry < retry_removal_validation
                 && retry_removal_validation < retry_manager_proof
-                && retry_manager_proof < manager_absent
+                && retry_manager_proof < restart_custody_released
+                && restart_custody_released < manager_absent
         );
+    }
+
+    fn contains_in_order(source: &str, needles: &[&str]) -> bool {
+        let mut remainder = source;
+        for needle in needles {
+            let Some(index) = remainder.find(needle) else {
+                return false;
+            };
+            remainder = &remainder[index + needle.len()..];
+        }
+        true
+    }
+
+    fn phase_split_namespace_custody_contract(worker: &str, functional: &str) -> bool {
+        let Some(worker_end) = worker.find("#[cfg(test)]\nmod tests {") else {
+            return false;
+        };
+        let worker = &worker[..worker_end];
+        let Some(functional_end) = functional.find("#[cfg(test)]\nmod tests {") else {
+            return false;
+        };
+        let functional = &functional[..functional_end];
+        let Some(reaped_start) = worker.find("struct ReapedWorkerRestartCustody {") else {
+            return false;
+        };
+        let Some(reaped_end_offset) =
+            worker[reaped_start..].find("\nimpl WorkerRecoveryIdentitySource {")
+        else {
+            return false;
+        };
+        let reaped = &worker[reaped_start..reaped_start + reaped_end_offset];
+        if !reaped.contains("restart: crate::worker_sandbox::PinnedWorkerRestartCustody,")
+            || reaped.contains("pending:")
+            || reaped.contains("WorkerRecoveryIdentitySource")
+        {
+            return false;
+        }
+        let Some(conversion_start) = worker.find("    fn into_reaped_restart_custody(") else {
+            return false;
+        };
+        let Some(conversion_end_offset) =
+            worker[conversion_start..].find("\n}\n\nimpl ReapedWorkerRestartCustody {")
+        else {
+            return false;
+        };
+        let conversion = &worker[conversion_start..conversion_start + conversion_end_offset];
+        if !contains_in_order(
+            conversion,
+            &[
+                "if self.pending.coordinates != reaped.coordinates",
+                "let Self {",
+                "pending,",
+                "restart_custody,",
+                "drop(pending);",
+                "ReapedWorkerRestartCustody {",
+                "restart: restart_custody,",
+            ],
+        ) {
+            return false;
+        }
+
+        let Some(cleanup_start) = functional.find("    async fn cleanup_exact(") else {
+            return false;
+        };
+        let Some(cleanup_end_offset) =
+            functional[cleanup_start..].find("\n    async fn settle_durable_cleanup(")
+        else {
+            return false;
+        };
+        let cleanup = &functional[cleanup_start..cleanup_start + cleanup_end_offset];
+        if !contains_in_order(
+            cleanup,
+            &[
+                "WorkerGenerationReap::Confirmed(proof) =>",
+                "let recovery = entry.recovery.take();",
+                "recovery.into_reaped_restart_custody(&proof)",
+                "entry.worker_cleanup.replace(proof)",
+                "entry.restart_custody.replace(restart_custody)",
+                "let parent_absent =",
+            ],
+        ) {
+            return false;
+        }
+
+        let Some(settle_start) = functional.find("    async fn settle_durable_cleanup(") else {
+            return false;
+        };
+        let Some(settle_end_offset) =
+            functional[settle_start..].find("\n    fn restore_durable_cleanup(")
+        else {
+            return false;
+        };
+        let settle = &functional[settle_start..settle_start + settle_end_offset];
+        contains_in_order(
+            settle,
+            &[
+                "manager_absence_proven != entry.restart_custody.is_none()",
+                "entry.restart_custody.take()",
+                "BorrowedCustodyPair::new(",
+                "remove_current_process_custody(",
+                ".verify_exact_target(custody.custody_name, &binding)",
+                "ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(",
+                "drop(restart_custody.take());",
+                "handle.confirm_manager_absent_until(proof, deadline)",
+                "self.restore_durable_cleanup(key, custody, None);",
+            ],
+        ) && functional.matches("drop(restart_custody.take());").count() == 1
+    }
+
+    #[test]
+    fn production_terminal_destroy_releases_namespace_custody_by_proven_phase() {
+        let worker = include_str!("../worker_v3.rs");
+        let functional = include_str!("functional_backend.rs");
+        assert!(phase_split_namespace_custody_contract(worker, functional));
+
+        let pending_leak = worker.replacen("drop(pending);", "let _pending = pending;", 1);
+        assert!(!phase_split_namespace_custody_contract(
+            &pending_leak,
+            functional
+        ));
+        let restart_leak = functional.replacen(
+            "drop(restart_custody.take());",
+            "let _restart_custody = restart_custody.take();",
+            1,
+        );
+        assert!(!phase_split_namespace_custody_contract(
+            worker,
+            &restart_leak
+        ));
+        let retained_local_fd = functional.replacen(
+            "self.restore_durable_cleanup(key, custody, None);",
+            "self.restore_durable_cleanup(key, custody, restart_custody);",
+            1,
+        );
+        assert!(!phase_split_namespace_custody_contract(
+            worker,
+            &retained_local_fd
+        ));
     }
 
     #[test]
@@ -5792,6 +8210,276 @@ mod tests {
         (key, binding, value, activated)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture reproduces the production native Exit authorization chain exactly"
+    )]
+    fn live_native_exit_activate_fixture() -> (
+        OpenLineageKey,
+        ActivateLeaseBatch,
+        PreparedWorkerLease,
+        UnderlayCandidate,
+        SignedRouteFixture,
+    ) {
+        let (mut key, _, mut value, prepared, underlay, route) = live_exit_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now_unix = now_ms / 1_000;
+        key.setup_expires_at_unix = now_unix + 5;
+        key.hard_expires_at_unix = now_unix + 10;
+        let expires_at_ms = now_ms + 20_000;
+        let relay = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
+        let relay_client_endpoint = relay
+            .relay_client_wireguard_endpoint
+            .clone()
+            .expect("RelayClient endpoint");
+        let relay_exit_endpoint = relay
+            .relay_exit_wireguard_endpoint
+            .clone()
+            .expect("RelayExit endpoint");
+        let exit_endpoint = relay
+            .exit_wireguard_endpoint
+            .clone()
+            .expect("Exit endpoint");
+        let client_endpoint =
+            decode_relay_request(route.relay_request(0).expect("client relay request"))
+                .client_wireguard_endpoint
+                .expect("Client endpoint");
+        let data_relay = native_actor(
+            route.relay_key(0).expect("Relay key"),
+            route.relay_peer_id(0).expect("Relay peer ID"),
+            0x81,
+            expires_at_ms + 5_000,
+        );
+        let exit = native_actor(
+            route.exit_key(),
+            route.exit_peer_id(),
+            0x82,
+            expires_at_ms + 5_000,
+        );
+        let address_family = match exit_endpoint.underlay_ip.len() {
+            4 => ObservationAddressFamily::Ipv4,
+            16 => ObservationAddressFamily::Ipv6,
+            _ => panic!("fixture endpoint family"),
+        };
+        let scope = NativeProbePathScope {
+            attempt_id: key.context_id.to_vec(),
+            probe_id: vec![0x83; 16],
+            candidate_set_hash: vec![0x84; 32],
+            candidate_ordinal: prepared.path_id,
+            data_relay: Some(data_relay.clone()),
+            control: Some(data_relay.clone()),
+            exit: Some(exit.clone()),
+            client_session_id: route.client_session_id().to_vec(),
+            client_session_public_key: route.client_key().verifying_key().to_bytes().to_vec(),
+            transport: Transport::UdpSinglePath as i32,
+            address_family: address_family as i32,
+            policy_version: 1,
+            policy_hash: relay.policy_hash.clone(),
+            policy_expires_at_ms: expires_at_ms + 5_000,
+            challenge_hash: vec![0x85; 32],
+            attempt_expires_at_ms: expires_at_ms,
+            required_path_count: 1,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
+        };
+        let client_binding = NativeProbeEndpointBinding {
+            helper_runtime_id: vec![0x86; 32],
+            route_context_id: key.context_id.to_vec(),
+            endpoint: Some(client_endpoint.clone()),
+            prepared_lease_commitment: vec![0x87; 32],
+            path_id: prepared.path_id,
+        };
+        let relay_client_binding = NativeProbeEndpointBinding {
+            helper_runtime_id: vec![0x88; 32],
+            route_context_id: key.context_id.to_vec(),
+            endpoint: Some(relay_client_endpoint),
+            prepared_lease_commitment: vec![0x89; 32],
+            path_id: prepared.path_id,
+        };
+        let relay_exit_binding = NativeProbeEndpointBinding {
+            helper_runtime_id: vec![0x88; 32],
+            route_context_id: key.context_id.to_vec(),
+            endpoint: Some(relay_exit_endpoint.clone()),
+            prepared_lease_commitment: vec![0x8a; 32],
+            path_id: prepared.path_id,
+        };
+        let lease_handle: [u8; 32] = value.leases[0]
+            .lease_handle
+            .as_slice()
+            .try_into()
+            .expect("Exit lease handle");
+        let exit_binding = NativeProbeEndpointBinding {
+            helper_runtime_id: key.helper_runtime_id.to_vec(),
+            route_context_id: key.context_id.to_vec(),
+            endpoint: Some(exit_endpoint.clone()),
+            prepared_lease_commitment: native_probe_prepared_lease_commitment(
+                &key.helper_runtime_id,
+                &key.context_id,
+                &lease_handle,
+                &exit_endpoint,
+            )
+            .expect("Exit lease commitment")
+            .to_vec(),
+            path_id: prepared.path_id,
+        };
+
+        let request_nonce = [0x8b; 32];
+        let request = NativeProbePermitRequest {
+            scope: Some(scope.clone()),
+            created_at_ms: now_ms,
+            expires_at_ms,
+            nonce: request_nonce.to_vec(),
+        };
+        let signed_request = sign_control_message(
+            &request,
+            route.client_key(),
+            now_ms,
+            expires_at_ms,
+            request_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Permit request");
+        let permit_nonce = [0x8c; 32];
+        let permit = NativeProbePermit {
+            request_hash: native_probe_permit_request_hash(&signed_request)
+                .expect("Permit request hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            issued_at_ms: now_ms + 1,
+            expires_at_ms,
+            nonce: permit_nonce.to_vec(),
+            exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
+        };
+        let signed_permit = sign_control_message(
+            &permit,
+            route.exit_key(),
+            permit.issued_at_ms,
+            expires_at_ms,
+            permit_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Permit");
+        let exit_ready_nonce = [0x8d; 32];
+        let exit_boot_id = vec![0x8e; 16];
+        let exit_ready = NativeProbeExitReady {
+            permit_hash: native_probe_permit_hash(&signed_permit)
+                .expect("Permit hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            relay_exit_endpoint: Some(relay_exit_binding),
+            exit_endpoint: Some(exit_binding),
+            ready_at_ms: now_ms + 2,
+            expires_at_ms,
+            nonce: exit_ready_nonce.to_vec(),
+            exit_boot_id: exit_boot_id.clone(),
+        };
+        let signed_exit_ready = sign_control_message(
+            &exit_ready,
+            route.exit_key(),
+            exit_ready.ready_at_ms,
+            expires_at_ms,
+            exit_ready_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Exit Ready");
+        let relay_ready_nonce = [0x8f; 32];
+        let relay_ready = NativeProbeRelayReady {
+            permit_hash: exit_ready.permit_hash.clone(),
+            exit_ready_hash: native_probe_exit_ready_hash(&signed_exit_ready)
+                .expect("Exit Ready hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            relay_client_endpoint: Some(relay_client_binding),
+            ready_at_ms: now_ms + 3,
+            expires_at_ms,
+            nonce: relay_ready_nonce.to_vec(),
+        };
+        let signed_relay_ready = sign_control_message(
+            &relay_ready,
+            route.relay_key(0).expect("Relay key"),
+            relay_ready.ready_at_ms,
+            expires_at_ms,
+            relay_ready_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Relay Ready");
+        let start_nonce = [0x90; 32];
+        let start = NativeProbeStart {
+            permit_hash: exit_ready.permit_hash,
+            relay_ready_hash: native_probe_relay_ready_hash(&signed_relay_ready)
+                .expect("Relay Ready hash")
+                .to_vec(),
+            scope: Some(scope.clone()),
+            client_endpoint: Some(client_binding),
+            started_at_ms: now_ms + 4,
+            expires_at_ms,
+            nonce: start_nonce.to_vec(),
+        };
+        let signed_start = sign_control_message(
+            &start,
+            route.client_key(),
+            start.started_at_ms,
+            expires_at_ms,
+            start_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed Start");
+        let chain = NativeProbeAuthorizationChain {
+            signed_permit_request: signed_request,
+            signed_permit,
+            signed_exit_ready,
+            signed_relay_ready,
+            signed_start: signed_start.clone(),
+        };
+        let encoded_chain = encode_canonical(&chain, MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE)
+            .expect("canonical native authorization chain");
+        let start_hash = native_probe_start_hash(&signed_start).expect("Start hash");
+        let authorization_nonce = [0x91; 32];
+        let authorization = RelayAuthorization {
+            reservation_id: scope.probe_id.clone(),
+            route_context_id: scope.attempt_id.clone(),
+            path_id: scope.candidate_ordinal,
+            relay_node_id: data_relay.node_id.clone(),
+            exit_node_id: exit.node_id.clone(),
+            client_session_id: scope.client_session_id.clone(),
+            allowed_transports: vec![scope.transport],
+            maximum_up_mbps: scope.reserved_up_mbps,
+            maximum_down_mbps: scope.reserved_down_mbps,
+            client_wireguard_public_key: client_endpoint.public_key,
+            exit_wireguard_endpoint: Some(exit_endpoint),
+            policy_hash: scope.policy_hash.clone(),
+            created_at_ms: start.started_at_ms,
+            expires_at_ms,
+            nonce: authorization_nonce.to_vec(),
+            relay_peer_id: data_relay.peer_id.clone(),
+            capability_id: scope.attempt_id.clone(),
+            client_session_public_key: scope.client_session_public_key.clone(),
+            exit_boot_id,
+            hold_id: scope.probe_id,
+            finalize_id: start_hash[..16].to_vec(),
+            control_relay_node_id: data_relay.node_id,
+            control_relay_peer_id: data_relay.peer_id,
+            exit_peer_id: exit.peer_id,
+        };
+        let signed_authorization = sign_control_message(
+            &authorization,
+            route.exit_key(),
+            authorization.created_at_ms,
+            expires_at_ms,
+            authorization_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed direct Exit authorization");
+        value.leases[0].peer_public_key = relay_exit_endpoint.public_key;
+        value.leases[0].peer_endpoint = Some(PublicUdpEndpoint {
+            address: relay_exit_endpoint.underlay_ip,
+            port: relay_exit_endpoint.listen_port,
+        });
+        value.leases[0].signed_relay_reservation = signed_authorization;
+        value.leases[0].signed_client_relay_request = encoded_chain;
+        (key, value, prepared, underlay, route)
+    }
+
     fn live_relay_activate_fixture() -> (
         OpenLineageKey,
         BackendBinding,
@@ -5897,6 +8585,157 @@ mod tests {
         (key, binding, value, prepared, underlay, route)
     }
 
+    fn live_native_relay_activate_fixture() -> (
+        OpenLineageKey,
+        ActivateLeaseBatch,
+        [PreparedWorkerLease; 2],
+        UnderlayCandidate,
+        SignedRouteFixture,
+    ) {
+        live_native_relay_activate_fixture_with(|_| {})
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture converts the finalized-route fixture into the exact native Start grant"
+    )]
+    fn live_native_relay_activate_fixture_with(
+        mutate_start: impl FnOnce(&mut NativeProbeStart),
+    ) -> (
+        OpenLineageKey,
+        ActivateLeaseBatch,
+        [PreparedWorkerLease; 2],
+        UnderlayCandidate,
+        SignedRouteFixture,
+    ) {
+        let (mut key, _, mut value, prepared, underlay, route) = live_relay_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now_unix = now_ms / 1_000;
+        key.setup_expires_at_unix = now_unix + 5;
+        key.hard_expires_at_unix = now_unix + 10;
+        let expires_at_ms = now_ms + 20_000;
+        let relay = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
+        let request = decode_relay_request(&value.leases[0].signed_client_relay_request);
+        let probe_id = [0x71; 16];
+        let data_relay = native_actor(
+            route.relay_key(0).expect("Relay key"),
+            route.relay_peer_id(0).expect("Relay peer ID"),
+            0x72,
+            expires_at_ms + 5_000,
+        );
+        let exit = native_actor(
+            route.exit_key(),
+            route.exit_peer_id(),
+            0x73,
+            expires_at_ms + 5_000,
+        );
+        let scope = NativeProbePathScope {
+            attempt_id: key.context_id.to_vec(),
+            probe_id: probe_id.to_vec(),
+            candidate_set_hash: vec![0x74; 32],
+            candidate_ordinal: 1,
+            data_relay: Some(data_relay.clone()),
+            control: Some(data_relay),
+            exit: Some(exit),
+            client_session_id: route.client_session_id().to_vec(),
+            client_session_public_key: route.client_key().verifying_key().to_bytes().to_vec(),
+            transport: Transport::TcpMptcp as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: 1,
+            policy_hash: relay.policy_hash.clone(),
+            policy_expires_at_ms: expires_at_ms + 5_000,
+            challenge_hash: vec![0x75; 32],
+            attempt_expires_at_ms: expires_at_ms,
+            required_path_count: 2,
+            reserved_up_mbps: relay.maximum_up_mbps,
+            reserved_down_mbps: relay.maximum_down_mbps,
+        };
+        let mut start = NativeProbeStart {
+            permit_hash: vec![0x76; 32],
+            relay_ready_hash: vec![0x77; 32],
+            scope: Some(scope),
+            client_endpoint: Some(NativeProbeEndpointBinding {
+                helper_runtime_id: vec![0x78; 32],
+                route_context_id: key.context_id.to_vec(),
+                endpoint: request.client_wireguard_endpoint.clone(),
+                prepared_lease_commitment: vec![0x79; 32],
+                path_id: 1,
+            }),
+            started_at_ms: now_ms,
+            expires_at_ms,
+            nonce: generate_nonce().to_vec(),
+        };
+        mutate_start(&mut start);
+        let start_nonce: [u8; 32] = start.nonce.as_slice().try_into().expect("Start nonce");
+        let signed_start = sign_control_message(
+            &start,
+            route.client_key(),
+            start.started_at_ms,
+            start.expires_at_ms,
+            start_nonce,
+            TimePolicy::default(),
+        )
+        .expect("signed native Start");
+        let signed_sha256: [u8; 32] = Sha256::digest(&signed_start).into();
+        let start_hash = native_probe_start_hash(&signed_start).expect("native Start hash");
+        let policy_hash = relay.policy_hash;
+        let grant = resign_consistent_grant(&route, |relay, authorization| {
+            relay.reservation_id = probe_id.to_vec();
+            relay.route_context_id = key.context_id.to_vec();
+            relay.path_id = 1;
+            relay.client_session_id = route.client_session_id().to_vec();
+            relay.allowed_transports = vec![Transport::TcpMptcp as i32];
+            relay.policy_hash.clone_from(&policy_hash);
+            relay.created_at_ms = now_ms;
+            relay.expires_at_ms = expires_at_ms;
+            relay.capability_id = key.context_id.to_vec();
+            relay.hold_id = probe_id.to_vec();
+            relay.finalize_id = start_hash[..16].to_vec();
+            relay.control_relay_node_id = route.relay_node_id(0).expect("Relay node ID").to_vec();
+            relay.control_relay_peer_id = route.relay_peer_id(0).expect("Relay peer ID").to_vec();
+            relay.signed_client_relay_request_sha256 = signed_sha256.to_vec();
+
+            authorization.reservation_id = probe_id.to_vec();
+            authorization.route_context_id = key.context_id.to_vec();
+            authorization.path_id = 1;
+            authorization.client_session_id = route.client_session_id().to_vec();
+            authorization.allowed_transports = vec![Transport::TcpMptcp as i32];
+            authorization.policy_hash.clone_from(&policy_hash);
+            authorization.created_at_ms = now_ms;
+            authorization.expires_at_ms = expires_at_ms;
+            authorization.capability_id = key.context_id.to_vec();
+            authorization.hold_id = probe_id.to_vec();
+            authorization.finalize_id = start_hash[..16].to_vec();
+            authorization.control_relay_node_id =
+                route.relay_node_id(0).expect("Relay node ID").to_vec();
+            authorization.control_relay_peer_id =
+                route.relay_peer_id(0).expect("Relay peer ID").to_vec();
+        });
+        for activation in &mut value.leases {
+            activation.signed_relay_reservation.clone_from(&grant);
+        }
+        value.leases[0].signed_client_relay_request = signed_start;
+        (key, value, prepared, underlay, route)
+    }
+
+    fn native_actor(
+        key: &SigningKey,
+        peer_id: &[u8],
+        seed: u8,
+        expires_at_ms: u64,
+    ) -> PreselectionActorBinding {
+        let public_key = key.verifying_key().to_bytes();
+        PreselectionActorBinding {
+            node_id: node_id_from_public_key(&public_key).to_vec(),
+            peer_id: peer_id.to_vec(),
+            public_key: public_key.to_vec(),
+            advertisement_sequence: 1,
+            advertisement_expires_at_ms: expires_at_ms,
+            advertisement_payload_hash: vec![seed; 32],
+            capability_expires_at_ms: expires_at_ms,
+        }
+    }
+
     fn live_relay_probe_fixture() -> (
         OpenLineageKey,
         BackendBinding,
@@ -5982,7 +8821,15 @@ mod tests {
         route: &SignedRouteFixture,
         mutate: impl FnOnce(&mut RelayReservation, &mut RelayAuthorization),
     ) -> Vec<u8> {
-        let mut relay = decode_relay_reservation(&route.relay_reservations()[0]);
+        resign_consistent_grant_from(route, &route.relay_reservations()[0], mutate)
+    }
+
+    fn resign_consistent_grant_from(
+        route: &SignedRouteFixture,
+        encoded: &[u8],
+        mutate: impl FnOnce(&mut RelayReservation, &mut RelayAuthorization),
+    ) -> Vec<u8> {
+        let mut relay = decode_relay_reservation(encoded);
         let mut exit = decode_relay_authorization(&relay.exit_authorization);
         mutate(&mut relay, &mut exit);
         let exit_nonce: [u8; 32] = exit.nonce.as_slice().try_into().expect("exit nonce");
@@ -6111,13 +8958,13 @@ mod tests {
             },
         )
         .expect("exit resource");
-        verified_internal_activate_plan(
+        verified_internal_activate_batch_plan(
             replay,
-            resource.resource(),
+            &[resource],
             key,
-            prepared,
+            &[prepared],
             underlay,
-            &value.leases[0],
+            &value.leases,
             now_ms,
         )
     }
@@ -6414,6 +9261,263 @@ mod tests {
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].role, WireguardRole::RelayClient as i32);
         assert_eq!(commits[1].role, WireguardRole::RelayExit as i32);
+    }
+
+    #[test]
+    fn relay_activate_accepts_exact_signed_native_start_grant() {
+        let (key, value, prepared, underlay, _) = live_native_relay_activate_fixture();
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verify_relay_fixture_plan(
+            &replay,
+            key,
+            &prepared,
+            underlay,
+            &value,
+            unix_milliseconds().expect("fixture time"),
+        )
+        .expect("verified native Relay pair");
+        assert_eq!(lock_replay_cache(&replay).len(), 3);
+        let [client, exit] = plan.leases.as_slice() else {
+            panic!("two native Relay endpoint activations")
+        };
+        assert_eq!(client.peer_public_key, value.leases[0].peer_public_key);
+        assert_eq!(exit.peer_public_key, value.leases[1].peer_public_key);
+    }
+
+    #[test]
+    fn client_activate_accepts_two_unique_grants_in_one_exact_route_context() {
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now = now_ms / 1_000;
+        let route =
+            SignedRouteFixture::new_with_path_ids(&[1, 2], 2, 8, &[Transport::TcpMptcp], now_ms)
+                .expect("two-path signed route");
+        let key = live_key(*route.route_context_id(), now);
+        let mut prepared = Vec::new();
+        let mut activations = Vec::new();
+        let mut resources = Vec::new();
+        for (index, signed) in route.relay_reservations().iter().enumerate() {
+            let relay = decode_relay_reservation(signed);
+            let path_id = relay.path_id;
+            let remote = relay
+                .relay_client_wireguard_endpoint
+                .as_ref()
+                .expect("RelayClient endpoint");
+            prepared.push(PreparedWorkerLease {
+                path_id,
+                role: WireguardRole::Client as i32,
+                public_key: relay
+                    .client_wireguard_public_key
+                    .as_slice()
+                    .try_into()
+                    .expect("Client key"),
+                listen_port: 51_820 + u16::try_from(index).expect("path index"),
+            });
+            activations.push(volparossa_routing::LeaseActivation {
+                lease_handle: vec![
+                    0x90 + u8::try_from(index).expect("path index");
+                    HELPER_HANDLE_BYTES
+                ],
+                path_id,
+                role: WireguardRole::Client as i32,
+                peer_public_key: remote.public_key.clone(),
+                peer_endpoint: Some(PublicUdpEndpoint {
+                    address: remote.underlay_ip.clone(),
+                    port: remote.listen_port,
+                }),
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                signed_relay_reservation: signed.clone(),
+                signed_client_relay_request: Vec::new(),
+            });
+            resources.push(
+                process_owned_resource(
+                    key,
+                    &RoutingLeasePlan {
+                        path_id,
+                        role: WireguardRole::Client as i32,
+                    },
+                )
+                .expect("Client resource"),
+            );
+        }
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verified_internal_activate_batch_plan(
+            &replay,
+            &resources,
+            key,
+            &prepared,
+            fixture_underlay(),
+            &activations,
+            now_ms,
+        )
+        .expect("shared two-path Client activation");
+        assert_eq!(
+            plan.leases
+                .iter()
+                .map(|lease| lease.path_id)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 4);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one substitution matrix proves the complete native activation scope and replay rollback"
+    )]
+    fn native_start_scope_hash_signature_and_path_substitutions_fail_closed() {
+        let mutations: [fn(&mut NativeProbeStart); 6] = [
+            |start| {
+                start.scope.as_mut().expect("scope").policy_hash[0] ^= 1;
+            },
+            |start| {
+                let scope = start.scope.as_mut().expect("scope");
+                scope.attempt_id[0] ^= 1;
+                start
+                    .client_endpoint
+                    .as_mut()
+                    .expect("Client binding")
+                    .route_context_id
+                    .clone_from(&scope.attempt_id);
+            },
+            |start| {
+                let key = SigningKey::from_bytes(&[0x81; 32]);
+                let public_key = key.verifying_key().to_bytes();
+                let actor = start
+                    .scope
+                    .as_mut()
+                    .expect("scope")
+                    .data_relay
+                    .as_mut()
+                    .expect("data Relay");
+                actor.node_id = node_id_from_public_key(&public_key).to_vec();
+                actor.public_key = public_key.to_vec();
+            },
+            |start| {
+                let key = SigningKey::from_bytes(&[0x82; 32]);
+                let public_key = key.verifying_key().to_bytes();
+                let actor = start
+                    .scope
+                    .as_mut()
+                    .expect("scope")
+                    .control
+                    .as_mut()
+                    .expect("control Relay");
+                actor.node_id = node_id_from_public_key(&public_key).to_vec();
+                actor.public_key = public_key.to_vec();
+            },
+            |start| {
+                let key = SigningKey::from_bytes(&[0x83; 32]);
+                let public_key = key.verifying_key().to_bytes();
+                let actor = start
+                    .scope
+                    .as_mut()
+                    .expect("scope")
+                    .exit
+                    .as_mut()
+                    .expect("Exit");
+                actor.node_id = node_id_from_public_key(&public_key).to_vec();
+                actor.public_key = public_key.to_vec();
+            },
+            |start| {
+                start
+                    .client_endpoint
+                    .as_mut()
+                    .expect("Client binding")
+                    .endpoint
+                    .as_mut()
+                    .expect("Client endpoint")
+                    .public_key[0] ^= 1;
+            },
+        ];
+        for mutate in mutations {
+            let (key, value, prepared, underlay, _) =
+                live_native_relay_activate_fixture_with(mutate);
+            let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+            assert_eq!(
+                verify_relay_fixture_plan(
+                    &replay,
+                    key,
+                    &prepared,
+                    underlay,
+                    &value,
+                    unix_milliseconds().expect("fixture time"),
+                ),
+                Err(BackendError::Invalid)
+            );
+            assert_eq!(lock_replay_cache(&replay).len(), 0);
+        }
+
+        let (key, mut value, prepared, underlay, route) = live_native_relay_activate_fixture();
+        let grant = resign_consistent_grant_from(
+            &route,
+            &value.leases[0].signed_relay_reservation,
+            |relay, _| relay.signed_client_relay_request_sha256[0] ^= 1,
+        );
+        for activation in &mut value.leases {
+            activation.signed_relay_reservation.clone_from(&grant);
+        }
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_relay_fixture_plan(
+                &replay,
+                key,
+                &prepared,
+                underlay,
+                &value,
+                unix_milliseconds().expect("fixture time"),
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 0);
+
+        let (key, mut value, prepared, underlay, _) = live_native_relay_activate_fixture();
+        *value.leases[0]
+            .signed_client_relay_request
+            .last_mut()
+            .expect("Start signature") ^= 1;
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_relay_fixture_plan(
+                &replay,
+                key,
+                &prepared,
+                underlay,
+                &value,
+                unix_milliseconds().expect("fixture time"),
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 0);
+
+        let (key, mut value, mut prepared, underlay, route) = live_native_relay_activate_fixture();
+        let grant = resign_consistent_grant_from(
+            &route,
+            &value.leases[0].signed_relay_reservation,
+            |relay, authorization| {
+                relay.path_id = 2;
+                authorization.path_id = 2;
+            },
+        );
+        for (activation, prepared) in value.leases.iter_mut().zip(&mut prepared) {
+            activation.path_id = 2;
+            activation.signed_relay_reservation.clone_from(&grant);
+            prepared.path_id = 2;
+        }
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_relay_fixture_plan(
+                &replay,
+                key,
+                &prepared,
+                underlay,
+                &value,
+                unix_milliseconds().expect("fixture time"),
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 0);
     }
 
     #[test]
@@ -6957,7 +10061,7 @@ mod tests {
         ambiguous.leases.push(ambiguous.leases[0].clone());
         assert_eq!(
             validate_activate_binding(binding, &ambiguous).unwrap_err(),
-            BackendError::Unavailable
+            BackendError::Invalid
         );
         let mut wrong = value;
         wrong.leases[0]
@@ -7174,6 +10278,64 @@ mod tests {
         assert_eq!(lock_replay_cache(&replay).len(), 2);
     }
 
+    #[test]
+    fn native_exit_accepts_direct_authorization_only_with_exact_phase_chain_and_lease_owner() {
+        let (key, value, prepared, underlay, route) = live_native_exit_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let envelope: SignedEnvelope = decode_canonical(
+            &value.leases[0].signed_relay_reservation,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("direct Exit authorization envelope");
+        assert_eq!(
+            ControlMessageType::try_from(envelope.message_type),
+            Ok(ControlMessageType::RelayAuthorization)
+        );
+        assert!(
+            verify_native_probe_authorization_chain(
+                &value.leases[0].signed_client_relay_request,
+                now_ms,
+            )
+            .is_ok()
+        );
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verify_exit_fixture_plan(&replay, key, prepared, underlay, &value, now_ms)
+            .expect("native Exit direct authorization plan");
+        assert_eq!(lock_replay_cache(&replay).len(), 1);
+        assert_eq!(plan.leases.len(), 1);
+        assert_eq!(
+            plan.leases[0].peer_public_key,
+            value.leases[0].peer_public_key
+        );
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrong_owner = value.clone();
+        wrong_owner.leases[0].lease_handle[0] ^= 1;
+        assert_eq!(
+            verify_exit_fixture_plan(&replay, key, prepared, underlay, &wrong_owner, now_ms,),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrapped_instead_of_direct = value;
+        wrapped_instead_of_direct.leases[0].signed_relay_reservation =
+            route.relay_reservations()[0].clone();
+        assert_eq!(
+            verify_exit_fixture_plan(
+                &replay,
+                key,
+                prepared,
+                underlay,
+                &wrapped_instead_of_direct,
+                now_ms,
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+    }
+
     #[tokio::test]
     async fn exit_post_verification_worker_lookup_failure_retains_both_replay_records() {
         let (key, binding, value, prepared, underlay, _) = live_exit_activate_fixture();
@@ -7194,7 +10356,7 @@ mod tests {
         retry.underlay = underlay;
         retry.prepared = vec![prepared];
         retry.phase = OpenLeasePhase::Prepared;
-        *lock_state(&backend.state) = Some(retry);
+        *lock_state(&backend.state) = Some(retry).into();
         let mut retry_binding = binding;
         retry_binding.operation_sequence += 1;
         retry_binding.request_id = [0xb3; 16];
@@ -7228,7 +10390,7 @@ mod tests {
         retry.underlay = underlay;
         retry.prepared = prepared.to_vec();
         retry.phase = OpenLeasePhase::Prepared;
-        *lock_state(&backend.state) = Some(retry);
+        *lock_state(&backend.state) = Some(retry).into();
         let mut retry_binding = binding;
         retry_binding.operation_sequence += 1;
         retry_binding.request_id = [0xd3; 16];
@@ -7492,9 +10654,13 @@ mod tests {
         entry.phase = OpenLeasePhase::Prepared;
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(Some(entry)),
+            state: Mutex::new(Some(entry).into()),
+            ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: None,
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         };
 
         let expected_worker = ExpectedUnixCredentials::new(
@@ -7545,7 +10711,7 @@ mod tests {
         let mut retry_entry = open_entry(key);
         retry_entry.prepared = vec![prepared];
         retry_entry.phase = OpenLeasePhase::Prepared;
-        *lock_state(&backend.state) = Some(retry_entry);
+        *lock_state(&backend.state) = Some(retry_entry).into();
 
         let mut exact_retry = binding;
         exact_retry.operation_sequence += 1;
@@ -7717,9 +10883,13 @@ mod tests {
         entry.phase = OpenLeasePhase::Activated;
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(Some(entry)),
+            state: Mutex::new(Some(entry).into()),
+            ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: None,
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         };
 
         let expected_worker = ExpectedUnixCredentials::new(
@@ -7985,9 +11155,13 @@ mod tests {
         entry.birth_may_exist.clear();
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(Some(entry)),
+            state: Mutex::new(Some(entry).into()),
+            ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: None,
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         };
 
         let cleanup_deadline =
@@ -8012,6 +11186,7 @@ mod tests {
         let retained = state.as_ref().expect("retryable parent ownership");
         assert!(retained.worker.is_none());
         assert!(retained.recovery.is_none());
+        assert!(retained.restart_custody.is_none());
         assert_eq!(retained.wireguard.len(), 2);
         assert!(retained.birth_may_exist.is_empty());
     }
@@ -8095,9 +11270,13 @@ mod tests {
         entry.durable_prepare_terminal = Some(selector);
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
+            ingress_coordinator: test_ingress_coordinator(),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
-            state: Mutex::new(Some(entry)),
+            state: Mutex::new(Some(entry).into()),
+            ingress_state: Mutex::new(None),
+            trusted_agent_uid: 1_001,
             durable_ownership: Some(handle),
+            dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
         };
 
         assert_eq!(
