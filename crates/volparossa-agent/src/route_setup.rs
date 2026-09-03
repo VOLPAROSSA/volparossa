@@ -68,8 +68,8 @@ use volparossa_reservation::{
 };
 use volparossa_routing::{
     AcquireTransportSocket, ActivateLeaseBatch, ActivatedLeaseBatch, CommitLeaseBatch,
-    CommittedLeaseBatch, ContextRole, DestroyedContext, LeaseActivation, LeaseCommit, LeasePlan,
-    MAX_HELPER_PATHS, MAX_HELPER_RATE_MBPS, PrepareLeaseBatch, PublicUdpEndpoint,
+    CommittedLeaseBatch, ContextRole, DestroyedContext, HelperResult, LeaseActivation, LeaseCommit,
+    LeasePlan, MAX_HELPER_PATHS, MAX_HELPER_RATE_MBPS, PrepareLeaseBatch, PublicUdpEndpoint,
     ReconciledExpiredPrepare, WireguardRole,
 };
 #[cfg(test)]
@@ -110,7 +110,10 @@ use crate::{
         MINIMUM_MPQUIC_TUNNEL_MTU, ProductionMpquicPreflight, ProductionMpquicSession,
     },
     mptcp_flow_runtime::{ActiveProductionMptcpClientFlow, activate_production_mptcp_client_flow},
-    mptcp_transport::{ClientMptcpTransport, ExitMptcpListenerSignal, PRODUCTION_MPTCP_EXIT_PORT},
+    mptcp_transport::{
+        ClientMptcpTransport, ExitMptcpListenerSignal, MptcpTransportError,
+        PRODUCTION_MPTCP_EXIT_PORT,
+    },
     paths::DEFAULT_MPQUIC_SOCKET,
     state::AgentState,
 };
@@ -1059,14 +1062,28 @@ impl ClientRouteControl {
         let ClientTransportState::TcpMptcp(transport) = &mut established.transport else {
             return Err(ClientRouteConnectError::Busy);
         };
+        let mut helper_route_was_lost = false;
         for _ in 0..8 {
             let local_port = random_mptcp_source_port(PRODUCTION_MPTCP_EXIT_PORT)?;
-            if let Ok(flow) = transport
+            match transport
                 .acquire_flow(&established.helper, local_port)
                 .await
             {
-                return Ok((flow, material));
+                Ok(flow) => return Ok((flow, material)),
+                Err(error) if mptcp_acquire_failure_lost_helper_route(&error) => {
+                    helper_route_was_lost = true;
+                    break;
+                }
+                Err(_) => {}
             }
+        }
+        if helper_route_was_lost {
+            let stale = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
+            drop(state);
+            if let ClientRouteControlState::Established(established) = stale {
+                Box::pin(established.shutdown()).await;
+            }
+            self.clear_agent_mpquic_paths().await;
         }
         Err(ClientRouteConnectError::TransportRuntimeUnavailable)
     }
@@ -2142,6 +2159,15 @@ fn random_mptcp_source_port(exit_listener_port: u16) -> Result<u16, ClientRouteC
         }
     }
     Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+}
+
+fn mptcp_acquire_failure_lost_helper_route(error: &MptcpTransportError) -> bool {
+    matches!(
+        error,
+        MptcpTransportError::Helper(HelperClientError::Rejected(
+            HelperResult::CleanupIncomplete | HelperResult::NotFound
+        ))
+    )
 }
 
 fn random_runtime_instance_id() -> Result<[u8; 32], ClientRouteConnectError> {
@@ -7103,6 +7129,24 @@ mod tests {
     const NOW_MS: u64 = 1_700_000_000_000;
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
+
+    #[test]
+    fn mptcp_acquire_retires_only_a_helper_route_that_is_no_longer_owned() {
+        for result in [HelperResult::CleanupIncomplete, HelperResult::NotFound] {
+            assert!(mptcp_acquire_failure_lost_helper_route(
+                &MptcpTransportError::Helper(HelperClientError::Rejected(result))
+            ));
+        }
+        for result in [
+            HelperResult::Kernel,
+            HelperResult::Unavailable,
+            HelperResult::Capacity,
+        ] {
+            assert!(!mptcp_acquire_failure_lost_helper_route(
+                &MptcpTransportError::Helper(HelperClientError::Rejected(result))
+            ));
+        }
+    }
 
     #[test]
     fn active_browser_flow_defers_only_minimum_crossing_path_removal() {
