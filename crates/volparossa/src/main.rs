@@ -63,6 +63,11 @@ enum CliCommand {
         #[arg(long)]
         passphrase_file: Option<PathBuf>,
     },
+    /// Offline permanent-identity maintenance.
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommand,
+    },
     /// Run read-only prerequisite and safety checks.
     Doctor {
         /// Emit a machine-readable JSON report.
@@ -176,6 +181,40 @@ enum ConfigCommand {
     Validate,
 }
 
+#[derive(Debug, Subcommand)]
+enum IdentityCommand {
+    /// Replace the permanent Ed25519 identity while all services are stopped.
+    Rotate {
+        /// Exact encrypted identity file path; defaults below the state directory.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        /// Strict 0600 file containing the current passphrase; otherwise prompt without echo.
+        #[arg(long, value_name = "FILE")]
+        current_passphrase_file: Option<PathBuf>,
+        /// Strict 0600 file containing the new passphrase; otherwise prompt twice without echo.
+        #[arg(long, value_name = "FILE")]
+        new_passphrase_file: Option<PathBuf>,
+    },
+    /// Re-encrypt the same permanent identity while all services are stopped.
+    ChangePassphrase {
+        /// Exact encrypted identity file path; defaults below the state directory.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        /// Strict 0600 file containing the current passphrase; otherwise prompt without echo.
+        #[arg(long, value_name = "FILE")]
+        current_passphrase_file: Option<PathBuf>,
+        /// Strict 0600 file containing the new passphrase; otherwise prompt twice without echo.
+        #[arg(long, value_name = "FILE")]
+        new_passphrase_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IdentityMutation {
+    Rotate,
+    ChangePassphrase,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -195,6 +234,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             identity,
             passphrase_file,
         } => initialize_identity(identity, passphrase_file.as_deref()),
+        CliCommand::Identity { command } => maintain_identity_command(command).await,
         CliCommand::Doctor { json } => run_doctor(&cli.config, json),
         CliCommand::Start => systemctl("start").await,
         CliCommand::Stop => systemctl("stop").await,
@@ -311,6 +351,134 @@ fn default_identity_path() -> PathBuf {
     std::env::var_os("VOLPAROSSA_STATE_DIRECTORY")
         .map_or_else(|| PathBuf::from(DEFAULT_STATE_DIRECTORY), PathBuf::from)
         .join("identity.key")
+}
+
+async fn maintain_identity_command(command: IdentityCommand) -> Result<()> {
+    let (mutation, identity, current_passphrase_file, new_passphrase_file) = match command {
+        IdentityCommand::Rotate {
+            identity,
+            current_passphrase_file,
+            new_passphrase_file,
+        } => (
+            IdentityMutation::Rotate,
+            identity,
+            current_passphrase_file,
+            new_passphrase_file,
+        ),
+        IdentityCommand::ChangePassphrase {
+            identity,
+            current_passphrase_file,
+            new_passphrase_file,
+        } => (
+            IdentityMutation::ChangePassphrase,
+            identity,
+            current_passphrase_file,
+            new_passphrase_file,
+        ),
+    };
+    maintain_identity(
+        mutation,
+        identity,
+        current_passphrase_file.as_deref(),
+        new_passphrase_file.as_deref(),
+    )
+    .await
+}
+
+async fn maintain_identity(
+    mutation: IdentityMutation,
+    identity: Option<PathBuf>,
+    current_passphrase_file: Option<&Path>,
+    new_passphrase_file: Option<&Path>,
+) -> Result<()> {
+    // Check both before and after interactive input so a service start while the
+    // operator is at a prompt cannot silently produce a split-brain identity.
+    ensure_identity_services_stopped().await?;
+    let current_passphrase = secret::read_passphrase_with_prompts(
+        current_passphrase_file,
+        "Current VOLPAROSSA identity passphrase: ",
+        None,
+    )?;
+    let new_passphrase = secret::read_passphrase_with_prompts(
+        new_passphrase_file,
+        "New VOLPAROSSA identity passphrase: ",
+        Some("Repeat new VOLPAROSSA identity passphrase: "),
+    )?;
+    ensure_identity_services_stopped().await?;
+
+    let path = identity.unwrap_or_else(default_identity_path);
+    let maintained =
+        apply_identity_mutation(mutation, &path, &current_passphrase, &new_passphrase)?;
+    match mutation {
+        IdentityMutation::Rotate => {
+            println!("identity rotated atomically: {}", path.display());
+            println!("new peer ID: {}", maintained.peer_id());
+            println!(
+                "services remain stopped; previously signed advertisements expire at their embedded TTL"
+            );
+            println!(
+                "before restart, update the packaged identity-passphrase systemd credential to the new passphrase"
+            );
+        }
+        IdentityMutation::ChangePassphrase => {
+            println!("identity passphrase changed atomically: {}", path.display());
+            println!("peer ID unchanged: {}", maintained.peer_id());
+            println!("services remain stopped");
+            println!(
+                "before restart, update the packaged identity-passphrase systemd credential to the new passphrase"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_identity_mutation(
+    mutation: IdentityMutation,
+    path: &Path,
+    current_passphrase: &volparossa_identity::Passphrase,
+    new_passphrase: &volparossa_identity::Passphrase,
+) -> Result<volparossa_identity::Identity> {
+    let store = IdentityStore::new(path);
+    match mutation {
+        IdentityMutation::Rotate => store.rotate(current_passphrase, new_passphrase),
+        IdentityMutation::ChangePassphrase => {
+            store.change_passphrase(current_passphrase, new_passphrase)
+        }
+    }
+    .context("identity maintenance failed")
+}
+
+async fn ensure_identity_services_stopped() -> Result<()> {
+    for service in SERVICES {
+        let output = ProcessCommand::new("systemctl")
+            .args(["show", "--property=ActiveState", "--value", service])
+            .output()
+            .await
+            .with_context(|| format!("cannot inspect {service}; identity maintenance refused"))?;
+        if !output.status.success() {
+            bail!(
+                "cannot prove {service} is stopped; identity maintenance refused (run `volparossa stop` first)"
+            );
+        }
+        let state = std::str::from_utf8(&output.stdout)
+            .with_context(|| format!("{service} returned a non-UTF-8 active state"))?;
+        require_stopped_service_state(service, state)?;
+    }
+    Ok(())
+}
+
+fn require_stopped_service_state(service: &str, state: &str) -> Result<()> {
+    let mut states = state.lines();
+    let state = states.next().unwrap_or_default().trim();
+    if states.next().is_some() || state.is_empty() {
+        bail!("cannot prove {service} is stopped; identity maintenance refused");
+    }
+    if matches!(state, "inactive" | "failed") {
+        return Ok(());
+    }
+    bail!(
+        "{service} is {state}; identity maintenance requires every VOLPAROSSA service to be stopped (run `volparossa stop` first)"
+    )
 }
 
 fn run_doctor(config: &Path, json: bool) -> Result<()> {
@@ -486,6 +654,7 @@ fn print_response(response: ControlResponse) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
 
     #[test]
     fn default_identity_uses_state_directory_override() {
@@ -493,9 +662,11 @@ mod tests {
         assert!(default_identity_path().ends_with("identity.key"));
     }
     #[test]
-    fn every_master_section_twenty_nine_command_form_parses() {
+    fn every_cli_command_form_parses() {
         let commands: &[&[&str]] = &[
             &["volparossa", "init"],
+            &["volparossa", "identity", "rotate"],
+            &["volparossa", "identity", "change-passphrase"],
             &["volparossa", "doctor"],
             &["volparossa", "start"],
             &["volparossa", "stop"],
@@ -552,5 +723,132 @@ mod tests {
             cli.command,
             CliCommand::Cleanup { execute: false }
         ));
+    }
+
+    #[test]
+    fn identity_maintenance_parses_exact_paths_and_separate_secret_files() {
+        let cli = Cli::try_parse_from([
+            "volparossa",
+            "identity",
+            "rotate",
+            "--identity",
+            "/var/lib/volparossa/custom.key",
+            "--current-passphrase-file",
+            "/run/secrets/current",
+            "--new-passphrase-file",
+            "/run/secrets/new",
+        ])
+        .expect("identity rotate");
+        let CliCommand::Identity {
+            command:
+                IdentityCommand::Rotate {
+                    identity,
+                    current_passphrase_file,
+                    new_passphrase_file,
+                },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(
+            identity,
+            Some(PathBuf::from("/var/lib/volparossa/custom.key"))
+        );
+        assert_eq!(
+            current_passphrase_file,
+            Some(PathBuf::from("/run/secrets/current"))
+        );
+        assert_eq!(new_passphrase_file, Some(PathBuf::from("/run/secrets/new")));
+    }
+
+    #[test]
+    fn identity_maintenance_accepts_only_definitively_stopped_services() {
+        assert!(require_stopped_service_state("agent", "inactive\n").is_ok());
+        assert!(require_stopped_service_state("agent", "failed\n").is_ok());
+        for unsafe_state in [
+            "active\n",
+            "activating\n",
+            "deactivating\n",
+            "reloading\n",
+            "maintenance\n",
+            "unknown\n",
+            "",
+            "inactive\nactive\n",
+        ] {
+            assert!(
+                require_stopped_service_state("agent", unsafe_state).is_err(),
+                "unexpectedly accepted {unsafe_state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_maintenance_changes_passphrase_and_rotates_via_strict_files() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let identity_path = directory.path().join("identity.key");
+        let current = volparossa_identity::Passphrase::new("current-passphrase-123")
+            .expect("current passphrase");
+        let original = IdentityStore::new(&identity_path)
+            .create(&current)
+            .expect("initial identity");
+        let original_peer_id = *original.peer_id();
+
+        let current_path = private_secret(directory.path(), "current", b"current-passphrase-123\n");
+        let changed_path = private_secret(directory.path(), "changed", b"changed-passphrase-456\n");
+        let current_from_file =
+            secret::read_passphrase_with_prompts(Some(&current_path), "unused", Some("unused"))
+                .expect("current secret file");
+        let changed_from_file =
+            secret::read_passphrase_with_prompts(Some(&changed_path), "unused", Some("unused"))
+                .expect("changed secret file");
+        let unchanged = apply_identity_mutation(
+            IdentityMutation::ChangePassphrase,
+            &identity_path,
+            &current_from_file,
+            &changed_from_file,
+        )
+        .expect("change passphrase");
+        assert_eq!(*unchanged.peer_id(), original_peer_id);
+        assert!(IdentityStore::new(&identity_path).load(&current).is_err());
+        assert_eq!(
+            *IdentityStore::new(&identity_path)
+                .load(&changed_from_file)
+                .expect("changed passphrase loads")
+                .peer_id(),
+            original_peer_id
+        );
+
+        let rotated_path = private_secret(directory.path(), "rotated", b"rotated-passphrase-789\n");
+        let rotated_from_file =
+            secret::read_passphrase_with_prompts(Some(&rotated_path), "unused", Some("unused"))
+                .expect("rotated secret file");
+        let rotated = apply_identity_mutation(
+            IdentityMutation::Rotate,
+            &identity_path,
+            &changed_from_file,
+            &rotated_from_file,
+        )
+        .expect("rotate identity");
+        assert_ne!(*rotated.peer_id(), original_peer_id);
+        assert_eq!(
+            *IdentityStore::new(&identity_path)
+                .load(&rotated_from_file)
+                .expect("rotated identity loads")
+                .peer_id(),
+            *rotated.peer_id()
+        );
+    }
+
+    fn private_secret(directory: &Path, name: &str, contents: &[u8]) -> PathBuf {
+        let path = directory.join(name);
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .expect("create private secret");
+        file.write_all(contents).expect("write private secret");
+        file.sync_all().expect("sync private secret");
+        path
     }
 }
