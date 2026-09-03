@@ -38,8 +38,9 @@ cargo test --workspace --all-features
 ./packaging/build-deb.sh --build
 ```
 
-The dependency gate is offline and requires `cargo-audit >= 0.22.1` plus an
-existing local RustSec advisory checkout. It reconstructs and verifies the two
+The dependency gate is offline and requires `cargo-deny >= 0.18.6`,
+`cargo-audit >= 0.22.1`, and an existing local RustSec advisory checkout. It
+reconstructs and verifies the two
 Debian-Rust-compatible source backports plus the reviewed single-backend Yamux
 override before applying the documented scanner exemptions; see
 `third_party/rust/README.md`.

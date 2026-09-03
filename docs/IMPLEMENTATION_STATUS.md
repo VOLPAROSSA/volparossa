@@ -59,12 +59,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   hard-incompatible privacy-v4 discovery and route-setup migration.
 - [x] GPL-3.0-only licensing, including the standalone fuzz package and new
   local mqvpn patch files, and compatible third-party notices are complete.
-- [ ] Workspace formatting, strict Clippy, and tests pass after the privacy-v4 migration; the
-  required all-in-one dependency-deny gate remains blocked as documented below, so the combined
-  gate stays unchecked.
-- [ ] The Debian-compatible Cargo-deny 0.18.3 cannot parse current CVSS 4.0 advisory metadata
-  for an all-in-one `cargo deny check`; the separate pinned Cargo-audit 0.22.1 gate reports zero
-  unremediated vulnerabilities.
+- [ ] Workspace formatting, strict Clippy, tests, and the dependency gates must pass together for
+  the accepted exact revision; no current exact-revision evidence is recorded here yet.
+- [ ] Pinned Cargo-deny 0.18.6 performs the required all-in-one offline root and fuzz checks with
+  CVSS 4.0 support; pinned Cargo-audit 0.22.1 independently checks both graphs for unremediated
+  vulnerabilities. Mark this complete only from the accepted exact-revision Quality run.
 - [x] `justfile` exposes every required build, test, fuzz, benchmark, doctor, demo, package,
   and cleanup entrypoint; privileged integration and package execution still report `BLOCKED`
   until their real drivers exist.

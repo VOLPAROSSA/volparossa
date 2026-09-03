@@ -60,7 +60,8 @@ jobs:
       - name: Install pinned dependency-audit tools
         run: |
           tool_root="${RUNNER_TEMP}/cargo-tools"
-          cargo install --locked --root "$tool_root" --version 0.18.3 cargo-deny
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 install --locked --root "$tool_root" --version 0.18.6 cargo-deny
           cargo install --locked --root "$tool_root" --version 0.22.1 cargo-audit
           printf '%s\n' "$tool_root/bin" >>"$GITHUB_PATH"
 

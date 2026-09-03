@@ -139,14 +139,15 @@ after `scripts/check-rust-dependencies.sh`:
 6. proves both locked graphs use all three local paths, contain only fixed
    `yamux 0.13.10`, and do not enable Hickory `dnssec-ring`,
    `dnssec-aws-lc-rs`, or the regression-only feature;
-7. runs cargo-deny license, ban, and source checks; and
-8. runs a CVSS 4.0-capable cargo-audit without fetching.
+7. runs CVSS 4.0-capable cargo-deny advisory, license, ban, and source checks; and
+8. independently runs a CVSS 4.0-capable cargo-audit without fetching.
 
 These are locally remediated advisory-version matches, not accepted
 vulnerabilities. Any byte change to an archive, reviewed patch, license, or
 vendor tree fails before the exemptions reach cargo-audit.
 
-The gate requires `cargo-audit >= 0.22.1`. Set `CARGO_AUDIT` to a specific
+The gate requires `cargo-deny >= 0.18.6` and `cargo-audit >= 0.22.1`. Set
+`CARGO_AUDIT` to a specific
 executable when it is not on `PATH`, and set `RUSTSEC_ADVISORY_DB` when the
 local advisory checkout is not in a standard Cargo cache location. The gate
 prints the exact advisory database commit and always passes `--no-fetch`.

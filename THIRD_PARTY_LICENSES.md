@@ -379,8 +379,8 @@ The complete sources, patch review notes, resulting tree hashes, test
 contract, and removal condition are in `third_party/rust/README.md`.
 `scripts/check-rust-dependencies.sh` reconstructs all three trees from the exact
 archives, applies the locked patches, byte-compares the result, verifies
-unchanged licenses and the feature graph, runs cargo-deny
-license/ban/source checks, and performs a no-fetch cargo-audit scan against a
+unchanged licenses and the feature graph, runs CVSS 4.0-capable cargo-deny
+advisory/license/ban/source checks, and performs an independent no-fetch cargo-audit scan against a
 local RustSec checkout. It prints that checkout's exact commit.
 
 The GPL-3.0-only harness under `third_party/rust/backport-regressions` has a
@@ -401,9 +401,9 @@ matches, not accepted vulnerable upstream artifacts. The production feature
 graph also keeps both Hickory DNSSEC features disabled; the NSEC3 fix is
 nevertheless present and tested.
 
-The dependency gate requires a CVSS 4.0-capable `cargo-audit >= 0.22.1`.
-Debian cargo-deny 0.18.3 remains authoritative for licenses, bans, and sources
-but cannot parse the current CVSS 4.0 advisory database.
+The dependency gate requires CVSS 4.0-capable `cargo-deny >= 0.18.6` and
+`cargo-audit >= 0.22.1`; the former runs all four checks while the latter
+provides an independent advisory scan.
 
 Candidate packaging excludes workspace members and admits path dependencies
 only at the three exact verified vendor paths above.
