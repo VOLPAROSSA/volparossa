@@ -5,7 +5,9 @@
 //! calling thread is still in the expected anonymous worker namespace and not
 //! in its parent namespace.  It can encode only one fixed `inet` table: two
 //! direction-specific `/128` forwarding rules between the exact `RelayClient`
-//! and `RelayExit` interfaces, followed by a terminal drop. Each accept rule must
+//! and `RelayExit` interfaces, followed by a terminal drop. A separate input
+//! base chain drops every packet arriving from either Relay `WireGuard` leg before
+//! it can reach a worker-local socket. Each accept rule must
 //! additionally find one short-lived IPv6 key in a singleton nft set whose Linux
 //! jiffies timeout is immune to realtime-clock rollback. The existing realtime
 //! comparison remains an independent earlier cutoff. Each accept is also bound
@@ -18,8 +20,9 @@
 //! acknowledged or possibly-sent mutation is reconciled through a fresh,
 //! bounded, generation-bracketed dump of tables, chains, rules, sets, set elements,
 //! objects and flowtables. Before either link exists, the exact context-bound table
-//! contains only an empty forward base chain with policy drop.  Activation
-//! accepts only the exact zero-counter rule set, deactivation restores that
+//! contains only empty forward and input base chains with policy drop. Activation
+//! installs both host-isolation drops before either peer is activated, accepts only
+//! the exact zero-counter rule set, and deactivation restores that
 //! same restrictive baseline with stable table and chain handles, and
 //! retirement accepts only complete absence. The authenticated Relay worker
 //! owns every affine state transition; an indeterminate mutation terminates
@@ -48,9 +51,10 @@ const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const RATE_BURST_BYTES: u32 = 65_535;
 const MAX_KERNEL_IFINDEX: u32 = 0x7fff_ffff;
 const INTERFACE_NAME_BYTES: usize = libc::IFNAMSIZ;
-const TABLE_USERDATA_DOMAIN: &[u8] = b"VOLPAROSSA relay fence identity v2\0";
+const TABLE_USERDATA_DOMAIN: &[u8] = b"VOLPAROSSA relay fence identity v3\0";
 const TABLE_NAME_PREFIX: &[u8] = b"vpr_";
 const FORWARD_CHAIN_NAME: &[u8] = b"forward";
+const INPUT_CHAIN_NAME: &[u8] = b"input";
 const FILTER_CHAIN_TYPE: &[u8] = b"filter";
 const LIVE_SET_NAME: &[u8] = b"lease_live";
 const LIVE_SET_TRANSACTION_ID: u32 = 1;
@@ -72,6 +76,7 @@ const MAX_SET_DESCRIPTION_ATTRIBUTES: usize = 2;
 const MAX_SET_ELEMENT_LIST_ATTRIBUTES: usize = 4;
 const MAX_SET_ELEMENT_ATTRIBUTES: usize = 11;
 const DIRECTION_RULE_EXPRESSIONS: usize = 21;
+const HOST_ISOLATION_RULE_EXPRESSIONS: usize = 6;
 const TERMINAL_RULE_EXPRESSIONS: usize = 2;
 const MAX_RULE_EXPRESSIONS: usize = DIRECTION_RULE_EXPRESSIONS;
 const MAX_EXPRESSION_ATTRIBUTES: usize = 2;
@@ -86,15 +91,15 @@ const MAX_CHAIN_USERDATA_BYTES: usize = 256;
 const MAX_RULE_USERDATA_BYTES: usize = 256;
 const MAX_COUNTER_BYTES: usize = 64;
 const MAX_OBSERVED_TABLES: usize = 2;
-const MAX_OBSERVED_CHAINS: usize = 2;
-const MAX_OBSERVED_RULES: usize = 4;
+const MAX_OBSERVED_CHAINS: usize = 3;
+const MAX_OBSERVED_RULES: usize = 6;
 const MAX_OBSERVED_SETS: usize = 2;
 const MAX_OBSERVED_SET_ELEMENTS: usize = 2;
 const MAX_MUTATION_BATCH_BYTES: usize = 16 * 1024;
-const MAX_MUTATION_MESSAGES: usize = 7;
+const MAX_MUTATION_MESSAGES: usize = 9;
 const MAX_MUTATION_ACK_BYTES: usize = 4 * 1024;
-const MAX_MUTATION_ACK_DATAGRAMS: usize = 5;
-const MAX_MUTATION_ACK_FRAMES: usize = 5;
+const MAX_MUTATION_ACK_DATAGRAMS: usize = 7;
+const MAX_MUTATION_ACK_FRAMES: usize = 7;
 const RECONCILIATION_TAIL: Duration = Duration::from_secs(1);
 
 const NLMSG_HEADER_LEN: usize = 16;
@@ -151,6 +156,7 @@ const NFPROTO_IPV6: u8 = 10;
 const NFNETLINK_V0: u8 = 0;
 
 const NF_INET_FORWARD: u32 = 2;
+const NF_INET_LOCAL_IN: u32 = 1;
 const NF_DROP: u32 = 0;
 const NF_ACCEPT: u32 = 1;
 const NFT_CHAIN_BASE: u32 = 1;
@@ -564,6 +570,36 @@ impl RelayFenceSpec {
             .collect()
     }
 
+    fn expected_host_isolation_expressions(&self, index: usize) -> Vec<ObservedExpression> {
+        let (ifindex, interface) = match index {
+            0 => (self.relay_client_ifindex, self.relay_client_interface),
+            1 => (self.relay_exit_ifindex, self.relay_exit_interface),
+            _ => std::process::abort(),
+        };
+        vec![
+            ObservedExpression::Meta {
+                destination: NFT_REG_1,
+                key: NFT_META_IIF,
+            },
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: ifindex.to_ne_bytes().to_vec(),
+            },
+            ObservedExpression::Meta {
+                destination: NFT_REG_1,
+                key: NFT_META_IIFNAME,
+            },
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: interface.to_vec(),
+            },
+            ObservedExpression::Counter(RelayFenceCounter::ZERO),
+            ObservedExpression::ImmediateDrop,
+        ]
+    }
+
     fn bind_live_gate_timeout(
         &mut self,
         maximum_live_gate_timeout: Duration,
@@ -737,7 +773,7 @@ pub(super) struct PristineRelayFence {
     namespace: RelayFenceNamespaceAuthority,
 }
 
-/// Exact context-bound table and empty policy-drop forward chain.
+/// Exact context-bound table and empty policy-drop forward and input chains.
 #[derive(Debug, Eq, PartialEq)]
 #[must_use = "the restrictive baseline must be activated or retired"]
 pub(super) struct RestrictedPolicyDrop {
@@ -802,7 +838,7 @@ pub(super) enum RelayFenceCreateAuthority {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum RelayFenceActivateAuthority {
     /// The exact restrictive baseline remains installed.
-    Restricted(RestrictedPolicyDrop),
+    Restricted(Box<RestrictedPolicyDrop>),
     /// The transaction could not be classified safely.
     Indeterminate(IndeterminateRelayFence),
 }
@@ -820,7 +856,7 @@ pub(super) enum RelayFenceDeactivateAuthority {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum RelayFenceRetireAuthority {
     /// The exact restrictive baseline remains installed.
-    Restricted(RestrictedPolicyDrop),
+    Restricted(Box<RestrictedPolicyDrop>),
     /// The transaction could not be classified safely.
     Indeterminate(IndeterminateRelayFence),
 }
@@ -973,7 +1009,7 @@ pub(super) fn create_relay_fence_baseline(
     )
 }
 
-/// Atomically add the two exact accepts and terminal drop to one restrictive baseline.
+/// Atomically add the two exact accepts, terminal forward drop and both input-leg drops.
 pub(super) fn activate_relay_fence_rules(
     restricted: RestrictedPolicyDrop,
     mut specification: RelayFenceSpec,
@@ -1292,10 +1328,10 @@ fn activate_failure_restricted(
 ) -> RelayFenceLineageFailure<RelayFenceActivateAuthority> {
     RelayFenceLineageFailure {
         source,
-        authority: RelayFenceActivateAuthority::Restricted(RestrictedPolicyDrop {
+        authority: RelayFenceActivateAuthority::Restricted(Box::new(RestrictedPolicyDrop {
             journal,
             namespace,
-        }),
+        })),
     }
 }
 
@@ -1320,10 +1356,10 @@ fn retire_failure_restricted(
 ) -> RelayFenceLineageFailure<RelayFenceRetireAuthority> {
     RelayFenceLineageFailure {
         source,
-        authority: RelayFenceRetireAuthority::Restricted(RestrictedPolicyDrop {
+        authority: RelayFenceRetireAuthority::Restricted(Box::new(RestrictedPolicyDrop {
             journal,
             namespace,
-        }),
+        })),
     }
 }
 
@@ -1570,14 +1606,16 @@ fn classify_retire_baseline(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BaselineHandles {
     table: u64,
-    chain: u64,
+    forward_chain: u64,
+    input_chain: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PolicyHandles {
     baseline: BaselineHandles,
     live_set: u64,
-    rules: [u64; 3],
+    forward_rules: [u64; 3],
+    input_rules: [u64; 2],
 }
 
 /// Mutable counters observed from the two accepted directions and terminal drop.
@@ -1802,7 +1840,7 @@ impl RulesetSnapshot {
             return Err(RelayFenceError::UnexpectedPolicy);
         }
         Ok(ExactRestrictedObservation {
-            handles: self.exact_baseline_handles(identity, 1, 0)?,
+            handles: self.exact_baseline_handles(identity, 2, 0, 0)?,
         })
     }
 
@@ -1813,14 +1851,14 @@ impl RulesetSnapshot {
         if let Ok(restricted) = self.exact_restricted_observation(identity) {
             return Ok(restricted.handles.table);
         }
-        let baseline = self.exact_baseline_handles(identity, 2, 3)?;
+        let baseline = self.exact_baseline_handles(identity, 3, 3, 2)?;
         let [set] = self.sets.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
         };
         let [element] = self.set_elements.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
         };
-        let [up, down, terminal] = self.rules.as_slice() else {
+        let [up, down, terminal, client_input, exit_input] = self.rules.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
         };
         if set.family != NFPROTO_INET
@@ -1837,9 +1875,19 @@ impl RulesetSnapshot {
                     || rule.chain != FORWARD_CHAIN_NAME
                     || rule.handle == 0
             })
-            || up.handle == down.handle
-            || up.handle == terminal.handle
-            || down.handle == terminal.handle
+            || [client_input, exit_input].iter().any(|rule| {
+                rule.family != NFPROTO_INET
+                    || rule.table != identity.table_name
+                    || rule.chain != INPUT_CHAIN_NAME
+                    || rule.handle == 0
+            })
+            || !all_distinct_rule_handles([
+                up.handle,
+                down.handle,
+                terminal.handle,
+                client_input.handle,
+                exit_input.handle,
+            ])
         {
             return Err(RelayFenceError::UnexpectedPolicy);
         }
@@ -1851,7 +1899,7 @@ impl RulesetSnapshot {
         specification: &RelayFenceSpec,
         require_zero: bool,
     ) -> Result<ExactPolicyObservation, RelayFenceError> {
-        let baseline = self.exact_baseline_handles(&specification.identity, 2, 3)?;
+        let baseline = self.exact_baseline_handles(&specification.identity, 3, 3, 2)?;
         let [set] = self.sets.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
         };
@@ -1882,7 +1930,7 @@ impl RulesetSnapshot {
         {
             return Err(RelayFenceError::UnexpectedPolicy);
         }
-        let [up, down, terminal] = self.rules.as_slice() else {
+        let [up, down, terminal, client_input, exit_input] = self.rules.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
         };
         if [up, down, terminal].iter().any(|rule| {
@@ -1892,12 +1940,24 @@ impl RulesetSnapshot {
                 || rule.handle == 0
                 || rule.userdata.is_some()
                 || rule.pad
-        }) || up.handle == down.handle
-            || up.handle == terminal.handle
-            || down.handle == terminal.handle
-            || up.position.is_some()
+        }) || [client_input, exit_input].iter().any(|rule| {
+            rule.family != NFPROTO_INET
+                || rule.table != specification.identity.table_name
+                || rule.chain != INPUT_CHAIN_NAME
+                || rule.handle == 0
+                || rule.userdata.is_some()
+                || rule.pad
+        }) || !all_distinct_rule_handles([
+            up.handle,
+            down.handle,
+            terminal.handle,
+            client_input.handle,
+            exit_input.handle,
+        ]) || up.position.is_some()
             || down.position != Some(up.handle)
             || terminal.position != Some(down.handle)
+            || client_input.position.is_some()
+            || exit_input.position != Some(client_input.handle)
         {
             return Err(RelayFenceError::UnexpectedPolicy);
         }
@@ -1909,11 +1969,18 @@ impl RulesetSnapshot {
         if require_zero && counters != [RelayFenceCounter::ZERO; 3] {
             return Err(RelayFenceError::UnexpectedPolicy);
         }
+        for (index, rule) in [client_input, exit_input].into_iter().enumerate() {
+            let counter = exact_host_isolation_counter(specification, index, &rule.expressions)?;
+            if require_zero && counter != RelayFenceCounter::ZERO {
+                return Err(RelayFenceError::UnexpectedPolicy);
+            }
+        }
         Ok(ExactPolicyObservation {
             handles: PolicyHandles {
                 baseline,
                 live_set: set.handle,
-                rules: [up.handle, down.handle, terminal.handle],
+                forward_rules: [up.handle, down.handle, terminal.handle],
+                input_rules: [client_input.handle, exit_input.handle],
             },
             counters: RelayFenceCounters(counters),
         })
@@ -1923,7 +1990,8 @@ impl RulesetSnapshot {
         &self,
         identity: &RelayFenceIdentity,
         expected_table_use: u32,
-        expected_chain_use: u32,
+        expected_forward_use: u32,
+        expected_input_use: u32,
     ) -> Result<BaselineHandles, RelayFenceError> {
         let [table] = self.tables.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
@@ -1939,31 +2007,63 @@ impl RulesetSnapshot {
         {
             return Err(RelayFenceError::UnexpectedPolicy);
         }
-        let [chain] = self.chains.as_slice() else {
+        let [forward, input] = self.chains.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
         };
-        if chain.family != NFPROTO_INET
-            || chain.table != identity.table_name
-            || chain.name != FORWARD_CHAIN_NAME
-            || chain.handle == 0
-            || chain.hook_number != NF_INET_FORWARD
-            || chain.hook_priority != 0
-            || chain.policy != NF_DROP
-            || chain.use_count != expected_chain_use
-            || chain.chain_type != FILTER_CHAIN_TYPE
-            || chain.flags != NFT_CHAIN_BASE
-            || chain.counters.is_some()
-            || chain.pad
-            || chain.id.is_some()
-            || chain.userdata.is_some()
+        if !exact_base_chain(
+            forward,
+            identity,
+            FORWARD_CHAIN_NAME,
+            NF_INET_FORWARD,
+            NF_DROP,
+            expected_forward_use,
+        ) || !exact_base_chain(
+            input,
+            identity,
+            INPUT_CHAIN_NAME,
+            NF_INET_LOCAL_IN,
+            NF_DROP,
+            expected_input_use,
+        ) || forward.handle == input.handle
         {
             return Err(RelayFenceError::UnexpectedPolicy);
         }
         Ok(BaselineHandles {
             table: table.handle,
-            chain: chain.handle,
+            forward_chain: forward.handle,
+            input_chain: input.handle,
         })
     }
+}
+
+fn exact_base_chain(
+    chain: &ChainRecord,
+    identity: &RelayFenceIdentity,
+    name: &[u8],
+    hook_number: u32,
+    policy: u32,
+    use_count: u32,
+) -> bool {
+    chain.family == NFPROTO_INET
+        && chain.table == identity.table_name
+        && chain.name == name
+        && chain.handle != 0
+        && chain.hook_number == hook_number
+        && chain.hook_priority == 0
+        && chain.policy == policy
+        && chain.use_count == use_count
+        && chain.chain_type == FILTER_CHAIN_TYPE
+        && chain.flags == NFT_CHAIN_BASE
+        && chain.counters.is_none()
+        && !chain.pad
+        && chain.id.is_none()
+        && chain.userdata.is_none()
+}
+
+fn all_distinct_rule_handles(handles: [u64; 5]) -> bool {
+    handles.iter().enumerate().all(|(index, handle)| {
+        *handle != 0 && handles[index + 1..].iter().all(|other| other != handle)
+    })
 }
 
 fn exact_rule_counter(
@@ -1972,6 +2072,30 @@ fn exact_rule_counter(
     expressions: &[ObservedExpression],
 ) -> Result<RelayFenceCounter, RelayFenceError> {
     let expected = specification.expected_rule_expressions(index);
+    if expressions.len() != expected.len() {
+        return Err(RelayFenceError::UnexpectedPolicy);
+    }
+    let counter_index = expressions
+        .len()
+        .checked_sub(2)
+        .ok_or(RelayFenceError::UnexpectedPolicy)?;
+    let ObservedExpression::Counter(counter) = expressions[counter_index] else {
+        return Err(RelayFenceError::UnexpectedPolicy);
+    };
+    for (position, (observed, expected)) in expressions.iter().zip(&expected).enumerate() {
+        if position != counter_index && observed != expected {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        }
+    }
+    Ok(counter)
+}
+
+fn exact_host_isolation_counter(
+    specification: &RelayFenceSpec,
+    index: usize,
+    expressions: &[ObservedExpression],
+) -> Result<RelayFenceCounter, RelayFenceError> {
+    let expected = specification.expected_host_isolation_expressions(index);
     if expressions.len() != expected.len() {
         return Err(RelayFenceError::UnexpectedPolicy);
     }
@@ -2087,27 +2211,7 @@ fn encode_create_baseline_transaction(
         &table,
     )?;
 
-    let mut hook = Vec::new();
-    encode_attribute(&mut hook, NFTA_HOOK_HOOKNUM, &NF_INET_FORWARD.to_be_bytes())?;
-    encode_attribute(&mut hook, NFTA_HOOK_PRIORITY, &0_i32.to_be_bytes())?;
-    let mut chain = encode_request_nfgen(NFPROTO_INET, 0);
-    encode_attribute(
-        &mut chain,
-        NFTA_CHAIN_TABLE,
-        &encode_nul_string(&identity.table_name)?,
-    )?;
-    encode_attribute(
-        &mut chain,
-        NFTA_CHAIN_NAME,
-        &encode_nul_string(FORWARD_CHAIN_NAME)?,
-    )?;
-    encode_attribute(
-        &mut chain,
-        NFTA_CHAIN_TYPE,
-        &encode_nul_string(FILTER_CHAIN_TYPE)?,
-    )?;
-    encode_attribute(&mut chain, NFTA_CHAIN_HOOK | NLA_F_NESTED, &hook)?;
-    encode_attribute(&mut chain, NFTA_CHAIN_POLICY, &NF_DROP.to_be_bytes())?;
+    let chain = encode_base_chain(identity, FORWARD_CHAIN_NAME, NF_INET_FORWARD, NF_DROP)?;
     transaction.push(
         NFT_MSG_NEWCHAIN,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
@@ -2115,13 +2219,47 @@ fn encode_create_baseline_transaction(
         &chain,
     )?;
 
+    let input_chain = encode_base_chain(identity, INPUT_CHAIN_NAME, NF_INET_LOCAL_IN, NF_DROP)?;
+    transaction.push(
+        NFT_MSG_NEWCHAIN,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        4,
+        &input_chain,
+    )?;
+
     transaction.push(
         NFNL_MSG_BATCH_END,
         NLM_F_REQUEST,
-        4,
+        5,
         &encode_batch_boundary_payload(None)?,
     )?;
-    transaction.finish(4, 2)
+    transaction.finish(5, 3)
+}
+
+fn encode_base_chain(
+    identity: &RelayFenceIdentity,
+    name: &[u8],
+    hook_number: u32,
+    policy: u32,
+) -> Result<Vec<u8>, RelayFenceError> {
+    let mut hook = Vec::new();
+    encode_attribute(&mut hook, NFTA_HOOK_HOOKNUM, &hook_number.to_be_bytes())?;
+    encode_attribute(&mut hook, NFTA_HOOK_PRIORITY, &0_i32.to_be_bytes())?;
+    let mut chain = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut chain,
+        NFTA_CHAIN_TABLE,
+        &encode_nul_string(&identity.table_name)?,
+    )?;
+    encode_attribute(&mut chain, NFTA_CHAIN_NAME, &encode_nul_string(name)?)?;
+    encode_attribute(
+        &mut chain,
+        NFTA_CHAIN_TYPE,
+        &encode_nul_string(FILTER_CHAIN_TYPE)?,
+    )?;
+    encode_attribute(&mut chain, NFTA_CHAIN_HOOK | NLA_F_NESTED, &hook)?;
+    encode_attribute(&mut chain, NFTA_CHAIN_POLICY, &policy.to_be_bytes())?;
+    Ok(chain)
 }
 
 fn encode_activate_rules_transaction(
@@ -2162,13 +2300,22 @@ fn encode_activate_rules_transaction(
             &rule,
         )?;
     }
+    for (sequence, rule_index) in [(7, 0), (8, 1)] {
+        let rule = encode_host_isolation_rule(specification, rule_index)?;
+        transaction.push(
+            NFT_MSG_NEWRULE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
+            sequence,
+            &rule,
+        )?;
+    }
     transaction.push(
         NFNL_MSG_BATCH_END,
         NLM_F_REQUEST,
-        7,
+        9,
         &encode_batch_boundary_payload(None)?,
     )?;
-    transaction.finish(7, 5)
+    transaction.finish(9, 7)
 }
 
 fn encode_live_set(specification: &RelayFenceSpec) -> Result<Vec<u8>, RelayFenceError> {
@@ -2256,6 +2403,29 @@ fn encode_relay_fence_rule(
     Ok(rule)
 }
 
+fn encode_host_isolation_rule(
+    specification: &RelayFenceSpec,
+    rule_index: usize,
+) -> Result<Vec<u8>, RelayFenceError> {
+    let mut rule = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut rule,
+        NFTA_RULE_TABLE,
+        &encode_nul_string(&specification.identity.table_name)?,
+    )?;
+    encode_attribute(
+        &mut rule,
+        NFTA_RULE_CHAIN,
+        &encode_nul_string(INPUT_CHAIN_NAME)?,
+    )?;
+    encode_attribute(
+        &mut rule,
+        NFTA_RULE_EXPRESSIONS | NLA_F_NESTED,
+        &encode_policy_expressions(&specification.expected_host_isolation_expressions(rule_index))?,
+    )?;
+    Ok(rule)
+}
+
 fn encode_deactivate_rules_transaction(
     journal: &ActiveRelayFenceJournal,
 ) -> Result<MutationTransaction, RelayFenceError> {
@@ -2271,9 +2441,11 @@ fn encode_deactivate_rules_transaction(
     )?;
 
     for (sequence, handle) in [
-        (2, journal.handles.rules[2]),
-        (3, journal.handles.rules[1]),
-        (4, journal.handles.rules[0]),
+        (2, journal.handles.input_rules[1]),
+        (3, journal.handles.input_rules[0]),
+        (4, journal.handles.forward_rules[2]),
+        (5, journal.handles.forward_rules[1]),
+        (6, journal.handles.forward_rules[0]),
     ] {
         let mut delete = encode_request_nfgen(NFPROTO_INET, 0);
         encode_attribute(
@@ -2305,20 +2477,24 @@ fn encode_deactivate_rules_transaction(
         NFTA_SET_HANDLE,
         &journal.handles.live_set.to_be_bytes(),
     )?;
-    transaction.push(NFT_MSG_DELSET, NLM_F_REQUEST | NLM_F_ACK, 5, &delete_set)?;
+    transaction.push(NFT_MSG_DELSET, NLM_F_REQUEST | NLM_F_ACK, 7, &delete_set)?;
     transaction.push(
         NFNL_MSG_BATCH_END,
         NLM_F_REQUEST,
-        6,
+        8,
         &encode_batch_boundary_payload(None)?,
     )?;
-    transaction.finish(6, 4)
+    transaction.finish(8, 6)
 }
 
 fn encode_retire_baseline_transaction(
     journal: &RestrictedRelayFenceJournal,
 ) -> Result<MutationTransaction, RelayFenceError> {
-    if journal.handles.table == 0 || journal.handles.chain == 0 {
+    if journal.handles.table == 0
+        || journal.handles.forward_chain == 0
+        || journal.handles.input_chain == 0
+        || journal.handles.forward_chain == journal.handles.input_chain
+    {
         return Err(RelayFenceError::UnexpectedPolicy);
     }
     let mut transaction = MutationTransaction::new();
@@ -2372,12 +2548,17 @@ fn encode_dead_worker_table_cleanup(
 
 fn valid_policy_handles(handles: PolicyHandles) -> bool {
     handles.baseline.table != 0
-        && handles.baseline.chain != 0
+        && handles.baseline.forward_chain != 0
+        && handles.baseline.input_chain != 0
+        && handles.baseline.forward_chain != handles.baseline.input_chain
         && handles.live_set != 0
-        && handles.rules.iter().all(|handle| *handle != 0)
-        && handles.rules[0] != handles.rules[1]
-        && handles.rules[0] != handles.rules[2]
-        && handles.rules[1] != handles.rules[2]
+        && all_distinct_rule_handles([
+            handles.forward_rules[0],
+            handles.forward_rules[1],
+            handles.forward_rules[2],
+            handles.input_rules[0],
+            handles.input_rules[1],
+        ])
 }
 
 fn encode_policy_expressions(
@@ -2385,7 +2566,7 @@ fn encode_policy_expressions(
 ) -> Result<Vec<u8>, RelayFenceError> {
     if !matches!(
         expressions.len(),
-        DIRECTION_RULE_EXPRESSIONS | TERMINAL_RULE_EXPRESSIONS
+        DIRECTION_RULE_EXPRESSIONS | HOST_ISOLATION_RULE_EXPRESSIONS | TERMINAL_RULE_EXPRESSIONS
     ) {
         return Err(RelayFenceError::Malformed);
     }
@@ -3814,7 +3995,7 @@ fn parse_expressions(payload: &[u8]) -> Result<Vec<ObservedExpression>, RelayFen
     let elements = parse_attributes(payload, MAX_RULE_EXPRESSIONS)?;
     if !matches!(
         elements.len(),
-        DIRECTION_RULE_EXPRESSIONS | TERMINAL_RULE_EXPRESSIONS
+        DIRECTION_RULE_EXPRESSIONS | HOST_ISOLATION_RULE_EXPRESSIONS | TERMINAL_RULE_EXPRESSIONS
     ) {
         return Err(RelayFenceError::UnexpectedPolicy);
     }
@@ -4493,12 +4674,14 @@ mod tests {
     const TEST_PORT: u32 = 41;
     const BASELINE_HANDLES: BaselineHandles = BaselineHandles {
         table: 11,
-        chain: 12,
+        forward_chain: 12,
+        input_chain: 13,
     };
     const POLICY_HANDLES: PolicyHandles = PolicyHandles {
         baseline: BASELINE_HANDLES,
-        live_set: 16,
-        rules: [13, 14, 15],
+        live_set: 14,
+        forward_rules: [15, 16, 17],
+        input_rules: [18, 19],
     };
 
     fn fixture_identity() -> RelayFenceIdentity {
@@ -4523,26 +4706,40 @@ mod tests {
     }
 
     fn fixture_restricted_snapshot(identity: &RelayFenceIdentity) -> RulesetSnapshot {
-        fixture_snapshot(identity, 0, Vec::new())
+        fixture_snapshot(identity, 0, 0, Vec::new())
     }
 
     fn fixture_active_snapshot(specification: &RelayFenceSpec) -> RulesetSnapshot {
-        let rules = (0_usize..3)
+        let mut rules = (0_usize..3)
             .map(|index| RuleRecord {
                 family: NFPROTO_INET,
                 table: specification.identity.table_name.clone(),
                 chain: FORWARD_CHAIN_NAME.to_vec(),
-                handle: POLICY_HANDLES.rules[index],
+                handle: POLICY_HANDLES.forward_rules[index],
                 position: index
                     .checked_sub(1)
-                    .map(|previous| POLICY_HANDLES.rules[previous]),
+                    .map(|previous| POLICY_HANDLES.forward_rules[previous]),
                 expressions: specification.expected_rule_expressions(index),
                 userdata: None,
                 pad: false,
             })
-            .collect();
-        let mut snapshot = fixture_snapshot(&specification.identity, 3, rules);
-        snapshot.tables[0].use_count = 2;
+            .collect::<Vec<_>>();
+        rules.extend((0_usize..2).map(|index| {
+            RuleRecord {
+                family: NFPROTO_INET,
+                table: specification.identity.table_name.clone(),
+                chain: INPUT_CHAIN_NAME.to_vec(),
+                handle: POLICY_HANDLES.input_rules[index],
+                position: index
+                    .checked_sub(1)
+                    .map(|previous| POLICY_HANDLES.input_rules[previous]),
+                expressions: specification.expected_host_isolation_expressions(index),
+                userdata: None,
+                pad: false,
+            }
+        }));
+        let mut snapshot = fixture_snapshot(&specification.identity, 3, 2, rules);
+        snapshot.tables[0].use_count = 3;
         snapshot.sets.push(SetRecord {
             family: NFPROTO_INET,
             table: specification.identity.table_name.clone(),
@@ -4571,7 +4768,8 @@ mod tests {
 
     fn fixture_snapshot(
         identity: &RelayFenceIdentity,
-        chain_use: u32,
+        forward_chain_use: u32,
+        input_chain_use: u32,
         rules: Vec<RuleRecord>,
     ) -> RulesetSnapshot {
         RulesetSnapshot {
@@ -4579,28 +4777,46 @@ mod tests {
                 family: NFPROTO_INET,
                 name: identity.table_name.clone(),
                 flags: 0,
-                use_count: 1,
+                use_count: 2,
                 handle: BASELINE_HANDLES.table,
                 pad: false,
                 userdata: Some(identity.canonical_userdata()),
                 owner: None,
             }],
-            chains: vec![ChainRecord {
-                family: NFPROTO_INET,
-                table: identity.table_name.clone(),
-                name: FORWARD_CHAIN_NAME.to_vec(),
-                handle: BASELINE_HANDLES.chain,
-                hook_number: NF_INET_FORWARD,
-                hook_priority: 0,
-                policy: NF_DROP,
-                use_count: chain_use,
-                chain_type: FILTER_CHAIN_TYPE.to_vec(),
-                flags: NFT_CHAIN_BASE,
-                counters: None,
-                pad: false,
-                id: None,
-                userdata: None,
-            }],
+            chains: vec![
+                ChainRecord {
+                    family: NFPROTO_INET,
+                    table: identity.table_name.clone(),
+                    name: FORWARD_CHAIN_NAME.to_vec(),
+                    handle: BASELINE_HANDLES.forward_chain,
+                    hook_number: NF_INET_FORWARD,
+                    hook_priority: 0,
+                    policy: NF_DROP,
+                    use_count: forward_chain_use,
+                    chain_type: FILTER_CHAIN_TYPE.to_vec(),
+                    flags: NFT_CHAIN_BASE,
+                    counters: None,
+                    pad: false,
+                    id: None,
+                    userdata: None,
+                },
+                ChainRecord {
+                    family: NFPROTO_INET,
+                    table: identity.table_name.clone(),
+                    name: INPUT_CHAIN_NAME.to_vec(),
+                    handle: BASELINE_HANDLES.input_chain,
+                    hook_number: NF_INET_LOCAL_IN,
+                    hook_priority: 0,
+                    policy: NF_DROP,
+                    use_count: input_chain_use,
+                    chain_type: FILTER_CHAIN_TYPE.to_vec(),
+                    flags: NFT_CHAIN_BASE,
+                    counters: None,
+                    pad: false,
+                    id: None,
+                    userdata: None,
+                },
+            ],
             rules,
             sets: Vec::new(),
             set_elements: Vec::new(),
@@ -4889,6 +5105,108 @@ mod tests {
     }
 
     #[test]
+    fn activation_installs_fail_closed_input_isolation_for_both_wireguard_legs() {
+        let specification = fixture_specification();
+        let baseline = encode_create_baseline_transaction(&specification.identity, TEST_GENERATION)
+            .expect("restrictive baseline");
+        let chains = transaction_frames(&baseline)
+            .into_iter()
+            .filter(|frame| read_ne_u16(frame, 4).ok() == Some(NFT_MSG_NEWCHAIN))
+            .collect::<Vec<_>>();
+        let [_, input] = chains.as_slice() else {
+            panic!("forward and input baseline chains")
+        };
+        let (_, input_payload) =
+            split_nfgenmsg(&input[NLMSG_HEADER_LEN..]).expect("input chain request nfgen");
+        let input_attributes =
+            parse_attributes(input_payload, MAX_CHAIN_ATTRIBUTES).expect("input chain attributes");
+        let input_names = attributes_of_kind(&input_attributes, NFTA_CHAIN_NAME);
+        let [input_name] = input_names.as_slice() else {
+            panic!("one input chain name")
+        };
+        assert_eq!(
+            read_nul_string(input_name.payload, MAX_TABLE_NAME_BYTES).expect("input chain name"),
+            INPUT_CHAIN_NAME
+        );
+        assert_eq!(
+            be_u32_attribute(&input_attributes, NFTA_CHAIN_POLICY),
+            NF_DROP
+        );
+        let hooks = attributes_of_kind(&input_attributes, NFTA_CHAIN_HOOK);
+        let [hook] = hooks.as_slice() else {
+            panic!("one input hook")
+        };
+        assert_eq!(hook.flags, NLA_F_NESTED);
+        assert_eq!(
+            be_u32_attribute(
+                &parse_attributes(hook.payload, MAX_HOOK_ATTRIBUTES).expect("input hook"),
+                NFTA_HOOK_HOOKNUM,
+            ),
+            NF_INET_LOCAL_IN
+        );
+
+        let transaction =
+            encode_activate_rules_transaction(&specification, TEST_GENERATION).expect("activation");
+        let rules = transaction_frames(&transaction)
+            .into_iter()
+            .filter(|frame| read_ne_u16(frame, 4).ok() == Some(NFT_MSG_NEWRULE))
+            .collect::<Vec<_>>();
+        assert_eq!(rules.len(), 5);
+
+        for (index, rule) in rules[3..].iter().enumerate() {
+            let (_, payload) =
+                split_nfgenmsg(&rule[NLMSG_HEADER_LEN..]).expect("input rule request nfgen");
+            let attributes =
+                parse_attributes(payload, MAX_RULE_ATTRIBUTES).expect("input rule attributes");
+            let chains = attributes_of_kind(&attributes, NFTA_RULE_CHAIN);
+            let [chain] = chains.as_slice() else {
+                panic!("one input chain binding")
+            };
+            assert_eq!(
+                read_nul_string(chain.payload, MAX_TABLE_NAME_BYTES).expect("input chain name"),
+                INPUT_CHAIN_NAME
+            );
+            let expression_lists = attributes_of_kind(&attributes, NFTA_RULE_EXPRESSIONS);
+            let [expressions] = expression_lists.as_slice() else {
+                panic!("one input expression list")
+            };
+            assert_eq!(expressions.flags, NLA_F_NESTED);
+            let expected = specification.expected_host_isolation_expressions(index);
+            assert_eq!(expected.len(), HOST_ISOLATION_RULE_EXPRESSIONS);
+            assert_eq!(
+                expressions.payload,
+                encode_policy_expressions(&expected).expect("canonical input drop expressions")
+            );
+            assert!(matches!(
+                &expected[1],
+                ObservedExpression::Compare { value, .. }
+                    if value == &[
+                        specification.relay_client_ifindex,
+                        specification.relay_exit_ifindex,
+                    ][index]
+                    .to_ne_bytes()
+            ));
+            assert!(matches!(
+                &expected[3],
+                ObservedExpression::Compare { value, .. }
+                    if value == &[
+                        specification.relay_client_interface,
+                        specification.relay_exit_interface,
+                    ][index]
+            ));
+            assert!(matches!(
+                expected.last(),
+                Some(ObservedExpression::ImmediateDrop)
+            ));
+            assert!(
+                !expected
+                    .iter()
+                    .any(|expression| matches!(expression, ObservedExpression::ImmediateAccept))
+            );
+        }
+    }
+
+    #[test]
     fn four_transactions_are_atomic_generation_pinned_and_operation_exact() {
         let identity = fixture_identity();
         let specification = fixture_specification();
@@ -4902,9 +5220,10 @@ mod tests {
                     NFNL_MSG_BATCH_BEGIN,
                     NFT_MSG_NEWTABLE,
                     NFT_MSG_NEWCHAIN,
+                    NFT_MSG_NEWCHAIN,
                     NFNL_MSG_BATCH_END,
                 ],
-                2,
+                3,
                 TEST_GENERATION,
             ),
             (
@@ -4917,9 +5236,11 @@ mod tests {
                     NFT_MSG_NEWRULE,
                     NFT_MSG_NEWRULE,
                     NFT_MSG_NEWRULE,
+                    NFT_MSG_NEWRULE,
+                    NFT_MSG_NEWRULE,
                     NFNL_MSG_BATCH_END,
                 ],
-                5,
+                7,
                 TEST_GENERATION + 1,
             ),
             (
@@ -4929,10 +5250,12 @@ mod tests {
                     NFT_MSG_DELRULE,
                     NFT_MSG_DELRULE,
                     NFT_MSG_DELRULE,
+                    NFT_MSG_DELRULE,
+                    NFT_MSG_DELRULE,
                     NFT_MSG_DELSET,
                     NFNL_MSG_BATCH_END,
                 ],
-                4,
+                6,
                 TEST_GENERATION + 2,
             ),
             (
@@ -5057,7 +5380,7 @@ mod tests {
             .copied()
             .filter(|frame| read_ne_u16(frame, 4).ok() == Some(NFT_MSG_NEWRULE))
             .collect::<Vec<_>>();
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 5);
         for rule in &rules[..2] {
             let (_, payload) =
                 split_nfgenmsg(&rule[NLMSG_HEADER_LEN..]).expect("rule request nfgen");
@@ -5189,7 +5512,7 @@ mod tests {
             encode_deactivate_rules_transaction(&active).expect("deactivate transaction");
         assert_eq!(
             delete_handles(&deactivation, NFT_MSG_DELRULE, NFTA_RULE_HANDLE),
-            vec![15, 14, 13]
+            vec![19, 18, 17, 16, 15]
         );
         assert_eq!(
             delete_handles(&deactivation, NFT_MSG_DELSET, NFTA_SET_HANDLE),
@@ -5299,6 +5622,33 @@ mod tests {
             changed_timeout,
             missing_lookup,
         ] {
+            assert!(
+                substituted
+                    .exact_active_observation(&specification, false)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn readback_requires_a_drop_baseline_and_exact_rules_for_both_input_legs() {
+        let identity = fixture_identity();
+        let specification = fixture_specification();
+
+        let mut missing_input_chain = fixture_restricted_snapshot(&identity);
+        missing_input_chain.chains.pop();
+        let mut permissive_input_chain = fixture_restricted_snapshot(&identity);
+        permissive_input_chain.chains[1].policy = NF_ACCEPT;
+        for substituted in [missing_input_chain, permissive_input_chain] {
+            assert!(substituted.exact_restricted_observation(&identity).is_err());
+        }
+
+        let mut local_delivery_allowed = fixture_active_snapshot(&specification);
+        local_delivery_allowed.rules[3].expressions[HOST_ISOLATION_RULE_EXPRESSIONS - 1] =
+            ObservedExpression::ImmediateAccept;
+        let mut second_leg_not_isolated = fixture_active_snapshot(&specification);
+        second_leg_not_isolated.rules.pop();
+        for substituted in [local_delivery_allowed, second_leg_not_isolated] {
             assert!(
                 substituted
                     .exact_active_observation(&specification, false)

@@ -2497,7 +2497,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             Err(failure) => {
                 return match failure.authority {
                     relay_fence::RelayFenceActivateAuthority::Restricted(restricted) => {
-                        self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                        self.relay_fence = Some(WorkerRelayFence::Restricted(*restricted));
                         RelayFenceActivationOutcome::Recoverable
                     }
                     relay_fence::RelayFenceActivateAuthority::Indeterminate(_) => {
@@ -2962,7 +2962,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                     Ok(_retired) => WorkerDestroyOutcome::Destroyed,
                     Err(failure) => match failure.authority {
                         relay_fence::RelayFenceRetireAuthority::Restricted(restricted) => {
-                            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                            self.relay_fence = Some(WorkerRelayFence::Restricted(*restricted));
                             WorkerDestroyOutcome::CleanupIncomplete
                         }
                         relay_fence::RelayFenceRetireAuthority::Indeterminate(_) => {
