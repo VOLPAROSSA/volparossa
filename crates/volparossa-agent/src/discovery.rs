@@ -16034,6 +16034,12 @@ mod tests {
             .unwrap_or_default();
     }
 
+    fn generated_nonce_with_network_discriminator(discriminator: u8) -> [u8; 32] {
+        let mut nonce = generate_nonce();
+        nonce[0] = discriminator;
+        nonce
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "test fixture preserves the signed advertisement inputs explicitly"
@@ -20585,7 +20591,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                generate_nonce(),
+                generated_nonce_with_network_discriminator(160),
                 now_ms,
             )
             .await
@@ -20603,7 +20609,7 @@ mod tests {
                 &control,
                 valid_exit,
                 1,
-                generate_nonce(),
+                generated_nonce_with_network_discriminator(161),
                 now_ms,
             )
             .await
@@ -20643,7 +20649,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                generate_nonce(),
+                generated_nonce_with_network_discriminator(162),
                 now_ms,
             )
             .await
