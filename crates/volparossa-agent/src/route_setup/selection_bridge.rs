@@ -5853,10 +5853,14 @@ mod tests {
         let (_, evidence) = snapshot_fixture();
         let batch = FreshEvidenceBatch::for_test(evidence.clone(), NOW_MS)
             .expect("explicit valid-until batch");
-        assert_eq!(
-            batch.entries[0].valid_until_ms,
-            NOW_MS + MAXIMUM_EVIDENCE_AGE_MS
-        );
+        let expected_valid_until_ms = evidence[0]
+            .observed_at_ms
+            .checked_add(MAXIMUM_EVIDENCE_AGE_MS)
+            .expect("bounded evidence age")
+            .min(evidence[0].policy_expires_at_ms)
+            .min(evidence[0].advertisement_expires_at_ms)
+            .min(evidence[0].capability_expires_at_ms);
+        assert_eq!(batch.entries[0].valid_until_ms, expected_valid_until_ms);
 
         let mut already_expired = evidence.clone();
         already_expired[0].valid_until_ms = NOW_MS;
