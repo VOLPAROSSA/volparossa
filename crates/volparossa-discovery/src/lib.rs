@@ -869,6 +869,19 @@ impl AddressAdmissions {
         }
         removed
     }
+
+    fn forget_peer(&mut self, peer: &PeerId) -> Vec<Multiaddr> {
+        self.by_peer
+            .remove(peer)
+            .map(|addresses| {
+                addresses
+                    .into_iter()
+                    .map(|admitted| admitted.address)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn contains_peer(&self, peer: &PeerId) -> bool {
         self.by_peer.contains_key(peer)
     }
@@ -1067,18 +1080,25 @@ impl DiscoveryService {
     }
 
     fn refresh_identify_addresses(&mut self, peer_id: PeerId, info: &identify::Info) {
+        if !identify_supports_private_kademlia(peer_id, info) {
+            // mDNS is observed before authenticated Identify and may therefore have admitted a
+            // client-only peer temporarily. Purge every source, including Known and mDNS, so a
+            // private-DHT server cannot retain or redistribute that client's public address.
+            self.address_admissions.forget_peer(&peer_id);
+            let _ = self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+            return;
+        }
+
         let mut retained = Vec::new();
-        if identify_supports_private_kademlia(peer_id, info) {
-            for address in bounded_prefix(&info.listen_addrs, MAX_DISCOVERY_ADDRESSES_PER_EVENT) {
-                if retained.len() >= MAX_DISCOVERY_ADDRESSES_PER_PEER {
-                    break;
-                }
-                if let Ok(canonical) =
-                    prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
-                {
-                    if !retained.contains(&canonical) {
-                        retained.push(canonical);
-                    }
+        for address in bounded_prefix(&info.listen_addrs, MAX_DISCOVERY_ADDRESSES_PER_EVENT) {
+            if retained.len() >= MAX_DISCOVERY_ADDRESSES_PER_PEER {
+                break;
+            }
+            if let Ok(canonical) =
+                prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
+            {
+                if !retained.contains(&canonical) {
+                    retained.push(canonical);
                 }
             }
         }
@@ -2281,6 +2301,37 @@ mod tests {
     }
 
     #[test]
+    fn address_admission_forget_peer_purges_every_source() {
+        let local = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let remote = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let first =
+            prepare_discovery_address(&local, remote, &test_address(4_001)).expect("first address");
+        let second = prepare_discovery_address(&local, remote, &test_address(4_002))
+            .expect("second address");
+        let mut admissions = AddressAdmissions::new(2, 2);
+
+        assert!(
+            admissions
+                .admit_prepared(remote, first.clone(), AddressSource::Mdns)
+                .expect("mDNS admission")
+        );
+        assert!(
+            !admissions
+                .admit_prepared(remote, first.clone(), AddressSource::Known)
+                .expect("cross-source admission")
+        );
+        assert!(
+            admissions
+                .admit_prepared(remote, second.clone(), AddressSource::Identify)
+                .expect("Identify admission")
+        );
+
+        assert_eq!(admissions.forget_peer(&remote), vec![first, second]);
+        assert!(!admissions.contains_peer(&remote));
+        assert!(admissions.forget_peer(&remote).is_empty());
+    }
+
+    #[test]
     fn identify_admission_requires_authenticated_peer_and_private_kademlia_protocol() {
         let keypair = identity::Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
@@ -2291,6 +2342,39 @@ mod tests {
         let unsupported =
             identify_info(&keypair, vec![StreamProtocol::new("/volparossa/not-kad/1")]);
         assert!(!identify_supports_private_kademlia(peer_id, &unsupported));
+    }
+
+    #[tokio::test]
+    async fn identify_refresh_retains_supported_peer_and_purges_unsupported_peer() {
+        let local = identity::Keypair::generate_ed25519();
+        let local_peer = local.public().to_peer_id();
+        let remote = identity::Keypair::generate_ed25519();
+        let remote_peer = remote.public().to_peer_id();
+        let address = prepare_discovery_address(&local_peer, remote_peer, &test_address(4_001))
+            .expect("canonical mDNS address");
+        let mut service = DiscoveryService::new(local).expect("discovery service");
+        service
+            .add_prepared_kademlia_address(remote_peer, address, AddressSource::Mdns)
+            .expect("mDNS admission");
+
+        let supported = identify_info(&remote, vec![StreamProtocol::new(KADEMLIA_PROTOCOL)]);
+        service.refresh_identify_addresses(remote_peer, &supported);
+        assert!(service.address_admissions.contains_peer(&remote_peer));
+
+        let unsupported =
+            identify_info(&remote, vec![StreamProtocol::new("/volparossa/not-kad/1")]);
+        service.refresh_identify_addresses(remote_peer, &unsupported);
+        assert!(!service.address_admissions.contains_peer(&remote_peer));
+        assert!(
+            service
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .kbuckets()
+                .all(|bucket| bucket
+                    .iter()
+                    .all(|entry| entry.node.key.preimage() != &remote_peer))
+        );
     }
     #[test]
     fn connection_limits_reject_excess_pending_inbound_without_bypasses() {
