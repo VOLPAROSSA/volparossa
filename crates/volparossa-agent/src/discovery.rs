@@ -20716,6 +20716,28 @@ mod tests {
         .expect("preselection outbound failure timeout")
     }
 
+    async fn next_unconnected_client_preselection_outbound_failure(
+        runtime: &mut DiscoveryRuntime,
+    ) -> DiscoveryEvent {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let event = runtime.service.next_event().await;
+                if matches!(
+                    &event,
+                    DiscoveryEvent::Other(SwarmEvent::Behaviour(
+                        BehaviourEvent::PreselectionObservation(
+                            request_response::Event::OutboundFailure { .. },
+                        ),
+                    ))
+                ) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("unconnected preselection outbound failure timeout")
+    }
+
     #[tokio::test]
     async fn client_preselection_rejects_every_invalid_parameter_before_snapshot_or_gate() {
         let mut fixture = fixture(RolesConfig {
@@ -21138,9 +21160,9 @@ mod tests {
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
-        reason = "one end-to-end regression rejects a forwarded exit until its control lineage refreshes"
+        reason = "one end-to-end regression retains the complete refreshed control lineage"
     )]
-    async fn production_client_preselection_waits_for_exact_forwarded_control_refresh() {
+    async fn production_client_preselection_accepts_same_lineage_control_refresh() {
         let mut fixture = fixture(RolesConfig {
             client: true,
             relay: false,
@@ -21244,8 +21266,24 @@ mod tests {
             )
             .await;
         assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Active(_)
+        ));
+        let failure =
+            next_unconnected_client_preselection_outbound_failure(&mut fixture.runtime).await;
+        Box::pin(
+            fixture
+                .runtime
+                .handle_sanitized_event(failure, &fixture.state),
+        )
+        .await;
+        assert!(matches!(
             response.await.expect("terminal dispatch result"),
-            Err(ClientPreselectionError::Unavailable)
+            Err(ClientPreselectionError::Transport)
+        ));
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
         ));
         assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 1);
     }
@@ -21286,6 +21324,14 @@ mod tests {
                 &fixture.state,
             )
             .await;
+        let failure =
+            next_unconnected_client_preselection_outbound_failure(&mut fixture.runtime).await;
+        Box::pin(
+            fixture
+                .runtime
+                .handle_sanitized_event(failure, &fixture.state),
+        )
+        .await;
         assert!(matches!(
             response.await.expect("terminal dispatch result"),
             Err(ClientPreselectionError::Transport)
