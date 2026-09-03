@@ -16025,11 +16025,9 @@ mod tests {
             .families
             .ipv6
             .then(|| {
-                format!(
-                    "2606:4700:{:02x}{:02x}::/48",
-                    nonce[0],
-                    sequence_number % 255
-                )
+                let prefix_segment = (u16::from(nonce[0]) << 8)
+                    | u16::try_from(sequence_number % 255).expect("bounded sequence suffix");
+                format!("2606:4700:{prefix_segment:x}::/48")
             })
             .unwrap_or_default();
     }
@@ -18076,6 +18074,8 @@ mod tests {
     async fn role_changes_require_restart_without_mutation_or_persistence() {
         let expected = RolesConfig::default();
         let mut fixture = fixture(expected);
+        let persisted_before =
+            fs::read(fixture.directory.path().join("roles.json")).expect("initial persisted roles");
         assert_eq!(
             fixture
                 .runtime
@@ -18098,11 +18098,9 @@ mod tests {
         assert_eq!(fixture.runtime.roles, expected);
         assert_eq!(fixture.state.read().await.roles(), expected);
         assert_eq!(
-            fixture
-                .role_store
-                .load_or_initialize(candidate)
-                .expect("persisted roles"),
-            expected
+            fs::read(fixture.directory.path().join("roles.json"))
+                .expect("unchanged persisted roles"),
+            persisted_before
         );
     }
 
