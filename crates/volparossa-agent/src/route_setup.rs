@@ -12630,6 +12630,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_native_rtt_drives_postprobe_spread_instead_of_rpc_latency() {
+        let fixture = fixture(1);
+        let mut parameters = fixture.transaction.transaction.request.parameters.clone();
+        parameters.post_probe_policy.relay_policy.active_paths = 2;
+        parameters.post_probe_policy.relay_policy.minimum_paths = 2;
+        parameters.post_probe_policy.relay_policy.maximum_paths = 2;
+        parameters.post_probe_policy.relay_policy.warm_backup_paths = 0;
+        let mut request = rebuild_prospective_request(
+            &fixture.transaction.transaction.authorities,
+            &[0, 1],
+            parameters,
+        );
+        request.paths[0]
+            .proof
+            .bind_client_native_round_trip(1_000)
+            .expect("first exact client native RTT");
+        request.paths[1]
+            .proof
+            .bind_client_native_round_trip(2_000)
+            .expect("second exact client native RTT");
+
+        let probes = request
+            .paths
+            .iter()
+            .map(|path| {
+                let path_id = path.path_id;
+                let rpc_window_micros = u64::from(path_id) * 100_000;
+                (
+                    path_id,
+                    FakeProbe {
+                        projection: ProbeProjection {
+                            path_id,
+                            transport: Transport::TcpMptcp,
+                            address_family: ProbeAddressFamily::Ipv4,
+                            minimum_directional_capacity_mbps: 100,
+                            evidence_bytes: 1_000,
+                            client_to_relay_rtt_micros: rpc_window_micros,
+                            relay_to_exit_rtt_micros: rpc_window_micros,
+                            total_rtt_micros: rpc_window_micros * 2,
+                            unique_throughput_gain_ratio: 0.0,
+                            meaningful_failover: false,
+                        },
+                        token: UniqueProbeToken {
+                            session: 0,
+                            path_id,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let selected = select_verified_probe_subset_with_rng::<FakeProtocol, _>(
+            &request,
+            probes,
+            NOW_MS,
+            &mut ZeroRng,
+        )
+        .expect("local native RTTs fit the 20 ms policy spread");
+        assert_eq!(selected.active.len(), 2);
+        fixture
+            .manager
+            .shutdown()
+            .await
+            .expect("clean manager shutdown");
+    }
+
+    #[tokio::test]
     async fn udp_policy_one_one_one_accepts_four_prospectives_and_finalizes_exactly_one() {
         let mut fixture = fixture(1);
         let mut parameters = fixture.transaction.transaction.request.parameters.clone();

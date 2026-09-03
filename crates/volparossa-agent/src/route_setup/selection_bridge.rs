@@ -110,6 +110,7 @@ impl VerifiedExitHelperRuntimeId {
 // the preceding preselection transaction used most of its own thirty-second deadline.
 const MAXIMUM_EVIDENCE_AGE_MS: u64 = 120_000;
 const NATIVE_PROBE_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_NATIVE_PROBE_ROUND_TRIP_MICROS: u64 = 10_000_000;
 
 #[derive(Eq, PartialEq)]
 struct ActorRelayDiversity {
@@ -160,9 +161,23 @@ pub(super) struct ActorBoundRelayProof {
     evidence_valid_until_ms: u64,
     projected_at_ms: u64,
     static_requirements: FilterRequirements,
+    client_native_round_trip_micros: Option<u64>,
 }
 
 impl ActorBoundRelayProof {
+    pub(super) fn bind_client_native_round_trip(
+        &mut self,
+        round_trip_micros: u64,
+    ) -> Result<(), RouteSetupError> {
+        if !(2..=MAX_NATIVE_PROBE_ROUND_TRIP_MICROS).contains(&round_trip_micros)
+            || self.client_native_round_trip_micros.is_some()
+        {
+            return Err(RouteSetupError::Invalid("client native probe RTT"));
+        }
+        self.client_native_round_trip_micros = Some(round_trip_micros);
+        Ok(())
+    }
+
     fn validate_preprobe_binding(
         &self,
         binding: &ProspectivePeerBinding,
@@ -342,6 +357,17 @@ impl ActorBoundRelayProof {
     ) -> Result<ProjectedRelayPath<'a>, RouteSetupError> {
         let capacity = u32::try_from(projection.minimum_directional_capacity_mbps)
             .map_err(|_| RouteSetupError::Invalid("probe capacity"))?;
+        let (client_to_relay_rtt_micros, relay_to_exit_rtt_micros) =
+            self.client_native_round_trip_micros.map_or(
+                (
+                    projection.client_to_relay_rtt_micros,
+                    projection.relay_to_exit_rtt_micros,
+                ),
+                |round_trip_micros| {
+                    let client_to_relay = round_trip_micros / 2;
+                    (client_to_relay, round_trip_micros - client_to_relay)
+                },
+            );
         Ok(ProjectedRelayPath::new(
             &self.selection,
             CompleteRelayPathMetrics::new(
@@ -351,8 +377,8 @@ impl ActorBoundRelayProof {
                     .map_err(|_| RouteSetupError::Invalid("probe capacity"))?,
                 Bandwidth::new(required_up, required_down)
                     .map_err(|_| RouteSetupError::Invalid("probe capacity"))?,
-                super::probe_rtt_millis(projection.client_to_relay_rtt_micros)?,
-                super::probe_rtt_millis(projection.relay_to_exit_rtt_micros)?,
+                super::probe_rtt_millis(client_to_relay_rtt_micros)?,
+                super::probe_rtt_millis(relay_to_exit_rtt_micros)?,
                 projection.unique_throughput_gain_ratio,
                 projection.meaningful_failover,
             ),
@@ -964,8 +990,13 @@ struct ClientNativeProbeBatchOwner {
     route_hard_lifetime: Duration,
     replay: volparossa_protocol::ReplayCache,
     armed: Vec<native_preselection::ArmedNativeProbe>,
-    proofs: Vec<native_preselection::BoundNativePathProof>,
+    proofs: Vec<MeasuredClientNativePathProof>,
     committed_owner: Option<RuntimeBoundPreparedLeaseBatch>,
+}
+
+struct MeasuredClientNativePathProof {
+    proof: native_preselection::BoundNativePathProof,
+    round_trip_micros: u64,
 }
 
 /// Terminal proof-to-evidence rejection with cooldown ownership retained.
@@ -1030,6 +1061,7 @@ struct AuthorizedClientNativePath {
     path_id: u32,
     lease_handle: Vec<u8>,
     prepared_lease_commitment: [u8; 32],
+    round_trip_micros: Option<u64>,
 }
 
 /// Signed Start dispatched to the exact data Relay and awaiting local helper commit proof.
@@ -1048,6 +1080,7 @@ struct AwaitingClientNativePathResult {
     path_id: u32,
     lease_handle: Vec<u8>,
     prepared_lease_commitment: [u8; 32],
+    round_trip_micros: u64,
 }
 
 /// One or more terminal cryptographic path proofs plus remaining affine candidate ownership.
@@ -1454,6 +1487,7 @@ impl PreparedClientNativeProbe {
                 path_id: path.path_id,
                 lease_handle: path.lease_handle,
                 prepared_lease_commitment: path.prepared_lease_commitment,
+                round_trip_micros: None,
             });
         }
         let activation = ActivateLeaseBatch {
@@ -1557,10 +1591,10 @@ impl AuthorizedPreparedClientNativeProbe {
 
     /// Exchange each exact one-shot challenge through its Activated-only helper socket.
     pub(crate) async fn exchange_challenges(
-        &self,
+        &mut self,
         helper: &HelperClient,
     ) -> Result<(), ClientNativeProbeError> {
-        for path in &self.paths {
+        for path in &mut self.paths {
             let request = native_probe_client_socket_request(
                 self.route_context_id,
                 &self.context_handle,
@@ -1586,6 +1620,7 @@ impl AuthorizedPreparedClientNativeProbe {
             let socket = UdpSocket::from_std(socket)
                 .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
             let challenge = path.awaiting.challenge();
+            let round_trip_started = Instant::now();
             let sent = timeout(NATIVE_PROBE_CHALLENGE_TIMEOUT, socket.send(challenge))
                 .await
                 .map_err(|_| ClientNativeProbeError::HelperCorrelation)?
@@ -1601,6 +1636,13 @@ impl AuthorizedPreparedClientNativeProbe {
             if received != NATIVE_PROBE_DATAGRAM_BYTES || echoed.as_slice() != challenge {
                 return Err(ClientNativeProbeError::HelperCorrelation);
             }
+            let round_trip_micros = u64::try_from(round_trip_started.elapsed().as_micros())
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?
+                .max(2);
+            if round_trip_micros > MAX_NATIVE_PROBE_ROUND_TRIP_MICROS {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            path.round_trip_micros = Some(round_trip_micros);
         }
         Ok(())
     }
@@ -1621,11 +1663,15 @@ impl AuthorizedPreparedClientNativeProbe {
         }
         let mut paths = Vec::with_capacity(self.paths.len());
         for path in self.paths {
+            let round_trip_micros = path
+                .round_trip_micros
+                .ok_or(ClientNativeProbeError::HelperCorrelation)?;
             paths.push(AwaitingClientNativePathResult {
                 awaiting: path.awaiting,
                 path_id: path.path_id,
                 lease_handle: path.lease_handle,
                 prepared_lease_commitment: path.prepared_lease_commitment,
+                round_trip_micros,
             });
         }
         Ok(AwaitingClientNativeProbeResult {
@@ -1702,6 +1748,7 @@ impl AwaitingClientNativeProbeResult {
                 Ok::<_, native_preselection::NativePreselectionError>((
                     path.path_id,
                     path.prepared_lease_commitment,
+                    path.round_trip_micros,
                     lease,
                     awaiting,
                     signed_relay_result,
@@ -1717,7 +1764,15 @@ impl AwaitingClientNativeProbeResult {
             })??);
         }
         results.sort_unstable_by_key(|(path_id, ..)| *path_id);
-        for (_path_id, prepared_lease_commitment, lease, awaiting, signed_relay_result) in results {
+        for (
+            _path_id,
+            prepared_lease_commitment,
+            round_trip_micros,
+            lease,
+            awaiting,
+            signed_relay_result,
+        ) in results
+        {
             let proof = awaiting.accept_result(
                 NativeProbeLeaseProof {
                     helper_runtime_id: self.helper_runtime_id.to_vec(),
@@ -1730,7 +1785,10 @@ impl AwaitingClientNativeProbeResult {
                 &signed_relay_result,
                 &mut self.batch.replay,
             )?;
-            self.batch.proofs.push(proof);
+            self.batch.proofs.push(MeasuredClientNativePathProof {
+                proof,
+                round_trip_micros,
+            });
         }
         self.batch.committed_owner = Some(self.prepared_owner);
         Ok(CompletedClientNativeProbe {
@@ -1829,8 +1887,8 @@ impl CompletedClientNativeProbe {
             .batch
             .proofs
             .iter()
-            .map(|proof| {
-                let relay = proof.data_relay();
+            .map(|measured| {
+                let relay = measured.proof.data_relay();
                 (relay.node_id.clone(), relay.peer_id.clone())
             })
             .collect::<HashSet<_>>();
@@ -1842,9 +1900,9 @@ impl CompletedClientNativeProbe {
             .collect::<HashSet<_>>();
         let expected_control = &plan.forwarded_exit.control.identity;
         let expected_exit = &plan.forwarded_exit.exit.identity;
-        let actors_match = self.batch.proofs.iter().all(|proof| {
-            let control = proof.control();
-            let exit = proof.exit();
+        let actors_match = self.batch.proofs.iter().all(|measured| {
+            let control = measured.proof.control();
+            let exit = measured.proof.exit();
             control.node_id == expected_control.wire_node_id
                 && control.peer_id == expected_control.peer_id.to_bytes()
                 && exit.node_id == expected_exit.wire_node_id
@@ -1864,21 +1922,41 @@ impl CompletedClientNativeProbe {
             );
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
-        let first_proof = self
+        for measured in &self.batch.proofs {
+            let data_relay = measured.proof.data_relay();
+            let mut matching = plan.prospective_relays.iter_mut().filter(|relay| {
+                relay.relay.identity.wire_node_id.as_slice() == data_relay.node_id
+                    && relay.relay.identity.peer_id.to_bytes() == data_relay.peer_id
+            });
+            let relay = matching
+                .next()
+                .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+            if matching.next().is_some() {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            relay
+                .proof
+                .bind_client_native_round_trip(measured.round_trip_micros)
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        }
+        let first_proof = &self
             .batch
             .proofs
             .first()
-            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?
+            .proof;
         if client_native_instance_id == [0; 32] {
             tracing::warn!(stage = "native-instance", "native route admission rejected");
             return Err(ClientNativeProbeError::HelperCorrelation);
         }
         let client_helper_runtime_id = *first_proof.client_helper_runtime_id();
         let exit_helper_runtime_id = first_proof.exit_helper_runtime_id();
-        if self.batch.proofs.iter().any(|proof| {
-            proof.client_helper_runtime_id() != &client_helper_runtime_id
-                || proof.exit_helper_runtime_id().as_bytes() != exit_helper_runtime_id.as_bytes()
-                || !proof
+        if self.batch.proofs.iter().any(|measured| {
+            measured.proof.client_helper_runtime_id() != &client_helper_runtime_id
+                || measured.proof.exit_helper_runtime_id().as_bytes()
+                    != exit_helper_runtime_id.as_bytes()
+                || !measured
+                    .proof
                     .exit_helper_runtime_id()
                     .is_same_signed_attempt(&exit_helper_runtime_id)
         }) {
@@ -4300,6 +4378,7 @@ fn mint_actor_bound_relay_proof(
         evidence_valid_until_ms: record.evidence_valid_until_ms,
         projected_at_ms,
         static_requirements: requirements,
+        client_native_round_trip_micros: None,
     })
 }
 
