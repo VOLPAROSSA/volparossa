@@ -77,10 +77,11 @@ index 0000000..0a366b3
 + * congestion term makes a nearly-full cwnd lose before it becomes completely
 + * blocked.  Before every active path has acknowledged 2 MiB, bounded startup
 + * exploration selects the sendable path with the least projected delivered
-+ * bytes.  Afterwards EDT remains primary while a 256 KiB maximum service skew
-+ * gives every healthy active path continuous genuine application traffic.
-+ * Forced service stops when attempted-minus-acknowledged transport reaches
-+ * 8 MiB, so an active black hole cannot retain a fixed traffic share forever.
++ * bytes.  Afterwards EDT remains primary while a 256 KiB service skew, plus
++ * at most the packet currently being scheduled, gives every healthy active
++ * path continuous genuine application traffic.  Forced service stops at an
++ * 8 MiB attempt debt plus at most that current packet, so an active black hole
++ * cannot retain a fixed traffic share forever.
 + * The loss multiplier is capped at 100 RTTs and the queue term at 60 seconds,
 + * keeping
 + * adversarial or transient counters finite.  Reinjection is deliberately
@@ -641,8 +642,8 @@ index 0000000..872a1a9
 +    /* A later transfer on the same connection must still exercise both paths.
 +     * Start at the maximum permitted service skew, make path 30's EDT vastly
 +     * better, then schedule the exact 4 MiB A07 pre-failure request.  Bounding
-+     * both the start and end skew to 256 KiB gives each path at least
-+     * (4 MiB - 2 * 256 KiB) / 2 = 1.75 MiB of new genuine traffic. */
++     * both the start and end skew to 256 KiB plus one 1200-byte packet gives
++     * each path more than 1.74 MiB of new genuine traffic. */
 +    const uint64_t baseline = 8ULL * 1024ULL * 1024ULL;
 +    const uint64_t service_skew = 256ULL * 1024ULL;
 +    fixture.send_ctls[0].ctl_delivered = baseline + service_skew;
