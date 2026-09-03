@@ -63,6 +63,8 @@ const MAXIMUM_PENDING_BROWSER_QUIC_BYTES: usize = 256 * 1024;
 const MAXIMUM_PENDING_GENERAL_UDP_AGE: Duration = Duration::from_secs(5);
 const GENERAL_UDP_AUTH_PORT: u16 = 47_001;
 const GENERAL_UDP_AUTH_MAGIC: &[u8] = b"VOLPAROSSA-UDP-AUTH-V1\0";
+const NATIVE_SEND_BACKPRESSURE_ATTEMPTS: usize = 20;
+const NATIVE_SEND_BACKPRESSURE_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Affine preflight of the exact native Exit process incarnation signed into finalization.
 #[must_use = "native Exit preflight authority must be consumed by one route"]
@@ -2510,13 +2512,36 @@ async fn send_inner_ip<C: MultipathNativeControl>(
     masque_context_id: u64,
     packet: Vec<u8>,
 ) -> Result<(), ProductionMpquicError> {
-    control
-        .send(SendDatagram {
-            route_context_id: route_context_id.to_vec(),
-            inner_ip_packet: packet,
-            masque_context_id,
-        })
-        .await
+    for attempt in 0..NATIVE_SEND_BACKPRESSURE_ATTEMPTS {
+        let result = control
+            .send(SendDatagram {
+                route_context_id: route_context_id.to_vec(),
+                inner_ip_packet: packet.clone(),
+                masque_context_id,
+            })
+            .await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt + 1 < NATIVE_SEND_BACKPRESSURE_ATTEMPTS
+                    && is_native_send_backpressure(&error) =>
+            {
+                tokio::time::sleep(NATIVE_SEND_BACKPRESSURE_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the bounded native send loop always returns")
+}
+
+fn is_native_send_backpressure(error: &ProductionMpquicError) -> bool {
+    matches!(
+        error,
+        ProductionMpquicError::Native(NativeClientError::Rejected {
+            result: NativeResultCode::Transport,
+            diagnostic_code,
+        }) if diagnostic_code == "send_backpressure"
+    )
 }
 
 async fn receive_inner_ip<C: MultipathNativeControl>(
@@ -3157,6 +3182,8 @@ mod tests {
         starts: usize,
         paths: Vec<u32>,
         stopped: bool,
+        send_attempts: usize,
+        send_backpressure_remaining: usize,
     }
 
     impl MultipathNativeControl for FakeNative {
@@ -3201,6 +3228,16 @@ mod tests {
         async fn send(&self, request: SendDatagram) -> Result<(), ProductionMpquicError> {
             assert_eq!(request.route_context_id, [2; 16]);
             assert_eq!(request.masque_context_id, 7);
+            let mut state = self.state.lock().unwrap();
+            state.send_attempts += 1;
+            if state.send_backpressure_remaining != 0 {
+                state.send_backpressure_remaining -= 1;
+                return Err(ProductionMpquicError::Native(NativeClientError::Rejected {
+                    result: NativeResultCode::Transport,
+                    diagnostic_code: "send_backpressure".to_owned(),
+                }));
+            }
+            drop(state);
             self.datagram_tx.send(&request.inner_ip_packet).unwrap();
             Ok(())
         }
@@ -3475,6 +3512,45 @@ mod tests {
         assert_eq!(
             receive_inner_ip(&native, [2; 16], 7).await.unwrap(),
             Some(packet)
+        );
+    }
+
+    #[tokio::test]
+    async fn native_send_retries_only_bounded_backpressure() {
+        let native = FakeNative::default();
+        native.state.lock().unwrap().send_backpressure_remaining = 1;
+        let packet = vec![
+            0x45, 0, 0, 20, 0, 0, 0, 0, 64, 59, 0, 0, 10, 76, 0, 2, 10, 76, 0, 1,
+        ];
+
+        send_inner_ip(&native, [2; 16], 7, packet.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(native.state.lock().unwrap().send_attempts, 2);
+        assert_eq!(
+            receive_inner_ip(&native, [2; 16], 7).await.unwrap(),
+            Some(packet)
+        );
+    }
+
+    #[tokio::test]
+    async fn native_send_backpressure_exhaustion_is_bounded() {
+        let native = FakeNative::default();
+        native.state.lock().unwrap().send_backpressure_remaining =
+            NATIVE_SEND_BACKPRESSURE_ATTEMPTS;
+        let packet = vec![
+            0x45, 0, 0, 20, 0, 0, 0, 0, 64, 59, 0, 0, 10, 76, 0, 2, 10, 76, 0, 1,
+        ];
+
+        let error = send_inner_ip(&native, [2; 16], 7, packet)
+            .await
+            .expect_err("persistent native backpressure must remain fail closed");
+
+        assert!(is_native_send_backpressure(&error));
+        assert_eq!(
+            native.state.lock().unwrap().send_attempts,
+            NATIVE_SEND_BACKPRESSURE_ATTEMPTS
         );
     }
 
