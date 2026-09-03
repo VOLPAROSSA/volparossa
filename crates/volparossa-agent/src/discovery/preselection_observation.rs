@@ -107,7 +107,10 @@ const MAXIMUM_TOMBSTONES: usize = 36;
         reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
-const MAXIMUM_BATCH_TOMBSTONES: usize = 4;
+// A failed batch can consume only one challenge tombstone.  Keep the independently bounded batch
+// ledger large enough for every live challenge rather than blocking valid retries after four
+// route attempts while retaining the same 120-second replay window.
+const MAXIMUM_BATCH_TOMBSTONES: usize = MAXIMUM_TOMBSTONES;
 #[cfg_attr(
     not(test),
     allow(
@@ -4409,7 +4412,7 @@ mod tests {
                 expires_at: started_at_mono + TOMBSTONE_LIFETIME,
             });
         }
-        for value in 1_u8..=3 {
+        for value in 1_u8..=35 {
             gate.batch_tombstones.push_back(BatchTombstone {
                 batch_id: [value; BATCH_ID_LENGTH],
                 expires_at: started_at_mono + TOMBSTONE_LIFETIME,
@@ -4429,9 +4432,12 @@ mod tests {
                 ),
                 |request_count| Ok(minted_entropy(request_count, 241)),
             )
-            .unwrap_or_else(|_| panic!("34+2 challenges and 3+1 batches fit exactly"));
+            .unwrap_or_else(|_| panic!("34+2 challenges and 35+1 batches fit exactly"));
         assert_eq!(pending.gate.tombstones.len(), 35);
-        assert_eq!(pending.gate.batch_tombstones.len(), 4);
+        assert_eq!(
+            pending.gate.batch_tombstones.len(),
+            MAXIMUM_BATCH_TOMBSTONES
+        );
         let dispatch = ObservationDispatchId {
             batch_id: pending.batch_id,
             ordinal: pending.pending.dispatch_id.ordinal,
@@ -5404,7 +5410,7 @@ mod tests {
             "const MAXIMUM_REQUESTS: usize = 9;",
             "const MAXIMUM_ENVELOPES: usize = 10;",
             "const MAXIMUM_TOMBSTONES: usize = 36;",
-            "const MAXIMUM_BATCH_TOMBSTONES: usize = 4;",
+            "const MAXIMUM_BATCH_TOMBSTONES: usize = MAXIMUM_TOMBSTONES;",
             "const REPLAY_CAPACITY: usize = 40;",
             "const REQUEST_LIFETIME_MS: u64 = 120_000;",
             "const ATTEMPT_LIFETIME_MS: u64 = 30_000;",

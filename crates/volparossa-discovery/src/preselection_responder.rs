@@ -32,7 +32,10 @@ use crate::{
 const REQUEST_TOMBSTONE_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_REQUEST_TOMBSTONES: usize = 1_024;
 const MAX_REQUEST_TOMBSTONES_PER_PEER: usize = 16;
-const MAX_LOCAL_ADVERTISEMENT_LINEAGE: usize = 8;
+// A live advertisement can legitimately remain selected while the local node
+// publishes several capacity refreshes.  Cover the measured alpha refresh
+// window while retaining an explicit bound on locally served authorities.
+const MAX_LOCAL_ADVERTISEMENT_LINEAGE: usize = 32;
 
 /// Exact active-policy snapshot required before a Relay or Exit may sign an observation receipt.
 ///
@@ -3125,22 +3128,28 @@ mod tests {
     async fn exact_previously_served_exit_actor_survives_bounded_advertisement_refresh() {
         let mut fixture = upstream_fixture().await;
         let previously_served = fixture.exit_actor.clone();
-        let mut replacement = exit_advertisement(&fixture.exit_key, fixture.exit_public_key);
-        replacement.sequence_number = replacement.sequence_number.saturating_add(1);
-        let replacement = sign_control_message_with(
-            &replacement,
-            fixture.exit_public_key,
-            NOW_MS,
-            ADVERTISEMENT_EXPIRY_MS,
-            [94; 32],
-            TimePolicy::default(),
-            |message| sign_with_key(&fixture.exit_key, message),
-        )
-        .expect("signed replacement Exit advertisement");
-        fixture
-            .service
-            .set_local_advertisement(replacement)
-            .expect("install replacement Exit advertisement");
+        for refresh in 1_u8..=u8::try_from(MAX_LOCAL_ADVERTISEMENT_LINEAGE)
+            .expect("bounded local advertisement lineage")
+        {
+            let mut replacement = exit_advertisement(&fixture.exit_key, fixture.exit_public_key);
+            replacement.sequence_number = replacement
+                .sequence_number
+                .saturating_add(u64::from(refresh));
+            let replacement = sign_control_message_with(
+                &replacement,
+                fixture.exit_public_key,
+                NOW_MS,
+                ADVERTISEMENT_EXPIRY_MS,
+                [94_u8.saturating_add(refresh); 32],
+                TimePolicy::default(),
+                |message| sign_with_key(&fixture.exit_key, message),
+            )
+            .expect("signed replacement Exit advertisement");
+            fixture
+                .service
+                .set_local_advertisement(replacement)
+                .expect("install replacement Exit advertisement");
+        }
 
         fixture
             .service
