@@ -171,12 +171,13 @@ impl Agent {
         let (listener, socket_guard) =
             bind_control_socket(&self.paths.control_socket)?.into_parts();
         let client_ingress = if self.config.roles.client {
-            Some(
-                ClientIngressRuntime::start(self.helper.clone())
-                    .await
-                    .map(Arc::new)
-                    .map_err(|_| AgentError::ClientIngress)?,
-            )
+            let ingress = ClientIngressRuntime::start(self.helper.clone())
+                .await
+                .map_err(|error| {
+                    tracing::error!(error = ?error, "client ingress startup failed");
+                    AgentError::ClientIngress
+                })?;
+            Some(Arc::new(ingress))
         } else {
             None
         };
