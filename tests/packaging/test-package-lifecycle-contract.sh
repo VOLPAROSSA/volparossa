@@ -5,6 +5,7 @@ set -eu
 
 export LC_ALL=C
 repository=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+lifecycle=$repository/tests/packaging/debian13-package-lifecycle.sh
 temporary=$(mktemp -d /tmp/volparossa-package-contract.XXXXXX)
 case $temporary in /tmp/volparossa-package-contract.??????) ;; *) exit 69 ;; esac
 cleanup() {
@@ -18,10 +19,14 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-"$repository/tests/packaging/debian13-package-lifecycle.sh" --preview \
-    >"$temporary/preview"
+"$lifecycle" --preview >"$temporary/preview"
 grep -F 'PREVIEW ONLY: no package, service, account, file or network state was changed.' \
     "$temporary/preview" >/dev/null
+grep -F 'agent_control_socket=/run/volparossa/control/agent.sock' "$lifecycle" >/dev/null
+[ "$(grep -Fc 'wait_agent_control_socket' "$lifecycle")" -eq 3 ]
+[ "$(grep -Fc -- "--control-socket \"\$agent_control_socket\" status" "$lifecycle")" -eq 1 ]
+grep -F '/usr/bin/timeout --signal=KILL 0.2s' "$lifecycle" >/dev/null
+grep -F 'volparossa-agent control socket did not become ready' "$lifecycle" >/dev/null
 
 mkdir "$temporary/bin"
 log=$temporary/commands

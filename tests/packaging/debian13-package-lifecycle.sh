@@ -250,9 +250,27 @@ wait_active() {
     return 1
 }
 
+agent_control_socket=/run/volparossa/control/agent.sock
+wait_agent_control_socket() {
+    attempt=0
+    while [ "$attempt" -lt 100 ]; do
+        if [ -S "$agent_control_socket" ] && [ ! -L "$agent_control_socket" ] \
+            && /usr/bin/timeout --signal=KILL 0.2s \
+                /usr/bin/volparossa --control-socket "$agent_control_socket" status \
+                    >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+    systemctl status --no-pager volparossa-agent.service >&2 || true
+    echo "volparossa-agent control socket did not become ready" >&2
+    return 1
+}
+
 services='volparossa-helper.service volparossa-mpquic.service volparossa-agent.service'
 for unit in $services; do wait_active "$unit"; done
-/usr/bin/volparossa status >/dev/null
+wait_agent_control_socket
 
 before_pids=
 for unit in $services; do
@@ -275,7 +293,7 @@ for unit in $services; do
 done
 test "$(sha256sum /var/lib/volparossa/identity.key | awk '{ print $1 }')" \
     = "$identity_before"
-/usr/bin/volparossa status >/dev/null
+wait_agent_control_socket
 /usr/bin/volparossa doctor --json >"$output_directory/doctor-after-upgrade.json"
 jq -e 'all(.checks[]; .status != "fail")' \
     "$output_directory/doctor-after-upgrade.json" >/dev/null
