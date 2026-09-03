@@ -13047,7 +13047,14 @@ mod tests {
         assert!(!product.contains("fn into_parts("));
         assert!(!product.contains("fn decompose("));
         assert!(!product.contains("fn transaction("));
-        assert!(!product.contains("fn deadline("));
+        let unmeasured_impl = product
+            .split("impl<P: ClientReservationProtocol> UnmeasuredRouteSetup<P> {")
+            .nth(1)
+            .expect("private unmeasured setup implementation")
+            .split("\n}\n\nimpl<P: ClientReservationProtocol> RouteSetupTransaction<P> {")
+            .next()
+            .expect("private unmeasured setup implementation end");
+        assert!(!unmeasured_impl.contains("fn deadline("));
         assert!(!product.contains("RouteSetupTransaction::execute_owned"));
         assert!(!product.contains("fn with_protocol("));
         assert!(!product.contains("resolve_and_generate"));

@@ -8711,10 +8711,14 @@ mod tests {
         snapshot: &RouteCandidateSnapshot,
         evidence: &[FreshPeerEvidence],
     ) {
+        let mut short_lived_evidence = evidence.to_vec();
+        for fresh in &mut short_lived_evidence {
+            fresh.valid_until_ms = NOW_MS + 1;
+        }
         let preflight = snapshot_exit_preflight_at(
             snapshot,
             snapshot_parameters(),
-            evidence,
+            &short_lived_evidence,
             NOW_MS,
             &mut OsRng,
         )
@@ -8725,7 +8729,7 @@ mod tests {
                 &paths,
                 deadlines(),
                 RouteSessionAuthority::for_test([49; 16], [50; 16]),
-                NOW_MS + MAXIMUM_EVIDENCE_AGE_MS + 1,
+                NOW_MS + 1,
                 &mut OsRng,
             ),
             Err(SelectionBridgeError::StaleEvidence)
