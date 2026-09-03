@@ -1087,6 +1087,41 @@ mod tests {
     }
 
     #[test]
+    fn namespace_retirement_binds_a_nonzero_representative_and_never_admits_zero() {
+        for role in [
+            volparossa_routing::ContextRole::Client,
+            volparossa_routing::ContextRole::Exit,
+        ] {
+            let hello = hello(role, 1);
+            let plan = restart_plan(role, 1);
+            let retire = ReaperPlanRecord::new(&hello, plan, RestartCleanupMode::RetireNamespace)
+                .expect("active namespace retirement record");
+            let pre_dispatch = ReaperPlanRecord::new(&hello, plan, RestartCleanupMode::PreDispatch)
+                .expect("pre-dispatch record");
+            assert!(retire != pre_dispatch);
+            assert_ne!(retire.fd_binding(), pre_dispatch.fd_binding());
+            assert_ne!(
+                phase_record(ReaperPhase::Proceed, &hello, retire),
+                phase_record(ReaperPhase::Proceed, &hello, pre_dispatch)
+            );
+            let proof =
+                ExactRestartReaperCleanupProof::for_test(plan, RestartCleanupMode::RetireNamespace);
+            assert!(proof.matches_plan(plan, RestartCleanupMode::RetireNamespace));
+            assert!(!proof.matches_plan(plan, RestartCleanupMode::PreDispatch));
+        }
+
+        for role in [
+            volparossa_routing::ContextRole::Client,
+            volparossa_routing::ContextRole::Relay,
+            volparossa_routing::ContextRole::Exit,
+        ] {
+            let zero = hello(role, 0);
+            assert!(HandshakeRecord::decode(&zero.encode()).is_err());
+            assert!(child_restart_plan(&zero).is_err());
+        }
+    }
+
+    #[test]
     fn authenticated_network_plan_rejects_every_unscoped_shape() {
         for role in [
             volparossa_routing::ContextRole::Client,

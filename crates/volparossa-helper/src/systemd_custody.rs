@@ -1389,12 +1389,14 @@ fn observe_exact_worker_exit_and_shared_cgroup(
 }
 
 /// Recover one exact-present set of single-path `MayOwnCustody` or active `MayOwnPrepare`
-/// namespaces, including a mixed set left by a crash between journal transitions.
+/// namespaces, including active multi-path Client/Exit namespaces and a mixed set left by a crash
+/// between journal transitions.
 ///
 /// Worker-spawn admission, the lock-held startup actor, every old process pidfd and every inherited
 /// namespace descriptor remain retained across both shared-cgroup observations, all fixed
 /// self-exec reapers, the journal transitions and the existing descriptor-store removal chain.
-/// Every no-store and multi-path shape remains outside this function.
+/// Every no-store shape, multi-path pre-dispatch shape and multi-path Relay shape remains outside
+/// this function.
 pub(crate) fn settle_exact_may_own_restart_present(
     runtime: &Runtime,
     mut ownership_startup: ProductionOwnershipStartup,
@@ -4097,6 +4099,17 @@ mod tests {
             .is_exact_may_own_restart_set(),
             "zero marks a multi-path durable plan"
         );
+        for (seed, role) in [
+            (77, volparossa_routing::ContextRole::Client),
+            (78, volparossa_routing::ContextRole::Relay),
+            (79, volparossa_routing::ContextRole::Exit),
+        ] {
+            assert!(
+                !single_restart_classification(seed, StartupCustodyPhase::MayOwnPrepare, role, 0,)
+                    .is_exact_may_own_restart_set(),
+                "a raw multi-path sentinel must never cross the authenticated reaper gate"
+            );
+        }
         assert!(
             !single_restart_classification(
                 81,
@@ -4117,7 +4130,7 @@ mod tests {
         );
 
         let mut multi = single_restart_classification(
-            77,
+            80,
             StartupCustodyPhase::MayOwnCustody,
             volparossa_routing::ContextRole::Client,
             1,
@@ -4125,9 +4138,9 @@ mod tests {
         multi.classified.push(multi.classified[0]);
         assert!(!multi.is_exact_may_own_restart_set());
 
-        let absent_target = synthetic_startup_target(78, StartupCustodyPhase::MayOwnCustody, 78)
+        let absent_target = synthetic_startup_target(81, StartupCustodyPhase::MayOwnCustody, 81)
             .with_restart_plan_for_test(restart_plan_fixture(
-                78,
+                81,
                 volparossa_routing::ContextRole::Client,
                 1,
             ));

@@ -409,8 +409,10 @@ pub(crate) struct StartupCustodyTarget {
 /// Secret-free, journal-derived identity of the worker bootstrap which preceded custody.
 ///
 /// This is observation input only. It carries no journal key, kernel mutation authority or raw
-/// descriptor. A zero `path_id` means that the durable plan contains more than one path and is
-/// deliberately outside the first restart-reaper slice.
+/// descriptor. A zero `path_id` means the durable plan has multiple paths and requires path-scoped
+/// cleanup, so it remains outside restart recovery. Active Client/Exit namespace retirement uses
+/// the canonical first real path only as a transcript representative; the exact durable record,
+/// recovery anchor and descriptor binding continue to identify the complete namespace.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct StartupRestartPlan {
     network: RestartNetworkPlan,
@@ -2470,17 +2472,29 @@ fn project_startup_custody_target(
         .first()
         .map(|path| path.path_id)
         .ok_or(DurableOwnershipError::RecoveryNotConfirmed)?;
-    let path_id = if record
+    let context_role = super::routing_context_role(record.plan.context_role);
+    let single_path = record
         .plan
         .paths
         .iter()
-        .all(|path| path.path_id == first_path_id)
-    {
+        .all(|path| path.path_id == first_path_id);
+    let path_id = if single_path
+        || (matches!(
+            phase,
+            StartupCustodyPhase::MayOwnPrepare | StartupCustodyPhase::CleanupConfirmed
+        ) && matches!(
+            context_role,
+            volparossa_routing::ContextRole::Client | volparossa_routing::ContextRole::Exit
+        )) {
+        // ClosedPlan validation orders paths canonically. For an active Client/Exit worker the
+        // first path is only a nonzero transcript correlation representative: RetireNamespace
+        // closes the exact journal/anchor/FD-bound namespace and never performs path cleanup.
         first_path_id
     } else {
+        // Multi-path pre-dispatch cleanup and every multi-path Relay remain outside restart
+        // recovery because those modes require exact per-path kernel cleanup authority.
         0
     };
-    let context_role = super::routing_context_role(record.plan.context_role);
     Ok(Some(StartupCustodyTarget {
         phase,
         custody_name_digest: custody_name_digest_for_coordinates(OwnershipCoordinates {

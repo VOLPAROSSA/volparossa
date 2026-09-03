@@ -217,9 +217,68 @@ fn wire_intent(seed: u8) -> PrepareIntent {
     }
 }
 
+fn wire_multi_path_intent(seed: u8, context_role: WireContextRole) -> PrepareIntent {
+    let leases = match context_role {
+        WireContextRole::Client => vec![
+            LeasePlan {
+                path_id: 1,
+                role: WireRole::Client as i32,
+            },
+            LeasePlan {
+                path_id: 2,
+                role: WireRole::Client as i32,
+            },
+        ],
+        WireContextRole::Relay => vec![
+            LeasePlan {
+                path_id: 1,
+                role: WireRole::RelayClient as i32,
+            },
+            LeasePlan {
+                path_id: 1,
+                role: WireRole::RelayExit as i32,
+            },
+            LeasePlan {
+                path_id: 2,
+                role: WireRole::RelayClient as i32,
+            },
+            LeasePlan {
+                path_id: 2,
+                role: WireRole::RelayExit as i32,
+            },
+        ],
+        WireContextRole::Exit => vec![
+            LeasePlan {
+                path_id: 1,
+                role: WireRole::Exit as i32,
+            },
+            LeasePlan {
+                path_id: 2,
+                role: WireRole::Exit as i32,
+            },
+        ],
+        WireContextRole::Unspecified => panic!("unspecified multi-path test context"),
+    };
+    PrepareIntent {
+        closed_plan: Some(ClosedPreparePlan {
+            context_role: context_role as i32,
+            leases,
+        }),
+        ..wire_intent(seed)
+    }
+}
+
 fn durable_intent(seed: u8) -> DurablePrepareIntent {
     DurablePrepareIntent::try_from_wire([seed.wrapping_add(96); 32], &wire_intent(seed))
         .expect("valid durable intent")
+}
+
+fn durable_multi_path_intent(seed: u8, context_role: WireContextRole) -> DurablePrepareIntent {
+    DurablePrepareIntent::try_from_wire(
+        [seed.wrapping_add(96); 32],
+        &wire_multi_path_intent(seed, context_role),
+    )
+    .expect("valid multi-path durable intent")
 }
 
 fn durable_registration(seed: u8) -> DurableIntentRegistration {
@@ -379,6 +438,53 @@ fn prepopulate_custody_target(
         },
         binding,
     )
+}
+
+fn projected_multi_path_target(
+    context_role: WireContextRole,
+    phase: StartupCustodyPhase,
+    seed: u8,
+) -> StartupCustodyTarget {
+    let directory = tempdir().expect("multi-path projection directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config).expect("open projection journal");
+    let inserted = journal
+        .insert_intent(0, durable_multi_path_intent(seed, context_role).0)
+        .expect("persist multi-path Intent");
+    let anchor = durable_anchor(seed);
+    let marked = journal
+        .mark_may_own_custody(
+            inserted.revision,
+            inserted.ownership_id,
+            inserted.generation,
+            anchor.0,
+            custody_binding_for_test(anchor)
+                .expect("multi-path custody binding")
+                .0,
+            io_deadline(),
+        )
+        .expect("persist multi-path MayOwnCustody");
+    if phase == StartupCustodyPhase::MayOwnPrepare {
+        journal
+            .mark_may_own_prepare_from_custody(
+                marked.revision,
+                inserted.ownership_id,
+                inserted.generation,
+                io_deadline(),
+            )
+            .expect("persist multi-path MayOwnPrepare");
+    } else {
+        assert_eq!(phase, StartupCustodyPhase::MayOwnCustody);
+    }
+    let snapshot = journal.snapshot().expect("multi-path projection snapshot");
+    project_startup_custody_target(
+        snapshot
+            .records
+            .get(&inserted.ownership_id)
+            .expect("multi-path projection record"),
+    )
+    .expect("project multi-path target")
+    .expect("MayOwn projection target")
 }
 
 type ExpectedStartupTarget = (
@@ -1561,6 +1667,99 @@ fn cleanup_confirmed_restart_evidence_settles_exact_full_set_without_cleanup_exe
         0,
         "installed cleanup and fallback manager executors must remain refusing and unused"
     );
+}
+
+#[test]
+fn restart_projection_uses_a_real_path_only_for_active_client_and_exit_namespaces() {
+    for role in [WireContextRole::Client, WireContextRole::Exit] {
+        let pre_dispatch =
+            projected_multi_path_target(role, StartupCustodyPhase::MayOwnCustody, 60);
+        assert_eq!(
+            pre_dispatch
+                .restart_plan()
+                .expect("pre-dispatch restart plan")
+                .path_id(),
+            0,
+            "multi-path pre-dispatch cleanup must remain refused"
+        );
+
+        let active = projected_multi_path_target(role, StartupCustodyPhase::MayOwnPrepare, 61);
+        let plan = active.restart_plan().expect("active restart plan");
+        assert_eq!(plan.context_role(), role);
+        assert_eq!(
+            plan.path_id(),
+            1,
+            "canonical first real path is only the active namespace transcript representative"
+        );
+    }
+
+    let relay = projected_multi_path_target(
+        WireContextRole::Relay,
+        StartupCustodyPhase::MayOwnPrepare,
+        62,
+    );
+    assert_eq!(
+        relay
+            .restart_plan()
+            .expect("active Relay restart plan")
+            .path_id(),
+        0,
+        "multi-path Relay cleanup remains path-scoped and refused"
+    );
+}
+
+#[test]
+fn active_multi_path_client_and_exit_reaper_evidence_crosses_exact_cleanup_cas() {
+    for (seed, role) in [(63, WireContextRole::Client), (64, WireContextRole::Exit)] {
+        let directory = tempdir().expect("active multi-path restart directory");
+        let config = test_config(directory.path());
+        prepopulate(
+            &config,
+            &[(
+                durable_multi_path_intent(seed, role),
+                Some(durable_anchor(seed)),
+            )],
+        );
+
+        let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+        let observations_capture = Arc::clone(&observations);
+        let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+            config.clone(),
+            move || executor(ExecutorMode::Error, &observations_capture, None),
+            io_deadline(),
+        )
+        .expect("active multi-path startup preflight");
+        let [target] = startup.targets() else {
+            panic!("one active multi-path startup target");
+        };
+        let target = *target;
+        let plan = target.restart_plan().expect("active restart plan");
+        assert_eq!(target.phase(), StartupCustodyPhase::MayOwnPrepare);
+        assert_eq!(plan.context_role(), role);
+        assert_eq!(plan.path_id(), 1);
+
+        let [successor] = startup
+            .confirm_restart_cleanup_set(RestartMayOwnCleanupEvidence::from_target_for_test(target))
+            .expect("active multi-path exact cleanup CAS")
+        else {
+            panic!("one active multi-path cleanup successor");
+        };
+        let successor = *successor;
+        assert_eq!(successor.phase(), StartupCustodyPhase::CleanupConfirmed);
+        assert!(target.same_identity_except_phase(&successor));
+        assert_eq!(
+            observations.lock().expect("executor observations").calls,
+            0,
+            "the exact reaper evidence path must not invoke general recovery"
+        );
+
+        let actor = startup
+            .continue_cleanup_confirmed_absent(
+                CleanupConfirmedManagerAbsenceEvidence::from_targets_for_test(vec![successor]),
+            )
+            .expect("continue after active multi-path manager absence");
+        actor.shutdown().expect("clean restart actor shutdown");
+    }
 }
 
 #[test]
