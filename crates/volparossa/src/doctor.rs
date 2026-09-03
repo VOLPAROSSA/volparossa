@@ -2312,6 +2312,27 @@ mod tests {
     }
 
     #[test]
+    fn packaged_unprivileged_units_match_the_doctor_sandbox_contract() {
+        for (unit, kind) in [
+            (
+                include_bytes!("../../../packaging/systemd/volparossa-agent.service").as_slice(),
+                UnitKind::Agent,
+            ),
+            (
+                include_bytes!("../../../packaging/systemd/volparossa-mpquic.service").as_slice(),
+                UnitKind::Native,
+            ),
+        ] {
+            let service = parse_service_unit(unit).expect("packaged service unit");
+            assert!(unit_has_required_sandbox(&service, kind));
+
+            let mut without_private_mounts = service;
+            without_private_mounts.remove("PrivateMounts");
+            assert!(!unit_has_required_sandbox(&without_private_mounts, kind));
+        }
+    }
+
+    #[test]
     fn helper_openat2_compatibility_exception_is_kind_specific() {
         let mut helper = sandbox_fixture(UnitKind::Helper);
         assert_eq!(
