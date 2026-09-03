@@ -58,7 +58,7 @@ pub fn read_identity_credential(path: &Path) -> Result<Passphrase, CredentialErr
 }
 
 fn credential_mode_is_safe(mode: u32, uid: u32, gid: u32) -> bool {
-    let owner_only = mode & 0o177 == 0 && mode & 0o400 != 0;
+    let owner_only = matches!(mode, 0o400 | 0o600);
     // systemd creates service credentials as root:root mode 0400, then grants the
     // service UID read access with a POSIX ACL. The ACL mask is represented in
     // st_mode as the group-read bit, yielding 0440 even though group:: has no
