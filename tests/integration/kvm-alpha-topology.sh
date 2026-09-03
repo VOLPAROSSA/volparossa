@@ -4425,6 +4425,13 @@ while [ "$attempt" -lt 30 ]; do
         aggregate_before_r2=$(tc_sent_bytes "$R2" r2c) \
             || fail A03_RELAY2_COUNTER_UNAVAILABLE
         release_mptcp_download
+        # Some kernels create the second negotiated subflow only after response bytes start
+        # flowing. Keep the pre-release observation, but also capture the exact same kernel
+        # evidence while the bounded download is active instead of rejecting a valid sample.
+        if [ "$aggregate_subflows_ready" != true ] \
+            && wait_established_mptcp_subflows "$aggregate_subflows"; then
+            aggregate_subflows_ready=true
+        fi
         if finish_mptcp_download; then
             aggregate_after_r1=$(tc_sent_bytes "$R1" r1c) \
                 || fail A03_RELAY1_COUNTER_UNAVAILABLE
