@@ -1795,7 +1795,13 @@ fn exact_reaper_cas_rejects_foreign_evidence_before_first_write() {
         io_deadline(),
     )
     .expect("mixed target preflight");
-    let evidence = RestartMayOwnCleanupEvidence::from_target_for_test(startup.targets()[0]);
+    let may_own_target = startup
+        .targets()
+        .iter()
+        .copied()
+        .find(|target| target.phase() == StartupCustodyPhase::MayOwnCustody)
+        .expect("one pending custody target");
+    let evidence = RestartMayOwnCleanupEvidence::from_target_for_test(may_own_target);
     assert_eq!(
         startup
             .confirm_restart_cleanup_set(evidence)
