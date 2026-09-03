@@ -67,6 +67,7 @@ impl AcceptanceCase {
 
 #[tokio::main]
 async fn main() -> FixtureResult<()> {
+    install_crypto_provider()?;
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
         Some("server") => {
@@ -90,6 +91,16 @@ async fn main() -> FixtureResult<()> {
         }
         _ => Err("usage: http3-acceptance-fixture {server|client} ...".into()),
     }
+}
+
+fn install_crypto_provider() -> FixtureResult<()> {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _installation = rustls::crypto::ring::default_provider().install_default();
+    }
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        return Err("rustls cryptography provider is unavailable".into());
+    }
+    Ok(())
 }
 
 fn argument(arguments: &mut impl Iterator<Item = String>, name: &str) -> FixtureResult<String> {
