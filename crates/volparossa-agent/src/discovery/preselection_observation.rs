@@ -2456,6 +2456,12 @@ fn validate_subject_set_matches_snapshot(
         || control.public_key != forwarded.control_relay_public_key
         || forwarded.control_relay_advertisement_sequence == 0
         || forwarded.control_relay_advertisement_expires_at_ms <= now_ms
+        || control.advertisement_sequence < forwarded.control_relay_advertisement_sequence
+        || (control.advertisement_sequence == forwarded.control_relay_advertisement_sequence
+            && (control.advertisement_expires_at_ms
+                != forwarded.control_relay_advertisement_expires_at_ms
+                || control.advertisement_payload_hash
+                    != forwarded.control_relay_advertisement_payload_hash))
         || control.advertisement_payload_hash
             != nested_control.advertisement().advertisement_payload_hash()
         || control.advertisement_payload_hash
@@ -4358,7 +4364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwarded_request_separates_canonical_actor_expiry_from_local_authority() {
+    async fn forwarded_request_bounds_local_authority_by_canonical_actor_expiry() {
         let fixture = preselection_snapshot_fixture(1, false).await;
         let started_at_ms = fixture.now_ms + 18_000;
         let started_at_mono = Instant::now();
@@ -4381,8 +4387,8 @@ mod tests {
         let (_, exit_index) = pending.snapshot.preselection_subjects.forwarded_pairs[0];
         let exit = &pending.snapshot.preselection_subjects.entries[exit_index];
         assert!(
-            exit.local_discovery_authority_expires_at_ms < exit.capability_expires_at_ms,
-            "old discovery request deadline is deliberately stricter than the canonical actor cap"
+            exit.local_discovery_authority_expires_at_ms <= exit.capability_expires_at_ms,
+            "local discovery authority must never outlive the canonical actor cap"
         );
         let request = request(&pending);
         assert_eq!(
@@ -5380,6 +5386,16 @@ mod tests {
             dispatched_impl
                 .contains("consume_preselection_observation_outbound_failure_with_context(")
         );
+        assert!(
+            dispatched_impl
+                .contains("event_peer: PeerId,\n        event_request: OutboundRequestId,")
+        );
+        assert_eq!(
+            product
+                .matches("request_response::OutboundRequestId")
+                .count(),
+            1
+        );
         assert!(dispatched_impl.contains("transaction: *transaction,"));
         assert!(dispatched_impl.contains("failure.into_transaction()"));
         for forbidden in [
@@ -5535,14 +5551,12 @@ mod tests {
         }
         for forbidden in [
             "ConnectionId",
-            "OutboundRequestId",
             "Multiaddr",
             "SocketAddr",
             "IpAddr",
             "tokio::spawn",
             "mpsc::",
             "oneshot::",
-            "request_response",
             "NetworkBehaviour",
             "RouteSessionAuthority",
             "ReservationSession",
@@ -5706,8 +5720,8 @@ mod tests {
         );
         assert_eq!(
             parent_product.matches("advertisement_fingerprint(").count(),
-            4,
-            "stored ingest, local Relay publication and revalidation are the only fingerprint consumers"
+            5,
+            "stored ingest, local Relay publication, forwarded Exit validation and revalidation are the only fingerprint consumers"
         );
         assert_eq!(
             parent_product
