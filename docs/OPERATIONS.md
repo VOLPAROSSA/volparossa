@@ -96,8 +96,9 @@ sudo chmod 0600 /etc/credstore.encrypted/identity-passphrase
 
 `volparossa-agent.service` imports only the named `identity-passphrase` credential. systemd exposes
 the decrypted bytes in its protected per-service credential directory; the agent opens that one
-fixed regular file with `O_NOFOLLOW`, enforces owner-only mode and a strict length bound, and
-zeroizes the temporary bytes. Missing or unsafe credentials make startup fail closed. Protect the
+fixed regular file with `O_NOFOLLOW`, accepts either owner-only mode or systemd's exact
+root-owned `0440` named-user ACL projection, enforces a strict length bound, and zeroizes the
+temporary bytes. Missing or unsafe credentials make startup fail closed. Protect the
 encrypted credential and identity file together when backing up or rotating the permanent
 identity. This provisioning flow still requires a Debian 13 systemd integration test before a
 package is declared releasable.
