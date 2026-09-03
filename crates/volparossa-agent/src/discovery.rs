@@ -11703,6 +11703,15 @@ impl DiscoveryRuntime {
                         expires_at_ms: capability_expiry_ms,
                     },
                 );
+                // Identify observations can be transient link addresses. Retain the
+                // authenticated relay's own signed listeners as stable dial candidates so a
+                // later link flap cannot strand preselection on an obsolete observation.
+                // Forwarded Exit advertisements deliberately never reach this branch.
+                for endpoint in &advertisement.control_endpoints {
+                    if let Ok(address) = Multiaddr::from_str(endpoint) {
+                        let _ = self.service.add_known_peer(peer, &address);
+                    }
+                }
                 if removed_expiry.is_some_and(|expiry| expiry > capability_expiry_ms) {
                     self.record_privacy_conflict(
                         peer,
