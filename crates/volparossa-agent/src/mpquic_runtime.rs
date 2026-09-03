@@ -52,6 +52,12 @@ const EXIT_FLOW_REPLAY_CAPACITY: usize = 4_096;
 pub(crate) const MINIMUM_MPQUIC_TUNNEL_MTU: usize = 1_280;
 pub(crate) const MAXIMUM_MPQUIC_TUNNEL_MTU: usize = 1_420;
 const MAXIMUM_EXIT_UDP_PAYLOAD_BYTES: usize = MAXIMUM_MPQUIC_TUNNEL_MTU - 20 - 8;
+// The Exit's native assignment is negotiated after its listener becomes ready and may be any
+// value in the supported 1280--1420 range. Until that exact assignment is exposed across the
+// native control boundary, admit reverse datagrams only when they fit every valid assignment.
+// Larger QUIC packets are loss, not a route-fatal native protocol error; endpoint PLPMTUD can
+// then converge on the protected path's usable size.
+const MAXIMUM_SAFE_EXIT_REVERSE_UDP_PAYLOAD_BYTES: usize = MINIMUM_MPQUIC_TUNNEL_MTU - 20 - 8;
 const MPQUIC_TUNNEL_IPV4_PREFIX: [u8; 3] = [10, 76, 0];
 /// Fixed protected-overlay listener port for every path of one MPQUIC Exit association.
 pub const MPQUIC_EXIT_LISTENER_PORT: u16 = 44_443;
@@ -304,7 +310,7 @@ impl ActiveProductionMpquicExitRoute {
             .map_err(|_| ProductionMpquicError::Invalid("native UDP replay bound"))?;
         let mut packet_id = 0_u16;
         let mut awaiting_client = true;
-        let mut response_buffer = vec![0_u8; MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1];
+        let mut response_buffer = vec![0_u8; MAXIMUM_SAFE_EXIT_REVERSE_UDP_PAYLOAD_BYTES + 1];
         let mut poll = interval(EXIT_DATAGRAM_POLL_INTERVAL);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -562,7 +568,7 @@ impl ActiveProductionMpquicExitRoute {
 }
 
 fn complete_exit_udp_payload(buffer: &[u8], length: usize) -> Option<&[u8]> {
-    if length > MAXIMUM_EXIT_UDP_PAYLOAD_BYTES {
+    if length > MAXIMUM_SAFE_EXIT_REVERSE_UDP_PAYLOAD_BYTES {
         return None;
     }
     buffer.get(..length)
@@ -2976,13 +2982,13 @@ mod tests {
 
     #[test]
     fn exit_udp_mtu_probe_is_dropped_without_forwarding_truncated_payload() {
-        let buffer = vec![0x5a; MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1];
+        let buffer = vec![0x5a; MAXIMUM_SAFE_EXIT_REVERSE_UDP_PAYLOAD_BYTES + 1];
         assert_eq!(
-            complete_exit_udp_payload(&buffer, MAXIMUM_EXIT_UDP_PAYLOAD_BYTES),
-            Some(&buffer[..MAXIMUM_EXIT_UDP_PAYLOAD_BYTES])
+            complete_exit_udp_payload(&buffer, MAXIMUM_SAFE_EXIT_REVERSE_UDP_PAYLOAD_BYTES),
+            Some(&buffer[..MAXIMUM_SAFE_EXIT_REVERSE_UDP_PAYLOAD_BYTES])
         );
         assert_eq!(
-            complete_exit_udp_payload(&buffer, MAXIMUM_EXIT_UDP_PAYLOAD_BYTES + 1),
+            complete_exit_udp_payload(&buffer, MAXIMUM_SAFE_EXIT_REVERSE_UDP_PAYLOAD_BYTES + 1),
             None
         );
     }
