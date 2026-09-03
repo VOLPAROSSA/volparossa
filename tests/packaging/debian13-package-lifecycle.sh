@@ -282,7 +282,7 @@ jq -e 'all(.checks[]; .status != "fail")' \
 
 # Removal itself must stop active services; do not pre-stop them here.
 env DEBIAN_FRONTEND=noninteractive apt-get remove --yes volparossa >/dev/null
-test "$(dpkg-query -W -f='${db:Status-Abbrev}' volparossa)" = rc
+test "$(dpkg-query -W -f='${db:Status-Abbrev}' volparossa)" = 'rc '
 for unit in $services; do
     if systemctl is-active --quiet "$unit"; then exit 1; fi
     test "$(systemctl is-enabled "$unit" 2>/dev/null || true)" = not-found

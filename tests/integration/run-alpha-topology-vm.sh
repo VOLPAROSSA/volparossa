@@ -320,15 +320,18 @@ printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 # Exercise the installed package only afterwards so package systemd services
 # cannot affect datapath evidence or its host-state comparison.
 mkdir /home/vpci/alpha-output/package
+package_stdout=/home/vpci/package-lifecycle.stdout
+package_stderr=/home/vpci/package-lifecycle.stderr
 set +e
 sudo -n -- ./tests/packaging/debian13-package-lifecycle.sh \
     --execute --yes \
     --package /home/vpci/volparossa.deb \
     --output /home/vpci/alpha-output/package \
-    >/home/vpci/alpha-output/package/runner.stdout \
-    2>/home/vpci/alpha-output/package/runner.stderr
+    >"$package_stdout" 2>"$package_stderr"
 package_status=$?
 set -e
+mv -- "$package_stdout" /home/vpci/alpha-output/package/runner.stdout
+mv -- "$package_stderr" /home/vpci/alpha-output/package/runner.stderr
 printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
 find /home/vpci/alpha-output -type d -exec chmod 0700 {} +
