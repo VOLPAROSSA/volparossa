@@ -50,7 +50,8 @@ const MAXIMUM_EXIT_DATAGRAMS_PER_TICK: usize = 64;
 const MAXIMUM_EXIT_FLOW_IDLE: Duration = Duration::from_secs(10 * 60);
 const EXIT_FLOW_REPLAY_CAPACITY: usize = 4_096;
 pub(crate) const MINIMUM_MPQUIC_TUNNEL_MTU: usize = 1_280;
-const MAXIMUM_EXIT_UDP_PAYLOAD_BYTES: usize = MINIMUM_MPQUIC_TUNNEL_MTU - 20 - 8;
+pub(crate) const MAXIMUM_MPQUIC_TUNNEL_MTU: usize = 1_420;
+const MAXIMUM_EXIT_UDP_PAYLOAD_BYTES: usize = MAXIMUM_MPQUIC_TUNNEL_MTU - 20 - 8;
 const MPQUIC_TUNNEL_IPV4_PREFIX: [u8; 3] = [10, 76, 0];
 /// Fixed protected-overlay listener port for every path of one MPQUIC Exit association.
 pub const MPQUIC_EXIT_LISTENER_PORT: u16 = 44_443;
@@ -863,7 +864,7 @@ fn parse_exit_ipv4_udp(
     assigned_client_ipv4: Option<Ipv4Addr>,
 ) -> Result<ParsedExitIpv4Udp<'_>, ProductionMpquicError> {
     if packet.len() < 28
-        || packet.len() > MINIMUM_MPQUIC_TUNNEL_MTU
+        || packet.len() > MAXIMUM_MPQUIC_TUNNEL_MTU
         || packet[0] != 0x45
         || usize::from(u16::from_be_bytes([packet[2], packet[3]])) != packet.len()
         || u16::from_be_bytes([packet[6], packet[7]]) & 0x3fff != 0
@@ -2023,6 +2024,10 @@ impl ProductionMpquicSession {
         now_ms: u64,
     ) -> Result<(), ProductionMpquicError> {
         validate_browser_quic_packet(flow, self.route_context_id, &packet, now_ms, true)?;
+        let (_, _, maximum_packet_bytes) = tunnel_ipv4_scope(&self.assignment)?;
+        if packet.len() > maximum_packet_bytes {
+            return Err(ProductionMpquicError::Invalid("browser QUIC tunnel MTU"));
+        }
         send_inner_ip(
             &self.client,
             self.route_context_id,
@@ -2073,6 +2078,12 @@ impl ProductionMpquicSession {
             signed_authorization,
             0,
         )?;
+        let (_, _, maximum_packet_bytes) = tunnel_ipv4_scope(&self.assignment)?;
+        if packet.len() > maximum_packet_bytes {
+            return Err(ProductionMpquicError::Invalid(
+                "browser QUIC authorization tunnel MTU",
+            ));
+        }
         send_inner_ip(
             &self.client,
             self.route_context_id,
@@ -2103,6 +2114,12 @@ impl ProductionMpquicSession {
         let Some(packet) = packet else {
             return Ok(None);
         };
+        let (_, _, maximum_packet_bytes) = tunnel_ipv4_scope(&self.assignment)?;
+        if packet.len() > maximum_packet_bytes {
+            return Err(ProductionMpquicError::Invalid(
+                "browser QUIC reverse tunnel MTU",
+            ));
+        }
         matching_browser_quic_response_flow(flows, self.route_context_id, &packet, now_ms)
             .map(|index| index.map(|index| (index, packet)))
     }
@@ -2196,10 +2213,15 @@ impl ProductionMpquicSession {
                 "native general UDP response scope",
             ));
         }
-        let (client, _, _) = tunnel_ipv4_scope(&self.assignment)?;
+        let (client, _, maximum_packet_bytes) = tunnel_ipv4_scope(&self.assignment)?;
         let packet =
             receive_inner_ip(&self.client, self.route_context_id, self.masque_context_id).await?;
         if let Some(packet) = packet.as_deref() {
+            if packet.len() > maximum_packet_bytes {
+                return Err(ProductionMpquicError::Invalid(
+                    "native general UDP reverse tunnel MTU",
+                ));
+            }
             let (source, target) = udp_packet_tuple(packet)?;
             if source != SocketAddr::V4(destination)
                 || target != SocketAddr::V4(SocketAddrV4::new(client, application_port))
@@ -2675,13 +2697,9 @@ fn tunnel_ipv4_scope(
         .map_err(|_| ProductionMpquicError::Invalid("native tunnel server IPv4"))?;
     let mtu = usize::try_from(assignment.mtu)
         .ok()
-        .filter(|mtu| *mtu >= MINIMUM_MPQUIC_TUNNEL_MTU)
+        .filter(|mtu| (MINIMUM_MPQUIC_TUNNEL_MTU..=MAXIMUM_MPQUIC_TUNNEL_MTU).contains(mtu))
         .ok_or(ProductionMpquicError::Invalid("native tunnel MTU"))?;
-    Ok((
-        Ipv4Addr::from(client),
-        Ipv4Addr::from(server),
-        mtu.min(MINIMUM_MPQUIC_TUNNEL_MTU),
-    ))
+    Ok((Ipv4Addr::from(client), Ipv4Addr::from(server), mtu))
 }
 
 fn build_general_udp_authorization_packet(
@@ -3306,6 +3324,18 @@ mod tests {
             7,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn exit_accepts_full_negotiated_1420_byte_inner_packet() {
+        let client = SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 7), 51_234);
+        let destination = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443);
+        let payload = vec![0x5a; MAXIMUM_EXIT_UDP_PAYLOAD_BYTES];
+        let packet = outbound_ipv4_udp(client, destination, &payload);
+
+        assert_eq!(packet.len(), MAXIMUM_MPQUIC_TUNNEL_MTU);
+        let parsed = parse_exit_ipv4_udp(&packet, Some(*client.ip())).unwrap();
+        assert_eq!(parsed.payload, payload);
     }
 
     #[test]

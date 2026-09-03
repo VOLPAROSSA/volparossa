@@ -107,7 +107,8 @@ use crate::{
         RuntimeBoundPreparedLeaseBatch,
     },
     mpquic_runtime::{
-        MINIMUM_MPQUIC_TUNNEL_MTU, ProductionMpquicPreflight, ProductionMpquicSession,
+        MAXIMUM_MPQUIC_TUNNEL_MTU, MINIMUM_MPQUIC_TUNNEL_MTU, ProductionMpquicPreflight,
+        ProductionMpquicSession,
     },
     mptcp_flow_runtime::{ActiveProductionMptcpClientFlow, activate_production_mptcp_client_flow},
     mptcp_transport::{
@@ -1863,8 +1864,7 @@ fn maximum_mpquic_tunnel_packet_bytes(
 ) -> Result<usize, ClientRouteConnectError> {
     usize::try_from(assignment_mtu)
         .ok()
-        .filter(|mtu| *mtu >= 28 && u16::try_from(*mtu).is_ok())
-        .map(|mtu| mtu.min(MINIMUM_MPQUIC_TUNNEL_MTU))
+        .filter(|mtu| (MINIMUM_MPQUIC_TUNNEL_MTU..=MAXIMUM_MPQUIC_TUNNEL_MTU).contains(mtu))
         .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)
 }
 
@@ -7339,14 +7339,21 @@ mod tests {
     }
 
     #[test]
-    fn browser_mpquic_packet_scope_never_exceeds_exit_parser_limit() {
+    fn browser_mpquic_packet_scope_uses_negotiated_protocol_mtu() {
         assert_eq!(
             maximum_mpquic_tunnel_packet_bytes(1_420),
+            Ok(MAXIMUM_MPQUIC_TUNNEL_MTU)
+        );
+        assert_eq!(
+            maximum_mpquic_tunnel_packet_bytes(1_280),
             Ok(MINIMUM_MPQUIC_TUNNEL_MTU)
         );
-        assert_eq!(maximum_mpquic_tunnel_packet_bytes(1_200), Ok(1_200));
         assert_eq!(
-            maximum_mpquic_tunnel_packet_bytes(27),
+            maximum_mpquic_tunnel_packet_bytes(1_279),
+            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        );
+        assert_eq!(
+            maximum_mpquic_tunnel_packet_bytes(1_421),
             Err(ClientRouteConnectError::TransportRuntimeUnavailable)
         );
     }

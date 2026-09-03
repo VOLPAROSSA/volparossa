@@ -64,6 +64,7 @@ const RTM_GETROUTE: u16 = 26;
 const RTM_NEWRULE: u16 = 32;
 const RTM_DELRULE: u16 = 33;
 const IFLA_IFNAME: u16 = 3;
+const IFLA_MTU: u16 = 4;
 const IFLA_LINKINFO: u16 = 18;
 const IFLA_NET_NS_FD: u16 = 28;
 const IFLA_IFALIAS: u16 = 20;
@@ -127,6 +128,7 @@ const WG_GENL_NAME: &str = "wireguard";
 const VETH_LINK_KIND: &str = "veth";
 const CLIENT_INGRESS_PARENT_ADDRESS: [u8; 4] = [169, 254, 240, 1];
 const CLIENT_INGRESS_WORKER_ADDRESS: [u8; 4] = [169, 254, 240, 2];
+const CLIENT_INGRESS_MTU: u32 = 1_420;
 const WG_GENL_VERSION: u8 = 1;
 const WG_CMD_SET_DEVICE: u8 = 1;
 const WGDEVICE_A_IFNAME: u16 = 2;
@@ -2287,6 +2289,7 @@ fn encode_create_client_ingress_veth(
     }
     let mut peer = interface_info(0, 0, 0)?;
     push_bounded_string_attribute(&mut peer, IFLA_IFNAME, worker_name, MAX_IFNAME_BYTES)?;
+    push_attribute(&mut peer, IFLA_MTU, &CLIENT_INGRESS_MTU.to_ne_bytes())?;
     push_attribute(&mut peer, IFLA_NET_NS_FD, &target_namespace.to_ne_bytes())?;
     let mut data = Vec::with_capacity(peer.len() + 8);
     push_attribute(&mut data, VETH_INFO_PEER | NLA_F_NESTED, &peer)?;
@@ -2300,6 +2303,7 @@ fn encode_create_client_ingress_veth(
     push_attribute(&mut link_info, IFLA_INFO_DATA | NLA_F_NESTED, &data)?;
     let mut payload = interface_info(0, 0, 0)?;
     push_bounded_string_attribute(&mut payload, IFLA_IFNAME, parent_name, MAX_IFNAME_BYTES)?;
+    push_attribute(&mut payload, IFLA_MTU, &CLIENT_INGRESS_MTU.to_ne_bytes())?;
     push_attribute(&mut payload, IFLA_LINKINFO | NLA_F_NESTED, &link_info)?;
     Ok(payload)
 }
