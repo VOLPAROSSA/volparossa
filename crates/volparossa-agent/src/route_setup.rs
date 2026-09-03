@@ -137,12 +137,15 @@ const TCP_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 // The discovery attempt owner cools for 30 seconds after a successful route bootstrap. Keep a
 // small bounded recovery window beyond it without extending any individual setup deadline.
 const TCP_CONNECT_RECOVERY_HORIZON: Duration = Duration::from_secs(35);
+const SINGLE_UDP_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const SINGLE_UDP_CONNECT_RECOVERY_HORIZON: Duration = Duration::from_secs(35);
 
 /// Cloneable single-owner gate for the local Connect route bootstrap.
 #[derive(Clone)]
 pub(crate) struct ClientRouteControl {
     state: Arc<Mutex<ClientRouteControlState>>,
     tcp_connect: Arc<Mutex<()>>,
+    single_udp_connect: Arc<Mutex<()>>,
     mpquic_socket: Arc<PathBuf>,
     agent_state: Option<Arc<tokio::sync::RwLock<AgentState>>>,
 }
@@ -808,6 +811,7 @@ impl ClientRouteControl {
         Self {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
             tcp_connect: Arc::new(Mutex::new(())),
+            single_udp_connect: Arc::new(Mutex::new(())),
             mpquic_socket: Arc::new(mpquic_socket),
             agent_state: None,
         }
@@ -820,6 +824,7 @@ impl ClientRouteControl {
         Self {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
             tcp_connect: Arc::new(Mutex::new(())),
+            single_udp_connect: Arc::new(Mutex::new(())),
             mpquic_socket: Arc::new(mpquic_socket),
             agent_state: Some(agent_state),
         }
@@ -979,27 +984,48 @@ impl ClientRouteControl {
         if !config.udp.enabled {
             return Err(ClientRouteConnectError::InvalidProfile);
         }
-        {
+        let _connect = self.single_udp_connect.lock().await;
+        let retry_deadline = Instant::now() + SINGLE_UDP_CONNECT_RECOVERY_HORIZON;
+        loop {
             self.retire_expired_route(crate::unix_millis(), Instant::now())
                 .await;
-            let state = self.state.lock().await;
-            match &*state {
-                ClientRouteControlState::Established(established)
-                    if matches!(established.transport, ClientTransportState::UdpReady(_))
-                        && !established.is_expired(crate::unix_millis(), Instant::now()) =>
-                {
-                    return Ok(ClientRouteProgress::UdpRouteReady);
+            let route_available = {
+                let state = self.state.lock().await;
+                match &*state {
+                    ClientRouteControlState::Established(established)
+                        if matches!(established.transport, ClientTransportState::UdpReady(_))
+                            && !established.is_expired(crate::unix_millis(), Instant::now()) =>
+                    {
+                        return Ok(ClientRouteProgress::UdpRouteReady);
+                    }
+                    ClientRouteControlState::Idle => true,
+                    ClientRouteControlState::Connecting
+                    | ClientRouteControlState::Established(_) => false,
                 }
-                ClientRouteControlState::Idle => {}
-                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
-                    return Err(ClientRouteConnectError::Busy);
+            };
+            let result = if route_available {
+                let mut profile = config.clone();
+                profile.tcp.enabled = false;
+                profile.quic.enabled = false;
+                Box::pin(self.connect_with_udp_mode(&profile, discovery, helper, false)).await
+            } else {
+                Err(ClientRouteConnectError::Busy)
+            };
+            match result {
+                Ok(progress) => return Ok(progress),
+                Err(error) => {
+                    let Some(delay) =
+                        single_udp_connect_retry_delay(error, Instant::now(), retry_deadline)
+                    else {
+                        return Err(error);
+                    };
+                    tokio::time::sleep(delay).await;
+                    if Instant::now() >= retry_deadline {
+                        return Err(error);
+                    }
                 }
             }
         }
-        let mut profile = config.clone();
-        profile.tcp.enabled = false;
-        profile.quic.enabled = false;
-        Box::pin(self.connect_with_udp_mode(&profile, discovery, helper, false)).await
     }
 
     /// Ensure general UDP uses native single-path MASQUE CONNECT-IP through one Relay.
@@ -1962,6 +1988,21 @@ fn tcp_connect_retry_delay(
         return None;
     }
     Some(TCP_CONNECT_RETRY_INTERVAL.min(deadline.saturating_duration_since(now)))
+}
+
+fn single_udp_connect_retry_delay(
+    error: ClientRouteConnectError,
+    now: Instant,
+    deadline: Instant,
+) -> Option<Duration> {
+    if !matches!(
+        error,
+        ClientRouteConnectError::Busy | ClientRouteConnectError::PreselectionUnavailable
+    ) || now >= deadline
+    {
+        return None;
+    }
+    Some(SINGLE_UDP_CONNECT_RETRY_INTERVAL.min(deadline.saturating_duration_since(now)))
 }
 
 struct ClientOpenTcpMaterial {
@@ -7567,6 +7608,39 @@ mod tests {
         );
         assert_eq!(
             tcp_connect_retry_delay(ClientRouteConnectError::Busy, now, now),
+            None
+        );
+    }
+
+    #[test]
+    fn single_udp_route_retry_is_bounded_to_transient_bootstrap_failures() {
+        let now = Instant::now();
+        assert_eq!(
+            single_udp_connect_retry_delay(
+                ClientRouteConnectError::PreselectionUnavailable,
+                now,
+                now + SINGLE_UDP_CONNECT_RECOVERY_HORIZON
+            ),
+            Some(SINGLE_UDP_CONNECT_RETRY_INTERVAL)
+        );
+        assert_eq!(
+            single_udp_connect_retry_delay(
+                ClientRouteConnectError::Busy,
+                now,
+                now + Duration::from_millis(250)
+            ),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            single_udp_connect_retry_delay(
+                ClientRouteConnectError::TransportRuntimeUnavailable,
+                now,
+                now + SINGLE_UDP_CONNECT_RECOVERY_HORIZON
+            ),
+            None
+        );
+        assert_eq!(
+            single_udp_connect_retry_delay(ClientRouteConnectError::Busy, now, now),
             None
         );
     }
