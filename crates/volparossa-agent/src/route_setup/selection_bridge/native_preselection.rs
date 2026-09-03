@@ -1543,8 +1543,8 @@ mod dispatch_tests {
     use sha2::{Digest, Sha256};
     use volparossa_protocol::{
         NativeProbePermit, NativeProbeRelayReady, ObservationAddressFamily, RelayAuthorization,
-        RelayReservation, SignedEnvelope, Transport, WireguardEndpoint, native_probe_permit_hash,
-        native_probe_permit_request_hash, verify_native_probe_permit,
+        RelayReservation, SignedEnvelope, Transport, WireguardEndpoint, generate_nonce,
+        native_probe_permit_hash, native_probe_permit_request_hash, verify_native_probe_permit,
     };
 
     use super::*;
@@ -1653,6 +1653,7 @@ mod dispatch_tests {
             exit_key: _,
             scope,
         } = ready_fixture();
+        let ready_nonce = generate_nonce();
         let ready = NativeProbeRelayReady {
             permit_hash: native_probe_permit_hash(&awaiting.relay_permit)
                 .expect("Permit hash")
@@ -1667,14 +1668,14 @@ mod dispatch_tests {
             )),
             ready_at_ms: crate::unix_millis(),
             expires_at_ms: scope.attempt_expires_at_ms,
-            nonce: vec![22; KEY_BYTES],
+            nonce: ready_nonce.to_vec(),
         };
         let signed_ready = sign_control_message(
             &ready,
             &relay_key,
             ready.ready_at_ms,
             ready.expires_at_ms,
-            [22; KEY_BYTES],
+            ready_nonce,
             native_time_policy(),
         )
         .expect("signed Ready mutant");
@@ -1793,21 +1794,23 @@ mod dispatch_tests {
             reserved_up_mbps: 8,
             reserved_down_mbps: 12,
         };
+        let request_nonce = generate_nonce();
         let request = NativeProbePermitRequest {
             scope: Some(scope.clone()),
             created_at_ms: now_ms,
             expires_at_ms,
-            nonce: vec![8; KEY_BYTES],
+            nonce: request_nonce.to_vec(),
         };
         let signed_request = sign_control_message(
             &request,
             &session_key,
             now_ms,
             expires_at_ms,
-            [8; KEY_BYTES],
+            request_nonce,
             native_time_policy(),
         )
         .expect("signed request");
+        let permit_nonce = generate_nonce();
         let permit = NativeProbePermit {
             request_hash: native_probe_permit_request_hash(&signed_request)
                 .expect("request hash")
@@ -1815,7 +1818,7 @@ mod dispatch_tests {
             scope: Some(scope.clone()),
             issued_at_ms: now_ms,
             expires_at_ms,
-            nonce: vec![9; KEY_BYTES],
+            nonce: permit_nonce.to_vec(),
             exit_control_address: "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/exit".to_owned(),
         };
         let signed_permit = sign_control_message(
@@ -1823,7 +1826,7 @@ mod dispatch_tests {
             &exit_key,
             now_ms,
             expires_at_ms,
-            [9; KEY_BYTES],
+            permit_nonce,
             native_time_policy(),
         )
         .expect("signed Permit");
@@ -1878,6 +1881,7 @@ mod dispatch_tests {
         } = ready_fixture();
         let now_ms = crate::unix_millis();
         let relay_endpoint = endpoint_binding(&scope.attempt_id, 11, [8, 8, 8, 8], 41_001);
+        let ready_nonce = generate_nonce();
         let ready = NativeProbeRelayReady {
             permit_hash: native_probe_permit_hash(&awaiting.relay_permit)
                 .expect("Permit hash")
@@ -1887,14 +1891,14 @@ mod dispatch_tests {
             relay_client_endpoint: Some(relay_endpoint.clone()),
             ready_at_ms: now_ms,
             expires_at_ms: scope.attempt_expires_at_ms,
-            nonce: vec![21; KEY_BYTES],
+            nonce: ready_nonce.to_vec(),
         };
         let signed_ready = sign_control_message(
             &ready,
             &relay_key,
             now_ms,
             ready.expires_at_ms,
-            [21; KEY_BYTES],
+            ready_nonce,
             native_time_policy(),
         )
         .expect("signed Ready");
@@ -1956,6 +1960,7 @@ mod dispatch_tests {
             underlay_ip: vec![7, 7, 7, 7],
             listen_port: 44_001,
         };
+        let authorization_nonce = generate_nonce();
         let authorization = RelayAuthorization {
             reservation_id: scope.probe_id.clone(),
             route_context_id: scope.attempt_id.clone(),
@@ -1971,7 +1976,7 @@ mod dispatch_tests {
             policy_hash: scope.policy_hash.clone(),
             created_at_ms: now_ms,
             expires_at_ms: scope.attempt_expires_at_ms,
-            nonce: vec![41; KEY_BYTES],
+            nonce: authorization_nonce.to_vec(),
             relay_peer_id: relay.peer_id.clone(),
             capability_id: scope.attempt_id.clone(),
             client_session_public_key: scope.client_session_public_key.clone(),
@@ -1987,10 +1992,11 @@ mod dispatch_tests {
             exit_key,
             now_ms,
             scope.attempt_expires_at_ms,
-            [41; KEY_BYTES],
+            authorization_nonce,
             native_time_policy(),
         )
         .expect("signed Exit authorization");
+        let reservation_nonce = generate_nonce();
         let reservation = RelayReservation {
             reservation_id: authorization.reservation_id.clone(),
             route_context_id: authorization.route_context_id.clone(),
@@ -2008,7 +2014,7 @@ mod dispatch_tests {
             policy_hash: authorization.policy_hash.clone(),
             created_at_ms: authorization.created_at_ms,
             expires_at_ms: authorization.expires_at_ms,
-            nonce: vec![51; KEY_BYTES],
+            nonce: reservation_nonce.to_vec(),
             exit_authorization: signed_exit,
             relay_peer_id: authorization.relay_peer_id.clone(),
             capability_id: authorization.capability_id.clone(),
@@ -2026,7 +2032,7 @@ mod dispatch_tests {
             relay_key,
             now_ms,
             scope.attempt_expires_at_ms,
-            [51; KEY_BYTES],
+            reservation_nonce,
             native_time_policy(),
         )
         .expect("signed Relay reservation")

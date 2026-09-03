@@ -1192,7 +1192,8 @@ mod tests {
         AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
         AdvertisementPolicy, AdvertisementQuality, AdvertisementRoles, ControlPayload,
         ForwardedPreselectionAttestation, MAX_CONTROL_PAYLOAD_SIZE, encode_canonical,
-        verify_direct_preselection_transcript, verify_forwarded_preselection_transcript,
+        generate_nonce, verify_direct_preselection_transcript,
+        verify_forwarded_preselection_transcript,
     };
 
     use super::*;
@@ -2598,7 +2599,7 @@ mod tests {
             relay_public_key,
             now_ms,
             advertisement_expiry,
-            [79; 32],
+            generate_nonce(),
             TimePolicy::default(),
             |message| sign_with_key(&relay_key, message),
         )
@@ -3078,7 +3079,7 @@ mod tests {
             fixture.relay_public_key,
             NOW_MS,
             ADVERTISEMENT_EXPIRY_MS,
-            [92; 32],
+            generate_nonce(),
             TimePolicy::default(),
             |message| sign_with_key(&fixture.relay_key, message),
         )

@@ -419,8 +419,8 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use volparossa_protocol::{
         NATIVE_ROUTE_CREDENTIAL_CIPHERTEXT_LENGTH, NATIVE_ROUTE_CREDENTIAL_ENCAPSULATED_KEY_LENGTH,
-        NativeRouteCredentialScope, TimePolicy, encode_canonical, node_id_from_public_key,
-        sign_control_message,
+        NativeRouteCredentialScope, TimePolicy, encode_canonical, generate_nonce,
+        node_id_from_public_key, sign_control_message,
     };
 
     use super::*;
@@ -471,7 +471,7 @@ mod tests {
             .native_route_identity
             .as_ref()
             .expect("native identity");
-        let nonce = [13; NODE_ID_BYTES];
+        let nonce = generate_nonce();
         let delivery = NativeRouteCredentialDelivery {
             scope: Some(NativeRouteCredentialScope {
                 reservation_id: exit.reservation_id.clone(),

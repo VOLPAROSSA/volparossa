@@ -16243,7 +16243,7 @@ mod tests {
             roles,
             &fixture.policy,
             23,
-            [0x73; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         )
@@ -16290,7 +16290,7 @@ mod tests {
             reserved_up_mbps: 8,
             reserved_down_mbps: 12,
         };
-        let nonce = [0x35; 32];
+        let nonce = generate_nonce();
         let permit_request = NativeProbePermitRequest {
             scope: Some(scope.clone()),
             created_at_ms: now_ms,
@@ -16617,7 +16617,7 @@ mod tests {
             roles,
             &fixture.policy,
             41,
-            [0xa1; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         )
@@ -16666,7 +16666,7 @@ mod tests {
             roles,
             &fixture.policy,
             42,
-            [0xa2; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         )
@@ -16793,7 +16793,7 @@ mod tests {
             },
             &fixture.fixture.policy,
             actor.advertisement_sequence,
-            [0x74; 32],
+            generate_nonce(),
             fixture.now_ms,
             &fixture.fixture.directory,
         );
@@ -16823,7 +16823,7 @@ mod tests {
             },
             &fixture.fixture.policy,
             actor.advertisement_sequence.saturating_add(1),
-            [0x75; 32],
+            generate_nonce(),
             fixture.now_ms,
             &fixture.fixture.directory,
         )
@@ -17532,7 +17532,7 @@ mod tests {
                 &control,
                 relay_roles,
                 1,
-                [191; 32],
+                generate_nonce(),
                 now_ms,
                 advertised,
             )
@@ -17557,7 +17557,7 @@ mod tests {
                     exit: true,
                 },
                 1,
-                [192; 32],
+                generate_nonce(),
                 now_ms,
                 advertised,
             )
@@ -18463,7 +18463,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [164; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -18548,7 +18548,7 @@ mod tests {
             &control,
             &exit_identity,
             1,
-            [162; 32],
+            generate_nonce(),
             now_ms,
         )
         .await
@@ -18598,7 +18598,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [162; 32],
+                generate_nonce(),
                 initial_ms,
             )
             .await
@@ -18616,7 +18616,7 @@ mod tests {
                     exit: false,
                 },
                 2,
-                [163; 32],
+                generate_nonce(),
                 refresh_ms,
             )
             .await
@@ -19387,7 +19387,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [91; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -19471,7 +19471,7 @@ mod tests {
             roles,
             &direct_first.policy,
             1,
-            [101; 32],
+            generate_nonce(),
             now_ms,
             &direct_first.directory,
         );
@@ -19528,7 +19528,7 @@ mod tests {
             roles,
             &forwarded_first.policy,
             1,
-            [102; 32],
+            generate_nonce(),
             now_ms,
             &forwarded_first.directory,
         );
@@ -19601,7 +19601,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [111; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -19622,7 +19622,7 @@ mod tests {
             RolesConfig::default(),
             &fixture.policy,
             2,
-            [112; 32],
+            generate_nonce(),
             now_ms.saturating_add(1),
             &fixture.directory,
         );
@@ -19678,7 +19678,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [113; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -19714,7 +19714,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [114; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -19736,7 +19736,7 @@ mod tests {
             RolesConfig::default(),
             &fixture.policy,
             2,
-            [115; 32],
+            generate_nonce(),
             now_ms.saturating_add(1),
             &fixture.directory,
         );
@@ -19785,7 +19785,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [121; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -20237,7 +20237,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [131; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -20392,7 +20392,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [154; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -20484,7 +20484,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [155; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -20585,7 +20585,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [160; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -20598,9 +20598,16 @@ mod tests {
             .expect("stored control capability")
             .clone();
         assert!(
-            ingest_forwarded_snapshot_exit(fixture, &control, valid_exit, 1, [161; 32], now_ms,)
-                .await
-                .is_some()
+            ingest_forwarded_snapshot_exit(
+                fixture,
+                &control,
+                valid_exit,
+                1,
+                generate_nonce(),
+                now_ms,
+            )
+            .await
+            .is_some()
         );
         control
     }
@@ -20636,7 +20643,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [162; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -21161,7 +21168,7 @@ mod tests {
                     exit: false,
                 },
                 2,
-                [163; 32],
+                generate_nonce(),
                 refresh_ms,
             )
             .await
@@ -21220,7 +21227,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [164; 32],
+                generate_nonce(),
                 refresh_ms,
             )
             .await
@@ -21263,7 +21270,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [162; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -21608,7 +21615,7 @@ mod tests {
                     exit: true,
                 },
                 1,
-                [162; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -21633,7 +21640,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [163; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -21668,7 +21675,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [164; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -21699,7 +21706,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [165; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -21720,7 +21727,7 @@ mod tests {
         let control = install_control(fixture, &control_identity, now_ms);
         let exit = Identity::generate();
         assert!(
-            ingest_forwarded_snapshot_exit(fixture, &control, &exit, 1, [166; 32], now_ms)
+            ingest_forwarded_snapshot_exit(fixture, &control, &exit, 1, generate_nonce(), now_ms)
                 .await
                 .is_some()
         );
@@ -21743,7 +21750,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [167; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -21770,7 +21777,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [168; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -21798,7 +21805,7 @@ mod tests {
     ) -> Libp2pPeerId {
         let exit = Identity::generate();
         assert!(
-            ingest_forwarded_snapshot_exit(fixture, control, &exit, 1, [169; 32], now_ms)
+            ingest_forwarded_snapshot_exit(fixture, control, &exit, 1, generate_nonce(), now_ms)
                 .await
                 .is_some()
         );
@@ -22235,7 +22242,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [139; 32],
+            generate_nonce(),
             advertisement_now_ms,
             &fixture.directory,
         );
@@ -22496,7 +22503,7 @@ mod tests {
             },
             &fixture.policy,
             2,
-            [161; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -22674,7 +22681,7 @@ mod tests {
             },
             &fixture.policy,
             2,
-            [171; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -22774,7 +22781,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [181; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -22915,7 +22922,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [183; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -23052,7 +23059,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [185; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
