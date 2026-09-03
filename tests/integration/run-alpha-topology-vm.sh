@@ -13,6 +13,7 @@ mode=preview
 approval=no
 image_path=
 mpquic_path=
+package_path=
 output_directory=
 expected_commit=
 
@@ -20,7 +21,7 @@ usage() {
     printf '%s\n' \
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
-        '         --image PATH --mpquic PATH --output DIRECTORY' \
+        '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
         '         --expected-commit SHA'
 }
 
@@ -30,8 +31,10 @@ print_plan() {
         '  verify the reviewed Debian 13 amd64 image by its pinned SHA-512;' \
         '  archive only the exact clean checked-out Git revision;' \
         '  verify and copy the locally built pinned mqvpn/xquic daemon;' \
+        '  verify and copy the exact candidate Debian package;' \
         '  boot one temporary KVM-only qcow2 overlay with QEMU user networking;' \
-        '  install Debian build/runtime packages and build only required binaries;' \
+        '  prove package install, doctor, start, upgrade and removal in the guest;' \
+        '  install Debian build/runtime packages and build only required test binaries;' \
         '  run the twelve-node production-helper topology as guest root;' \
         '  retrieve bounded non-secret logs and its machine-readable result;' \
         '  power off and discard the overlay, keys, seed and source archive.' \
@@ -51,6 +54,11 @@ while [ "$#" -gt 0 ]; do
         --mpquic)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             mpquic_path=$2
+            shift
+            ;;
+        --package)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            package_path=$2
             shift
             ;;
         --output)
@@ -77,7 +85,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$output_directory$expected_commit" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$output_directory$expected_commit" ]; then
         usage >&2
         exit 64
     fi
@@ -87,16 +95,20 @@ if [ "$mode" = preview ]; then
 fi
 
 if [ "$approval" != yes ] || [ -z "$image_path" ] || [ -z "$mpquic_path" ] \
+    || [ -z "$package_path" ] \
     || [ -z "$output_directory" ] || [ -z "$expected_commit" ]; then
     usage >&2
     exit 64
 fi
-case $image_path:$mpquic_path:$output_directory in /*:/*:/*) ;; *) exit 64 ;; esac
+case $image_path:$mpquic_path:$package_path:$output_directory in
+    /*:/*:/*:/*) ;;
+    *) exit 64 ;;
+esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
 case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'VM runner must remain unprivileged' >&2; exit 77; }
 
-for command_name in awk cat chmod cloud-localds cmp cut find git grep gzip install \
+for command_name in awk cat chmod cloud-localds cmp cut dpkg-deb find git grep gzip install \
     jq kill mktemp qemu-img qemu-system-x86_64 readlink rm scp sed sha256sum \
     sha512sum sleep ssh ssh-keygen ss stat tail tar timeout; do
     command -v "$command_name" >/dev/null 2>&1 \
@@ -143,6 +155,14 @@ case $MPQUIC_SIZE in ''|0|*[!0-9]*) exit 64 ;; esac
 [ "$MPQUIC_SIZE" -le 67108864 ] || exit 64
 [ "$("$mpquic_path" --api-version)" = 6 ] || exit 64
 MPQUIC_SHA256=$(sha256sum "$mpquic_path" | awk '{ print $1 }')
+[ "$(readlink -f -- "$package_path")" = "$package_path" ] || exit 64
+[ -f "$package_path" ] && [ ! -L "$package_path" ] || exit 64
+[ "$(dpkg-deb -f "$package_path" Package)" = volparossa ] || exit 64
+[ "$(dpkg-deb -f "$package_path" Architecture)" = amd64 ] || exit 64
+PACKAGE_SIZE=$(stat -Lc '%s' "$package_path")
+case $PACKAGE_SIZE in ''|0|*[!0-9]*) exit 64 ;; esac
+[ "$PACKAGE_SIZE" -le 536870912 ] || exit 64
+PACKAGE_SHA256=$(sha256sum "$package_path" | awk '{ print $1 }')
 [ -d "$output_directory" ] && [ ! -L "$output_directory" ] || exit 64
 [ -z "$(find "$output_directory" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 64
 
@@ -246,10 +266,13 @@ umask 077
 expected_commit=$1
 source_sha256=$2
 mpquic_sha256=$3
+package_sha256=$4
 cd /home/vpci
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
 printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
+printf '%s  volparossa.deb\n' "$package_sha256" | sha256sum --check --strict -
 [ "$(stat -Lc '%s' volparossa-mpquic)" -le 67108864 ]
+[ "$(stat -Lc '%s' volparossa.deb)" -le 536870912 ]
 chmod 0555 volparossa-mpquic
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
@@ -266,6 +289,7 @@ test "$(systemd-detect-virt)" = kvm
 tar -xzf source.tar.gz
 cd source
 test -x tests/integration/kvm-alpha-topology.sh
+test -x tests/packaging/debian13-package-lifecycle.sh
 CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
     -p volparossa --bin volparossa \
     -p volparossa-agent --bin volparossa-agent \
@@ -291,9 +315,26 @@ sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
 topology_status=$?
 set -e
 printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
+
+# The topology runner has completed its own scoped cleanup before returning.
+# Exercise the installed package only afterwards so package systemd services
+# cannot affect datapath evidence or its host-state comparison.
+mkdir /home/vpci/alpha-output/package
+set +e
+sudo -n -- ./tests/packaging/debian13-package-lifecycle.sh \
+    --execute --yes \
+    --package /home/vpci/volparossa.deb \
+    --output /home/vpci/alpha-output/package \
+    >/home/vpci/alpha-output/package/runner.stdout \
+    2>/home/vpci/alpha-output/package/runner.stderr
+package_status=$?
+set -e
+printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
-chmod 0600 /home/vpci/alpha-output/*
+find /home/vpci/alpha-output -type d -exec chmod 0700 {} +
+find /home/vpci/alpha-output -type f -exec chmod 0600 {} +
 tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz .
+if [ "$package_status" -ne 0 ]; then exit "$package_status"; fi
 exit "$topology_status"
 GUEST_DRIVER_SCRIPT
 chmod 0700 "$GUEST_DRIVER"
@@ -363,12 +404,13 @@ done
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
 scp_to "$mpquic_path" /home/vpci/volparossa-mpquic
+scp_to "$package_path" /home/vpci/volparossa.deb
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
 ssh_base chmod 0700 /home/vpci/guest-driver.sh
 
 set +e
 ssh_base /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
-    "$MPQUIC_SHA256"
+    "$MPQUIC_SHA256" "$PACKAGE_SHA256"
 GUEST_STATUS=$?
 set -e
 if ! scp_from /home/vpci/alpha-output.tar.gz "$RUN_DIRECTORY/alpha-output.tar.gz"; then

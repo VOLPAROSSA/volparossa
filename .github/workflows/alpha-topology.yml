@@ -76,6 +76,26 @@ jobs:
           sha256sum "$native_binary"
           printf 'VOLPAROSSA_ALPHA_MPQUIC=%s\n' "$native_binary" >>"$GITHUB_ENV"
 
+      - name: Build exact candidate Debian package
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/volparossa-package-target
+          VMP_BUILD_JOBS: 2
+          VMP_RUN_TESTS: no
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+            ./packaging/build-deb.sh --build
+          mapfile -t packages < <(find "$(pwd -P)/dist" -maxdepth 1 -type f \
+            -name 'volparossa_*_amd64.deb' -print)
+          test "${#packages[@]}" -eq 1
+          package=${packages[0]}
+          test -f "$package"
+          test ! -L "$package"
+          test "$(dpkg-deb -f "$package" Package)" = volparossa
+          test "$(dpkg-deb -f "$package" Architecture)" = amd64
+          sha256sum "$package"
+          printf 'VOLPAROSSA_ALPHA_PACKAGE=%s\n' "$package" >>"$GITHUB_ENV"
+
       - name: Require KVM and create output directory
         run: |
           set -euo pipefail
@@ -126,6 +146,7 @@ jobs:
             --execute --yes \
             --image "$VOLPAROSSA_ALPHA_IMAGE" \
             --mpquic "$VOLPAROSSA_ALPHA_MPQUIC" \
+            --package "$VOLPAROSSA_ALPHA_PACKAGE" \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" \
             --expected-commit "$GITHUB_SHA"
           topology_status=$?
@@ -164,6 +185,20 @@ jobs:
             ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             printf '%s\n' 'The VM did not publish a topology report.' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          package_report="$VOLPAROSSA_ALPHA_OUTPUT/package/package-lifecycle.json"
+          if test -f "$package_report"; then
+            jq -r '
+              "package lifecycle: \(.overall)",
+              "package version: \(.package.version)",
+              "installed services started: \(.service_start.helper and .service_start.native_mpquic and .service_start.agent)",
+              "upgrade restarted active processes: \(.upgrade.active_processes_restarted)",
+              "uninstall preserved identity: \(.uninstall.identity_preserved)",
+              "package test networking unchanged: \(.network_state_unchanged)"
+            ' "$package_report" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' 'The VM did not publish package lifecycle evidence.' \
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -280,3 +315,33 @@ jobs:
             .cleanup.remaining_units == 0 and
             .cleanup.remaining_owned_objects == 0
           ' "$VOLPAROSSA_ALPHA_OUTPUT/report.json" >/dev/null
+          test "$(cat "$VOLPAROSSA_ALPHA_OUTPUT/package/guest-exit-status")" = 0
+          jq -e '
+            .schema_version == 1 and
+            .environment == {
+              "debian_version":"13",
+              "architecture":"amd64",
+              "virtualization":"kvm"
+            } and
+            .fresh_install.services_enabled == false and
+            .fresh_install.filesystem_contract == true and
+            .doctor_before_upgrade == true and
+            .service_start.helper == true and
+            .service_start.native_mpquic == true and
+            .service_start.agent == true and
+            .service_start.live_status == true and
+            .upgrade.maintainer_path_exercised == true and
+            .upgrade.active_processes_restarted == true and
+            .upgrade.identity_preserved == true and
+            .doctor_after_upgrade == true and
+            .uninstall.active_services_stopped == true and
+            .uninstall.package_files_absent == true and
+            .uninstall.identity_preserved == true and
+            .uninstall.config_preserved == true and
+            .network_state_unchanged == true and
+            .overall == "PASS"
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/package/package-lifecycle.json" >/dev/null
+          jq -e 'all(.checks[]; .status != "fail")' \
+            "$VOLPAROSSA_ALPHA_OUTPUT/package/doctor-before-upgrade.json" >/dev/null
+          jq -e 'all(.checks[]; .status != "fail")' \
+            "$VOLPAROSSA_ALPHA_OUTPUT/package/doctor-after-upgrade.json" >/dev/null

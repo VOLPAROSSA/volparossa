@@ -34,8 +34,13 @@ grep -F 'native/volparossa-mpquic/scripts/fetch-upstream.sh --yes' "$WORKFLOW" \
 grep -F 'native/volparossa-mpquic/scripts/build-upstream.sh' "$WORKFLOW" >/dev/null
 grep -F 'VMP_BUILD_JOBS=2 VMP_RUN_TESTS=no' "$WORKFLOW" >/dev/null
 grep -F -- '--mpquic "$VOLPAROSSA_ALPHA_MPQUIC"' "$WORKFLOW" >/dev/null
+grep -F -- '--package "$VOLPAROSSA_ALPHA_PACKAGE"' "$WORKFLOW" >/dev/null
+grep -F './packaging/build-deb.sh --build' "$WORKFLOW" >/dev/null
 grep -F 'scp_to "$mpquic_path" /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
+grep -F 'scp_to "$package_path" /home/vpci/volparossa.deb' "$HOST" >/dev/null
 grep -F -- '--mpquic /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
+grep -F -- './tests/packaging/debian13-package-lifecycle.sh' "$HOST" >/dev/null
+grep -F -- '--package /home/vpci/volparossa.deb' "$HOST" >/dev/null
 grep -F -- '-p volparossa-test-support --example http3-acceptance-fixture' "$HOST" \
     >/dev/null
 grep -F -- '-p volparossa-test-support --example tls-policy-acceptance-fixture' "$HOST" \
