@@ -184,6 +184,21 @@ grep -F '43.159.1.1:52007 47.163.4.2:443' "$GUEST" >/dev/null
 grep -F '"$WORK/client-fixtures/http3-cert.der"' "$GUEST" >/dev/null
 grep -F 'connected: false' "$GUEST" >/dev/null
 grep -F 'active contexts: 0' "$GUEST" >/dev/null
+grep -F 'PHASE=a06-preconnect-multipath-route' "$GUEST" >/dev/null
+grep -F -- '--transport multipath-quic' "$GUEST" >/dev/null
+grep -F 'wait_active_native_mpquic_paths a06-preconnect-native-paths' \
+    "$GUEST" >/dev/null
+grep -F 'all(.paths[]; .state == 3)' "$GUEST" >/dev/null
+grep -F 'preestablished_before_http3_client:true' "$GUEST" >/dev/null
+grep -F '($preconnect.route_context_id == $native.route_context_id)' "$GUEST" >/dev/null
+preconnect_line=$(grep -nF 'PHASE=a06-preconnect-multipath-route' "$GUEST" \
+    | cut -d: -f1)
+disconnect_line=$(grep -nF 'PHASE=a06-reset-single-path-route' "$GUEST" \
+    | cut -d: -f1)
+a06_client_line=$(grep -nF '"$WORK/bin/examples/http3-acceptance-fixture" client a06' \
+    "$GUEST" | cut -d: -f1)
+[ "$disconnect_line" -lt "$preconnect_line" ]
+[ "$preconnect_line" -lt "$a06_client_line" ]
 grep -F 'destination == "47.163.4.2" and destination_port == 443' "$GUEST" \
     >/dev/null
 grep -F 'capture_native_mpquic_paths()' "$GUEST" >/dev/null

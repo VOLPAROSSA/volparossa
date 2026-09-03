@@ -395,6 +395,8 @@ copy_artifacts() {
         a05-exit-capture.json a05-exit-capture.log a05-exit-capture.err \
         a05-evidence.json \
         http3-server.log a06-disconnect.out a06-disconnect.err \
+        a06-connect.out a06-connect.err \
+        a06-preconnect-native-paths.txt a06-preconnect-native-paths.json \
         a06-client.json a06-client.err \
         destination-a06-evidence.json a06-client-fallback-route.txt \
         a06-client-capture.json a06-client-capture.log a06-client-capture.err \
@@ -3445,6 +3447,25 @@ wait_native_mpquic_paths() {
     return 1
 }
 
+wait_active_native_mpquic_paths() {
+    active_prefix=$1
+    active_attempt=0
+    while [ "$active_attempt" -lt 300 ]; do
+        if capture_native_mpquic_paths "$active_prefix" both \
+            && jq -e '
+                .requirement == "both" and
+                (.paths | length) == 2 and
+                ([.paths[].relay] | sort) == ["relay1", "relay2"] and
+                all(.paths[]; .state == 3)
+            ' "$WORK/$active_prefix.json" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+        active_attempt=$((active_attempt + 1))
+    done
+    return 1
+}
+
 start_http3_observers() {
     http3_prefix=$1
     http3_marker=$2
@@ -4878,6 +4899,27 @@ while [ "$attempt" -lt 300 ]; do
 done
 [ "$attempt" -lt 300 ] || fail A06_SINGLE_PATH_ROUTE_NOT_IDLE
 
+PHASE=a06-preconnect-multipath-route
+A06_REQUESTED=true
+a06_connect_status=1
+attempt=0
+while [ "$attempt" -lt 120 ]; do
+    set +e
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" connect \
+        --transport multipath-quic \
+        >"$WORK/a06-connect.out" 2>"$WORK/a06-connect.err"
+    a06_connect_status=$?
+    set -e
+    [ "$a06_connect_status" -ne 0 ] || break
+    a01_transient_connect_unavailable "$WORK/a06-connect.err" || break
+    sleep 1
+    attempt=$((attempt + 1))
+done
+[ "$a06_connect_status" -eq 0 ] || fail A06_MULTIPATH_ROUTE_CONNECT_FAILED
+wait_active_native_mpquic_paths a06-preconnect-native-paths \
+    || fail A06_MULTIPATH_ROUTE_NOT_ACTIVE
+
 timeout --signal=TERM --kill-after=5s 420s \
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
     --clear-groups --inh-caps=+net_bind_service \
@@ -4900,7 +4942,6 @@ install -o "$WORKER_UID" -g "$WORKER_GID" -m 0400 \
     "$WORK/destination/http3-cert.der" "$WORK/client-fixtures/http3-cert.der"
 
 PHASE=a06-http3-mpquic
-A06_REQUESTED=true
 A06_STATUS=1
 A06_FALLBACK_ROUTE=$(ip -n "$CLIENT" -o route get 47.163.4.2 | sed -n '1p')
 printf '%s\n' "$A06_FALLBACK_ROUTE" >"$WORK/a06-client-fallback-route.txt"
@@ -4944,7 +4985,8 @@ if [ "$A06_STATUS" -eq 0 ] \
     A06_STATUS=1
 fi
 for evidence_file in a06-client.json destination-a06-evidence.json \
-    a06-client-capture.json a06-exit-capture.json a06-native-paths.json; do
+    a06-client-capture.json a06-exit-capture.json \
+    a06-preconnect-native-paths.json a06-native-paths.json; do
     if [ "$A06_STATUS" -eq 0 ] \
         && { [ ! -s "$WORK/$evidence_file" ] \
             || ! jq -e . "$WORK/$evidence_file" >/dev/null 2>&1; }; then
@@ -4957,11 +4999,13 @@ if [ "$A06_STATUS" -eq 0 ]; then
         --slurpfile destination "$WORK/destination-a06-evidence.json" \
         --slurpfile client_capture "$WORK/a06-client-capture.json" \
         --slurpfile exit_capture "$WORK/a06-exit-capture.json" \
+        --slurpfile preconnect "$WORK/a06-preconnect-native-paths.json" \
         --slurpfile native "$WORK/a06-native-paths.json" \
         --arg fallback_route "$A06_FALLBACK_ROUTE" \
         --arg relay1_peer "$R1_PEER" --arg relay2_peer "$R2_PEER" \
         '($application[0]) as $app | ($destination[0]) as $destination
         | ($client_capture[0]) as $client | ($exit_capture[0]) as $exit
+        | ($preconnect[0]) as $preconnect
         | ($native[0]) as $native
         | ($native.paths | map(select(.relay == "relay1")) | .[0]) as $native_r1
         | ($native.paths | map(select(.relay == "relay2")) | .[0]) as $native_r2
@@ -4991,6 +5035,10 @@ if [ "$A06_STATUS" -eq 0 ]; then
             and ($client.truncated == false) and ($exit.truncated == false)
             and ($exit.destination_request_datagrams > 0)
             and ($exit.destination_response_datagrams > 0)
+            and ($preconnect.requirement == "both")
+            and (($preconnect.paths | length) == 2)
+            and (all($preconnect.paths[]; .state == 3))
+            and ($preconnect.route_context_id == $native.route_context_id)
             and ($native_r1.relay_peer_id == $relay1_peer)
             and ($native_r2.relay_peer_id == $relay2_peer)
             and ($native_r1.path_id != $native_r2.path_id)
@@ -5004,7 +5052,9 @@ if [ "$A06_STATUS" -eq 0 ]; then
              client_initial_inspected_before_route:true,
              exit_initial_reverified_before_egress:true},
            native_mpquic:{route_context_id:$native.route_context_id,
-             required_path_count:2,paths:$native.paths},
+             preestablished_before_http3_client:true,
+             preconnect_paths:$preconnect.paths,required_path_count:2,
+             paths:$native.paths},
            path_evidence:{client_capture:$client,exit_capture:$exit},
            no_direct_client_exit:{topology_adjacency:false,route_absent:true,
              fallback_route:$fallback_route,observed_packets:$client.direct_client_exit_packets},
