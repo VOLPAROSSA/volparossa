@@ -63,7 +63,11 @@ const MAXIMUM_PENDING_BROWSER_QUIC_BYTES: usize = 256 * 1024;
 const MAXIMUM_PENDING_GENERAL_UDP_AGE: Duration = Duration::from_secs(5);
 const GENERAL_UDP_AUTH_PORT: u16 = 47_001;
 const GENERAL_UDP_AUTH_MAGIC: &[u8] = b"VOLPAROSSA-UDP-AUTH-V1\0";
-const NATIVE_SEND_BACKPRESSURE_ATTEMPTS: usize = 20;
+// A freshly established xquic association can remain non-writable for several
+// relay RTTs before its datagram-write callback clears mqvpn's backpressure
+// latch. Keep retrying only that exact transient result, within the ingress
+// request's timeout, rather than rejecting the first application datagram.
+const NATIVE_SEND_BACKPRESSURE_ATTEMPTS: usize = 400;
 const NATIVE_SEND_BACKPRESSURE_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Affine preflight of the exact native Exit process incarnation signed into finalization.
