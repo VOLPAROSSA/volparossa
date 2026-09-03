@@ -130,7 +130,12 @@ const WG_GENL_NAME: &str = "wireguard";
 const VETH_LINK_KIND: &str = "veth";
 const CLIENT_INGRESS_PARENT_ADDRESS: [u8; 4] = [169, 254, 240, 1];
 const CLIENT_INGRESS_WORKER_ADDRESS: [u8; 4] = [169, 254, 240, 2];
-const CLIENT_INGRESS_MTU: u32 = 1_420;
+// Keep application QUIC datagrams within the native CONNECT-IP path's outer-packet budget.
+// The tunnel assignment may negotiate up to 1420 bytes, but that is the inner-IP ceiling: using
+// it on the application-facing link lets QUIC probe a 1392-byte UDP payload whose wrapped packet
+// cannot fit through the IPv6/UDP/MASQUE transport. IPv6's minimum link MTU keeps both families
+// usable while bounding an IPv4 UDP payload to 1252 bytes and its inner packet to 1280 bytes.
+const CLIENT_INGRESS_MTU: u32 = 1_280;
 const CLIENT_INGRESS_PARENT_IPV6_ADDRESS: [u8; 16] = [
     0xfd, 0x56, 0x4f, 0x4c, 0x50, 0x41, 0x52, 0x4f, 0x53, 0x53, 0x41, 0, 0, 0, 0, 1,
 ];
@@ -3046,6 +3051,13 @@ mod tests {
     const TEST_FAMILY_ID: u16 = 0x43;
     const TEST_PORT_ID: u32 = 4_242;
 
+    fn attribute<'a>(encoded: &'a [(u16, &'a [u8])], kind: u16) -> &'a [u8] {
+        encoded
+            .iter()
+            .find_map(|(candidate, value)| ((*candidate & NLA_TYPE_MASK) == kind).then_some(*value))
+            .expect("required attribute")
+    }
+
     fn durable_resource(route_context_seed: u8, ownership_seed: u8) -> DurableWireguardResource {
         durable_wireguard_resource_for_test(
             [route_context_seed; 16],
@@ -3118,6 +3130,29 @@ mod tests {
                     *kind == FRA_FWMARK && *value == CLIENT_INGRESS_PARENT_IPV6_MARK.to_ne_bytes()
                 })
         );
+    }
+
+    #[test]
+    fn client_ingress_veth_caps_both_endpoints_at_ipv6_minimum_mtu() {
+        let payload = encode_create_client_ingress_veth("vpih01020304", "vpiw01020304", 17)
+            .expect("client ingress veth");
+        let outer = attributes(&payload[16..]).expect("outer link attributes");
+        assert_eq!(
+            attribute(&outer, IFLA_MTU),
+            CLIENT_INGRESS_MTU.to_ne_bytes()
+        );
+
+        let link_info =
+            attributes(attribute(&outer, IFLA_LINKINFO)).expect("nested link-info attributes");
+        let veth_data =
+            attributes(attribute(&link_info, IFLA_INFO_DATA)).expect("nested veth attributes");
+        let peer = attribute(&veth_data, VETH_INFO_PEER);
+        let peer_attributes = attributes(&peer[16..]).expect("peer link attributes");
+        assert_eq!(
+            attribute(&peer_attributes, IFLA_MTU),
+            CLIENT_INGRESS_MTU.to_ne_bytes()
+        );
+        assert_eq!(CLIENT_INGRESS_MTU, 1_280);
     }
 
     fn acknowledgement(errno: i32) -> NetlinkReply {
