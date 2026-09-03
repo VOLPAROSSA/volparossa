@@ -15245,7 +15245,7 @@ mod tests {
         fs,
         os::unix::fs::PermissionsExt,
         sync::{
-            Arc,
+            Arc, Mutex, OnceLock,
             atomic::{AtomicU64, Ordering},
         },
         time::Duration,
@@ -16032,10 +16032,19 @@ mod tests {
             .unwrap_or_default();
     }
 
-    fn generated_nonce_with_network_discriminator(discriminator: u8) -> [u8; 32] {
-        let mut nonce = generate_nonce();
-        nonce[0] = discriminator;
-        nonce
+    fn generated_nonce_with_unique_network_discriminator() -> [u8; 32] {
+        static USED_DISCRIMINATORS: OnceLock<Mutex<BTreeSet<u8>>> = OnceLock::new();
+        let used = USED_DISCRIMINATORS.get_or_init(|| Mutex::new(BTreeSet::new()));
+        loop {
+            let nonce = generate_nonce();
+            if used
+                .lock()
+                .expect("network discriminator set")
+                .insert(nonce[0])
+            {
+                return nonce;
+            }
+        }
     }
 
     #[allow(
@@ -20589,7 +20598,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                generated_nonce_with_network_discriminator(160),
+                generated_nonce_with_unique_network_discriminator(),
                 now_ms,
             )
             .await
@@ -20607,7 +20616,7 @@ mod tests {
                 &control,
                 valid_exit,
                 1,
-                generated_nonce_with_network_discriminator(161),
+                generated_nonce_with_unique_network_discriminator(),
                 now_ms,
             )
             .await
@@ -20647,7 +20656,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                generated_nonce_with_network_discriminator(162),
+                generated_nonce_with_unique_network_discriminator(),
                 now_ms,
             )
             .await
