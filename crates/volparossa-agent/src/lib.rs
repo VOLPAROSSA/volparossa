@@ -675,7 +675,6 @@ async fn run_client_udp_ingress(
                 continue;
             }
         };
-        ready.clear_ready();
         for observed in observed_batch {
             if observed.is_browser_quic() {
                 let ingresses = match browser_gate.inspect(observed, &policy, now_ms) {
@@ -976,7 +975,6 @@ async fn run_client_dns_ingress(
                 continue;
             }
         };
-        ready.clear_ready();
         if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
             .await
             .is_err()
