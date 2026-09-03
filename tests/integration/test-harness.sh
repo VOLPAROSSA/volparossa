@@ -86,6 +86,8 @@ for script_path in \
     packaging/debian/postinst \
     packaging/debian/prerm \
     packaging/debian/postrm \
+    tests/packaging/debian13-package-lifecycle.sh \
+    tests/packaging/test-package-lifecycle-contract.sh \
     scripts/bootstrap-debian13-dev.sh \
     scripts/check-system.sh \
     scripts/cleanup-network.sh \
@@ -106,6 +108,7 @@ jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-restart-vm-environment-v1.sch
 "$REPOSITORY_DIRECTORY/tests/helper/test-live-worker-identity-contract.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-production-ipc-busctl-parser.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-qemu-pidfd-supervisor.sh"
+"$REPOSITORY_DIRECTORY/tests/packaging/test-package-lifecycle-contract.sh"
 
 /bin/mkdir "$TEMPORARY_DIRECTORY/bin"
 MUTATION_MARKER=$TEMPORARY_DIRECTORY/mutation-attempt

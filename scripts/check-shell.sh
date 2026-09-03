@@ -19,6 +19,8 @@ set -- \
     packaging/debian/postinst \
     packaging/debian/postrm \
     packaging/debian/prerm \
+    tests/packaging/debian13-package-lifecycle.sh \
+    tests/packaging/test-package-lifecycle-contract.sh \
     scripts/bootstrap-debian13-dev.sh \
     scripts/check-rust-dependencies.sh \
     scripts/check-shell.sh \
