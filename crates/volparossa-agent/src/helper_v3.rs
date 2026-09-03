@@ -2891,23 +2891,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_and_prepare_share_one_absolute_five_second_deadline() {
+    async fn bind_and_prepare_share_one_absolute_ten_second_deadline() {
         let directory = tempfile::tempdir().expect("tempdir");
         let socket = directory.path().join("helper.sock");
         let listener = UnixListener::bind(&socket).expect("bind");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let bind = read_bind_some(&mut stream).await;
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(6)).await;
             write_runtime(&mut stream, &bind, [0xa5; 32]).await;
             let _prepare = read_request(&mut stream).await.expect("Prepare request");
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(6)).await;
         });
         let client =
             HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
         let started = StdInstant::now();
         let Err(failure) = client.prepare_lease_batch(prepare_sequence_value()).await else {
-            panic!("3s + 3s must exceed one 5s sequence budget");
+            panic!("6s + 6s must exceed one 10s sequence budget");
         };
         let elapsed = started.elapsed();
         assert!(matches!(
@@ -2917,8 +2917,8 @@ mod tests {
                 ..
             }
         ));
-        assert!(elapsed >= Duration::from_millis(4_500));
-        assert!(elapsed < Duration::from_secs(6));
+        assert!(elapsed >= Duration::from_millis(9_500));
+        assert!(elapsed < Duration::from_secs(11));
         server.abort();
         let _ = server.await;
     }
