@@ -1661,15 +1661,15 @@ preserves the complete affine terminal under its exact selector for a fresh-dead
 
 Production startup still performs the separate complete-set classification described above before
 retiring any `Intent`. Every non-empty classification blocks except an all-`CleanupConfirmed` set
-or the exact-singleton `ExactPresent + MayOwnCustody` reaper shape.
+or an exact-singleton, single-path `ExactPresent + MayOwn` reaper shape.
 For exact-present pairs, one descriptorless removal plus barrier and exact baseline-minus-pair proof
 is chained per canonical name; already-absent members are skipped. The final successor and one new
 barrier/two-snapshot observation must both be exactly empty before the existing actor sweep receives
 full-set evidence. A crash after any removal resumes from present+no-store state; a crash after one
 per-record CAS leaves exact `Absent` tombstones plus remaining `CleanupConfirmed` records for the
 no-store path. Inherited custody is never adopted as a live worker. The installed general restart
-cleanup executor still refuses both `MayOwn` phases; only the fixed singleton reaper proof can cross
-one `MayOwnCustody` record, and `MayOwnPrepare` remains refused.
+cleanup executor still refuses uncorrelated `MayOwn` proofs; only the fixed singleton reaper proof
+can cross one exact `MayOwnCustody` or `MayOwnPrepare` record.
 
 Remaining durable/runtime blockers are explicit:
 

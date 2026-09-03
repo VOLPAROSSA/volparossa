@@ -2535,7 +2535,12 @@ impl CleanupExecutor for RestartMayOwnCleanupExecutor<'_> {
         let candidate = project_startup_custody_target(&target.exact_record)
             .ok()
             .flatten()
-            .filter(|candidate| candidate.phase() == StartupCustodyPhase::MayOwnCustody)
+            .filter(|candidate| {
+                matches!(
+                    candidate.phase(),
+                    StartupCustodyPhase::MayOwnCustody | StartupCustodyPhase::MayOwnPrepare
+                )
+            })
             .ok_or(RestartMayOwnCleanupMismatch)?;
         if !self.evidence.consume_exact_target(&candidate) {
             return Err(RestartMayOwnCleanupMismatch);
@@ -2689,7 +2694,12 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
         let record = record_snapshot
             .records
             .values()
-            .find(|record| record.phase == OwnershipPhase::MayOwnCustody)
+            .find(|record| {
+                matches!(
+                    record.phase,
+                    OwnershipPhase::MayOwnCustody | OwnershipPhase::MayOwnPrepare
+                )
+            })
             .cloned()
             .ok_or(FailureDisposition::Continue(
                 DurableOwnershipError::RecoveryNotConfirmed,

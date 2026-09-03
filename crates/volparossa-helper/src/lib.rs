@@ -8,10 +8,10 @@
 //! complete client-to-destination datapath or general crash/restart recovery path. The public
 //! [`HelperEngine::new`] constructor remains fail-closed with `Unavailable`, so only the production
 //! server selects the functional backend. Production owns the canonical durable journal actor as a
-//! startup/shutdown barrier and still refuses `MayOwnPrepare`. It can retire an already durable
-//! `CleanupConfirmed` restart set and can reap exactly one same-boot, same-image, single-path
-//! pre-dispatch `MayOwnCustody + ExactPresent` namespace before reusing that removal chain. All
-//! broader restart shapes remain fail-closed. Leader retirement still does not own descendants.
+//! startup/shutdown barrier. It can retire an already durable `CleanupConfirmed` restart set and
+//! can reap exactly one same-boot, same-image, single-path `MayOwnCustody` or active
+//! `MayOwnPrepare` namespace before reusing that removal chain. Broader restart shapes remain
+//! fail-closed. Leader retirement still does not own descendants.
 
 #![cfg(target_os = "linux")]
 

@@ -145,7 +145,8 @@ Candidate units are installed as:
   and structurally validates inherited activation groups before Tokio. Durable Prepare publication
   uses `FDPOLL=0`, a manager barrier and complete post-barrier store-inventory attestation before
   arming. Startup normally retires already durable `CleanupConfirmed` custody; it also supports the
-  one exact-singleton pre-dispatch `MayOwnCustody` reaper case documented below. Every other
+  one exact-singleton single-path `MayOwnCustody` or active `MayOwnPrepare` reaper case documented
+  below. Every other
   inherited `MayOwn` shape refuses before socket bind;
 - `volparossa-agent.service`: user/group `volparossa`, no capabilities, persistent state/config,
   control-plane network access, the helper socket, and an agent-owned mode-0660 socket under a
@@ -236,10 +237,9 @@ each descriptorless removal must prove a stable complete inventory equal to its 
 only that pair. Mixed already-absent/present state resumes after a crash. A final revalidated fresh
 manager barrier plus two stable snapshots must prove the complete descriptor store remains exactly
 empty before any journal transition. A
-`MayOwnPrepare`, absent/no-store `MayOwnCustody`, multiple targets and multiple paths remain
-byte-identical and block startup because production has no worker/kernel absence-proving executor
-for them. Never remove a journal object merely to bypass this interlock: unsupported shapes require
-operator inspection.
+Absent/no-store `MayOwn`, multiple targets and multiple paths remain byte-identical and block
+startup because production has no exact recovery proof for them. Never remove a journal object
+merely to bypass this interlock: unsupported shapes require operator inspection.
 
 One `MayOwnCustody + ExactPresent` target may proceed only when its durable plan is exactly one
 Client lease, one Exit lease, or the same-path RelayClient/RelayExit pair; its boot ID and helper

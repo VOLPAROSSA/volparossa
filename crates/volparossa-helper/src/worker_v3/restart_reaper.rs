@@ -87,21 +87,23 @@ impl From<WorkerV3Error> for RestartReaperError {
 #[must_use = "restart cleanup proof must reach the retained startup actor"]
 pub(crate) struct ExactRestartReaperCleanupProof {
     plan: StartupRestartPlan,
+    mode: RestartCleanupMode,
 }
 
 impl ExactRestartReaperCleanupProof {
-    pub(crate) fn matches_plan(&self, plan: StartupRestartPlan) -> bool {
+    pub(crate) fn matches_plan(&self, plan: StartupRestartPlan, mode: RestartCleanupMode) -> bool {
         self.plan.context_id() == plan.context_id()
             && self.plan.context_role() as i32 == plan.context_role() as i32
             && self.plan.path_id() == plan.path_id()
             && self.plan.boot_id() == plan.boot_id()
             && self.plan.network_namespace_identity() == plan.network_namespace_identity()
             && self.plan.executable_identity() == plan.executable_identity()
+            && self.mode == mode
     }
 
     #[cfg(test)]
-    pub(crate) const fn for_test(plan: StartupRestartPlan) -> Self {
-        Self { plan }
+    pub(crate) const fn for_test(plan: StartupRestartPlan, mode: RestartCleanupMode) -> Self {
+        Self { plan, mode }
     }
 }
 
@@ -116,10 +118,32 @@ struct ReaperPlanRecord {
     hello_hash: [u8; 32],
     namespace_device: NonZeroU64,
     namespace_inode: NonZeroU64,
+    cleanup_mode: RestartCleanupMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum RestartCleanupMode {
+    PreDispatch = 1,
+    RetireNamespace = 2,
+}
+
+impl RestartCleanupMode {
+    fn decode(value: u8) -> Result<Self, RestartReaperError> {
+        match value {
+            1 => Ok(Self::PreDispatch),
+            2 => Ok(Self::RetireNamespace),
+            _ => Err(RestartReaperError::Invalid),
+        }
+    }
 }
 
 impl ReaperPlanRecord {
-    fn new(hello: &HandshakeRecord, plan: StartupRestartPlan) -> Result<Self, RestartReaperError> {
+    fn new(
+        hello: &HandshakeRecord,
+        plan: StartupRestartPlan,
+        cleanup_mode: RestartCleanupMode,
+    ) -> Result<Self, RestartReaperError> {
         let (namespace_device, namespace_inode) = plan.network_namespace_identity();
         let hello_hash = *blake3::hash(&hello.encode()).as_bytes();
         if hello_hash == [0; 32] {
@@ -129,6 +153,7 @@ impl ReaperPlanRecord {
             hello_hash,
             namespace_device,
             namespace_inode,
+            cleanup_mode,
         })
     }
 
@@ -139,13 +164,14 @@ impl ReaperPlanRecord {
         encoded[36..68].copy_from_slice(&self.hello_hash);
         encoded[68..76].copy_from_slice(&self.namespace_device.get().to_be_bytes());
         encoded[76..84].copy_from_slice(&self.namespace_inode.get().to_be_bytes());
+        encoded[84] = self.cleanup_mode as u8;
         encoded
     }
 
     fn decode(encoded: &[u8], hello: &HandshakeRecord) -> Result<Self, RestartReaperError> {
         if encoded.len() != REAPER_PLAN_LENGTH
             || encoded.get(..32) != Some(REAPER_PLAN_DOMAIN.as_slice())
-            || encoded.get(84..88) != Some([0_u8; 4].as_slice())
+            || encoded.get(85..88) != Some([0_u8; 3].as_slice())
             || u32::from_be_bytes(read_array(encoded, 32)?) != REAPER_PLAN_VERSION
         {
             return Err(RestartReaperError::Invalid);
@@ -156,6 +182,7 @@ impl ReaperPlanRecord {
                 .ok_or(RestartReaperError::Invalid)?,
             namespace_inode: NonZeroU64::new(u64::from_be_bytes(read_array(encoded, 76)?))
                 .ok_or(RestartReaperError::Invalid)?,
+            cleanup_mode: RestartCleanupMode::decode(encoded[84])?,
         };
         if record.hello_hash != *blake3::hash(&hello.encode()).as_bytes() {
             return Err(RestartReaperError::Authentication);
@@ -289,8 +316,13 @@ fn restart_reaper_fail_stop() -> ! {
 }
 
 /// Spawn, authenticate, attest and exactly reap one fixed cleanup child.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the authenticated restart transaction retains every owner until exact reap"
+)]
 pub(crate) fn execute_single_restart_reaper(
     plan: StartupRestartPlan,
+    cleanup_mode: RestartCleanupMode,
     network_namespace: BorrowedFd<'_>,
     deadline: HardDeadline,
 ) -> Result<ExactRestartReaperCleanupProof, RestartReaperError> {
@@ -383,6 +415,7 @@ pub(crate) fn execute_single_restart_reaper(
         child_pid,
         challenge,
         plan,
+        cleanup_mode,
         network_namespace,
         deadline,
     );
@@ -391,7 +424,10 @@ pub(crate) fn execute_single_restart_reaper(
         (Ok(()), Ok(WaitStatus::Exited(pid, 0)))
             if u32::try_from(pid.as_raw()).ok() == Some(child_pid) =>
         {
-            Ok(ExactRestartReaperCleanupProof { plan })
+            Ok(ExactRestartReaperCleanupProof {
+                plan,
+                mode: cleanup_mode,
+            })
         }
         (Err(error), Ok(status)) if wait_status_matches_child(status, child_pid) => Err(error),
         (_, Err(error)) => Err(error),
@@ -422,6 +458,7 @@ fn parent_protocol(
     child_pid: u32,
     challenge: [u8; 32],
     plan: StartupRestartPlan,
+    cleanup_mode: RestartCleanupMode,
     network_namespace: BorrowedFd<'_>,
     deadline: HardDeadline,
 ) -> Result<(), RestartReaperError> {
@@ -440,7 +477,7 @@ fn parent_protocol(
         worker_gid: worker_identity.gid(),
         monotonic_deadline_ns: deadline.monotonic_expiry_nanos()?,
     };
-    let plan_record = ReaperPlanRecord::new(&hello, plan)?;
+    let plan_record = ReaperPlanRecord::new(&hello, plan, cleanup_mode)?;
     send_credential_record_with_deadline(channel, &hello.encode(), deadline)?;
     send_credential_record_with_deadline(channel, &plan_record.encode(), deadline)?;
     send_credential_fd_record_with_deadline(
@@ -833,6 +870,7 @@ fn run_child() -> Result<(), RestartReaperError> {
         parent_network_namespace,
         target_network_namespace,
         plan,
+        plan_record.cleanup_mode,
         deadline,
     )?;
     send_credential_record_with_deadline(
@@ -858,10 +896,22 @@ fn perform_cleanup(
     parent_network_namespace: crate::worker_sandbox::NetworkNamespaceIdentity,
     target_network_namespace: crate::worker_sandbox::NetworkNamespaceIdentity,
     plan: RestartNetworkPlan,
+    cleanup_mode: RestartCleanupMode,
     deadline: HardDeadline,
 ) -> Result<(), RestartReaperError> {
     let mut kernel =
         NamespaceKernel::connect(deadline).map_err(|_| RestartReaperError::CleanupIncomplete)?;
+    if cleanup_mode == RestartCleanupMode::RetireNamespace {
+        // Exact process exit, cgroup replacement and the durable descriptor binding were proven
+        // by the parent before this child joined the namespace. No object can escape this
+        // anonymous namespace: after the journal transition, the existing exact FD-store removal
+        // chain closes its final retained references and Linux destroys every contained link,
+        // route, rule and nftables object atomically. Connecting both namespace-local netlink
+        // families here proves that the exact pinned namespace remains usable until that handoff.
+        deadline.ensure_remaining()?;
+        drop(kernel);
+        return Ok(());
+    }
     kernel
         .prove_restart_pre_dispatch_links_absent(plan, deadline)
         .map_err(|_| RestartReaperError::CleanupIncomplete)?;
@@ -966,12 +1016,16 @@ mod tests {
     fn plan_record_is_canonical_hello_bound_and_fd_identity_complete() {
         let hello = hello(volparossa_routing::ContextRole::Relay, 3);
         let plan = restart_plan(volparossa_routing::ContextRole::Relay, 3);
-        let record = ReaperPlanRecord::new(&hello, plan).expect("canonical plan record");
+        let record = ReaperPlanRecord::new(&hello, plan, RestartCleanupMode::PreDispatch)
+            .expect("canonical plan record");
         let encoded = record.encode();
         assert_eq!(encoded.len(), REAPER_PLAN_LENGTH);
         assert!(ReaperPlanRecord::decode(&encoded, &hello).is_ok_and(|value| value == record));
         assert_eq!(&encoded[..32], REAPER_PLAN_DOMAIN);
-        assert_eq!(&encoded[84..], &[0; 4]);
+        assert_eq!(
+            &encoded[84..],
+            &[RestartCleanupMode::PreDispatch as u8, 0, 0, 0]
+        );
         assert_ne!(record.fd_binding(), [0; 32]);
 
         for length in 0..REAPER_PLAN_LENGTH {
@@ -1007,6 +1061,7 @@ mod tests {
         let plan = ReaperPlanRecord::new(
             &hello,
             restart_plan(volparossa_routing::ContextRole::Client, 1),
+            RestartCleanupMode::PreDispatch,
         )
         .expect("phase plan");
         let proceed = phase_record(ReaperPhase::Proceed, &hello, plan);

@@ -8,7 +8,8 @@
 //! shape, and classifies it against one lock-held durable-journal projection plus a barrier-ordered
 //! stable manager inventory. A non-empty set may continue when every target was already durably
 //! `CleanupConfirmed`, or through one fixed reaper for an exact-present, single-path,
-//! pre-dispatch `MayOwnCustody` singleton. Exact-present cleanup-confirmed pairs are removed
+//! single-path `MayOwnCustody` or active `MayOwnPrepare` singleton. Exact-present
+//! cleanup-confirmed pairs are removed
 //! canonically; already-absent pairs are skipped. A final fresh exact-empty manager proof drives
 //! the existing manager-absence transition. Every broader classification refuses socket
 //! publication.
@@ -44,7 +45,7 @@ use crate::{
         observe_current_process_startup_inventory, remove_restart_custody,
     },
     worker_v3::{
-        ExactRestartReaperCleanupProof, acquire_worker_spawn_admission_until,
+        ExactRestartReaperCleanupProof, RestartCleanupMode, acquire_worker_spawn_admission_until,
         execute_single_restart_reaper,
     },
 };
@@ -186,7 +187,10 @@ impl StartupCustodyClassification {
         };
         let plan = entry.target.restart_plan()?;
         (self.custody.bundles.len() == 1
-            && entry.target.phase() == StartupCustodyPhase::MayOwnCustody
+            && matches!(
+                entry.target.phase(),
+                StartupCustodyPhase::MayOwnCustody | StartupCustodyPhase::MayOwnPrepare
+            )
             && entry.disposition == StartupCustodyDisposition::ExactPresent
             && crate::ownership_journal::RestartNetworkPlan::from_authenticated_reaper(
                 plan.context_id(),
@@ -207,8 +211,10 @@ impl StartupCustodyClassification {
         let [entry] = self.classified.as_mut_slice() else {
             return Err(restart_settlement_incomplete());
         };
-        if entry.target.phase() != StartupCustodyPhase::MayOwnCustody
-            || successor.phase() != StartupCustodyPhase::CleanupConfirmed
+        if !matches!(
+            entry.target.phase(),
+            StartupCustodyPhase::MayOwnCustody | StartupCustodyPhase::MayOwnPrepare
+        ) || successor.phase() != StartupCustodyPhase::CleanupConfirmed
             || !entry.target.same_identity_except_phase(&successor)
         {
             return Err(restart_settlement_incomplete());
@@ -325,10 +331,12 @@ impl RestartMayOwnCleanupEvidence {
         plan: crate::ownership_journal::StartupRestartPlan,
         proof: ExactRestartReaperCleanupProof,
     ) -> Result<Self, io::Error> {
-        if target.phase() != StartupCustodyPhase::MayOwnCustody
-            || target.restart_plan() != Some(plan)
-            || !proof.matches_plan(plan)
-        {
+        let mode = match target.phase() {
+            StartupCustodyPhase::MayOwnCustody => RestartCleanupMode::PreDispatch,
+            StartupCustodyPhase::MayOwnPrepare => RestartCleanupMode::RetireNamespace,
+            StartupCustodyPhase::CleanupConfirmed => return Err(restart_settlement_incomplete()),
+        };
+        if target.restart_plan() != Some(plan) || !proof.matches_plan(plan, mode) {
             return Err(restart_settlement_incomplete());
         }
         Ok(Self {
@@ -356,9 +364,14 @@ impl RestartMayOwnCleanupEvidence {
     #[cfg(test)]
     pub(crate) fn from_target_for_test(target: StartupCustodyTarget) -> Self {
         let plan = target.restart_plan().expect("restart target plan");
+        let mode = match target.phase() {
+            StartupCustodyPhase::MayOwnCustody => RestartCleanupMode::PreDispatch,
+            StartupCustodyPhase::MayOwnPrepare => RestartCleanupMode::RetireNamespace,
+            StartupCustodyPhase::CleanupConfirmed => panic!("cleanup-confirmed is not MayOwn"),
+        };
         Self {
             target: Some(target),
-            _proof: ExactRestartReaperCleanupProof::for_test(plan),
+            _proof: ExactRestartReaperCleanupProof::for_test(plan, mode),
         }
     }
 }
@@ -1246,12 +1259,12 @@ fn observe_exact_worker_exit_and_shared_cgroup(
     }
 }
 
-/// Recover only one exact-present, pre-dispatch `MayOwnCustody` worker namespace.
+/// Recover one exact-present single-path `MayOwnCustody` or active `MayOwnPrepare` namespace.
 ///
 /// Worker-spawn admission, the lock-held startup actor, the old process pidfd and the inherited
 /// namespace descriptor remain retained across both shared-cgroup observations, the fixed
 /// self-exec reaper, the journal CAS and the existing descriptor-store removal chain. Every
-/// no-store, `MayOwnPrepare`, multi-target or multi-path shape remains outside this function.
+/// No-store, multi-target and multi-path shapes remain outside this function.
 pub(crate) fn settle_exact_single_may_own_restart_present(
     runtime: &Runtime,
     mut ownership_startup: ProductionOwnershipStartup,
@@ -1279,9 +1292,19 @@ pub(crate) fn settle_exact_single_may_own_restart_present(
         .get(&custody_name)
         .ok_or_else(restart_settlement_incomplete)?;
     bundle.verify_exact_target(&target)?;
-    let proof = execute_single_restart_reaper(plan, bundle.network_namespace.as_fd(), deadline)
-        .map_err(|_| restart_settlement_incomplete())?;
-    if !proof.matches_plan(plan) {
+    let cleanup_mode = match target.phase() {
+        StartupCustodyPhase::MayOwnCustody => RestartCleanupMode::PreDispatch,
+        StartupCustodyPhase::MayOwnPrepare => RestartCleanupMode::RetireNamespace,
+        StartupCustodyPhase::CleanupConfirmed => return Err(restart_settlement_incomplete()),
+    };
+    let proof = execute_single_restart_reaper(
+        plan,
+        cleanup_mode,
+        bundle.network_namespace.as_fd(),
+        deadline,
+    )
+    .map_err(|_| restart_settlement_incomplete())?;
+    if !proof.matches_plan(plan, cleanup_mode) {
         return Err(restart_settlement_incomplete());
     }
 
@@ -3841,37 +3864,36 @@ mod tests {
     }
 
     #[test]
-    fn restart_reaper_gate_accepts_only_one_exact_present_single_path_may_own_custody() {
-        for (seed, role) in [
-            (71, volparossa_routing::ContextRole::Client),
-            (72, volparossa_routing::ContextRole::Relay),
-            (73, volparossa_routing::ContextRole::Exit),
+    fn restart_reaper_gate_accepts_one_exact_present_single_path_may_own_phase() {
+        for phase in [
+            StartupCustodyPhase::MayOwnCustody,
+            StartupCustodyPhase::MayOwnPrepare,
         ] {
-            let classification =
-                single_restart_classification(seed, StartupCustodyPhase::MayOwnCustody, role, 1);
-            assert!(classification.is_exact_single_may_own_restart());
-            let (target, plan) = classification
-                .exact_single_may_own_restart()
-                .expect("exact restart shape");
-            assert_eq!(target.phase(), StartupCustodyPhase::MayOwnCustody);
-            assert_eq!(plan.context_role(), role);
-            assert_eq!(plan.path_id(), 1);
+            for (seed, role) in [
+                (71, volparossa_routing::ContextRole::Client),
+                (72, volparossa_routing::ContextRole::Relay),
+                (73, volparossa_routing::ContextRole::Exit),
+            ] {
+                let classification = single_restart_classification(seed, phase, role, 1);
+                assert!(classification.is_exact_single_may_own_restart());
+                let (target, plan) = classification
+                    .exact_single_may_own_restart()
+                    .expect("exact restart shape");
+                assert_eq!(target.phase(), phase);
+                assert_eq!(plan.context_role(), role);
+                assert_eq!(plan.path_id(), 1);
+            }
         }
 
-        for (seed, phase) in [
-            (74, StartupCustodyPhase::MayOwnPrepare),
-            (75, StartupCustodyPhase::CleanupConfirmed),
-        ] {
-            assert!(
-                !single_restart_classification(
-                    seed,
-                    phase,
-                    volparossa_routing::ContextRole::Client,
-                    1,
-                )
-                .is_exact_single_may_own_restart()
-            );
-        }
+        assert!(
+            !single_restart_classification(
+                75,
+                StartupCustodyPhase::CleanupConfirmed,
+                volparossa_routing::ContextRole::Client,
+                1,
+            )
+            .is_exact_single_may_own_restart()
+        );
         assert!(
             !single_restart_classification(
                 76,

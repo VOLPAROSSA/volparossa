@@ -399,7 +399,7 @@ its affine owner through systemd custody, durable dispatch and same-runtime clea
 restart may retire an already durable all-`CleanupConfirmed` set: exact-present pairs first chain
 canonical descriptorless baseline-minus-pair removals, then a fresh stable exact-empty manager
 observation supplies full-set actor evidence. It may also reap one exact-present, same-boot,
-same-helper-image, single-path pre-dispatch `MayOwnCustody` namespace. The fixed authenticated child
+same-helper-image, single-path `MayOwnCustody` or active `MayOwnPrepare` namespace. The fixed authenticated child
 accepts only role-specific baseline state and the exact restricted Relay fence; it never deletes a
 WireGuard link or changes forwarding. After exact child reap, the startup actor crosses only that
 record to `CleanupConfirmed`, then reuses the existing removal/absence chain. The general cleanup

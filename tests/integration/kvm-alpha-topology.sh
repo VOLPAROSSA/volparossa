@@ -415,7 +415,7 @@ copy_artifacts() {
         a14-refresh-connect.out a14-refresh-connect.err \
         a14-owned-before.json a14-worker-custody-before.json \
         a14-worker-custody-after.json a14-owned-after-paths.txt a14-paths-before.txt \
-        a14-crashes.json a14-evidence.json \
+        a14-crashes.json a14-helper-restarts.json a14-evidence.json \
         host-state-before.json host-state-after.json a15-evidence.json; do
         if [ -f "$WORK/$artifact" ] && [ ! -L "$WORK/$artifact" ]; then
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 \
@@ -930,7 +930,8 @@ cleanup() {
         a14_success=false
         if [ "$REMAINING_OWNED_OBJECTS" -eq 0 ] \
             && [ -s "$WORK/a14-owned-before.json" ] \
-            && [ -s "$WORK/a14-crashes.json" ]; then
+            && [ -s "$WORK/a14-crashes.json" ] \
+            && [ -s "$WORK/a14-helper-restarts.json" ]; then
             a14_success=true
             A14_STATUS=0
             A14_SUCCEEDED=true
@@ -953,6 +954,7 @@ cleanup() {
             --argjson before "$a14_before" \
             --argjson crashes "$a14_crashes" \
             --argjson worker_after "$a14_worker_after" \
+            --slurpfile helper_restarts "$WORK/a14-helper-restarts.json" \
             --slurpfile host "$WORK/a15-evidence.json" \
             --argjson success "$a14_success" \
             --argjson namespaces "$REMAINING_NAMESPACES" \
@@ -969,6 +971,7 @@ cleanup() {
             --argjson remaining "$REMAINING_OWNED_OBJECTS" \
             '{schema_version:1,acceptance_id:"A14",success:$success,
               forced_crashes:$crashes,owned_before:$before,
+              helper_restart_recovery:$helper_restarts[0],
               cleanup:{worker_custody_after:$worker_after,
                 remaining_owned_objects:$remaining,
                 remaining_namespaces:$namespaces,remaining_units:$units,
@@ -1292,9 +1295,16 @@ launch_helper() {
     HELPER_UNITS="$HELPER_UNITS $helper_unit"
     systemd-run --no-block --unit="$helper_unit" --slice=system.slice \
         --description="VOLPAROSSA disposable alpha helper $node" \
-        --service-type=exec \
+        --service-type=simple \
         --property=CollectMode=inactive-or-failed \
-        --property=Restart=no \
+        --property=ExitType=main \
+        --property=RemainAfterExit=no \
+        --property=SuccessExitStatus= \
+        --property=Restart=on-failure \
+        --property=RestartMode=normal \
+        --property=RestartSec=3s \
+        --property=RestartForceExitStatus= \
+        --property='RestartPreventExitStatus=70 71' \
         --property=NotifyAccess=main \
         --property=FileDescriptorStoreMax=128 \
         --property=FileDescriptorStorePreserve=yes \
@@ -1339,6 +1349,8 @@ launch_helper() {
         --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
         --property=KillMode=control-group \
         --property=SendSIGKILL=yes \
+        --property=FinalKillSignal=SIGKILL \
+        --property=TimeoutStopFailureMode=terminate \
         --property=TimeoutStartSec=45s \
         --property=TimeoutStopSec=45s \
         --property=TasksMax=64 \
@@ -3492,6 +3504,49 @@ record_a14_owned_inventory() {
         >"$WORK/a14-owned-before.json"
 }
 
+verify_a14_helper_restart_recovery() {
+    a14_restart_rows=$WORK/a14-helper-restarts.ndjson
+    : >"$a14_restart_rows"
+    for a14_restart_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
+        a14_restart_unit=volparossa-alpha-helper@$a14_restart_node.service
+        a14_crash_record=$WORK/a14-crash-helper-$a14_restart_node.json
+        a14_old_pid=$(jq -er '.pid_before' "$a14_crash_record") || return 1
+        a14_restart_attempt=0
+        while [ "$a14_restart_attempt" -lt 450 ]; do
+            a14_restart_state=$(systemctl show --property=ActiveState --value \
+                "$a14_restart_unit" 2>/dev/null || true)
+            a14_restart_substate=$(systemctl show --property=SubState --value \
+                "$a14_restart_unit" 2>/dev/null || true)
+            a14_new_pid=$(systemctl show --property=MainPID --value \
+                "$a14_restart_unit" 2>/dev/null || true)
+            a14_fdstore_after=$(systemctl show --property=NFileDescriptorStore --value \
+                "$a14_restart_unit" 2>/dev/null || true)
+            if [ "$a14_restart_state:$a14_restart_substate" = active:running ] \
+                && [ -S "$WORK/runtime-$a14_restart_node/helper.sock" ] \
+                && [ "$a14_new_pid" != "$a14_old_pid" ] \
+                && [ "$a14_fdstore_after" = 0 ]; then
+                break
+            fi
+            sleep 0.1
+            a14_restart_attempt=$((a14_restart_attempt + 1))
+        done
+        [ "$a14_restart_attempt" -lt 450 ] || return 1
+        case $a14_new_pid in ''|0|*[!0-9]*) return 1 ;; esac
+        jq -S -c -n --arg node "$a14_restart_node" \
+            --arg unit "$a14_restart_unit" --argjson old_pid "$a14_old_pid" \
+            --argjson new_pid "$a14_new_pid" \
+            '{node:$node,unit:$unit,old_pid:$old_pid,new_pid:$new_pid,
+              restarted:true,helper_socket_republished:true,
+              inherited_fdstore_descriptors_after:0}' \
+            >>"$a14_restart_rows" || return 1
+    done
+    jq -S -c -s '
+      {schema_version:1,all_helpers_restarted:(length == 7 and all(.[]; .restarted)),
+       helpers:.}' "$a14_restart_rows" >"$WORK/a14-helper-restarts.json" || return 1
+    rm -f -- "$a14_restart_rows"
+    jq -e '.all_helpers_restarted == true' "$WORK/a14-helper-restarts.json" >/dev/null
+}
+
 measure_a14_remaining_network_objects() {
     remaining_links=0
     remaining_routes=0
@@ -5201,6 +5256,7 @@ for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 exit; do
         "volparossa-alpha-helper@$crash_node.service" \
         || fail A14_HELPER_CRASH_FAILED
 done
+verify_a14_helper_restart_recovery || fail A14_HELPER_RESTART_RECOVERY_FAILED
 jq -S -c -s . "$WORK"/a14-crash-*.json >"$WORK/a14-crashes.json"
 jq -e '
   length == 16 and

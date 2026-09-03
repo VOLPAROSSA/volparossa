@@ -128,8 +128,9 @@ pub(crate) use functional_backend::{
 };
 pub(crate) use restart_reaper::{
     ExactRestartReaperCleanupProof, INTERNAL_RESTART_REAPER_ARGUMENT,
-    INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT, execute_single_restart_reaper,
-    run_internal_restart_reaper_entry, run_internal_restart_reaper_fail_stop_live_proof,
+    INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT, RestartCleanupMode,
+    execute_single_restart_reaper, run_internal_restart_reaper_entry,
+    run_internal_restart_reaper_fail_stop_live_proof,
 };
 
 #[cfg(test)]

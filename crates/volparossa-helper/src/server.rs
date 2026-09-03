@@ -199,8 +199,8 @@ fn run_production_server_with_empty_custody_for_test() -> Result<(), ServerError
 ///
 /// # Errors
 ///
-/// Returns an error when the fixed runtime directory, durable ownership actor, or protected Unix
-/// socket cannot be prepared. A `MayOwnPrepare` record remains unreaped and blocks startup.
+/// Returns an error when the fixed runtime directory, durable ownership actor, restart cleanup, or
+/// protected Unix socket cannot be prepared.
 fn bind_production_socket(
     prepared_runtime: PreparedProductionRuntime,
     ownership_runtime: ProductionOwnershipRuntime,
@@ -266,15 +266,10 @@ fn bind_production_socket(
 /// Serves until SIGINT/SIGTERM while an owned expiry driver retires stale in-memory contexts, then
 /// closes the durable actor.
 ///
-/// The crate-internal production engine can prepare, activate, probe-commit and destroy one
-/// process-owned functional-alpha Client or Exit singleton lease. A committed response proves only
-/// the exact `WireGuard` identity, signed peer, `/128` route, recent handshake and strict
-/// bidirectional counter growth. The same exact committed singleton can hand off one bound,
-/// explicitly unconnected QUIC UDP descriptor; MPTCP, Relay transport handoff, route-manager
-/// adoption and every usable datapath remain unavailable. A successful return proves the engine
-/// was cleaned before the durable journal actor became quiescent. Startup still refuses
-/// `MayOwnPrepare` because no production restart reaper can yet prove absence of stale kernel
-/// state. Unexpected expiry-driver exit stops serving and fails the runtime closed.
+/// A successful return proves the engine was cleaned before the durable journal actor became
+/// quiescent. Startup can retire one exact-present, same-image, single-path active worker namespace
+/// before publishing the replacement socket; unsupported broader restart shapes remain fail
+/// closed. Unexpected expiry-driver exit stops serving and fails the runtime closed.
 ///
 /// # Errors
 ///

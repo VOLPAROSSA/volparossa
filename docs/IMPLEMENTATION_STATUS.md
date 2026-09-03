@@ -544,11 +544,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   now hands it a non-empty set only when every record is already `CleanupConfirmed`, no inherited
   or manager custody exists, the journal revalidates, and a fresh manager barrier plus two new
   identical complete empty snapshots mint one-shot exact-target manager-absence evidence. The
-  installed general restart cleanup executor still refuses every `MayOwnCustody` or
-  `MayOwnPrepare` proof. One separate startup-only control now accepts an affine proof from the
-  fixed exact-singleton reaper described below and can CAS only that unchanged
-  `MayOwnCustody -> CleanupConfirmed` record while the actor remains `Starting` and lock-held.
-  `MayOwnPrepare` remains unconditionally refused. A separate affine
+  installed general restart cleanup executor still refuses uncorrelated proofs. One separate
+  startup-only control accepts an affine proof from the fixed exact-singleton reaper described
+  below and can CAS an unchanged `MayOwnCustody` or `MayOwnPrepare` record to
+  `CleanupConfirmed` while the actor remains `Starting` and lock-held. A separate affine
   same-runtime handle may echo only proofs already completed by the live functional backend;
   independently, the actor may settle never-dispatched `Intent` records. Admission is bounded to four
   operations plus shutdown.

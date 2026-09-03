@@ -951,14 +951,13 @@ pub(crate) struct ClientIngressIpv4Routing {
 
 fn restart_wireguard_roles(
     context_role: volparossa_routing::ContextRole,
-) -> Result<&'static [volparossa_routing::WireguardRole], KernelError> {
+) -> Result<&'static [WireguardRole], KernelError> {
     match context_role {
-        volparossa_routing::ContextRole::Client => Ok(&[volparossa_routing::WireguardRole::Client]),
-        volparossa_routing::ContextRole::Relay => Ok(&[
-            volparossa_routing::WireguardRole::RelayClient,
-            volparossa_routing::WireguardRole::RelayExit,
-        ]),
-        volparossa_routing::ContextRole::Exit => Ok(&[volparossa_routing::WireguardRole::Exit]),
+        volparossa_routing::ContextRole::Client => Ok(&[WireguardRole::Client]),
+        volparossa_routing::ContextRole::Relay => {
+            Ok(&[WireguardRole::RelayClient, WireguardRole::RelayExit])
+        }
+        volparossa_routing::ContextRole::Exit => Ok(&[WireguardRole::Exit]),
         volparossa_routing::ContextRole::Unspecified => Err(KernelError::Invalid),
     }
 }
