@@ -181,8 +181,17 @@ done
 
 
 metadata_file=$staging_parent/cargo-metadata.json
+release_packages=$staging_parent/release-packages.txt
+cargo tree --locked --offline --workspace --all-features \
+    --target x86_64-unknown-linux-gnu --prefix none --format '{p}' \
+    | sed -E 's/ \([^)]*\)$//' | LC_ALL=C sort -u > "$release_packages"
 cargo metadata --locked --offline --filter-platform x86_64-unknown-linux-gnu \
-    --format-version 1 > "$metadata_file"
+    --format-version 1 \
+    | jq --rawfile release_packages "$release_packages" '
+        .packages |= map(. as $package
+            | select(($release_packages | split("\n"))
+                | index($package.name + " v" + $package.version)))
+      ' > "$metadata_file"
 "$script_directory/collect-cargo-licenses.sh" "$metadata_file" \
     "$package_root/usr/share/doc/volparossa/cargo-licenses"
 installed_size=$(du -sk "$package_root/etc" "$package_root/usr" | \
