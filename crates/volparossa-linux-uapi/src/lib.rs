@@ -1223,11 +1223,14 @@ pub fn validate_ingress_socket<F: AsFd>(
     validate_ingress_snapshot(snapshot, kind, family, expected_local_port)
 }
 
-/// Revalidate one connected transparent IPv4 or IPv6 UDP reply descriptor.
+/// Revalidate one source-bound transparent IPv4 or IPv6 UDP reply descriptor.
 ///
-/// The helper must have bound the descriptor to the exact original remote tuple and connected it
-/// to the exact intercepted application tuple before handoff. TTL one confines delivery to the
-/// immediately adjacent client namespace even if a caller substitutes a routable peer.
+/// The helper must have bound the descriptor to the exact original remote tuple. It deliberately
+/// remains unconnected: a connected reverse-flow socket would win Linux's established-socket
+/// lookup for later TPROXY ingress datagrams and silently consume the application's uplink. The
+/// typed owner retains the exact intercepted application tuple used by `sendto`. TTL one confines
+/// delivery to the immediately adjacent client namespace even if a caller substitutes a routable
+/// peer.
 ///
 /// # Errors
 ///
@@ -1267,11 +1270,14 @@ pub fn validate_ingress_udp_reply_socket<F: AsFd>(
         IngressSocketFamily::Ipv4 => true,
         IngressSocketFamily::Ipv6 => getsockopt(socket, sockopt::Ipv6V6Only).map_err(errno_io)?,
     };
+    let unconnected = reference
+        .peer_addr()
+        .is_err_and(|error| error.raw_os_error() == Some(libc::ENOTCONN));
     if reference.domain()? != expected_domain
         || reference.r#type()? != Type::DGRAM
         || reference.protocol()? != Some(Protocol::UDP)
         || reference.local_addr()?.as_socket() != Some(remote)
-        || reference.peer_addr()?.as_socket() != Some(application)
+        || !unconnected
         || !getsockopt(socket, sockopt::IpTransparent).map_err(errno_io)?
         || !one_hop
         || !ipv6_only

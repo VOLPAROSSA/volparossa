@@ -1124,7 +1124,8 @@ pub(crate) fn validate_adopted_ingress_socket(
     Ok(descriptor)
 }
 
-/// Create one connected transparent IPv4 or IPv6 UDP socket for an exact intercepted flow reply.
+/// Create one source-bound transparent IPv4 or IPv6 UDP socket for an exact intercepted flow
+/// reply.
 pub(crate) fn create_client_ingress_reply_socket(
     request: &AcquireClientIngressReplySocket,
 ) -> Result<OwnedFd, WorkerTransportError> {
@@ -1151,7 +1152,6 @@ pub(crate) fn create_client_ingress_reply_socket(
         SocketAddr::V6(_) => socket.set_unicast_hops_v6(1)?,
     }
     socket.bind(&SockAddr::from(remote))?;
-    socket.connect(&SockAddr::from(application))?;
     validate_ingress_reply_socket(&socket, remote, application)?;
     Ok(socket.into())
 }
@@ -1227,7 +1227,7 @@ fn concrete_ingress_address(
 fn validate_ingress_reply_socket(
     socket: &Socket,
     remote: SocketAddr,
-    application: SocketAddr,
+    _application: SocketAddr,
 ) -> Result<(), WorkerTransportError> {
     validate_common(socket, Type::DGRAM, Protocol::UDP, remote, false)?;
     let one_hop = match remote {
@@ -1236,7 +1236,10 @@ fn validate_ingress_reply_socket(
     };
     let ipv6_only = !matches!(remote, SocketAddr::V6(_))
         || getsockopt(socket, sockopt::Ipv6V6Only).map_err(errno_io)?;
-    if socket.peer_addr()?.as_socket() != Some(application)
+    let unconnected = socket
+        .peer_addr()
+        .is_err_and(|error| error.raw_os_error() == Some(libc::ENOTCONN));
+    if !unconnected
         || !getsockopt(socket, sockopt::IpTransparent).map_err(errno_io)?
         || !one_hop
         || !ipv6_only

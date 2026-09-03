@@ -178,7 +178,7 @@ pub struct AcquiredIngressSocket {
     local: SocketAddr,
 }
 
-/// One connected, non-retargetable transparent UDP socket for an exact intercepted flow reply.
+/// One source-bound transparent UDP socket for an exact intercepted flow reply.
 pub(crate) struct AcquiredIngressReplySocket {
     descriptor: OwnedFd,
     remote: SocketAddr,
@@ -187,9 +187,11 @@ pub(crate) struct AcquiredIngressReplySocket {
 
 impl AcquiredIngressReplySocket {
     pub(crate) fn send(&self, payload: &[u8]) -> Result<(), std::io::Error> {
-        let written = nix::sys::socket::send(
+        let destination = nix::sys::socket::SockaddrStorage::from(self.application);
+        let written = nix::sys::socket::sendto(
             self.descriptor.as_raw_fd(),
             payload,
+            &destination,
             nix::sys::socket::MsgFlags::MSG_DONTWAIT | nix::sys::socket::MsgFlags::MSG_NOSIGNAL,
         )
         .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
@@ -1145,7 +1147,7 @@ impl HelperClient {
         })
     }
 
-    /// Acquire one exact connected transparent IPv4 or IPv6 UDP reply descriptor for active ingress.
+    /// Acquire one exact source-bound transparent IPv4 or IPv6 UDP reply descriptor for active ingress.
     pub(crate) async fn acquire_ingress_reply_socket(
         &self,
         ingress: &ActiveClientIngress,

@@ -1196,6 +1196,7 @@ mod tests {
     const SMOKE_WORKER: &str = "VOLPAROSSA_TEST_INGRESS_WORKER_NETNS";
     const SMOKE_TEST: &str = "worker_v3::client_ingress_policy::tests::parent_output_steering_delivers_udp_over_real_veth";
     const SMOKE_PAYLOAD: &[u8] = b"volparossa-real-ingress-udp";
+    const SMOKE_SECOND_PAYLOAD: &[u8] = b"volparossa-real-ingress-udp-after-reply";
     const SMOKE_REPLY: &[u8] = b"volparossa-real-ingress-reply";
 
     #[test]
@@ -1486,18 +1487,29 @@ mod tests {
             reply_execution
                 .descriptor
                 .take()
-                .expect("connected reply descriptor"),
+                .expect("source-bound reply descriptor"),
         );
         app.set_read_timeout(Some(Duration::from_secs(2)))
             .expect("bounded application receive");
         reply
-            .send(SMOKE_REPLY)
+            .send_to(SMOKE_REPLY, application)
             .expect("send exact transparent reply");
         let (length, source) = app
             .recv_from(&mut datagram)
             .expect("application received transparent reply");
         assert_eq!(source, remote);
         assert_eq!(&datagram[..length], SMOKE_REPLY);
+
+        // Keep the reply descriptor alive while proving that Linux TPROXY still sends the next
+        // datagram on the exact same four-tuple to the transparent ingress owner. A connected
+        // transparent reply socket wins TPROXY's established-flow lookup and silently consumes
+        // this packet instead.
+        app.send_to(SMOKE_SECOND_PAYLOAD, remote)
+            .expect("send second app packet on exact tuple");
+        let (length, _) = receiver
+            .recv_from(&mut datagram)
+            .expect("second packet reached transparent socket while reply socket remains open");
+        assert_eq!(&datagram[..length], SMOKE_SECOND_PAYLOAD);
 
         remove_parent(&parent_policy, deadline).expect("remove exact parent nft table");
         parent_kernel
@@ -1661,7 +1673,7 @@ mod tests {
         )
         .expect("correlated reply Acquire response");
         send_credential_worker_response(&channel, &reply_request, &response, Some(descriptor))
-            .expect("transfer connected reply descriptor");
+            .expect("transfer source-bound reply descriptor");
 
         let destroy = receive_credential_worker_request(&channel, expected_parent)
             .expect("receive Destroy")
