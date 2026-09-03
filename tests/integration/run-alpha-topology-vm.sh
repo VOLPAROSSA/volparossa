@@ -302,23 +302,11 @@ CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
         exit 1
     }
 mkdir /home/vpci/alpha-output
-set +e
-sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
-    --execute --yes \
-    --source /home/vpci/source \
-    --bin /home/vpci/target/debug \
-    --mpquic /home/vpci/volparossa-mpquic \
-    --output /home/vpci/alpha-output \
-    --expected-commit "$expected_commit" \
-    >/home/vpci/alpha-output/runner.stdout \
-    2>/home/vpci/alpha-output/runner.stderr
-topology_status=$?
-set -e
-printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 
-# The topology runner has completed its own scoped cleanup before returning.
-# Exercise the installed package only afterwards so package systemd services
-# cannot affect datapath evidence or its host-state comparison.
+# The package lifecycle requires a pristine VM, including an absent
+# /run/volparossa. Exercise it before the topology's transient units can create
+# that bind-mount target; successful package removal leaves no active services
+# or installed binaries that could affect the later datapath evidence.
 mkdir /home/vpci/alpha-output/package
 package_stdout=/home/vpci/package-lifecycle.stdout
 package_stderr=/home/vpci/package-lifecycle.stderr
@@ -333,6 +321,20 @@ set -e
 mv -- "$package_stdout" /home/vpci/alpha-output/package/runner.stdout
 mv -- "$package_stderr" /home/vpci/alpha-output/package/runner.stderr
 printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-status
+
+set +e
+sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
+    --execute --yes \
+    --source /home/vpci/source \
+    --bin /home/vpci/target/debug \
+    --mpquic /home/vpci/volparossa-mpquic \
+    --output /home/vpci/alpha-output \
+    --expected-commit "$expected_commit" \
+    >/home/vpci/alpha-output/runner.stdout \
+    2>/home/vpci/alpha-output/runner.stderr
+topology_status=$?
+set -e
+printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
 find /home/vpci/alpha-output -type d -exec chmod 0700 {} +
 find /home/vpci/alpha-output -type f -exec chmod 0600 {} +
