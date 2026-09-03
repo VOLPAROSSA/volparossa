@@ -61,7 +61,11 @@ impl RoleStore {
         Self { path }
     }
 
-    /// Loads existing state, or durably records the safe configuration default.
+    /// Validates existing state and durably mirrors the configured role snapshot.
+    ///
+    /// The YAML configuration is authoritative across service restarts. The private state file is
+    /// retained as an atomic audit snapshot, but must not silently override a deliberate operator
+    /// edit after the first start.
     pub fn load_or_initialize(
         &self,
         configured: RolesConfig,
@@ -84,9 +88,13 @@ impl RoleStore {
                 if bytes.is_empty() || bytes.len() > MAX_ROLE_FILE_LENGTH {
                     return Err(RoleStoreError::Invalid);
                 }
-                serde_json::from_slice::<PersistedRoles>(&bytes)
+                let persisted = serde_json::from_slice::<PersistedRoles>(&bytes)
                     .map_err(|_| RoleStoreError::Invalid)?
-                    .into_config()
+                    .into_config()?;
+                if persisted != configured {
+                    self.persist(configured)?;
+                }
+                Ok(configured)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.persist(configured)?;
@@ -207,7 +215,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initial_state_and_updates_survive_reopen() {
+    fn configured_roles_replace_stale_persisted_snapshot_on_reopen() {
         let directory = tempdir().expect("tempdir");
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).expect("mode");
         let store = RoleStore::new(directory.path().join("roles.json"));
@@ -226,7 +234,7 @@ mod tests {
             exit: false,
         };
         store.persist(updated).expect("persist");
-        assert_eq!(store.load_or_initialize(initial).expect("reload"), updated);
+        assert_eq!(store.load_or_initialize(initial).expect("reload"), initial);
         assert_eq!(
             fs::symlink_metadata(directory.path().join("roles.json"))
                 .expect("metadata")
@@ -237,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn service_only_roles_survive_reopen() {
+    fn service_only_config_replaces_stale_persisted_snapshot() {
         let directory = tempdir().expect("tempdir");
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).expect("mode");
         let store = RoleStore::new(directory.path().join("roles.json"));
@@ -258,7 +266,7 @@ mod tests {
         store.persist(exit_only).expect("persist");
         assert_eq!(
             store.load_or_initialize(relay_only).expect("reload"),
-            exit_only
+            relay_only
         );
     }
 }
