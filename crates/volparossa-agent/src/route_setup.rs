@@ -192,6 +192,15 @@ struct ActiveProductionNativeUdpRoute {
     session: ProductionMpquicSession,
     path: VerifiedSingleRelayPath,
     binding: Option<RouteAuthorizedUdpIngress>,
+    lifetime: Option<GeneralUdpSessionLifetime>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GeneralUdpSessionLifetime {
+    expires_at_ms: u64,
+    absolute_deadline: Instant,
+    idle_timeout: Duration,
+    idle_deadline: Instant,
 }
 
 struct ActiveProductionMpquicRoute {
@@ -236,6 +245,11 @@ struct CommittedMpquicRouteIdentity {
 impl EstablishedClientRoute {
     fn is_expired(&self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
         self.expiry.is_expired(wall_now_ms, monotonic_now)
+            || matches!(
+                &self.transport,
+                ClientTransportState::NativeUdp(active)
+                    if active.flow_expired(wall_now_ms, monotonic_now)
+            )
     }
 
     const fn progress(&self) -> ClientRouteProgress {
@@ -291,6 +305,68 @@ impl EstablishedClientRoute {
             let _ = Box::pin(route.disconnect()).await;
         }
         let _ = self.orchestrator.shutdown().await;
+    }
+}
+
+impl ActiveProductionNativeUdpRoute {
+    fn flow_expired(&self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
+        match (&self.binding, self.lifetime) {
+            (None, None) => false,
+            (Some(_), Some(lifetime)) => lifetime.is_expired(wall_now_ms, monotonic_now),
+            (None, Some(_)) | (Some(_), None) => true,
+        }
+    }
+
+    fn retirement_deadline(&self) -> Option<Instant> {
+        self.lifetime.map(GeneralUdpSessionLifetime::deadline)
+    }
+}
+
+impl GeneralUdpSessionLifetime {
+    fn start(
+        idle_timeout: Duration,
+        expires_at_ms: u64,
+        wall_now_ms: u64,
+        monotonic_now: Instant,
+    ) -> Result<Self, ClientRouteConnectError> {
+        if idle_timeout.is_zero() || expires_at_ms <= wall_now_ms {
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        }
+        let remaining_ms = expires_at_ms.saturating_sub(wall_now_ms);
+        let absolute_deadline = monotonic_now
+            .checked_add(Duration::from_millis(remaining_ms))
+            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
+        let idle_deadline = monotonic_now
+            .checked_add(idle_timeout)
+            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
+        Ok(Self {
+            expires_at_ms,
+            absolute_deadline,
+            idle_timeout,
+            idle_deadline,
+        })
+    }
+
+    fn record_activity(
+        &mut self,
+        wall_now_ms: u64,
+        monotonic_now: Instant,
+    ) -> Result<(), ClientRouteConnectError> {
+        if self.is_expired(wall_now_ms, monotonic_now) {
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        }
+        self.idle_deadline = monotonic_now
+            .checked_add(self.idle_timeout)
+            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
+        Ok(())
+    }
+
+    fn deadline(self) -> Instant {
+        self.absolute_deadline.min(self.idle_deadline)
+    }
+
+    fn is_expired(self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
+        wall_now_ms >= self.expires_at_ms || monotonic_now >= self.deadline()
     }
 }
 
@@ -771,6 +847,29 @@ impl ClientRouteControl {
                 *state = ClientRouteControlState::Idle;
             }
         }
+    }
+
+    /// Return the current general-UDP flow's earliest signed or idle deadline.
+    ///
+    /// Expired ownership is retired before the deadline is observed, so the ingress actor never
+    /// arms a stale timer for a route that cleanup has already consumed.
+    pub(crate) async fn general_udp_retirement_deadline(&self) -> Option<Instant> {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+        let state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &*state else {
+            return None;
+        };
+        let ClientTransportState::NativeUdp(active) = &established.transport else {
+            return None;
+        };
+        active.retirement_deadline()
+    }
+
+    /// Retire a route only when its retained signed or monotonic lifetime has elapsed.
+    pub(crate) async fn retire_expired(&self) {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
     }
 
     /// Select and establish one normal relay-only MPTCP route for transparent TCP ingress.
@@ -1268,6 +1367,7 @@ impl ClientRouteControl {
         &self,
         ingress: PolicyAuthorizedUdpIngress,
         policy: &VerifiedManifest,
+        idle_timeout: Duration,
         now_ms: u64,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         self.retire_expired_route(now_ms, Instant::now()).await;
@@ -1276,6 +1376,10 @@ impl ClientRouteControl {
             if let ClientRouteControlState::Established(established) = &mut *state {
                 if let ClientTransportState::NativeUdp(active) = &mut established.transport {
                     if let Some(binding) = active.binding.as_ref() {
+                        let lifetime = active
+                            .lifetime
+                            .as_mut()
+                            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
                         let payload = binding
                             .bind_next_native_datagram(ingress, policy, now_ms)
                             .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
@@ -1300,7 +1404,11 @@ impl ClientRouteControl {
                                 eprintln!("native general UDP activation failed: {error}");
                                 ClientRouteConnectError::TransportRuntimeUnavailable
                             })?;
+                        lifetime.record_activity(crate::unix_millis(), Instant::now())?;
                         return Ok(ClientRouteProgress::TransportActive);
+                    }
+                    if active.lifetime.is_some() {
+                        return Err(ClientRouteConnectError::UdpIngressUnavailable);
                     }
                     let route = established
                         .route
@@ -1313,9 +1421,17 @@ impl ClientRouteControl {
                         .and_then(PreparedContextOwner::protocol)
                         .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
                     let authorized = ingress
-                        .bind_to_route(&active.path, &protocol.coordinator, policy, now_ms)
+                        .bind_to_route(
+                            &active.path,
+                            &protocol.coordinator,
+                            policy,
+                            idle_timeout,
+                            now_ms,
+                        )
                         .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
                     let (flow, signed_authorization) = authorized.activation();
+                    let idle_timeout = flow.idle_timeout();
+                    let expires_at_ms = flow.expires_at_ms();
                     let SocketAddr::V4(destination) = authorized.destination() else {
                         return Err(ClientRouteConnectError::UdpIngressUnavailable);
                     };
@@ -1336,7 +1452,14 @@ impl ClientRouteControl {
                             eprintln!("native general UDP activation failed: {error}");
                             ClientRouteConnectError::TransportRuntimeUnavailable
                         })?;
+                    let lifetime = GeneralUdpSessionLifetime::start(
+                        idle_timeout,
+                        expires_at_ms,
+                        crate::unix_millis(),
+                        Instant::now(),
+                    )?;
                     active.binding = Some(authorized);
+                    active.lifetime = Some(lifetime);
                     return Ok(ClientRouteProgress::TransportActive);
                 }
             }
@@ -1383,7 +1506,7 @@ impl ClientRouteControl {
             *state = ClientRouteControlState::Idle;
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
-        let Ok(authorized) = ready.bind_ingress(ingress, policy, now_ms) else {
+        let Ok(authorized) = ready.bind_ingress(ingress, policy, idle_timeout, now_ms) else {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
                 expiry,
@@ -1548,10 +1671,21 @@ impl ClientRouteControl {
                 .binding
                 .as_ref()
                 .ok_or(ClientRouteConnectError::Busy)?;
+            let lifetime = active
+                .lifetime
+                .as_mut()
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
             let SocketAddr::V4(destination) = binding.destination() else {
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
-            let packet = timeout(MAXIMUM_CALL_DURATION, async {
+            let response_timeout = lifetime
+                .deadline()
+                .saturating_duration_since(Instant::now())
+                .min(MAXIMUM_CALL_DURATION);
+            if response_timeout.is_zero() {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+            let packet = timeout(response_timeout, async {
                 loop {
                     if let Some(packet) = active
                         .session
@@ -1575,6 +1709,7 @@ impl ClientRouteControl {
                 .accept_native_response(&packet)
                 .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
                 .to_vec();
+            lifetime.record_activity(crate::unix_millis(), Instant::now())?;
             return Ok(ClientUdpResponse {
                 application: binding.source(),
                 remote: binding.destination(),
@@ -2062,6 +2197,7 @@ async fn admit_completed_native_route(
                         session,
                         path,
                         binding: None,
+                        lifetime: None,
                     },
                 )),
                 tcp_flow: None,
@@ -5012,6 +5148,7 @@ impl CertificateBoundProductionUdpRoute {
         &self,
         ingress: PolicyAuthorizedUdpIngress,
         policy: &VerifiedManifest,
+        idle_timeout: Duration,
         now_ms: u64,
     ) -> Result<RouteAuthorizedUdpIngress, ()> {
         let protocol = self
@@ -5023,7 +5160,13 @@ impl CertificateBoundProductionUdpRoute {
             .and_then(PreparedContextOwner::protocol)
             .ok_or(())?;
         ingress
-            .bind_to_route(&self.prepared.path, &protocol.coordinator, policy, now_ms)
+            .bind_to_route(
+                &self.prepared.path,
+                &protocol.coordinator,
+                policy,
+                idle_timeout,
+                now_ms,
+            )
             .map_err(|_| ())
     }
 
@@ -7264,6 +7407,43 @@ mod tests {
     const NOW_MS: u64 = 1_700_000_000_000;
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
+
+    #[test]
+    fn general_udp_lifetime_retains_two_continuations_then_expires_idle() {
+        let monotonic_now = Instant::now();
+        let mut lifetime = GeneralUdpSessionLifetime::start(
+            Duration::from_secs(5),
+            NOW_MS + 20_000,
+            NOW_MS,
+            monotonic_now,
+        )
+        .expect("live UDP association");
+
+        lifetime
+            .record_activity(NOW_MS + 2_000, monotonic_now + Duration::from_secs(2))
+            .expect("second datagram retains association");
+        lifetime
+            .record_activity(NOW_MS + 4_000, monotonic_now + Duration::from_secs(4))
+            .expect("third datagram retains association");
+
+        assert!(!lifetime.is_expired(NOW_MS + 8_999, monotonic_now + Duration::from_millis(8_999)));
+        assert!(lifetime.is_expired(NOW_MS + 9_000, monotonic_now + Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn general_udp_lifetime_never_outlives_signed_expiry() {
+        let monotonic_now = Instant::now();
+        let lifetime = GeneralUdpSessionLifetime::start(
+            Duration::from_secs(30),
+            NOW_MS + 3_000,
+            NOW_MS,
+            monotonic_now,
+        )
+        .expect("live UDP association");
+
+        assert_eq!(lifetime.deadline(), monotonic_now + Duration::from_secs(3));
+        assert!(lifetime.is_expired(NOW_MS + 3_000, monotonic_now + Duration::from_secs(3)));
+    }
 
     #[test]
     fn client_route_expiry_fails_closed_at_the_signed_wall_deadline() {

@@ -552,6 +552,7 @@ async fn run_client_udp_ingress(
     let mut browser_reverse_poll = tokio::time::interval(BROWSER_QUIC_REVERSE_POLL_INTERVAL);
     browser_reverse_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        let general_udp_retirement_deadline = routes.general_udp_retirement_deadline().await;
         let browser_flow_active = routes.browser_quic_flow_active().await;
         if !browser_flow_active {
             browser_gate.reset_authorized_if_route_inactive();
@@ -559,8 +560,15 @@ async fn run_client_udp_ingress(
         let ready = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
                     return;
                 }
+                continue;
+            }
+            () = tokio::time::sleep_until(
+                general_udp_retirement_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if general_udp_retirement_deadline.is_some() => {
+                routes.retire_expired().await;
                 continue;
             }
             _ = browser_reverse_poll.tick(), if browser_flow_active => {
@@ -806,10 +814,16 @@ async fn run_client_udp_ingress(
                 continue;
             }
         };
-        if Box::pin(routes.activate_udp_ingress(ingress, &active_policy, activation_ms))
-            .await
-            .is_err()
+        if Box::pin(routes.activate_udp_ingress(
+            ingress,
+            &active_policy,
+            Duration::from_secs(config.udp.idle_timeout_seconds),
+            activation_ms,
+        ))
+        .await
+        .is_err()
         {
+            routes.disconnect().await;
             state.write().await.log(
                 LogLevel::Warn,
                 "INGRESS_UDP_ROUTE_UNAVAILABLE",
@@ -820,6 +834,7 @@ async fn run_client_udp_ingress(
         let response = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
                     return;
                 }
                 continue;
@@ -827,6 +842,7 @@ async fn run_client_udp_ingress(
             result = routes.receive_udp_response() => match result {
                 Ok(response) => response,
                 Err(_) => {
+                    routes.disconnect().await;
                     state.write().await.log(
                         LogLevel::Warn,
                         "INGRESS_UDP_RESPONSE_UNAVAILABLE",
@@ -845,12 +861,12 @@ async fn run_client_udp_ingress(
             .await
             .is_err()
         {
+            routes.disconnect().await;
             state
                 .write()
                 .await
                 .log(LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis());
         }
-        routes.disconnect().await;
     }
 }
 

@@ -1141,6 +1141,7 @@ impl PolicyAuthorizedUdpIngress {
         path: &VerifiedSingleRelayPath,
         coordinator: &ReservationCoordinator,
         policy: &VerifiedManifest,
+        idle_timeout: Duration,
         now_ms: u64,
     ) -> Result<RouteAuthorizedUdpIngress, ClientIngressUdpError> {
         if now_ms >= self.expires_at_ms
@@ -1148,13 +1149,17 @@ impl PolicyAuthorizedUdpIngress {
         {
             return Err(ClientIngressUdpError::PolicyBinding);
         }
+        let idle_timeout_ms = u32::try_from(idle_timeout.as_millis())
+            .ok()
+            .filter(|timeout| *timeout > 0)
+            .ok_or(ClientIngressUdpError::FlowBound)?;
         let signed_authorization = coordinator
             .sign_udp_ip(
                 *path.route_context_id(),
                 self.policy_hash,
                 self.destination.ip(),
                 self.destination.port(),
-                INGRESS_UDP_IDLE_TIMEOUT_MS,
+                idle_timeout_ms,
                 now_ms,
                 self.expires_at_ms.min(path.expires_at_ms()),
             )
