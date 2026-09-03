@@ -4413,23 +4413,16 @@ while [ "$attempt" -lt 30 ]; do
     if start_mptcp_download a03-aggregate a03-aggregate "$attempt" -; then
         aggregate_subflows="$WORK/a03-aggregate-subflows-$attempt.json"
         aggregate_subflows_ready=false
-        # The destination marker proves only that the initial subflow delivered
-        # the request.  Query the production Client worker's own network
-        # namespace and do not accept an aggregate sample until the kernel MPTCP
-        # socket reports both negotiated subflows before payload release.
-        if wait_established_mptcp_subflows "$aggregate_subflows"; then
-            aggregate_subflows_ready=true
-        fi
         aggregate_before_r1=$(tc_sent_bytes "$R1" r1c) \
             || fail A03_RELAY1_COUNTER_UNAVAILABLE
         aggregate_before_r2=$(tc_sent_bytes "$R2" r2c) \
             || fail A03_RELAY2_COUNTER_UNAVAILABLE
         release_mptcp_download
-        # Some kernels create the second negotiated subflow only after response bytes start
-        # flowing. Keep the pre-release observation, but also capture the exact same kernel
-        # evidence while the bounded download is active instead of rejecting a valid sample.
-        if [ "$aggregate_subflows_ready" != true ] \
-            && wait_established_mptcp_subflows "$aggregate_subflows"; then
+        # The destination marker proves only that the initial subflow delivered the request.
+        # Response traffic is what makes the kernel establish the second subflow, so observe the
+        # production Client worker while that bounded transfer is active. The later byte counters
+        # and captures still require substantial payload on both independently limited paths.
+        if wait_established_mptcp_subflows "$aggregate_subflows"; then
             aggregate_subflows_ready=true
         fi
         if finish_mptcp_download; then
