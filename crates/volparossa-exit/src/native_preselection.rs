@@ -1730,7 +1730,7 @@ mod tests {
             relay_exit_for_chain,
             &fixture.relay_key,
             NOW_MS + 3,
-            [21; NONCE_BYTES],
+            generate_nonce(),
         )
         .expect("Relay readiness");
         let signed_relay_ready = relay_ready.encoded_relay_ready().to_vec();
@@ -1755,7 +1755,7 @@ mod tests {
             client_binding(&fixture.scope),
             &fixture.client_key,
             NOW_MS + 4,
-            [22; NONCE_BYTES],
+            generate_nonce(),
         )
         .expect("client start");
         let start = verify_native_probe_start_for_relay(
@@ -1824,7 +1824,7 @@ mod tests {
             relay_exit,
             &fixture.relay_key,
             NOW_MS + 3,
-            [21; NONCE_BYTES],
+            generate_nonce(),
         )
         .expect("Relay readiness");
         let signed_relay_ready = relay_ready.encoded_relay_ready().to_vec();
@@ -1848,7 +1848,7 @@ mod tests {
             client_binding(&fixture.scope),
             &fixture.client_key,
             NOW_MS + 4,
-            [22; NONCE_BYTES],
+            generate_nonce(),
         )
         .expect("client Start");
         let signed_start = issued_start.encoded_start().to_vec();

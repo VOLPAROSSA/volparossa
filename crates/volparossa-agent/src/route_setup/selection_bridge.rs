@@ -4892,7 +4892,7 @@ mod tests {
         AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
         AdvertisementPolicy, AdvertisementQuality, AdvertisementRoles, MAX_CONTROL_MESSAGE_SIZE,
         NodeAdvertisement as WireAdvertisement, SignedEnvelope, TimePolicy, decode_canonical,
-        node_id_from_public_key, sign_control_message_with,
+        generate_nonce, node_id_from_public_key, sign_control_message_with,
     };
     use volparossa_selection::{HardFilterReason, SelectionError};
 
@@ -5004,7 +5004,7 @@ mod tests {
             public_key,
             ADVERTISEMENT_MEASURED_AT_MS,
             expires_at_ms,
-            [seed.max(1); 32],
+            generate_nonce(),
             TimePolicy::default(),
             |bytes| identity.sign(bytes).ok(),
         )
