@@ -141,8 +141,8 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
     || { printf '%s\n' 'execution requires a KVM guest' >&2; exit 77; }
 
 for command_name in awk busctl cat chmod chown cut date find getent grep install ip jq kill \
-    mkdir mktemp nft python3 readlink rm runuser sed setpriv sha256sum sleep sort stat \
-    systemctl systemd-run systemd-sysusers tail tc timeout tr wg; do
+    mkdir mktemp nft python3 readlink rm runuser rustc sed setpriv sha256sum sleep sort \
+    stat systemctl systemd-run systemd-sysusers tail tc timeout tr wg; do
     command -v "$command_name" >/dev/null 2>&1 \
         || { printf 'required guest tool unavailable: %s\n' "$command_name" >&2; exit 69; }
 done
@@ -156,6 +156,10 @@ done
     || { printf '%s\n' 'HTTP/3 acceptance fixture unavailable' >&2; exit 69; }
 [ -x "$binary_directory/examples/tls-policy-acceptance-fixture" ] \
     || { printf '%s\n' 'TLS policy acceptance fixture unavailable' >&2; exit 69; }
+[ -x "$source_directory/tests/integration/generate-alpha-acceptance-report.sh" ] \
+    || { printf '%s\n' 'normative acceptance-report generator unavailable' >&2; exit 69; }
+[ -x "$source_directory/tests/integration/validate-report.sh" ] \
+    || { printf '%s\n' 'normative acceptance-report validator unavailable' >&2; exit 69; }
 if [ ! -f "$mpquic_binary" ] || [ ! -x "$mpquic_binary" ] \
     || [ -L "$mpquic_binary" ]; then
     printf '%s\n' 'pinned native MPQUIC executable unavailable' >&2
@@ -181,6 +185,21 @@ case $OUTPUT_UID:$OUTPUT_GID in :|:*|*:|*[!0-9:]*) exit 64 ;; esac
 RUN_ID=$(tr -d -- - </proc/sys/kernel/random/uuid)
 case $RUN_ID in ''|*[!0-9a-f]*) exit 69 ;; esac
 [ "${#RUN_ID}" -eq 32 ] || exit 69
+STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+FINISHED_AT=
+NATIVE_REVISIONS=$(jq -ce '
+  [.components[] | select(.commit? != null) |
+    {key:.name,value:.commit}] | from_entries as $revisions |
+  if ($revisions | keys | sort) == ["boringssl","lwip","mqvpn","xquic"] and
+     all($revisions[]; test("^[0-9a-f]{40}([0-9a-f]{24})?$"))
+  then $revisions else error("invalid native revision lock") end
+' "$source_directory/third_party/upstream.lock.json")
+RUNTIME_ENVIRONMENT=$(jq -S -c -n \
+    --arg kernel "$(uname -r)" \
+    --arg rustc "$(rustc --version)" \
+    --argjson native_revisions "$NATIVE_REVISIONS" \
+    '{debian_version:"13",architecture:"amd64",kernel:$kernel,rustc:$rustc,
+      native_revisions:$native_revisions}')
 PREFIX=va-$(printf '%.8s' "$RUN_ID")
 CLIENT=$PREFIX-c
 B1=$PREFIX-b1
@@ -621,6 +640,8 @@ write_report() {
     jq -S -c -n \
         --arg commit "$expected_commit" \
         --arg run_id "$RUN_ID" \
+        --arg started_at "$STARTED_AT" \
+        --arg finished_at "$FINISHED_AT" \
         --arg phase "$PHASE" \
         --arg blocker "$OBSERVED_BLOCKER" \
         --argjson topology "$TOPOLOGY_READY" \
@@ -700,8 +721,10 @@ write_report() {
         --argjson a13_evidence "$a13_evidence" \
         --argjson a14_evidence "$a14_evidence" \
         --argjson a15_evidence "$a15_evidence" \
+        --argjson environment "$RUNTIME_ENVIRONMENT" \
         '{schema_version:1,report_kind:"volparossa-alpha-kvm-topology",
-          source_revision:$commit,run_id:$run_id,last_phase:$phase,
+          source_revision:$commit,run_id:$run_id,started_at:$started_at,
+          finished_at:$finished_at,environment:$environment,last_phase:$phase,
           topology:{ready:$topology,direct_client_exit_adjacency:false,
             client_exit_route_absent:$client_exit_route_absent,
             exit_control_relay:"relay0",data_relays:["relay1","relay2"],
@@ -1023,7 +1046,17 @@ cleanup() {
         original_status=1
     fi
     copy_artifacts
+    FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
     write_report "$original_status"
+    if [ "$original_status" -eq 0 ]; then
+        if ! "$source_directory/tests/integration/generate-alpha-acceptance-report.sh" \
+            "$output_directory/report.json" \
+            "$output_directory/acceptance-report.json"; then
+            original_status=1
+            OBSERVED_BLOCKER=NORMATIVE_ACCEPTANCE_REPORT_INVALID
+            write_report "$original_status"
+        fi
+    fi
     exit "$original_status"
 }
 trap cleanup EXIT

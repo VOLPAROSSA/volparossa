@@ -9,6 +9,7 @@ umask 077
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 GUEST=$HERE/kvm-alpha-topology.sh
 HOST=$HERE/run-alpha-topology-vm.sh
+GENERATOR=$HERE/generate-alpha-acceptance-report.sh
 WORKFLOW=$HERE/../../.github/workflows/alpha-topology.yml
 
 for script in "$GUEST" "$HOST"; do
@@ -21,6 +22,8 @@ for script in "$GUEST" "$HOST"; do
     set -e
     [ "$invalid_status" -eq 64 ]
 done
+[ -f "$GENERATOR" ] && [ -x "$GENERATOR" ] && [ ! -L "$GENERATOR" ]
+sh -n "$GENERATOR"
 
 [ -f "$WORKFLOW" ] && [ ! -L "$WORKFLOW" ]
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
@@ -339,5 +342,9 @@ grep -F '.a14_forced_crash_cleanup.evidence.cleanup.remaining_helper_fdstore_des
     "$WORKFLOW" >/dev/null
 grep -F '.a15_host_state_unchanged.evidence.before_sha256 ==' "$WORKFLOW" \
     >/dev/null
+grep -F 'generate-alpha-acceptance-report.sh' "$GUEST" >/dev/null
+grep -F '"$output_directory/acceptance-report.json"' "$GUEST" >/dev/null
+grep -F 'Validate normative acceptance report before upload' "$WORKFLOW" >/dev/null
+grep -F 'tests/integration/validate-report.sh "$report"' "$WORKFLOW" >/dev/null
 
 printf '%s\n' 'KVM alpha topology static contract passed'

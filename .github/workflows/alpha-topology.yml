@@ -223,6 +223,50 @@ jobs:
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Validate normative acceptance report before upload
+        if: always()
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/acceptance-report.json"
+          test -f "$report"
+          test ! -L "$report"
+          tests/integration/validate-report.sh "$report"
+          locked_native_revisions=$(jq -ce '
+            [.components[] | select(.commit? != null) |
+              {key:.name,value:.commit}] | from_entries
+          ' third_party/upstream.lock.json)
+          jq -e --arg revision "$GITHUB_SHA" \
+            --argjson native_revisions "$locked_native_revisions" '
+            .source_revision == $revision and
+            .suite == "all" and
+            .overall == "PASS" and
+            .execution == {
+              "attempted":true,
+              "blockers":[],
+              "completed":true,
+              "requested_mode":"EXECUTE",
+              "topology_created":true
+            } and
+            .environment.debian_version == "13" and
+            .environment.architecture == "amd64" and
+            .environment.native_revisions == $native_revisions and
+            .host_state.captured == true and
+            .host_state.unchanged == true and
+            .cleanup == {
+              "attempted":true,
+              "complete":true,
+              "remaining_owned_objects":0
+            } and
+            ([.cases[].id] == [
+              "A01","A02","A03","A04","A05","A06","A07","A08",
+              "A09","A10","A11","A12","A13","A14","A15"
+            ]) and
+            all(.cases[]; .selected == true and .result == "PASS")
+          ' "$report" >/dev/null
+
       - name: Upload bounded topology diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -74,6 +74,11 @@ for script_path in \
     tests/helper/validate-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
     tests/integration/run.sh \
+    tests/integration/generate-alpha-acceptance-report.sh \
+    tests/integration/kvm-alpha-topology.sh \
+    tests/integration/run-alpha-topology-vm.sh \
+    tests/integration/test-alpha-acceptance-report.sh \
+    tests/integration/test-kvm-alpha-topology-contract.sh \
     tests/integration/vertical-topology.sh \
     tests/integration/validate-report.sh \
     tests/netns/run-topology.sh \
@@ -109,6 +114,8 @@ jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-restart-vm-environment-v1.sch
 "$REPOSITORY_DIRECTORY/tests/helper/test-production-ipc-busctl-parser.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-qemu-pidfd-supervisor.sh"
 "$REPOSITORY_DIRECTORY/tests/packaging/test-package-lifecycle-contract.sh"
+"$REPOSITORY_DIRECTORY/tests/integration/test-alpha-acceptance-report.sh"
+"$REPOSITORY_DIRECTORY/tests/integration/test-kvm-alpha-topology-contract.sh"
 
 /bin/mkdir "$TEMPORARY_DIRECTORY/bin"
 MUTATION_MARKER=$TEMPORARY_DIRECTORY/mutation-attempt
