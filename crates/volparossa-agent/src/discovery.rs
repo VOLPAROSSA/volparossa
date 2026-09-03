@@ -161,6 +161,10 @@ const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
 const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
 pub(crate) const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
 const AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS: u64 = 1_000;
+// A provider observation is client-local: a selected control Relay may not have converged on the
+// same DHT record yet. Retire that exact Relay/Exit lineage long enough to rotate through the
+// bounded control set, but retry it well inside the provider observation and A01 liveness windows.
+const AUTOMATIC_EXIT_FETCH_EXHAUSTED_COOLDOWN_MS: u64 = 10_000;
 // Helper Destroy can legitimately remain ambiguous for its full five-second RPC bound. Retrying
 // that synchronous call on every one-second actor tick starves discovery traffic, so quarantine
 // the affine owner and retry slowly while the helper's durable reaper also converges cleanup.
@@ -1914,6 +1918,10 @@ impl DiscoveryRuntime {
                             "RESERVATION_RPC_CALLER_CLOSED",
                         ).await;
                     }
+                    // The automatic fetch owner uses a one-second retry backoff. Drive it on the
+                    // matching bounded maintenance clock instead of stretching every retry to the
+                    // five-second provider-query cadence.
+                    self.schedule_exit_advertisement_fetches();
                 }
                 _ = capability_maintenance.tick() => {
                     self.query_capabilities(&state).await;
@@ -3485,8 +3493,7 @@ impl DiscoveryRuntime {
                     && self.exit_provider_peers.contains_key(exit_peer)
                     && self.direct_relays.contains_key(control_peer)
             });
-        self.automatic_exit_fetches
-            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.retain_live_automatic_exit_fetch_history();
         if self.forwarded_exit_fail_closed_until_ms <= now_ms {
             self.forwarded_exit_fail_closed_until_ms = 0;
         }
@@ -4590,8 +4597,7 @@ impl DiscoveryRuntime {
         }
         let now_ms = unix_millis();
         self.drive_automatic_exit_fetch_attempts(now_ms);
-        self.automatic_exit_fetches
-            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.retain_live_automatic_exit_fetch_history();
         if self.automatic_exit_fetch_attempts.len() >= self.candidate_limit.max(1) {
             return;
         }
@@ -4722,7 +4728,7 @@ impl DiscoveryRuntime {
             }
         }
 
-        controls
+        if let Some(control) = controls
             .iter()
             .find(|control| {
                 let key = ForwardedExitKey {
@@ -4730,16 +4736,52 @@ impl DiscoveryRuntime {
                     exit_peer,
                 };
                 control.peer_id != exit_peer
-                    && self
-                        .automatic_exit_fetches
-                        .get(&key)
-                        .is_none_or(|expiry| *expiry <= now_ms)
+                    && !self.automatic_exit_fetches.contains_key(&key)
                     && !self
                         .automatic_exit_fetch_attempts
                         .iter()
                         .any(|pending| pending.key == key)
             })
             .cloned()
+        {
+            return Some(control);
+        }
+
+        // Every never-tried live control wins over an expired suppression. Once the bounded set
+        // has completed a round, choose the least-recently suppressed eligible lineage. Retaining
+        // expired entries while both peers remain live makes this a fair rotation instead of
+        // repeatedly selecting the lexicographically first Relay.
+        controls
+            .iter()
+            .filter_map(|control| {
+                let key = ForwardedExitKey {
+                    control_relay_peer: control.peer_id,
+                    exit_peer,
+                };
+                let retry_at_ms = self.automatic_exit_fetches.get(&key).copied()?;
+                (control.peer_id != exit_peer
+                    && retry_at_ms <= now_ms
+                    && !self
+                        .automatic_exit_fetch_attempts
+                        .iter()
+                        .any(|pending| pending.key == key))
+                .then_some((retry_at_ms, control))
+            })
+            .min_by(|(left_time, left), (right_time, right)| {
+                left_time
+                    .cmp(right_time)
+                    .then_with(|| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()))
+            })
+            .map(|(_, control)| control.clone())
+    }
+
+    /// Keep only bounded scheduling history for currently live provider/control pairs.
+    fn retain_live_automatic_exit_fetch_history(&mut self) {
+        let providers = &self.exit_provider_peers;
+        let controls = &self.direct_relays;
+        self.automatic_exit_fetches.retain(|key, _| {
+            providers.contains_key(&key.exit_peer) && controls.contains_key(&key.control_relay_peer)
+        });
     }
 
     fn drive_automatic_exit_fetch_attempts(&mut self, now_ms: u64) {
@@ -4805,16 +4847,15 @@ impl DiscoveryRuntime {
         self.automatic_exit_fetch_attempts = retained;
     }
 
-    /// Prevent a failed control Relay from starving later candidates when the Relay set is larger
-    /// than one request deadline can traverse. The provider observation is the authority for the
-    /// current search round, so an exhausted `(Relay, Exit)` pair stays tried until that observation
-    /// expires instead of becoming eligible again after the shorter forwarding deadline.
+    /// Prevent a failed control Relay from starving later candidates while still recovering when
+    /// that Relay's local DHT view converges after the client observed the Exit provider.
     fn retain_exhausted_exit_fetch_control(&mut self, key: ForwardedExitKey, now_ms: u64) {
         let exhausted_until_ms = self
             .exit_provider_peers
             .get(&key.exit_peer)
             .copied()
-            .unwrap_or_else(|| now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS));
+            .unwrap_or_else(|| now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS))
+            .min(now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_EXHAUSTED_COOLDOWN_MS));
         self.automatic_exit_fetches.insert(key, exhausted_until_ms);
     }
 
@@ -18321,7 +18362,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exhausted_scale_controls_stay_retired_until_provider_refresh() {
+    async fn exhausted_scale_controls_rotate_then_retry_inside_provider_lifetime() {
         let mut fixture = fixture(RolesConfig::default());
         let now_ms = unix_millis();
         let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
@@ -18382,7 +18423,7 @@ mod tests {
 
             assert_eq!(
                 fixture.runtime.automatic_exit_fetches.get(&key),
-                Some(&provider_expires_at_ms)
+                Some(&now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_EXHAUSTED_COOLDOWN_MS))
             );
             assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
         }
@@ -18396,6 +18437,68 @@ mod tests {
                 .control_relay_peer,
             controls[5].peer_id
         );
+    }
+
+    #[tokio::test]
+    async fn all_exhausted_exit_fetch_controls_have_a_bounded_quiet_period() {
+        let mut fixture = fixture(RolesConfig::default());
+        let now_ms = unix_millis();
+        let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
+        let exit_peer = Identity::generate().peer_id().to_owned();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, provider_expires_at_ms);
+
+        let mut controls = (1_u64..=6)
+            .map(|sequence| {
+                direct_capability(
+                    &Identity::generate(),
+                    &fixture.policy,
+                    sequence,
+                    provider_expires_at_ms,
+                )
+            })
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        for control in &controls {
+            fixture
+                .runtime
+                .direct_relays
+                .insert(control.peer_id, control.clone());
+            fixture.runtime.retain_exhausted_exit_fetch_control(
+                ForwardedExitKey {
+                    control_relay_peer: control.peer_id,
+                    exit_peer,
+                },
+                now_ms,
+            );
+        }
+
+        let retry_at_ms = now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_EXHAUSTED_COOLDOWN_MS);
+        assert!(
+            fixture
+                .runtime
+                .next_untried_exit_control(&controls, exit_peer, retry_at_ms.saturating_sub(1))
+                .is_none()
+        );
+        let first_retry = fixture
+            .runtime
+            .next_untried_exit_control(&controls, exit_peer, retry_at_ms)
+            .expect("oldest exhausted control becomes retryable");
+        assert_eq!(first_retry.peer_id, controls[0].peer_id);
+        fixture.runtime.retain_exhausted_exit_fetch_control(
+            ForwardedExitKey {
+                control_relay_peer: first_retry.peer_id,
+                exit_peer,
+            },
+            retry_at_ms,
+        );
+        let second_retry = fixture
+            .runtime
+            .next_untried_exit_control(&controls, exit_peer, retry_at_ms)
+            .expect("rotation advances while first control cools down");
+        assert_eq!(second_retry.peer_id, controls[1].peer_id);
     }
 
     #[tokio::test]
