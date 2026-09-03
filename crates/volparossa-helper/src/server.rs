@@ -36,7 +36,7 @@ use crate::{
         capture_inherited_custody, classify_startup_custody,
         observe_nonempty_restart_custody_for_refusal, observe_startup_custody_inventory,
         settle_cleanup_confirmed_restart_absence, settle_cleanup_confirmed_restart_present,
-        settle_exact_single_may_own_restart_present,
+        settle_exact_may_own_restart_present,
     },
 };
 
@@ -164,8 +164,8 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
             ownership_deadline,
         )
         .map_err(|_| ServerError::InheritedCustody)?
-    } else if classification.is_exact_single_may_own_restart() {
-        settle_exact_single_may_own_restart_present(
+    } else if classification.is_exact_may_own_restart_set() {
+        settle_exact_may_own_restart_present(
             &runtime,
             ownership_startup,
             classification,
@@ -979,8 +979,8 @@ mod tests {
             .find("settle_cleanup_confirmed_restart_present(")
             .expect("cleanup-confirmed exact-present removal");
         let exact_restart_reaper = entry
-            .find("settle_exact_single_may_own_restart_present(")
-            .expect("exact singleton restart reaper");
+            .find("settle_exact_may_own_restart_present(")
+            .expect("exact restart-set reaper");
         let continue_empty = entry
             .find("continue_empty()")
             .expect("empty-only ownership startup continuation");

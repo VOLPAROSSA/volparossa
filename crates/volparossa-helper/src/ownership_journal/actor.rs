@@ -1713,9 +1713,9 @@ impl DurableOwnershipStartup {
         Ok(&self.targets)
     }
 
-    /// Consume one exact restart-reaper proof and durably cross only
-    /// `MayOwnCustody -> CleanupConfirmed` while the actor remains startup-locked.
-    pub(super) fn confirm_single_restart_cleanup(
+    /// Consume one exact restart-reaper proof set and durably cross every pending
+    /// `MayOwn* -> CleanupConfirmed` transition while the actor remains startup-locked.
+    pub(super) fn confirm_restart_cleanup_set(
         &mut self,
         evidence: RestartMayOwnCleanupEvidence,
     ) -> Result<&[StartupCustodyTarget], DurableOwnershipError> {
@@ -1750,8 +1750,11 @@ impl DurableOwnershipStartup {
             }
         }
         self.targets = pending.wait()?;
-        if self.targets.len() != 1
-            || self.targets[0].phase() != StartupCustodyPhase::CleanupConfirmed
+        if self.targets.is_empty()
+            || self
+                .targets
+                .iter()
+                .any(|target| target.phase() != StartupCustodyPhase::CleanupConfirmed)
         {
             self.lifecycle.mark_ambiguous();
             return Err(DurableOwnershipError::Ambiguous);
@@ -2671,7 +2674,7 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
         Ok(())
     }
 
-    fn confirm_single_restart_cleanup(
+    fn confirm_restart_cleanup_set(
         &mut self,
         mut evidence: RestartMayOwnCleanupEvidence,
         deadline: HardDeadline,
@@ -2680,43 +2683,45 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
             Ok(snapshot) => snapshot,
             Err(error) => return Err(self.classify_journal_error(error)),
         };
-        let targets =
+        let prior_targets =
             project_startup_custody_targets(snapshot).map_err(FailureDisposition::Continue)?;
-        if !evidence.matches_exact_target_set(&targets) {
+        if !evidence.matches_exact_target_set(&prior_targets) {
             return Err(FailureDisposition::Continue(
                 DurableOwnershipError::RecoveryNotConfirmed,
             ));
         }
-        let record_snapshot = match self.journal.snapshot() {
-            Ok(snapshot) => snapshot,
-            Err(error) => return Err(self.classify_journal_error(error)),
-        };
-        let record = record_snapshot
+        let records = snapshot
             .records
             .values()
-            .find(|record| {
+            .filter(|record| {
                 matches!(
                     record.phase,
                     OwnershipPhase::MayOwnCustody | OwnershipPhase::MayOwnPrepare
                 )
             })
             .cloned()
-            .ok_or(FailureDisposition::Continue(
+            .collect::<Vec<_>>();
+        if records.is_empty() || records.len() != evidence.pending_target_count() {
+            return Err(FailureDisposition::Continue(
                 DurableOwnershipError::RecoveryNotConfirmed,
-            ))?;
+            ));
+        }
+        let expected_target_count = evidence.expected_target_count();
         let mut executor = RestartMayOwnCleanupExecutor {
             evidence: &mut evidence,
         };
-        self.revision = self
-            .journal
-            .confirm_cleanup(
-                self.revision,
-                record.ownership_id,
-                record.generation,
-                &mut executor,
-                deadline,
-            )
-            .map_err(|error| self.classify_settlement_error(error))?;
+        for record in records {
+            self.revision = self
+                .journal
+                .confirm_cleanup(
+                    self.revision,
+                    record.ownership_id,
+                    record.generation,
+                    &mut executor,
+                    deadline,
+                )
+                .map_err(|error| self.classify_settlement_error(error))?;
+        }
         if !evidence.is_consumed() {
             return Err(FailureDisposition::Stop(
                 DurableOwnershipError::Ambiguous,
@@ -2732,7 +2737,18 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
         };
         let targets =
             project_startup_custody_targets(snapshot).map_err(FailureDisposition::Continue)?;
-        if targets.len() != 1 || targets[0].phase() != StartupCustodyPhase::CleanupConfirmed {
+        if targets.len() != expected_target_count
+            || prior_targets
+                .iter()
+                .zip(&targets)
+                .any(|(prior, successor)| match prior.phase() {
+                    StartupCustodyPhase::MayOwnCustody | StartupCustodyPhase::MayOwnPrepare => {
+                        successor.phase() != StartupCustodyPhase::CleanupConfirmed
+                            || !prior.same_identity_except_phase(successor)
+                    }
+                    StartupCustodyPhase::CleanupConfirmed => prior != successor,
+                })
+        {
             return Err(FailureDisposition::Stop(
                 DurableOwnershipError::Ambiguous,
                 Lifecycle::Ambiguous,
@@ -3301,7 +3317,7 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
                     reply.complete_unstarted_deadline();
                     continue;
                 }
-                match core.confirm_single_restart_cleanup(*evidence, deadline) {
+                match core.confirm_restart_cleanup_set(*evidence, deadline) {
                     Ok(targets) => reply.complete(Ok(targets)),
                     Err(failure) => {
                         let (error, terminal) = terminal_start_failure(failure);

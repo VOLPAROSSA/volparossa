@@ -363,15 +363,16 @@ impl ProductionOwnershipStartup {
             .map(|actor| ProductionOwnershipRuntime { actor })
     }
 
-    /// Consume one affine exact-reaper proof while retaining the startup actor and journal lock.
+    /// Consume one affine exact-reaper proof set while retaining the startup actor and journal lock.
     ///
-    /// This crosses only the actor's single-target `MayOwnCustody -> CleanupConfirmed` CAS. It
-    /// neither removes systemd custody nor continues startup.
-    pub(crate) fn confirm_single_restart_cleanup(
+    /// This crosses only the actor's exact pending `MayOwn* -> CleanupConfirmed` transitions. It
+    /// neither removes systemd custody nor continues startup, and a partial durable prefix remains
+    /// exactly retryable after another process crash.
+    pub(crate) fn confirm_restart_cleanup_set(
         &mut self,
         evidence: RestartMayOwnCleanupEvidence,
     ) -> Result<&[StartupCustodyTarget], DurableOwnershipError> {
-        self.startup.confirm_single_restart_cleanup(evidence)
+        self.startup.confirm_restart_cleanup_set(evidence)
     }
 
     /// Continue the retained startup only with fresh exact manager-absence evidence for its full
