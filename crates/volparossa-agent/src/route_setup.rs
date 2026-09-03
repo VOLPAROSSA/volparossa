@@ -1079,9 +1079,9 @@ impl ClientRouteControl {
             }
         }
         if helper_route_was_lost {
-            let stale = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
+            let prior_route = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
             drop(state);
-            if let ClientRouteControlState::Established(established) = stale {
+            if let ClientRouteControlState::Established(established) = prior_route {
                 Box::pin(established.shutdown()).await;
             }
             self.clear_agent_mpquic_paths().await;

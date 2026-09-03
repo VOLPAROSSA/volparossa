@@ -1757,6 +1757,10 @@ mod dispatch_tests {
         ));
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture constructs one complete signed native preselection lineage"
+    )]
     fn ready_fixture() -> ReadyFixture {
         let now_ms = crate::unix_millis();
         let expires_at_ms = now_ms + MAX_NATIVE_PROBE_LIFETIME_MS;

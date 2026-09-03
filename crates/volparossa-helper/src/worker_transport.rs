@@ -2916,6 +2916,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the live regression proves both endpoint roles inside one disposable namespace"
+    )]
     fn committed_client_and_exit_create_genuine_mptcp_fds_in_disposable_netns() {
         if env::var_os(MPTCP_TRANSPORT_NAMESPACE_CHILD_ENV).is_some() {
             for arguments in [

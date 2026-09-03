@@ -4063,12 +4063,12 @@ struct VerifiedPathActivationAuthority {
 
 enum VerifiedRelayClientRequest {
     Reservation {
-        request: VerifiedControlMessage<RelayReservationRequest>,
-        capability: VerifiedControlMessage<ClientSessionCapability>,
+        request: Box<VerifiedControlMessage<RelayReservationRequest>>,
+        capability: Box<VerifiedControlMessage<ClientSessionCapability>>,
         exit_reservation: Box<VerifiedControlMessage<ExitReservation>>,
     },
     NativeStart {
-        start: VerifiedControlMessage<NativeProbeStart>,
+        start: Box<VerifiedControlMessage<NativeProbeStart>>,
         signed_sha256: [u8; 32],
         start_hash: [u8; 32],
     },
@@ -4361,8 +4361,8 @@ fn verify_relay_client_request(
             .map_err(|error| protocol_backend_error(&error))?;
             replay_keys.push((*exit_reservation.sender_id(), *exit_reservation.nonce()));
             Ok(VerifiedRelayClientRequest::Reservation {
-                request,
-                capability,
+                request: Box::new(request),
+                capability: Box::new(capability),
                 exit_reservation: Box::new(exit_reservation),
             })
         }
@@ -4378,7 +4378,7 @@ fn verify_relay_client_request(
             let start_hash =
                 native_probe_start_hash(encoded).map_err(|error| protocol_backend_error(&error))?;
             Ok(VerifiedRelayClientRequest::NativeStart {
-                start,
+                start: Box::new(start),
                 signed_sha256: Sha256::digest(encoded).into(),
                 start_hash,
             })
@@ -6701,7 +6701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descriptor_shape_mismatch_is_closed_and_cleans_the_ambiguous_generation() {
+    async fn descriptor_shape_mismatch_is_closed_and_retains_the_committed_generation() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("fixture time")
@@ -6740,10 +6740,7 @@ mod tests {
         let completion = Arc::clone(&backend)
             .acquire_transport_socket(BackendRequest::new(binding, value))
             .await;
-        assert_eq!(
-            completion.result.err(),
-            Some(BackendError::CleanupIncomplete)
-        );
+        assert_eq!(completion.result.err(), Some(BackendError::Kernel));
         worker.join().expect("fake worker thread");
         observer
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -6755,8 +6752,13 @@ mod tests {
                 .expect("rejected descriptor closed"),
             0
         );
+        assert!(alive.load(Ordering::SeqCst));
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::Committed)
+        );
+        retire_transport_fixture(&backend, key).await;
         assert!(!alive.load(Ordering::SeqCst));
-        assert!(lock_state(&backend.state).is_none());
     }
 
     #[tokio::test]

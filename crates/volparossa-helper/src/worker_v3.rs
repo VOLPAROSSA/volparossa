@@ -8526,17 +8526,17 @@ impl WorkerSupervisor {
                         .as_ref()
                         .ok_or(WorkerV3Error::Authentication)?;
                     let descriptor = execution.descriptor.take().ok_or(WorkerV3Error::Invalid)?;
-                    match validate_adopted_transport_socket(expected_namespace, acquire, descriptor)
+                    if let Ok(descriptor) =
+                        validate_adopted_transport_socket(expected_namespace, acquire, descriptor)
                     {
-                        Ok(descriptor) => execution.descriptor = Some(descriptor),
-                        Err(_) => {
-                            // The authenticated child completed a phase-preserving Acquire and
-                            // transferred the only descriptor into this owner. Rejection drops
-                            // that descriptor, so no socket custody remains uncertain and the
-                            // committed route must stay available for a later independent flow.
-                            execution.response.result = InternalWorkerResult::Kernel as i32;
-                            execution.response.outcome = None;
-                        }
+                        execution.descriptor = Some(descriptor);
+                    } else {
+                        // The authenticated child completed a phase-preserving Acquire and
+                        // transferred the only descriptor into this owner. Rejection drops
+                        // that descriptor, so no socket custody remains uncertain and the
+                        // committed route must stay available for a later independent flow.
+                        execution.response.result = InternalWorkerResult::Kernel as i32;
+                        execution.response.outcome = None;
                     }
                 }
                 Some(internal_worker_request::Operation::AcquireClientIngressSocket(acquire))
@@ -24416,7 +24416,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn invalid_adopted_descriptor_is_closed_and_generation_is_retired() {
+    async fn invalid_adopted_descriptor_is_closed_and_committed_generation_is_retained() {
         let context_id = [61; 16];
         let request = acquire(context_id, 46);
         let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
@@ -24445,10 +24445,16 @@ mod tests {
         });
 
         let coordinator = WorkerCoordinator::new(registry);
-        assert!(matches!(
-            coordinator.execute(context_id, generation, request).await,
-            Err(WorkerV3Error::Ambiguous)
-        ));
+        let execution = coordinator
+            .execute(context_id, generation, request)
+            .await
+            .expect("descriptor rejection is a definite flow-local kernel failure");
+        assert_eq!(
+            execution.response.result,
+            InternalWorkerResult::Kernel as i32
+        );
+        assert!(execution.response.outcome.is_none());
+        assert!(execution.descriptor.is_none());
         worker.join().expect("worker join");
         let mut byte = [0_u8; 1];
         assert_eq!(
@@ -24456,11 +24462,13 @@ mod tests {
             0,
             "namespace or shape rejection must consume and close the descriptor"
         );
-        assert!(!alive.load(Ordering::SeqCst));
+        assert!(alive.load(Ordering::SeqCst));
         assert!(matches!(
             coordinator.phase(context_id, generation),
-            Err(WorkerV3Error::Stale)
+            Ok(VisiblePhase::Stable(StablePhase::Committed))
         ));
+        assert!(coordinator.shutdown().await);
+        assert!(!alive.load(Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

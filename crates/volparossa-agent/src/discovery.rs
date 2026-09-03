@@ -18317,6 +18317,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression keeps all three control replacements and invalidation together"
+    )]
     async fn automatic_exit_fetch_keeps_current_control_until_it_is_invalid() {
         let mut fixture = fixture(RolesConfig::default());
         let now_ms = unix_millis();

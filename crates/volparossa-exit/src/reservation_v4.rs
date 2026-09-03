@@ -694,6 +694,10 @@ impl ExitService {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "the boundary regression stays adjacent to the helper it freezes"
+)]
 mod tests {
     use super::{MAX_NATIVE_PROBE_LIFETIME_MS, native_premeasurement_is_fresh};
 

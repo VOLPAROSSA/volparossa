@@ -408,9 +408,7 @@ async fn execute_probe_reaches_the_local_relay_handler() {
                         },
                     )) = event
                     {
-                        if request_id == outbound {
-                            panic!("probe transport failed: {error}");
-                        }
+                        assert_ne!(request_id, outbound, "probe transport failed: {error}");
                     }
                 }
                 event = next_other(&mut relay) => {

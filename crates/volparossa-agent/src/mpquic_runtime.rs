@@ -3067,12 +3067,12 @@ mod tests {
         )
         .await
         .expect("authorized egress");
-        let received =
+        let received_bytes =
             tokio::time::timeout(Duration::from_secs(1), receiver.recv(&mut receive_buffer))
                 .await
                 .expect("egress timeout")
                 .expect("egress receive");
-        assert_eq!(&receive_buffer[..received], b"reordered payload");
+        assert_eq!(&receive_buffer[..received_bytes], b"reordered payload");
     }
 
     #[test]
