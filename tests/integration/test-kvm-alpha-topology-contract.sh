@@ -36,6 +36,10 @@ grep -F 'VMP_BUILD_JOBS=2 VMP_RUN_TESTS=no' "$WORKFLOW" >/dev/null
 grep -F -- '--mpquic "$VOLPAROSSA_ALPHA_MPQUIC"' "$WORKFLOW" >/dev/null
 grep -F -- '--package "$VOLPAROSSA_ALPHA_PACKAGE"' "$WORKFLOW" >/dev/null
 grep -F './packaging/build-deb.sh --build' "$WORKFLOW" >/dev/null
+[ "$(grep -Fc './packaging/build-deb.sh --build' "$WORKFLOW")" -eq 2 ]
+grep -F 'volparossa-package-target-rebuild' "$WORKFLOW" >/dev/null
+grep -F 'cmp -- "$first_package" "$package"' "$WORKFLOW" >/dev/null
+grep -F "test \"\$first_sha256\" = \"\$second_sha256\"" "$WORKFLOW" >/dev/null
 grep -F 'scp_to "$mpquic_path" /home/vpci/volparossa-mpquic' "$HOST" >/dev/null
 grep -F 'scp_to "$package_path" /home/vpci/volparossa.deb' "$HOST" >/dev/null
 grep -F -- '--mpquic /home/vpci/volparossa-mpquic' "$HOST" >/dev/null

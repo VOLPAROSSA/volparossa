@@ -76,7 +76,7 @@ jobs:
           sha256sum "$native_binary"
           printf 'VOLPAROSSA_ALPHA_MPQUIC=%s\n' "$native_binary" >>"$GITHUB_ENV"
 
-      - name: Build exact candidate Debian package
+      - name: Build twice and verify exact candidate Debian package
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/volparossa-package-target
           VMP_BUILD_JOBS: 2
@@ -84,7 +84,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo fetch --locked
-          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+          source_date_epoch=$(git log -1 --format=%ct)
+          SOURCE_DATE_EPOCH="$source_date_epoch" \
             ./packaging/build-deb.sh --build
           mapfile -t packages < <(find "$(pwd -P)/dist" -maxdepth 1 -type f \
             -name 'volparossa_*_amd64.deb' -print)
@@ -94,7 +95,26 @@ jobs:
           test ! -L "$package"
           test "$(dpkg-deb -f "$package" Package)" = volparossa
           test "$(dpkg-deb -f "$package" Architecture)" = amd64
-          sha256sum "$package"
+          first_package="$RUNNER_TEMP/volparossa-reproducibility-first.deb"
+          install -m 0600 "$package" "$first_package"
+          first_sha256=$(sha256sum "$first_package" | awk '{print $1}')
+          rm -f -- "$package"
+
+          CARGO_TARGET_DIR="$RUNNER_TEMP/volparossa-package-target-rebuild" \
+            SOURCE_DATE_EPOCH="$source_date_epoch" \
+            ./packaging/build-deb.sh --build
+          mapfile -t packages < <(find "$(pwd -P)/dist" -maxdepth 1 -type f \
+            -name 'volparossa_*_amd64.deb' -print)
+          test "${#packages[@]}" -eq 1
+          package=${packages[0]}
+          test -f "$package"
+          test ! -L "$package"
+          test "$(dpkg-deb -f "$package" Package)" = volparossa
+          test "$(dpkg-deb -f "$package" Architecture)" = amd64
+          second_sha256=$(sha256sum "$package" | awk '{print $1}')
+          test "$first_sha256" = "$second_sha256"
+          cmp -- "$first_package" "$package"
+          printf 'Reproducible package SHA-256: %s\n' "$second_sha256"
           printf 'VOLPAROSSA_ALPHA_PACKAGE=%s\n' "$package" >>"$GITHUB_ENV"
 
       - name: Require KVM and create output directory
