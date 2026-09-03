@@ -245,7 +245,7 @@ impl ClientIngressRuntime {
     pub(crate) fn try_receive_udp(
         &self,
         family: ClientIngressSocketFamily,
-    ) -> Result<ObservedUdpIngress, ClientIngressUdpError> {
+    ) -> Result<Vec<ObservedUdpIngress>, ClientIngressUdpError> {
         let (identity, kernel_family) = match family {
             ClientIngressSocketFamily::Ipv4 => {
                 (IPV4_TRANSPARENT_UDP, KernelIngressSocketFamily::Ipv4)
@@ -269,7 +269,12 @@ impl ClientIngressRuntime {
         )
         .map_err(ClientIngressUdpError::Receive)?;
         payload.truncate(received.bytes());
-        ObservedUdpIngress::new(received.source(), received.original_destination(), payload)
+        split_udp_gro_payload(payload, received.gro_segment_size())?
+            .into_iter()
+            .map(|segment| {
+                ObservedUdpIngress::new(received.source(), received.original_destination(), segment)
+            })
+            .collect()
     }
 
     pub(crate) fn duplicate_udp_poll_descriptors(&self) -> Result<[OwnedFd; 2], io::Error> {
@@ -371,6 +376,22 @@ impl ClientIngressRuntime {
             .map(|_| ())
             .map_err(ClientIngressRuntimeError::Destroy)
     }
+}
+
+fn split_udp_gro_payload(
+    payload: Vec<u8>,
+    gro_segment_size: Option<usize>,
+) -> Result<Vec<Vec<u8>>, ClientIngressUdpError> {
+    let Some(segment_size) = gro_segment_size else {
+        return Ok(vec![payload]);
+    };
+    if segment_size == 0
+        || segment_size > payload.len()
+        || payload.len().div_ceil(segment_size) > 64
+    {
+        return Err(ClientIngressUdpError::DestinationBinding);
+    }
+    Ok(payload.chunks(segment_size).map(<[u8]>::to_vec).collect())
 }
 
 /// One readiness owner for an exact helper-created transparent TCP listener.
@@ -1736,7 +1757,26 @@ mod tests {
         ExactReplySocketCache, MAX_RETAINED_INGRESS_REPLY_SOCKETS, ObservedTcpIngress,
         ObservedUdpIngress, PolicyAuthorizedDnsIngress, PolicyAuthorizedUdpIngress,
         authorize_tcp_destination, build_ipv4_udp_packet, parse_ipv4_udp_packet,
+        split_udp_gro_payload,
     };
+
+    #[test]
+    fn udp_gro_payload_is_split_only_at_kernel_provided_boundaries() {
+        let payload = vec![0x5a; 4_976];
+        let segments = split_udp_gro_payload(payload.clone(), Some(1_200)).expect("GRO record");
+        assert_eq!(
+            segments.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1_200, 1_200, 1_200, 1_200, 176]
+        );
+        assert_eq!(segments.concat(), payload);
+
+        let ordinary = vec![0x5a; 4_800];
+        assert_eq!(
+            split_udp_gro_payload(ordinary.clone(), None).expect("ordinary datagram"),
+            [ordinary]
+        );
+        assert!(split_udp_gro_payload(vec![0; 4_800], Some(4_801)).is_err());
+    }
 
     #[tokio::test]
     async fn tls_ingress_on_policy_port_retains_visible_sni_and_kernel_destination_pin() {

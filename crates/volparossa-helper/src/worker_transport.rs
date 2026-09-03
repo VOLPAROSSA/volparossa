@@ -1053,6 +1053,12 @@ pub(crate) fn create_client_ingress_socket(
                 return Err(WorkerTransportError::Invalid);
             }
         }
+        // Transparent application UDP can arrive as a kernel-coalesced GSO/GRO record. Keep the
+        // original segment boundary in UDP_GRO ancillary metadata so the unprivileged ingress
+        // actor can reconstruct the exact application datagrams before MASQUE encapsulation.
+        if kind == InternalIngressSocketKind::TransparentUdp {
+            setsockopt(&socket, sockopt::UdpGroSegment, &true).map_err(errno_io)?;
+        }
     }
     socket.set_reuse_address(true)?;
     let wildcard = match family {

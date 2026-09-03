@@ -1153,6 +1153,7 @@ pub struct ReceivedUdpDatagram {
     bytes: usize,
     source: SocketAddr,
     original_destination: SocketAddr,
+    gro_segment_size: Option<usize>,
 }
 
 impl ReceivedUdpDatagram {
@@ -1172,6 +1173,13 @@ impl ReceivedUdpDatagram {
     #[must_use]
     pub const fn original_destination(self) -> SocketAddr {
         self.original_destination
+    }
+
+    /// Kernel-provided payload size for each UDP GRO segment, when this receive coalesced
+    /// multiple original datagrams. The final segment may be shorter.
+    #[must_use]
+    pub const fn gro_segment_size(self) -> Option<usize> {
+        self.gro_segment_size
     }
 }
 
@@ -1547,9 +1555,10 @@ fn receive_udp_record<F: AsFd>(
     let mut control_space = nix::cmsg_space!(
         libc::sockaddr_in,
         libc::sockaddr_in6,
+        i32,
         [RawFd; MAX_HANDOFF_FDS]
     );
-    let (bytes, flags, source, accumulator, descriptors, control_parse_failed) = {
+    let (bytes, flags, source, accumulator, gro_segment_size, descriptors, control_parse_failed) = {
         let message = recvmsg::<SockaddrStorage>(
             socket.as_fd().as_raw_fd(),
             &mut vectors,
@@ -1558,6 +1567,7 @@ fn receive_udp_record<F: AsFd>(
         )
         .map_err(errno_io)?;
         let mut accumulator = OriginalDestinationAccumulator::new(family);
+        let mut gro_segment_size = None;
         let mut descriptors = Vec::new();
         let mut control_parse_failed = false;
         match message.cmsgs() {
@@ -1584,6 +1594,11 @@ fn receive_udp_record<F: AsFd>(
                                 descriptors.push(unsafe { OwnedFd::from_raw_fd(raw) });
                             }
                         }
+                        ControlMessageOwned::UdpGroSegments(value) => {
+                            if gro_segment_size.replace(value).is_some() {
+                                accumulator.observe_extra();
+                            }
+                        }
                         _ => accumulator.observe_extra(),
                     }
                 }
@@ -1596,6 +1611,7 @@ fn receive_udp_record<F: AsFd>(
             message.flags,
             source,
             accumulator,
+            gro_segment_size,
             descriptors,
             control_parse_failed,
         )
@@ -1605,11 +1621,13 @@ fn receive_udp_record<F: AsFd>(
     let source = source
         .ok_or_else(|| invalid_data("UDP datagram has no Internet source"))
         .and_then(|value| validate_concrete_address(value, family));
+    let gro_segment_size = validate_udp_gro_segment_size(gro_segment_size, bytes);
     if flags.intersects(MsgFlags::MSG_TRUNC | MsgFlags::MSG_CTRUNC)
         || control_parse_failed
         || !descriptors.is_empty()
         || destination.is_err()
         || source.is_err()
+        || gro_segment_size.is_err()
     {
         let initialized = bytes.min(payload.len());
         payload[..initialized].fill(0);
@@ -1621,7 +1639,19 @@ fn receive_udp_record<F: AsFd>(
         bytes,
         source: source.expect("checked source result"),
         original_destination: destination.expect("checked destination result"),
+        gro_segment_size: gro_segment_size.expect("checked UDP GRO segment size"),
     })
+}
+
+fn validate_udp_gro_segment_size(raw: Option<i32>, bytes: usize) -> io::Result<Option<usize>> {
+    raw.map(|value| {
+        usize::try_from(value)
+            .ok()
+            .filter(|size| *size != 0 && *size <= bytes)
+            .filter(|size| bytes.div_ceil(*size) <= 64)
+            .ok_or_else(|| invalid_data("invalid UDP GRO segment size"))
+    })
+    .transpose()
 }
 
 struct OriginalDestinationAccumulator {
@@ -3719,6 +3749,26 @@ exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES=first:second VOLPAROSSA_UAPI_
         let mut zero_port = OriginalDestinationAccumulator::new(IngressSocketFamily::Ipv4);
         zero_port.observe_ipv4(SocketAddrV4::new(*ipv4.ip(), 0));
         assert!(zero_port.finish().is_err());
+    }
+
+    #[test]
+    fn udp_gro_segment_metadata_preserves_exact_datagram_boundaries() {
+        assert_eq!(
+            validate_udp_gro_segment_size(Some(1_200), 4_800).expect("four exact segments"),
+            Some(1_200)
+        );
+        assert_eq!(
+            validate_udp_gro_segment_size(Some(1_200), 4_976).expect("short final segment"),
+            Some(1_200)
+        );
+        assert_eq!(
+            validate_udp_gro_segment_size(None, 4_800).expect("ordinary datagram"),
+            None
+        );
+        for invalid in [Some(0), Some(-1), Some(4_801)] {
+            assert!(validate_udp_gro_segment_size(invalid, 4_800).is_err());
+        }
+        assert!(validate_udp_gro_segment_size(Some(1), 65).is_err());
     }
 
     #[test]

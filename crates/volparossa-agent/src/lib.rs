@@ -648,7 +648,7 @@ async fn run_client_udp_ingress(
             }
             continue;
         };
-        let observed = match runtime.try_receive_udp(family) {
+        let observed_batch = match runtime.try_receive_udp(family) {
             Ok(ingress) => ingress,
             Err(ClientIngressUdpError::Receive(error))
                 if error.kind() == std::io::ErrorKind::WouldBlock =>
@@ -676,79 +676,56 @@ async fn run_client_udp_ingress(
             }
         };
         ready.clear_ready();
-        if observed.is_browser_quic() {
-            let ingresses = match browser_gate.inspect(observed, &policy, now_ms) {
-                Ok(BrowserQuicIngressDecision::NeedMore) => continue,
-                Ok(BrowserQuicIngressDecision::Authorized(ingresses)) => ingresses,
-                Err(ClientIngressUdpError::Policy(_)) => {
-                    browser_gate = BrowserQuicIngressGate::new();
-                    state.write().await.record_policy_rejection();
-                    continue;
-                }
-                Err(_) => {
-                    browser_gate = BrowserQuicIngressGate::new();
-                    state.write().await.log(
-                        LogLevel::Warn,
-                        "INGRESS_MPQUIC_CLIENT_HELLO_DENIED",
-                        unix_millis(),
-                    );
-                    continue;
-                }
-            };
-            if Box::pin(routes.ensure_browser_quic(&config, &discovery, &helper))
-                .await
-                .is_err()
-            {
-                browser_gate = BrowserQuicIngressGate::new();
-                state.write().await.log(
-                    LogLevel::Warn,
-                    "INGRESS_MPQUIC_ROUTE_UNAVAILABLE",
-                    unix_millis(),
-                );
-                continue;
-            }
-            let activation_ms = unix_millis();
-            let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
-                browser_gate = BrowserQuicIngressGate::new();
-                routes.disconnect().await;
-                state.write().await.record_policy_rejection();
-                continue;
-            };
-            let ingresses = match browser_gate.reauthorize_after_route_ready(
-                ingresses,
-                &active_policy,
-                activation_ms,
-            ) {
-                Ok(ingresses) => ingresses,
-                Err(ClientIngressUdpError::Policy(_)) => {
-                    browser_gate = BrowserQuicIngressGate::new();
-                    routes.disconnect().await;
-                    state.write().await.record_policy_rejection();
-                    continue;
-                }
-                Err(_) => {
-                    browser_gate = BrowserQuicIngressGate::new();
-                    routes.disconnect().await;
-                    state.write().await.log(
-                        LogLevel::Warn,
-                        "INGRESS_MPQUIC_DATAGRAM_REJECTED",
-                        unix_millis(),
-                    );
-                    continue;
-                }
-            };
-            for ingress in ingresses {
-                match routes
-                    .send_browser_quic_ingress(ingress, &active_policy, activation_ms)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(ClientRouteConnectError::UdpIngressUnavailable) => {
+        for observed in observed_batch {
+            if observed.is_browser_quic() {
+                let ingresses = match browser_gate.inspect(observed, &policy, now_ms) {
+                    Ok(BrowserQuicIngressDecision::NeedMore) => continue,
+                    Ok(BrowserQuicIngressDecision::Authorized(ingresses)) => ingresses,
+                    Err(ClientIngressUdpError::Policy(_)) => {
+                        browser_gate = BrowserQuicIngressGate::new();
+                        state.write().await.record_policy_rejection();
+                        continue;
+                    }
+                    Err(_) => {
+                        browser_gate = BrowserQuicIngressGate::new();
                         state.write().await.log(
                             LogLevel::Warn,
-                            "INGRESS_MPQUIC_DATAGRAM_DROPPED",
+                            "INGRESS_MPQUIC_CLIENT_HELLO_DENIED",
                             unix_millis(),
                         );
+                        continue;
+                    }
+                };
+                if Box::pin(routes.ensure_browser_quic(&config, &discovery, &helper))
+                    .await
+                    .is_err()
+                {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_MPQUIC_ROUTE_UNAVAILABLE",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+                let activation_ms = unix_millis();
+                let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    routes.disconnect().await;
+                    state.write().await.record_policy_rejection();
+                    continue;
+                };
+                let ingresses = match browser_gate.reauthorize_after_route_ready(
+                    ingresses,
+                    &active_policy,
+                    activation_ms,
+                ) {
+                    Ok(ingresses) => ingresses,
+                    Err(ClientIngressUdpError::Policy(_)) => {
+                        browser_gate = BrowserQuicIngressGate::new();
+                        routes.disconnect().await;
+                        state.write().await.record_policy_rejection();
+                        continue;
                     }
                     Err(_) => {
                         browser_gate = BrowserQuicIngressGate::new();
@@ -758,114 +735,139 @@ async fn run_client_udp_ingress(
                             "INGRESS_MPQUIC_DATAGRAM_REJECTED",
                             unix_millis(),
                         );
-                        break;
+                        continue;
+                    }
+                };
+                for ingress in ingresses {
+                    match routes
+                        .send_browser_quic_ingress(ingress, &active_policy, activation_ms)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(ClientRouteConnectError::UdpIngressUnavailable) => {
+                            state.write().await.log(
+                                LogLevel::Warn,
+                                "INGRESS_MPQUIC_DATAGRAM_DROPPED",
+                                unix_millis(),
+                            );
+                        }
+                        Err(_) => {
+                            browser_gate = BrowserQuicIngressGate::new();
+                            routes.disconnect().await;
+                            state.write().await.log(
+                                LogLevel::Warn,
+                                "INGRESS_MPQUIC_DATAGRAM_REJECTED",
+                                unix_millis(),
+                            );
+                            break;
+                        }
                     }
                 }
-            }
-            continue;
-        }
-        let ingress = match observed.authorize_ip(&policy, now_ms) {
-            Ok(ingress) => ingress,
-            Err(ClientIngressUdpError::Policy(_)) => {
-                state.write().await.record_policy_rejection();
                 continue;
             }
-            Err(_) => {
-                state.write().await.log(
-                    LogLevel::Warn,
-                    "INGRESS_UDP_DATAGRAM_REJECTED",
-                    unix_millis(),
-                );
-                continue;
-            }
-        };
-        if Box::pin(routes.ensure_general_udp(&config, &discovery, &helper))
-            .await
-            .is_err()
-        {
-            state.write().await.log(
-                LogLevel::Warn,
-                "INGRESS_UDP_ROUTE_UNAVAILABLE",
-                unix_millis(),
-            );
-            continue;
-        }
-        let activation_ms = unix_millis();
-        let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
-            routes.disconnect().await;
-            state.write().await.record_policy_rejection();
-            continue;
-        };
-        let ingress = match ingress.reauthorize_ip_after_route_ready(&active_policy, activation_ms)
-        {
-            Ok(ingress) => ingress,
-            Err(ClientIngressUdpError::Policy(_)) => {
-                routes.disconnect().await;
-                state.write().await.record_policy_rejection();
-                continue;
-            }
-            Err(_) => {
-                routes.disconnect().await;
-                state.write().await.log(
-                    LogLevel::Warn,
-                    "INGRESS_UDP_DATAGRAM_REJECTED",
-                    unix_millis(),
-                );
-                continue;
-            }
-        };
-        if Box::pin(routes.activate_udp_ingress(
-            ingress,
-            &active_policy,
-            Duration::from_secs(config.udp.idle_timeout_seconds),
-            activation_ms,
-        ))
-        .await
-        .is_err()
-        {
-            routes.disconnect().await;
-            state.write().await.log(
-                LogLevel::Warn,
-                "INGRESS_UDP_ROUTE_UNAVAILABLE",
-                unix_millis(),
-            );
-            continue;
-        }
-        let response = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    routes.disconnect().await;
-                    return;
+            let ingress = match observed.authorize_ip(&policy, now_ms) {
+                Ok(ingress) => ingress,
+                Err(ClientIngressUdpError::Policy(_)) => {
+                    state.write().await.record_policy_rejection();
+                    continue;
                 }
-                continue;
-            }
-            result = routes.receive_udp_response() => match result {
-                Ok(response) => response,
                 Err(_) => {
-                    routes.disconnect().await;
                     state.write().await.log(
                         LogLevel::Warn,
-                        "INGRESS_UDP_RESPONSE_UNAVAILABLE",
+                        "INGRESS_UDP_DATAGRAM_REJECTED",
                         unix_millis(),
                     );
                     continue;
                 }
-            },
-        };
-        if runtime
-            .send_udp_response(
-                response.application(),
-                response.remote(),
-                response.payload(),
-            )
+            };
+            if Box::pin(routes.ensure_general_udp(&config, &discovery, &helper))
+                .await
+                .is_err()
+            {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_UDP_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                continue;
+            }
+            let activation_ms = unix_millis();
+            let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+                routes.disconnect().await;
+                state.write().await.record_policy_rejection();
+                continue;
+            };
+            let ingress =
+                match ingress.reauthorize_ip_after_route_ready(&active_policy, activation_ms) {
+                    Ok(ingress) => ingress,
+                    Err(ClientIngressUdpError::Policy(_)) => {
+                        routes.disconnect().await;
+                        state.write().await.record_policy_rejection();
+                        continue;
+                    }
+                    Err(_) => {
+                        routes.disconnect().await;
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "INGRESS_UDP_DATAGRAM_REJECTED",
+                            unix_millis(),
+                        );
+                        continue;
+                    }
+                };
+            if Box::pin(routes.activate_udp_ingress(
+                ingress,
+                &active_policy,
+                Duration::from_secs(config.udp.idle_timeout_seconds),
+                activation_ms,
+            ))
             .await
             .is_err()
-        {
-            routes.disconnect().await;
-            state
-                .write()
+            {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_UDP_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                continue;
+            }
+            let response = tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        routes.disconnect().await;
+                        return;
+                    }
+                    continue;
+                }
+                result = routes.receive_udp_response() => match result {
+                    Ok(response) => response,
+                    Err(_) => {
+                        routes.disconnect().await;
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "INGRESS_UDP_RESPONSE_UNAVAILABLE",
+                            unix_millis(),
+                        );
+                        continue;
+                    }
+                },
+            };
+            if runtime
+                .send_udp_response(
+                    response.application(),
+                    response.remote(),
+                    response.payload(),
+                )
                 .await
-                .log(LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis());
+                .is_err()
+            {
+                routes.disconnect().await;
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis());
+            }
         }
     }
 }
