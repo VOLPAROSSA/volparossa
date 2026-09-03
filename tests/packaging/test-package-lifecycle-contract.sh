@@ -27,6 +27,10 @@ grep -F 'agent_control_socket=/run/volparossa/control/agent.sock' "$lifecycle" >
 [ "$(grep -Fc -- "--control-socket \"\$agent_control_socket\" status" "$lifecycle")" -eq 1 ]
 grep -F '/usr/bin/timeout --signal=KILL 0.2s' "$lifecycle" >/dev/null
 grep -F 'volparossa-agent control socket did not become ready' "$lifecycle" >/dev/null
+grep -F 'journalctl --no-pager --output=short-iso-precise -n 500' "$lifecycle" >/dev/null
+# Match the literal runtime variable rather than expanding it in this contract.
+# shellcheck disable=SC2016
+grep -F '>"$output_directory/service-journal.log" 2>&1 || true' "$lifecycle" >/dev/null
 
 mkdir "$temporary/bin"
 log=$temporary/commands

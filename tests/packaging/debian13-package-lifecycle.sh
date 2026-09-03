@@ -79,7 +79,7 @@ case $package_path:$output_directory in /*:/*) ;; *) exit 64 ;; esac
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'execute requires guest root' >&2; exit 77; }
 
 for command_name in apt-get awk cmp dpkg dpkg-deb dpkg-query find getent grep id \
-    install ip jq mktemp nft readlink rm runuser sed sha256sum stat systemctl \
+    install ip jq journalctl mktemp nft readlink rm runuser sed sha256sum stat systemctl \
     systemd-creds systemd-detect-virt uname; do
     command -v "$command_name" >/dev/null 2>&1 \
         || { printf 'required guest command unavailable: %s\n' "$command_name" >&2; exit 69; }
@@ -264,6 +264,11 @@ wait_agent_control_socket() {
         attempt=$((attempt + 1))
     done
     systemctl status --no-pager volparossa-agent.service >&2 || true
+    journalctl --no-pager --output=short-iso-precise -n 500 \
+        -u volparossa-agent.service \
+        -u volparossa-helper.service \
+        -u volparossa-mpquic.service \
+        >"$output_directory/service-journal.log" 2>&1 || true
     echo "volparossa-agent control socket did not become ready" >&2
     return 1
 }
