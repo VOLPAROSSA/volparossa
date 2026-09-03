@@ -2,6 +2,7 @@
 
 mod control;
 mod doctor;
+mod policy_bootstrap;
 mod secret;
 
 use std::{
@@ -137,6 +138,21 @@ enum PolicyCommand {
         #[arg(long, default_value = DEFAULT_TRUST_STORE)]
         trust_store: PathBuf,
     },
+    /// Generate a local 3-of-5 production policy and its private maintainer keys.
+    BootstrapLocal {
+        /// New absolute directory to publish; it and all output files must not exist.
+        #[arg(long, value_name = "ABSOLUTE_DIRECTORY")]
+        output_directory: PathBuf,
+        /// Repeatable exact-domain rule: DOMAIN=tcp:PORT[,udp:PORT...].
+        #[arg(long = "allow-domain", value_name = "RULE")]
+        allow_domains: Vec<String>,
+        /// Repeatable exact-IP rule: IP=tcp:PORT[,udp:PORT...].
+        #[arg(long = "allow-ip", value_name = "RULE")]
+        allow_ips: Vec<String>,
+        /// Manifest lifetime in hours (1 through 168).
+        #[arg(long, default_value_t = 24, value_parser = clap::value_parser!(u16).range(1..=168))]
+        lifetime_hours: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -269,17 +285,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 control::request(&cli.control_socket, Operation::Sessions(Empty {})).await?;
             print_response(response)
         }
-        CliCommand::Policy { command } => match command {
-            PolicyCommand::Status => {
-                let response =
-                    control::request(&cli.control_socket, Operation::PolicyStatus(Empty {}))
-                        .await?;
-                print_response(response)
-            }
-            PolicyCommand::Verify { file, trust_store } => {
-                verify_policy(&cli.config, &file, &trust_store)
-            }
-        },
+        CliCommand::Policy { command } => {
+            run_policy_command(command, &cli.config, &cli.control_socket).await
+        }
         CliCommand::Role { command } => match command {
             RoleCommand::Show => {
                 let response =
@@ -319,6 +327,44 @@ async fn dispatch(cli: Cli) -> Result<()> {
             )
             .await?;
             print_response(response)
+        }
+    }
+}
+
+async fn run_policy_command(command: PolicyCommand, config: &Path, socket: &Path) -> Result<()> {
+    match command {
+        PolicyCommand::Status => {
+            let response = control::request(socket, Operation::PolicyStatus(Empty {})).await?;
+            print_response(response)
+        }
+        PolicyCommand::Verify { file, trust_store } => verify_policy(config, &file, &trust_store),
+        PolicyCommand::BootstrapLocal {
+            output_directory,
+            allow_domains,
+            allow_ips,
+            lifetime_hours,
+        } => {
+            let output = policy_bootstrap::bootstrap_local(
+                &output_directory,
+                &allow_domains,
+                &allow_ips,
+                lifetime_hours,
+            )?;
+            println!("policy manifest: {}", output.manifest.display());
+            println!("production trust store: {}", output.trust_store.display());
+            println!("local maintainer keys: {}", output.keys_directory.display());
+            println!(
+                "warning: all five production-labeled maintainer keys are co-located for this personal alpha; separate them before operational use"
+            );
+            println!(
+                "configuration: set runtime_mode: production, policy.manifest_path: \"{}\", and policy.minimum_signatures: 3",
+                output.manifest.display()
+            );
+            println!(
+                "trust placement: policy-maintainers.json must be beside the active config file; using {}/config.yaml satisfies that layout",
+                output_directory.display()
+            );
+            Ok(())
         }
     }
 }
@@ -679,6 +725,17 @@ mod tests {
             &["volparossa", "sessions"],
             &["volparossa", "policy", "status"],
             &["volparossa", "policy", "verify", "/tmp/policy.manifest"],
+            &[
+                "volparossa",
+                "policy",
+                "bootstrap-local",
+                "--output-directory",
+                "/tmp/local-policy",
+                "--allow-domain",
+                "example.com=tcp:443,udp:443",
+                "--allow-ip",
+                "93.184.216.34=tcp:8443",
+            ],
             &["volparossa", "role", "show"],
             &["volparossa", "role", "enable", "relay"],
             &["volparossa", "role", "disable", "relay"],
@@ -706,6 +763,55 @@ mod tests {
             panic!("unexpected command");
         };
         assert_eq!(trust_store, PathBuf::from(DEFAULT_TRUST_STORE));
+    }
+
+    #[test]
+    fn policy_bootstrap_parses_repeatable_exact_rules_and_bounded_lifetime() {
+        let cli = Cli::try_parse_from([
+            "volparossa",
+            "policy",
+            "bootstrap-local",
+            "--output-directory",
+            "/etc/volparossa/local-policy",
+            "--allow-domain",
+            "example.com=tcp:443",
+            "--allow-domain",
+            "example.net=udp:443",
+            "--lifetime-hours",
+            "12",
+        ])
+        .expect("policy bootstrap");
+        let CliCommand::Policy {
+            command:
+                PolicyCommand::BootstrapLocal {
+                    output_directory,
+                    allow_domains,
+                    allow_ips,
+                    lifetime_hours,
+                },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(
+            output_directory,
+            PathBuf::from("/etc/volparossa/local-policy")
+        );
+        assert_eq!(allow_domains.len(), 2);
+        assert!(allow_ips.is_empty());
+        assert_eq!(lifetime_hours, 12);
+        assert!(
+            Cli::try_parse_from([
+                "volparossa",
+                "policy",
+                "bootstrap-local",
+                "--output-directory",
+                "/tmp/policy",
+                "--lifetime-hours",
+                "169",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
