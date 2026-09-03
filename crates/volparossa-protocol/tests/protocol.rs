@@ -109,8 +109,13 @@ fn preselection_request_is_v4_role_exact_short_and_bounded() {
     let mut request =
         preselection_request(PreselectionObservationRole::Relay, actor.clone(), None, 93);
     request.validate().unwrap();
-    request.expires_at_ms = NOW + 5_000;
-    request.validate().expect("exact five-second challenge");
+    request.scope.as_mut().unwrap().policy_expires_at_ms = NOW + 180_000;
+    request.actor.as_mut().unwrap().advertisement_expires_at_ms = NOW + 180_000;
+    request.actor.as_mut().unwrap().capability_expires_at_ms = NOW + 180_000;
+    request.expires_at_ms = NOW + 120_000;
+    request
+        .validate()
+        .expect("exact two-minute challenge ceiling");
     request.expires_at_ms += 1;
     assert!(matches!(
         request.validate(),
@@ -1556,6 +1561,8 @@ fn assert_native_probe_core_schema(rust: &str, schema: &str) {
                 ("challenge_hash", 15),
                 ("attempt_expires_at_ms", 16),
                 ("required_path_count", 17),
+                ("reserved_up_mbps", 18),
+                ("reserved_down_mbps", 19),
             ],
         ),
         (
@@ -1575,6 +1582,7 @@ fn assert_native_probe_core_schema(rust: &str, schema: &str) {
                 ("issued_at_ms", 3),
                 ("expires_at_ms", 4),
                 ("nonce", 5),
+                ("exit_control_address", 6),
             ],
         ),
     ];

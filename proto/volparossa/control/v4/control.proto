@@ -224,6 +224,10 @@ message NativeProbePathScope {
   bytes challenge_hash = 15;
   uint64 attempt_expires_at_ms = 16;
   uint32 required_path_count = 17;
+  // Client-requested upload capacity reserved for this exact path.
+  uint64 reserved_up_mbps = 18;
+  // Client-requested download capacity reserved for this exact path.
+  uint64 reserved_down_mbps = 19;
 }
 
 // Permit exchange is dataplane-endpoint-free and binds one exact attempt, candidate set,
