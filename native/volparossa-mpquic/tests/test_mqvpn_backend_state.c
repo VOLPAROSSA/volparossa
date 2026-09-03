@@ -462,9 +462,10 @@ static void test_reverse_fifo_overflow_and_complete_wipe(void)
                &state, packet, sizeof(packet)) ==
            VMP_MQVPN_RESULT_OVERFLOW);
 
-    /* With the exact 1420-byte assignment ceiling, the eight-packet ceiling
-     * necessarily fires before 256 KiB. A forged byte counter is corruption,
-     * not a legitimate resource overflow, and therefore fails as ENGINE. */
+    /* The bounded queue retains enough assignment-sized datagrams to absorb a
+     * transport burst without allocating the protocol's 64 KiB maximum for
+     * every slot. A forged byte counter is corruption, not a legitimate
+     * resource overflow, and therefore fails as ENGINE. */
     assert(VMP_MQVPN_REVERSE_MAX_BYTES >
            VMP_MQVPN_REVERSE_MAX_PACKETS * 1420U);
     vmp_mqvpn_backend_state_init(&state);
