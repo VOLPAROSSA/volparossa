@@ -32,6 +32,12 @@ const MAXIMUM_LOCAL_MEASUREMENTS: usize = 64;
 const HIGH_BAND_PERCENT: u64 = 70;
 const MIDDLE_BAND_PERCENT: u64 = 20;
 const SCORE_SCALE: f64 = 1_000.0;
+const CAPACITY_WEIGHT: u64 = 30;
+const UPTIME_WEIGHT: u64 = 20;
+const DELIVERY_WEIGHT: u64 = 15;
+const REPUTATION_WEIGHT: u64 = 15;
+const BALANCE_WEIGHT: u64 = 10;
+const FREE_SLOTS_WEIGHT: u64 = 10;
 
 #[cfg_attr(
     not(test),
@@ -622,12 +628,12 @@ fn static_candidate(
     let balance = 1_000_u64 / u64::from(active_sessions.saturating_add(1));
     let slots = u64::from(free_slots.min(1_000));
     let weight = capacity
-        .saturating_mul(35)
-        .saturating_add(uptime.saturating_mul(20))
-        .saturating_add(delivery.saturating_mul(15))
-        .saturating_add(reputation.saturating_mul(15))
-        .saturating_add(balance.saturating_mul(10))
-        .saturating_add(slots.saturating_mul(5))
+        .saturating_mul(CAPACITY_WEIGHT)
+        .saturating_add(uptime.saturating_mul(UPTIME_WEIGHT))
+        .saturating_add(delivery.saturating_mul(DELIVERY_WEIGHT))
+        .saturating_add(reputation.saturating_mul(REPUTATION_WEIGHT))
+        .saturating_add(balance.saturating_mul(BALANCE_WEIGHT))
+        .saturating_add(slots.saturating_mul(FREE_SLOTS_WEIGHT))
         .max(1);
     Some(StaticCandidate {
         weight,
@@ -1433,7 +1439,7 @@ mod tests {
         let baseline_score = static_candidate(&baseline, ServiceRole::Relay, scope)
             .expect("baseline candidate")
             .weight;
-        assert_eq!(baseline_score, 38_550);
+        assert_eq!(baseline_score, 38_100);
 
         let mut changed = baseline.clone();
         changed.advertisement.capacity.estimated_free = bandwidth(101);
@@ -1441,7 +1447,7 @@ mod tests {
             static_candidate(&changed, ServiceRole::Relay, scope)
                 .expect("capacity candidate")
                 .weight,
-            baseline_score + 35
+            baseline_score + 30
         );
 
         changed = baseline.clone();
@@ -1486,7 +1492,7 @@ mod tests {
             static_candidate(&changed, ServiceRole::Relay, scope)
                 .expect("slot candidate")
                 .weight,
-            baseline_score + 5
+            baseline_score + 10
         );
 
         changed = baseline.clone();
