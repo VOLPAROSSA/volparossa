@@ -8,7 +8,7 @@
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     os::fd::OwnedFd,
     time::Duration,
 };
@@ -27,6 +27,7 @@ use volparossa_inspection::{
 use volparossa_linux_uapi::{
     IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
     duplicate_descriptor_cloexec, receive_udp_with_original_destination, tcp_original_destination,
+    tcp_redirect_original_destination,
 };
 use volparossa_policy::{PolicyError, TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{ReplayCache, TimePolicy};
@@ -76,10 +77,26 @@ const IPV4_TRANSPARENT_UDP: ClientIngressSocketIdentity = ClientIngressSocketIde
     ClientIngressSocketKind::TransparentUdp,
     ClientIngressSocketFamily::Ipv4,
 );
+const IPV6_TRANSPARENT_UDP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
+    ClientIngressSocketKind::TransparentUdp,
+    ClientIngressSocketFamily::Ipv6,
+);
 
 const IPV4_DNS_UDP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
     ClientIngressSocketKind::DnsUdp,
     ClientIngressSocketFamily::Ipv4,
+);
+const IPV6_DNS_UDP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
+    ClientIngressSocketKind::DnsUdp,
+    ClientIngressSocketFamily::Ipv6,
+);
+const IPV4_DNS_TCP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
+    ClientIngressSocketKind::DnsTcpListener,
+    ClientIngressSocketFamily::Ipv4,
+);
+const IPV6_DNS_TCP: ClientIngressSocketIdentity = ClientIngressSocketIdentity::new(
+    ClientIngressSocketKind::DnsTcpListener,
+    ClientIngressSocketFamily::Ipv6,
 );
 
 /// Affine owner of the complete activated ingress descriptor set.
@@ -90,7 +107,7 @@ pub(crate) struct ClientIngressRuntime {
 }
 
 struct ExactReplySocketCache<T> {
-    sockets: HashMap<(SocketAddrV4, SocketAddrV4), T>,
+    sockets: HashMap<(SocketAddr, SocketAddr), T>,
 }
 
 impl<T> ExactReplySocketCache<T> {
@@ -100,7 +117,7 @@ impl<T> ExactReplySocketCache<T> {
         }
     }
 
-    fn get(&self, remote: SocketAddrV4, application: SocketAddrV4) -> Option<&T> {
+    fn get(&self, remote: SocketAddr, application: SocketAddr) -> Option<&T> {
         self.sockets.get(&(remote, application))
     }
 
@@ -108,12 +125,7 @@ impl<T> ExactReplySocketCache<T> {
         self.sockets.len() >= MAX_RETAINED_INGRESS_REPLY_SOCKETS
     }
 
-    fn insert_new(
-        &mut self,
-        remote: SocketAddrV4,
-        application: SocketAddrV4,
-        socket: T,
-    ) -> Option<&T> {
+    fn insert_new(&mut self, remote: SocketAddr, application: SocketAddr, socket: T) -> Option<&T> {
         if self.is_full() {
             return None;
         }
@@ -195,15 +207,26 @@ impl ClientIngressRuntime {
         &self,
     ) -> Result<[ClientTcpIngressListener; 2], ClientIngressTcpError> {
         Ok([
-            self.transparent_tcp_listener(IPV4_TRANSPARENT_TCP, KernelIngressSocketFamily::Ipv4)?,
-            self.transparent_tcp_listener(IPV6_TRANSPARENT_TCP, KernelIngressSocketFamily::Ipv6)?,
+            self.tcp_listener(IPV4_TRANSPARENT_TCP, KernelIngressSocketFamily::Ipv4, false)?,
+            self.tcp_listener(IPV6_TRANSPARENT_TCP, KernelIngressSocketFamily::Ipv6, false)?,
         ])
     }
 
-    fn transparent_tcp_listener(
+    /// Duplicate both dedicated DNS/TCP listeners into Tokio readiness owners.
+    pub(crate) fn dns_tcp_listeners(
+        &self,
+    ) -> Result<[ClientTcpIngressListener; 2], ClientIngressTcpError> {
+        Ok([
+            self.tcp_listener(IPV4_DNS_TCP, KernelIngressSocketFamily::Ipv4, true)?,
+            self.tcp_listener(IPV6_DNS_TCP, KernelIngressSocketFamily::Ipv6, true)?,
+        ])
+    }
+
+    fn tcp_listener(
         &self,
         identity: ClientIngressSocketIdentity,
         family: KernelIngressSocketFamily,
+        dns_redirect: bool,
     ) -> Result<ClientTcpIngressListener, ClientIngressTcpError> {
         let socket = self
             .active
@@ -211,27 +234,36 @@ impl ClientIngressRuntime {
             .ok_or(ClientIngressTcpError::DescriptorUnavailable)?;
         let descriptor = duplicate_descriptor_cloexec(&socket.descriptor())
             .map_err(ClientIngressTcpError::Duplicate)?;
-        ClientTcpIngressListener::from_descriptor(descriptor, family)
+        ClientTcpIngressListener::from_descriptor(descriptor, family, dns_redirect)
     }
 
-    /// Try to receive one IPv4 application datagram and bind its immutable destination to policy.
+    /// Try to receive one application datagram from the exact requested address family.
     ///
     /// The descriptor is nonblocking. `WouldBlock` is returned unchanged so an actor can wait for
     /// readiness without inventing a destination. The payload and destination enter the returned
     /// affine value only after exact ORIGDST evidence and the active whitelist both agree.
-    pub(crate) fn try_receive_ipv4_udp(&self) -> Result<ObservedUdpIngress, ClientIngressUdpError> {
+    pub(crate) fn try_receive_udp(
+        &self,
+        family: ClientIngressSocketFamily,
+    ) -> Result<ObservedUdpIngress, ClientIngressUdpError> {
+        let (identity, kernel_family) = match family {
+            ClientIngressSocketFamily::Ipv4 => {
+                (IPV4_TRANSPARENT_UDP, KernelIngressSocketFamily::Ipv4)
+            }
+            ClientIngressSocketFamily::Ipv6 => {
+                (IPV6_TRANSPARENT_UDP, KernelIngressSocketFamily::Ipv6)
+            }
+        };
         let socket = self
             .active
-            .socket(IPV4_TRANSPARENT_UDP)
+            .socket(identity)
             .ok_or(ClientIngressUdpError::DescriptorUnavailable)?;
-        let SocketAddr::V4(local) = socket.local_address() else {
-            return Err(ClientIngressUdpError::DescriptorUnavailable);
-        };
+        let local = socket.local_address();
         let mut payload = vec![0_u8; MAX_UDP_PAYLOAD_BYTES];
         let received = receive_udp_with_original_destination(
             &socket.descriptor(),
             KernelIngressSocketKind::TransparentUdp,
-            KernelIngressSocketFamily::Ipv4,
+            kernel_family,
             local.port(),
             &mut payload,
         )
@@ -240,31 +272,34 @@ impl ClientIngressRuntime {
         ObservedUdpIngress::new(received.source(), received.original_destination(), payload)
     }
 
-    pub(crate) fn duplicate_ipv4_udp_poll_descriptor(&self) -> Result<OwnedFd, io::Error> {
-        let socket = self.active.socket(IPV4_TRANSPARENT_UDP).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "IPv4 UDP ingress unavailable")
-        })?;
-        duplicate_descriptor_cloexec(&socket.descriptor())
+    pub(crate) fn duplicate_udp_poll_descriptors(&self) -> Result<[OwnedFd; 2], io::Error> {
+        Ok([
+            self.duplicate_poll_descriptor(IPV4_TRANSPARENT_UDP)?,
+            self.duplicate_poll_descriptor(IPV6_TRANSPARENT_UDP)?,
+        ])
     }
 
     /// Receive one dedicated DNS datagram and authorize only its bounded A/AAAA query name.
-    pub(crate) fn try_receive_ipv4_dns_udp(
+    pub(crate) fn try_receive_dns_udp(
         &self,
+        family: ClientIngressSocketFamily,
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<PolicyAuthorizedDnsIngress, ClientIngressUdpError> {
+        let (identity, kernel_family) = match family {
+            ClientIngressSocketFamily::Ipv4 => (IPV4_DNS_UDP, KernelIngressSocketFamily::Ipv4),
+            ClientIngressSocketFamily::Ipv6 => (IPV6_DNS_UDP, KernelIngressSocketFamily::Ipv6),
+        };
         let socket = self
             .active
-            .socket(IPV4_DNS_UDP)
+            .socket(identity)
             .ok_or(ClientIngressUdpError::DescriptorUnavailable)?;
-        let SocketAddr::V4(local) = socket.local_address() else {
-            return Err(ClientIngressUdpError::DescriptorUnavailable);
-        };
+        let local = socket.local_address();
         let mut payload = vec![0_u8; MAX_DNS_MESSAGE_BYTES];
         let received = receive_udp_with_original_destination(
             &socket.descriptor(),
             KernelIngressSocketKind::DnsUdp,
-            KernelIngressSocketFamily::Ipv4,
+            kernel_family,
             local.port(),
             &mut payload,
         )
@@ -279,17 +314,30 @@ impl ClientIngressRuntime {
         )
     }
 
-    pub(crate) fn duplicate_ipv4_dns_udp_poll_descriptor(&self) -> Result<OwnedFd, io::Error> {
-        let socket = self.active.socket(IPV4_DNS_UDP).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "IPv4 DNS UDP ingress unavailable")
+    pub(crate) fn duplicate_dns_udp_poll_descriptors(&self) -> Result<[OwnedFd; 2], io::Error> {
+        Ok([
+            self.duplicate_poll_descriptor(IPV4_DNS_UDP)?,
+            self.duplicate_poll_descriptor(IPV6_DNS_UDP)?,
+        ])
+    }
+
+    fn duplicate_poll_descriptor(
+        &self,
+        identity: ClientIngressSocketIdentity,
+    ) -> Result<OwnedFd, io::Error> {
+        let socket = self.active.socket(identity).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "client ingress descriptor unavailable",
+            )
         })?;
         duplicate_descriptor_cloexec(&socket.descriptor())
     }
 
-    pub(crate) async fn send_ipv4_udp_response(
+    pub(crate) async fn send_udp_response(
         &self,
-        application: SocketAddrV4,
-        remote: SocketAddrV4,
+        application: SocketAddr,
+        remote: SocketAddr,
         payload: &[u8],
     ) -> Result<(), ClientIngressUdpError> {
         if payload.len() > MAX_UDP_PAYLOAD_BYTES {
@@ -329,12 +377,14 @@ impl ClientIngressRuntime {
 pub(crate) struct ClientTcpIngressListener {
     listener: TcpListener,
     family: KernelIngressSocketFamily,
+    dns_redirect: bool,
 }
 
 impl ClientTcpIngressListener {
     fn from_descriptor(
         descriptor: OwnedFd,
         family: KernelIngressSocketFamily,
+        dns_redirect: bool,
     ) -> Result<Self, ClientIngressTcpError> {
         let listener = std::net::TcpListener::from(descriptor);
         listener
@@ -343,20 +393,26 @@ impl ClientTcpIngressListener {
         Ok(Self {
             listener: TcpListener::from_std(listener).map_err(ClientIngressTcpError::Duplicate)?,
             family,
+            dns_redirect,
         })
     }
 
     /// Accept one application stream and recover its immutable kernel original destination.
     pub(crate) async fn accept(&self) -> Result<ObservedTcpIngress, ClientIngressTcpError> {
-        let (stream, _source) = self
+        let (stream, source) = self
             .listener
             .accept()
             .await
             .map_err(ClientIngressTcpError::Accept)?;
-        let destination = tcp_original_destination(&stream, self.family)
-            .map_err(ClientIngressTcpError::OriginalDestination)?;
+        let destination = if self.dns_redirect {
+            tcp_redirect_original_destination(&stream, self.family, 53)
+        } else {
+            tcp_original_destination(&stream, self.family)
+        }
+        .map_err(ClientIngressTcpError::OriginalDestination)?;
         Ok(ObservedTcpIngress {
             stream,
+            source,
             destination,
         })
     }
@@ -366,10 +422,24 @@ impl ClientTcpIngressListener {
 #[must_use = "an observed TCP ingress stream must be policy-bound or dropped"]
 pub(crate) struct ObservedTcpIngress {
     stream: TcpStream,
+    source: SocketAddr,
     destination: SocketAddr,
 }
 
 impl ObservedTcpIngress {
+    /// Consume a dedicated DNS listener result into its stream and exact family-matched tuples.
+    pub(crate) fn into_dns_parts(
+        self,
+    ) -> Result<(TcpStream, SocketAddr, SocketAddr), ClientIngressTcpError> {
+        if self.source.port() == 0
+            || self.destination.port() != 53
+            || self.source.is_ipv4() != self.destination.is_ipv4()
+        {
+            return Err(ClientIngressTcpError::DestinationBinding);
+        }
+        Ok((self.stream, self.source, self.destination))
+    }
+
     /// Bind the kernel-observed tuple to the active manifest. TCP/443 and destinations which are
     /// not independently authorised by exact IP require a visible policy-approved SNI and retain
     /// the original address as an Exit-side DNS pin. This keeps domain policy usable on explicit
@@ -556,8 +626,8 @@ fn authorize_tcp_destination(
 /// One kernel-observed UDP datagram before destination policy is selected.
 #[must_use = "kernel UDP evidence must be inspected and authorized or dropped"]
 pub(crate) struct ObservedUdpIngress {
-    source: SocketAddrV4,
-    destination: SocketAddrV4,
+    source: SocketAddr,
+    destination: SocketAddr,
     payload: Vec<u8>,
 }
 
@@ -567,9 +637,9 @@ impl ObservedUdpIngress {
         destination: SocketAddr,
         payload: Vec<u8>,
     ) -> Result<Self, ClientIngressUdpError> {
-        let (SocketAddr::V4(source), SocketAddr::V4(destination)) = (source, destination) else {
+        if source.is_ipv4() != destination.is_ipv4() {
             return Err(ClientIngressUdpError::AddressFamily);
-        };
+        }
         if source.port() == 0
             || destination.port() == 0
             || source.ip().is_unspecified()
@@ -595,8 +665,8 @@ impl ObservedUdpIngress {
         now_ms: u64,
     ) -> Result<PolicyAuthorizedUdpIngress, ClientIngressUdpError> {
         PolicyAuthorizedUdpIngress::authorize(
-            self.source.into(),
-            self.destination.into(),
+            self.source,
+            self.destination,
             self.payload,
             policy,
             now_ms,
@@ -612,15 +682,15 @@ pub(crate) struct BrowserQuicIngressGate {
 enum BrowserQuicIngressState {
     Empty,
     Pending {
-        source: SocketAddrV4,
-        destination: SocketAddrV4,
+        source: SocketAddr,
+        destination: SocketAddr,
         inspector: Box<QuicInitialInspector>,
         datagrams: Vec<Vec<u8>>,
         bytes: usize,
     },
     Authorized {
-        source: SocketAddrV4,
-        destination: SocketAddrV4,
+        source: SocketAddr,
+        destination: SocketAddr,
         hostname: String,
         policy_hash: [u8; 32],
         expires_at_ms: u64,
@@ -851,8 +921,8 @@ fn udp_flow_expiry(policy: &VerifiedManifest, now_ms: u64) -> Result<u64, Client
 /// or caller-substituted destination.
 #[must_use = "a policy-authorized ingress datagram must be route-bound or dropped"]
 pub(crate) struct PolicyAuthorizedUdpIngress {
-    source: SocketAddrV4,
-    destination: SocketAddrV4,
+    source: SocketAddr,
+    destination: SocketAddr,
     payload: Vec<u8>,
     policy_hash: [u8; 32],
     expires_at_ms: u64,
@@ -867,13 +937,13 @@ impl PolicyAuthorizedUdpIngress {
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<Self, ClientIngressUdpError> {
-        let (SocketAddr::V4(source), SocketAddr::V4(destination)) = (source, destination) else {
+        if source.is_ipv4() != destination.is_ipv4() {
             return Err(ClientIngressUdpError::AddressFamily);
-        };
+        }
         policy
             .authorize_ip(
                 now_ms,
-                IpAddr::V4(*destination.ip()),
+                destination.ip(),
                 TransportProtocol::Udp,
                 destination.port(),
             )
@@ -929,7 +999,7 @@ impl PolicyAuthorizedUdpIngress {
         policy
             .authorize_ip(
                 now_ms,
-                IpAddr::V4(*self.destination.ip()),
+                self.destination.ip(),
                 TransportProtocol::Udp,
                 self.destination.port(),
             )
@@ -970,7 +1040,7 @@ impl PolicyAuthorizedUdpIngress {
                 route_context_id,
                 self.policy_hash,
                 hostname,
-                IpAddr::V4(*self.destination.ip()),
+                self.destination.ip(),
                 self.destination.port(),
                 INGRESS_UDP_IDLE_TIMEOUT_MS,
                 now_ms,
@@ -980,7 +1050,7 @@ impl PolicyAuthorizedUdpIngress {
             coordinator.sign_udp_ip(
                 route_context_id,
                 self.policy_hash,
-                IpAddr::V4(*self.destination.ip()),
+                self.destination.ip(),
                 self.destination.port(),
                 INGRESS_UDP_IDLE_TIMEOUT_MS,
                 now_ms,
@@ -1028,26 +1098,30 @@ impl PolicyAuthorizedUdpIngress {
             &mut replay,
         )
         .map_err(ClientIngressUdpError::Authorization)?;
+        let (SocketAddr::V4(source), SocketAddr::V4(destination)) = (self.source, self.destination)
+        else {
+            return Err(ClientIngressUdpError::AddressFamily);
+        };
         if !self.is_browser_quic()
-            || self.source.port() == 0
-            || self.source.ip().is_unspecified()
+            || source.port() == 0
+            || source.ip().is_unspecified()
             || tunnel_source.is_unspecified()
-            || !flow.matches_exact_ip_destination(SocketAddr::V4(self.destination))
+            || !flow.matches_exact_ip_destination(SocketAddr::V4(destination))
             || flow.hostname() != self.hostname.as_deref()
         {
             return Err(ClientIngressUdpError::DestinationBinding);
         }
         let packet = build_ipv4_udp_packet(
-            SocketAddrV4::new(tunnel_source, self.source.port()),
-            self.destination,
+            SocketAddrV4::new(tunnel_source, source.port()),
+            destination,
             &self.payload,
             maximum_packet_bytes,
         )?;
         Ok((
             BrowserQuicFlowBinding {
                 flow,
-                application: self.source,
-                remote: self.destination,
+                application: source,
+                remote: destination,
                 tunnel_source,
                 policy_hash: self.policy_hash,
                 last_activity_ms: now_ms,
@@ -1078,7 +1152,7 @@ impl PolicyAuthorizedUdpIngress {
             .sign_udp_ip(
                 *path.route_context_id(),
                 self.policy_hash,
-                IpAddr::V4(*self.destination.ip()),
+                self.destination.ip(),
                 self.destination.port(),
                 INGRESS_UDP_IDLE_TIMEOUT_MS,
                 now_ms,
@@ -1105,7 +1179,7 @@ impl PolicyAuthorizedUdpIngress {
                 &mut replay,
             )
             .map_err(ClientIngressUdpError::Authorization)?;
-        if !flow.matches_exact_ip_destination(SocketAddr::V4(self.destination)) {
+        if !flow.matches_exact_ip_destination(self.destination) {
             return Err(ClientIngressUdpError::DestinationBinding);
         }
         Ok(RouteAuthorizedUdpIngress {
@@ -1121,8 +1195,8 @@ impl PolicyAuthorizedUdpIngress {
 /// One helper-intercepted DNS query bound to an active domain policy rule.
 #[must_use = "a policy-authorized DNS query must be route-bound or dropped"]
 pub(crate) struct PolicyAuthorizedDnsIngress {
-    source: SocketAddrV4,
-    resolver: SocketAddrV4,
+    source: SocketAddr,
+    resolver: SocketAddr,
     payload: Vec<u8>,
     hostname: String,
     policy_hash: [u8; 32],
@@ -1130,16 +1204,16 @@ pub(crate) struct PolicyAuthorizedDnsIngress {
 }
 
 impl PolicyAuthorizedDnsIngress {
-    fn authorize(
+    pub(crate) fn authorize(
         source: SocketAddr,
         resolver: SocketAddr,
         payload: Vec<u8>,
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<Self, ClientIngressUdpError> {
-        let (SocketAddr::V4(source), SocketAddr::V4(resolver)) = (source, resolver) else {
+        if source.is_ipv4() != resolver.is_ipv4() {
             return Err(ClientIngressUdpError::AddressFamily);
-        };
+        }
         if source.port() == 0 || resolver.port() != 53 {
             return Err(ClientIngressUdpError::DestinationBinding);
         }
@@ -1247,8 +1321,8 @@ impl BrowserQuicFlowBinding {
     ) -> Result<Vec<u8>, ClientIngressUdpError> {
         self.ensure_live(policy, now_ms)?;
         if !ingress.is_browser_quic()
-            || ingress.source != self.application
-            || ingress.destination != self.remote
+            || ingress.source != SocketAddr::V4(self.application)
+            || ingress.destination != SocketAddr::V4(self.remote)
             || ingress.policy_hash.ct_eq(&self.policy_hash).unwrap_u8() != 1
             || now_ms >= ingress.expires_at_ms
         {
@@ -1313,8 +1387,8 @@ impl BrowserQuicFlowBinding {
     /// Return whether one freshly inspected datagram belongs to this retained application flow.
     pub(crate) fn matches_ingress_tuple(&self, ingress: &PolicyAuthorizedUdpIngress) -> bool {
         ingress.is_browser_quic()
-            && ingress.source == self.application
-            && ingress.destination == self.remote
+            && ingress.source == SocketAddr::V4(self.application)
+            && ingress.destination == SocketAddr::V4(self.remote)
     }
 
     /// Return whether this exact policy and signed flow binding can still carry data.
@@ -1452,8 +1526,8 @@ fn internet_checksum(bytes: &[u8]) -> u16 {
 pub(crate) struct RouteAuthorizedUdpIngress {
     flow: AuthorizedUdpFlow,
     signed_authorization: Vec<u8>,
-    source: SocketAddrV4,
-    destination: SocketAddrV4,
+    source: SocketAddr,
+    destination: SocketAddr,
     payload: Vec<u8>,
 }
 
@@ -1464,12 +1538,12 @@ impl RouteAuthorizedUdpIngress {
     }
 
     /// Return the application source tuple needed for reverse datagram delivery.
-    pub(crate) const fn source(&self) -> SocketAddrV4 {
+    pub(crate) const fn source(&self) -> SocketAddr {
         self.source
     }
 
     /// Return the immutable original destination that responses must impersonate locally.
-    pub(crate) const fn destination(&self) -> SocketAddrV4 {
+    pub(crate) const fn destination(&self) -> SocketAddr {
         self.destination
     }
 
@@ -1498,16 +1572,14 @@ impl RouteAuthorizedUdpIngress {
             || ingress.source != self.source
             || ingress.destination != self.destination
             || ingress.policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() != 1
-            || !self
-                .flow
-                .matches_exact_ip_destination(SocketAddr::V4(ingress.destination))
+            || !self.flow.matches_exact_ip_destination(ingress.destination)
         {
             return Err(ClientIngressUdpError::DestinationBinding);
         }
         policy
             .authorize_ip(
                 now_ms,
-                IpAddr::V4(*ingress.destination.ip()),
+                ingress.destination.ip(),
                 TransportProtocol::Udp,
                 ingress.destination.port(),
             )
@@ -1523,8 +1595,13 @@ impl RouteAuthorizedUdpIngress {
         &self,
         packet: &'a [u8],
     ) -> Result<&'a [u8], ClientIngressUdpError> {
+        let (SocketAddr::V4(expected_source), SocketAddr::V4(expected_destination)) =
+            (self.destination, self.source)
+        else {
+            return Err(ClientIngressUdpError::AddressFamily);
+        };
         let (source, destination, payload) = parse_ipv4_udp_packet(packet)?;
-        if source != self.destination || destination.port() != self.source.port() {
+        if source != expected_source || destination.port() != expected_destination.port() {
             return Err(ClientIngressUdpError::DestinationBinding);
         }
         Ok(payload)
@@ -1635,7 +1712,7 @@ pub(crate) enum ClientIngressUdpError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -1652,8 +1729,8 @@ mod tests {
     use super::{
         BrowserQuicIngressGate, BrowserQuicIngressState, ClientIngressUdpError,
         ExactReplySocketCache, MAX_RETAINED_INGRESS_REPLY_SOCKETS, ObservedTcpIngress,
-        ObservedUdpIngress, PolicyAuthorizedUdpIngress, authorize_tcp_destination,
-        build_ipv4_udp_packet, parse_ipv4_udp_packet,
+        ObservedUdpIngress, PolicyAuthorizedDnsIngress, PolicyAuthorizedUdpIngress,
+        authorize_tcp_destination, build_ipv4_udp_packet, parse_ipv4_udp_packet,
     };
 
     #[tokio::test]
@@ -1685,6 +1762,7 @@ mod tests {
 
         let authorized = ObservedTcpIngress {
             stream,
+            source: SocketAddr::from((Ipv4Addr::LOCALHOST, 50_000)),
             destination,
         }
         .authorize(&policy, NOW_MS)
@@ -1707,8 +1785,8 @@ mod tests {
 
     #[test]
     fn ingress_reply_socket_is_reused_beyond_helper_issuance_limit() {
-        let remote = SocketAddrV4::new(Ipv4Addr::new(47, 163, 4, 2), 443);
-        let application = SocketAddrV4::new(Ipv4Addr::new(43, 159, 1, 1), 52_006);
+        let remote = SocketAddr::from((Ipv4Addr::new(47, 163, 4, 2), 443));
+        let application = SocketAddr::from((Ipv4Addr::new(43, 159, 1, 1), 52_006));
         let mut cache = ExactReplySocketCache::new();
         let mut acquisitions = 0_u32;
 
@@ -1758,6 +1836,7 @@ mod tests {
         let (stream, _) = listener.accept().await.expect("accepted test stream");
         let ingress = ObservedTcpIngress {
             stream,
+            source: SocketAddr::from((Ipv4Addr::LOCALHOST, 50_000)),
             destination,
         }
         .authorize(&observed_policy, OBSERVED_MS)
@@ -1903,7 +1982,7 @@ mod tests {
         assert!(flow.matches_exact_ip_destination(destination));
         assert!(!signature.is_empty());
         assert_eq!(bound.source(), "10.0.0.2:52000".parse().expect("source"));
-        assert_eq!(SocketAddr::V4(bound.destination()), destination);
+        assert_eq!(bound.destination(), destination);
         assert_eq!(bound.payload(), b"alpha-datagram");
 
         let continuation = PolicyAuthorizedUdpIngress::authorize(
@@ -1962,8 +2041,8 @@ mod tests {
         let refreshed = ingress
             .reauthorize_ip_after_route_ready(&ready_policy, ROUTE_READY_MS)
             .expect("exact tuple re-authorized at route readiness");
-        assert_eq!(SocketAddr::V4(refreshed.source), source);
-        assert_eq!(SocketAddr::V4(refreshed.destination), destination);
+        assert_eq!(refreshed.source, source);
+        assert_eq!(refreshed.destination, destination);
         assert_eq!(refreshed.payload, b"buffered-datagram");
         assert!(refreshed.hostname.is_none());
         assert_eq!(refreshed.policy_hash, *ready_policy.policy_hash());
@@ -1975,6 +2054,50 @@ mod tests {
             refreshed.reauthorize_ip_after_route_ready(&denied_policy, ROUTE_READY_MS),
             Err(ClientIngressUdpError::Policy(_))
         ));
+    }
+
+    #[test]
+    fn ipv6_udp_and_dns_ingress_retain_exact_family_bound_tuples() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        let application = SocketAddr::from((Ipv6Addr::new(0xfd76, 0, 0, 0, 0, 0, 0, 7), 52_000));
+        let destination = SocketAddr::from((
+            Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+            18_081,
+        ));
+        let udp_permission =
+            ProtocolPort::new(TransportProtocol::Udp, destination.port()).expect("UDP permission");
+        let udp_rule =
+            DestinationRule::exact_ip(destination.ip(), [udp_permission]).expect("IPv6 rule");
+        let udp_policy =
+            verified_development_manifest(NOW_MS, vec![udp_rule]).expect("IPv6 policy");
+        let observed = ObservedUdpIngress::new(application, destination, b"ipv6-datagram".to_vec())
+            .expect("IPv6 kernel tuple");
+        let authorized = observed
+            .authorize_ip(&udp_policy, NOW_MS)
+            .expect("IPv6 policy authorization");
+        assert_eq!(authorized.source, application);
+        assert_eq!(authorized.destination, destination);
+
+        let dns_permission = ProtocolPort::new(TransportProtocol::Udp, 53).expect("DNS permission");
+        let dns_rule =
+            DestinationRule::exact_domain("allowed.example", [dns_permission]).expect("DNS rule");
+        let dns_policy = verified_development_manifest(NOW_MS, vec![dns_rule]).expect("DNS policy");
+        let mut query = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        query.extend_from_slice(&[
+            7, b'a', b'l', b'l', b'o', b'w', b'e', b'd', 7, b'e', b'x', b'a', b'm', b'p', b'l',
+            b'e', 0, 0, 1, 0, 1,
+        ]);
+        let resolver = SocketAddr::from((destination.ip(), 53));
+        let dns = PolicyAuthorizedDnsIngress::authorize(
+            application,
+            resolver,
+            query,
+            &dns_policy,
+            NOW_MS,
+        )
+        .expect("IPv6 protected DNS authorization");
+        assert_eq!(dns.source, application);
+        assert_eq!(dns.resolver, resolver);
     }
 
     fn authorize_browser_quic_test_ingress(
@@ -2019,8 +2142,8 @@ mod tests {
         assert!(ROUTE_READY_MS >= ingress.expires_at_ms);
         let mut gate = BrowserQuicIngressGate {
             state: BrowserQuicIngressState::Authorized {
-                source: application,
-                destination: remote,
+                source: application.into(),
+                destination: remote.into(),
                 hostname: HOSTNAME.to_owned(),
                 policy_hash: *inspected_policy.policy_hash(),
                 expires_at_ms: ingress.expires_at_ms,
@@ -2031,8 +2154,8 @@ mod tests {
             .reauthorize_after_route_ready(vec![ingress], &ready_policy, ROUTE_READY_MS)
             .expect("exact inspected tuple re-authorized at route readiness");
         assert_eq!(refreshed.len(), 1);
-        assert_eq!(refreshed[0].source, application);
-        assert_eq!(refreshed[0].destination, remote);
+        assert_eq!(refreshed[0].source, SocketAddr::V4(application));
+        assert_eq!(refreshed[0].destination, SocketAddr::V4(remote));
         assert_eq!(refreshed[0].payload, b"buffered-initial");
         assert_eq!(refreshed[0].hostname.as_deref(), Some(HOSTNAME));
         assert_eq!(refreshed[0].policy_hash, *ready_policy.policy_hash());

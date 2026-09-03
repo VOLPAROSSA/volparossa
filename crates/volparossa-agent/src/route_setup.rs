@@ -23,7 +23,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
-    net::{IpAddr, Ipv4Addr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -683,17 +683,17 @@ pub(crate) enum ClientRouteProgress {
 
 /// One response datagram plus the exact transparent local return tuple.
 pub(crate) struct ClientUdpResponse {
-    application: SocketAddrV4,
-    remote: SocketAddrV4,
+    application: SocketAddr,
+    remote: SocketAddr,
     payload: Vec<u8>,
 }
 
 impl ClientUdpResponse {
-    pub(crate) const fn application(&self) -> SocketAddrV4 {
+    pub(crate) const fn application(&self) -> SocketAddr {
         self.application
     }
 
-    pub(crate) const fn remote(&self) -> SocketAddrV4 {
+    pub(crate) const fn remote(&self) -> SocketAddr {
         self.remote
     }
 
@@ -1279,13 +1279,16 @@ impl ClientRouteControl {
                             .bind_next_native_datagram(ingress, policy, now_ms)
                             .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
                         let (flow, _) = binding.activation();
+                        let SocketAddr::V4(destination) = binding.destination() else {
+                            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+                        };
                         active
                             .session
                             .send_general_udp(
                                 flow,
                                 None,
                                 binding.source().port(),
-                                binding.destination(),
+                                destination,
                                 &payload,
                                 now_ms,
                             )
@@ -1312,13 +1315,16 @@ impl ClientRouteControl {
                         .bind_to_route(&active.path, &protocol.coordinator, policy, now_ms)
                         .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
                     let (flow, signed_authorization) = authorized.activation();
+                    let SocketAddr::V4(destination) = authorized.destination() else {
+                        return Err(ClientRouteConnectError::UdpIngressUnavailable);
+                    };
                     active
                         .session
                         .send_general_udp(
                             flow,
                             Some(signed_authorization),
                             authorized.source().port(),
-                            authorized.destination(),
+                            destination,
                             authorized.payload(),
                             now_ms,
                         )
@@ -1541,6 +1547,9 @@ impl ClientRouteControl {
                 .binding
                 .as_ref()
                 .ok_or(ClientRouteConnectError::Busy)?;
+            let SocketAddr::V4(destination) = binding.destination() else {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
             let packet = timeout(MAXIMUM_CALL_DURATION, async {
                 loop {
                     if let Some(packet) = active
@@ -1548,7 +1557,7 @@ impl ClientRouteControl {
                         .receive_general_udp(
                             binding.activation().0,
                             binding.source().port(),
-                            binding.destination(),
+                            destination,
                             crate::unix_millis(),
                         )
                         .await?
@@ -1742,8 +1751,8 @@ impl ClientRouteControl {
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
             .to_vec();
         let response = ClientUdpResponse {
-            application,
-            remote,
+            application: SocketAddr::V4(application),
+            remote: SocketAddr::V4(remote),
             payload,
         };
         let paths = active.path_summaries().await?;
@@ -4569,8 +4578,8 @@ pub(crate) struct ActiveProductionUdpRoute {
 
 #[derive(Clone, Copy)]
 struct ClientUdpReturnPath {
-    application: SocketAddrV4,
-    remote: SocketAddrV4,
+    application: SocketAddr,
+    remote: SocketAddr,
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]

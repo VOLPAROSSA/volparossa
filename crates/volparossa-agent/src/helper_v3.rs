@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Read,
-    net::SocketAddrV4,
+    net::{SocketAddr, SocketAddrV4},
     os::fd::{AsFd, AsRawFd as _, BorrowedFd, OwnedFd},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
@@ -129,7 +129,7 @@ struct IngressAuthority {
 struct PreparedIngressSocketAuthority {
     socket_handle: [u8; 32],
     wire_local: IngressSocketAddress,
-    local: std::net::SocketAddr,
+    local: SocketAddr,
     acquisition_started: bool,
 }
 
@@ -160,10 +160,7 @@ impl PreparedClientIngress {
 
     /// Return the helper-selected wildcard bind tuple for one identity.
     #[must_use]
-    pub fn local_address(
-        &self,
-        identity: ClientIngressSocketIdentity,
-    ) -> Option<std::net::SocketAddr> {
+    pub fn local_address(&self, identity: ClientIngressSocketIdentity) -> Option<SocketAddr> {
         self.sockets.get(&identity).map(|socket| socket.local)
     }
 }
@@ -178,14 +175,14 @@ pub struct AcquiredIngressSocket {
     socket_handle: [u8; 32],
     receipt_handle: [u8; 32],
     identity: ClientIngressSocketIdentity,
-    local: std::net::SocketAddr,
+    local: SocketAddr,
 }
 
 /// One connected, non-retargetable transparent UDP socket for an exact intercepted flow reply.
 pub(crate) struct AcquiredIngressReplySocket {
     descriptor: OwnedFd,
-    remote: SocketAddrV4,
-    application: SocketAddrV4,
+    remote: SocketAddr,
+    application: SocketAddr,
 }
 
 impl AcquiredIngressReplySocket {
@@ -205,11 +202,11 @@ impl AcquiredIngressReplySocket {
         Ok(())
     }
 
-    pub(crate) const fn remote(&self) -> SocketAddrV4 {
+    pub(crate) const fn remote(&self) -> SocketAddr {
         self.remote
     }
 
-    pub(crate) const fn application(&self) -> SocketAddrV4 {
+    pub(crate) const fn application(&self) -> SocketAddr {
         self.application
     }
 }
@@ -229,7 +226,7 @@ impl AcquiredIngressSocket {
 
     /// Return the kernel-revalidated wildcard bind tuple.
     #[must_use]
-    pub const fn local_address(&self) -> std::net::SocketAddr {
+    pub const fn local_address(&self) -> SocketAddr {
         self.local
     }
 }
@@ -1148,19 +1145,19 @@ impl HelperClient {
         })
     }
 
-    /// Acquire one exact connected transparent IPv4 UDP reply descriptor for active ingress.
+    /// Acquire one exact connected transparent IPv4 or IPv6 UDP reply descriptor for active ingress.
     pub(crate) async fn acquire_ingress_reply_socket(
         &self,
         ingress: &ActiveClientIngress,
-        remote: SocketAddrV4,
-        application: SocketAddrV4,
+        remote: SocketAddr,
+        application: SocketAddr,
     ) -> Result<AcquiredIngressReplySocket, HelperClientError> {
         let authority = ingress.authority;
         let operation = AcquireIngressReplySocket {
             client_runtime_id: authority.client_runtime_id.to_vec(),
             ingress_handle: authority.ingress_handle.to_vec(),
-            remote: Some(ingress_ipv4_address(remote)),
-            application: Some(ingress_ipv4_address(application)),
+            remote: Some(ingress_address(remote)),
+            application: Some(ingress_address(application)),
         };
         let execution = self
             .execute_operation(
@@ -1708,7 +1705,7 @@ fn client_ingress_identity(
 fn client_ingress_local(
     value: &IngressSocketAddress,
     family: ClientIngressSocketFamily,
-) -> Result<std::net::SocketAddr, HelperClientError> {
+) -> Result<SocketAddr, HelperClientError> {
     let port = u16::try_from(value.port).map_err(|_| HelperClientError::Correlation)?;
     if port == 0 {
         return Err(HelperClientError::Correlation);
@@ -1724,7 +1721,7 @@ fn client_ingress_local(
             if !address.is_unspecified() {
                 return Err(HelperClientError::Correlation);
             }
-            Ok(std::net::SocketAddr::V4(SocketAddrV4::new(address, port)))
+            Ok(SocketAddr::V4(SocketAddrV4::new(address, port)))
         }
         ClientIngressSocketFamily::Ipv6 => {
             let address: [u8; 16] = value
@@ -1736,7 +1733,7 @@ fn client_ingress_local(
             if !address.is_unspecified() {
                 return Err(HelperClientError::Correlation);
             }
-            Ok(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+            Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
                 address, port, 0, 0,
             )))
         }
@@ -1758,9 +1755,12 @@ fn ingress_ready_matches(
         && ready.local.as_ref() == Some(expected_local)
 }
 
-fn ingress_ipv4_address(value: SocketAddrV4) -> IngressSocketAddress {
+fn ingress_address(value: SocketAddr) -> IngressSocketAddress {
     IngressSocketAddress {
-        address: value.ip().octets().to_vec(),
+        address: match value.ip() {
+            std::net::IpAddr::V4(address) => address.octets().to_vec(),
+            std::net::IpAddr::V6(address) => address.octets().to_vec(),
+        },
         port: u32::from(value.port()),
     }
 }
@@ -1768,13 +1768,13 @@ fn ingress_ipv4_address(value: SocketAddrV4) -> IngressSocketAddress {
 fn ingress_reply_ready_matches(
     ready: &IngressReplySocketReady,
     authority: IngressAuthority,
-    remote: SocketAddrV4,
-    application: SocketAddrV4,
+    remote: SocketAddr,
+    application: SocketAddr,
 ) -> bool {
     ready.client_runtime_id.as_slice() == authority.client_runtime_id
         && ready.ingress_handle.as_slice() == authority.ingress_handle
-        && ready.remote.as_ref() == Some(&ingress_ipv4_address(remote))
-        && ready.application.as_ref() == Some(&ingress_ipv4_address(application))
+        && ready.remote.as_ref() == Some(&ingress_address(remote))
+        && ready.application.as_ref() == Some(&ingress_address(application))
 }
 
 fn ingress_receipts(

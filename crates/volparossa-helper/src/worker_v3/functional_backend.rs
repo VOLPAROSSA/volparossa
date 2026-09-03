@@ -20,7 +20,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     ops::{Deref, DerefMut},
     os::fd::{AsRawFd as _, OwnedFd},
     sync::{Arc, Mutex},
@@ -2264,8 +2264,8 @@ impl FunctionalAlphaLeaseBackend {
         )?;
         let deadline = ingress_deadline(binding)?;
         let application =
-            ingress_reply_ipv4(value.application.as_ref().ok_or(BackendError::Invalid)?)?;
-        prove_local_ingress_application(*application.ip(), deadline)?;
+            ingress_reply_address(value.application.as_ref().ok_or(BackendError::Invalid)?)?;
+        prove_local_ingress_application(application.ip(), deadline)?;
         let worker_generation = {
             let state = self
                 .ingress_state
@@ -5323,22 +5323,35 @@ fn internal_ingress_family(value: i32) -> Result<InternalIngressAddressFamily, B
     }
 }
 
-fn ingress_reply_ipv4(value: &IngressSocketAddress) -> Result<SocketAddrV4, BackendError> {
-    let address = Ipv4Addr::from(
-        <[u8; 4]>::try_from(value.address.as_slice()).map_err(|_| BackendError::Invalid)?,
-    );
+fn ingress_reply_address(value: &IngressSocketAddress) -> Result<SocketAddr, BackendError> {
     let port = u16::try_from(value.port)
         .ok()
         .filter(|port| *port != 0)
         .ok_or(BackendError::Invalid)?;
-    if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST {
-        return Err(BackendError::Invalid);
+    match value.address.as_slice() {
+        bytes if bytes.len() == 4 => {
+            let address =
+                Ipv4Addr::from(<[u8; 4]>::try_from(bytes).map_err(|_| BackendError::Invalid)?);
+            if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST
+            {
+                return Err(BackendError::Invalid);
+            }
+            Ok(SocketAddr::V4(SocketAddrV4::new(address, port)))
+        }
+        bytes if bytes.len() == 16 => {
+            let address =
+                Ipv6Addr::from(<[u8; 16]>::try_from(bytes).map_err(|_| BackendError::Invalid)?);
+            if address.is_unspecified() || address.is_multicast() {
+                return Err(BackendError::Invalid);
+            }
+            Ok(SocketAddr::V6(SocketAddrV6::new(address, port, 0, 0)))
+        }
+        _ => Err(BackendError::Invalid),
     }
-    Ok(SocketAddrV4::new(address, port))
 }
 
 fn prove_local_ingress_application(
-    application: Ipv4Addr,
+    application: IpAddr,
     deadline: HardDeadline,
 ) -> Result<(), BackendError> {
     deadline
@@ -5346,15 +5359,20 @@ fn prove_local_ingress_application(
         .map_err(|_| BackendError::Unavailable)?;
     let local = getifaddrs()
         .map_err(|_| BackendError::Unavailable)?
-        .filter_map(|interface| {
-            interface
-                .address
-                .as_ref()
-                .and_then(|address| address.as_sockaddr_in())
+        .filter_map(|interface| match interface.address.as_ref() {
+            Some(address) if application.is_ipv4() => address
+                .as_sockaddr_in()
                 .copied()
                 .map(SocketAddrV4::from)
+                .map(SocketAddr::V4),
+            Some(address) => address
+                .as_sockaddr_in6()
+                .copied()
+                .map(SocketAddrV6::from)
+                .map(SocketAddr::V6),
+            None => None,
         })
-        .any(|address| *address.ip() == application);
+        .any(|address| address.ip() == application);
     deadline
         .complete(local)
         .map_err(|_| BackendError::Unavailable)?

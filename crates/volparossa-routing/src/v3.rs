@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeSet,
     fmt::Write as _,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
 use prost::Message;
@@ -116,7 +116,7 @@ pub mod helper_request {
         /// Read this helper process's non-secret per-start identity.
         #[prost(message, tag = "35")]
         BindHelperRuntime(BindHelperRuntime),
-        /// Acquire one exact connected IPv4 reply socket for an active ingress flow.
+        /// Acquire one exact connected family-matched reply socket for an active ingress flow.
         #[prost(message, tag = "36")]
         AcquireIngressReplySocket(AcquireIngressReplySocket),
     }
@@ -367,7 +367,7 @@ pub struct DestroyClientIngress {
     pub ingress_handle: Vec<u8>,
 }
 
-/// Acquire one non-retargetable transparent UDP reply socket for an active IPv4 ingress flow.
+/// Acquire one non-retargetable transparent UDP reply socket for an active ingress flow.
 #[derive(Clone, PartialEq, Message)]
 pub struct AcquireIngressReplySocket {
     /// Exact client runtime returned by prepare.
@@ -1158,7 +1158,7 @@ pub fn ingress_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperProt
     Ok(*hasher.finalize().as_bytes())
 }
 
-/// Derive the exact binding sent atomically with one connected IPv4 ingress reply descriptor.
+/// Derive the exact binding sent atomically with one connected ingress reply descriptor.
 ///
 /// # Errors
 ///
@@ -1265,7 +1265,7 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
         }
         Operation::DestroyClientIngress(_) => "destroy one owned client ingress runtime".to_owned(),
         Operation::AcquireIngressReplySocket(_) => {
-            "acquire one connected IPv4 client-ingress UDP reply descriptor".to_owned()
+            "acquire one connected client-ingress UDP reply descriptor".to_owned()
         }
         Operation::BindHelperRuntime(value) if value.prepare_intent.is_some() => {
             "bind helper runtime and pre-register one Prepare intent".to_owned()
@@ -1491,19 +1491,19 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
         Operation::AcquireIngressReplySocket(operation) => {
             runtime(&operation.client_runtime_id)?;
             handle(&operation.ingress_handle)?;
-            let remote = concrete_ingress_ipv4(
+            let remote = concrete_ingress_address(
                 operation
                     .remote
                     .as_ref()
                     .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
             )?;
-            let application = concrete_ingress_ipv4(
+            let application = concrete_ingress_address(
                 operation
                     .application
                     .as_ref()
                     .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
             )?;
-            if remote == application {
+            if remote == application || remote.is_ipv4() != application.is_ipv4() {
                 return Err(HelperProtocolError::Invalid("ingress reply address pair"));
             }
             Ok(())
@@ -1746,19 +1746,19 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
         Outcome::IngressReplySocketReady(value) => {
             runtime(&value.client_runtime_id)?;
             handle(&value.ingress_handle)?;
-            let remote = concrete_ingress_ipv4(
+            let remote = concrete_ingress_address(
                 value
                     .remote
                     .as_ref()
                     .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
             )?;
-            let application = concrete_ingress_ipv4(
+            let application = concrete_ingress_address(
                 value
                     .application
                     .as_ref()
                     .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
             )?;
-            if remote == application {
+            if remote == application || remote.is_ipv4() != application.is_ipv4() {
                 return Err(HelperProtocolError::Invalid("ingress reply address pair"));
             }
             Ok(())
@@ -1976,23 +1976,37 @@ fn ingress_local(
     Ok(())
 }
 
-fn concrete_ingress_ipv4(
+fn concrete_ingress_address(
     value: &IngressSocketAddress,
-) -> Result<std::net::SocketAddrV4, HelperProtocolError> {
-    let address: [u8; 4] = value
-        .address
-        .as_slice()
-        .try_into()
-        .map_err(|_| HelperProtocolError::Invalid("ingress reply IPv4 address"))?;
-    let address = Ipv4Addr::from(address);
+) -> Result<SocketAddr, HelperProtocolError> {
     let port = u16::try_from(value.port)
         .ok()
         .filter(|port| *port != 0)
         .ok_or(HelperProtocolError::Invalid("ingress reply UDP port"))?;
-    if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST {
-        return Err(HelperProtocolError::Invalid("ingress reply IPv4 address"));
+    match value.address.as_slice() {
+        bytes if bytes.len() == 4 => {
+            let address = Ipv4Addr::from(
+                <[u8; 4]>::try_from(bytes)
+                    .map_err(|_| HelperProtocolError::Invalid("ingress reply IPv4 address"))?,
+            );
+            if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST
+            {
+                return Err(HelperProtocolError::Invalid("ingress reply IPv4 address"));
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        bytes if bytes.len() == 16 => {
+            let address = Ipv6Addr::from(
+                <[u8; 16]>::try_from(bytes)
+                    .map_err(|_| HelperProtocolError::Invalid("ingress reply IPv6 address"))?,
+            );
+            if address.is_unspecified() || address.is_multicast() {
+                return Err(HelperProtocolError::Invalid("ingress reply IPv6 address"));
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        _ => Err(HelperProtocolError::Invalid("ingress reply address family")),
     }
-    Ok(std::net::SocketAddrV4::new(address, port))
 }
 
 fn bound_context(context_id: &[u8], context_handle: &[u8]) -> Result<(), HelperProtocolError> {
@@ -4001,5 +4015,61 @@ mod tests {
             ingress_reply_fd_binding(&changed).expect("changed tuple"),
             binding
         );
+    }
+
+    #[test]
+    fn ingress_reply_protocol_accepts_exact_ipv6_and_rejects_mixed_families() {
+        let remote = IngressSocketAddress {
+            address: Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
+                .octets()
+                .to_vec(),
+            port: 53,
+        };
+        let application = IngressSocketAddress {
+            address: Ipv6Addr::new(0xfd76, 0, 0, 0, 0, 0, 0, 7).octets().to_vec(),
+            port: 50_001,
+        };
+        let mut request = ingress_request(
+            36,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(remote.clone()),
+                application: Some(application.clone()),
+            }),
+        );
+        assert!(encode_request(&request).is_ok());
+
+        let response = HelperResponse {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: HelperResult::Ok as i32,
+            diagnostic_code: "INGRESS_REPLY_SOCKET_READY".to_owned(),
+            operation_digest: operation_digest(&request).expect("IPv6 digest").to_vec(),
+            outcome: Some(helper_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                    remote: Some(remote),
+                    application: Some(application),
+                },
+            )),
+        };
+        assert!(encode_response(&response).is_ok());
+        assert_ne!(
+            ingress_reply_fd_binding(&response).expect("IPv6 binding"),
+            [0; 32]
+        );
+
+        let Some(helper_request::Operation::AcquireIngressReplySocket(reply)) =
+            request.operation.as_mut()
+        else {
+            panic!("reply request");
+        };
+        reply.application = Some(IngressSocketAddress {
+            address: vec![192, 0, 2, 20],
+            port: 50_001,
+        });
+        assert!(encode_request(&request).is_err());
     }
 }

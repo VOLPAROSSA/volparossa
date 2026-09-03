@@ -37,7 +37,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    io::unix::AsyncFd,
+    io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd},
     sync::{RwLock, Semaphore, watch},
     task::{JoinHandle, JoinSet},
 };
@@ -47,14 +47,15 @@ use volparossa_inspection::InspectionError;
 use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
+use volparossa_udp::MAX_DNS_MESSAGE_BYTES;
 
 use client_ingress::{
     BrowserQuicIngressDecision, BrowserQuicIngressGate, ClientIngressRuntime,
-    ClientIngressTcpError, ClientIngressUdpError,
+    ClientIngressTcpError, ClientIngressUdpError, PolicyAuthorizedDnsIngress,
 };
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
-use helper::HelperClient;
+use helper::{ClientIngressSocketFamily, HelperClient};
 use policy::load_active_policy;
 use roles::{RoleStore, ensure_private_state_directory};
 use route_setup::{ClientPathMaintenance, ClientRouteConnectError, ClientRouteControl};
@@ -71,6 +72,7 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 const INGRESS_POLICY_BACKOFF: Duration = Duration::from_millis(50);
 const BROWSER_QUIC_REVERSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAXIMUM_BROWSER_QUIC_RESPONSES_PER_TICK: usize = 64;
+const DNS_TCP_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fully loaded unprivileged service.
 pub struct Agent {
@@ -214,18 +216,22 @@ impl Agent {
             self.metrics.clone(),
             shutdown_tx.subscribe(),
         ));
-        let (mut tcp_ingress_task, mut ingress_task, mut dns_ingress_task) =
-            spawn_client_ingress_tasks(
-                client_ingress.as_ref().map(Arc::clone),
-                Arc::clone(&self.state),
-                Arc::clone(&self.config),
-                self.discovery_control.clone(),
-                self.helper.clone(),
-                routes.clone(),
-                routes.clone(),
-                routes.clone(),
-                &shutdown_tx,
-            );
+        let (
+            mut tcp_ingress_task,
+            mut ingress_task,
+            mut dns_ingress_task,
+            mut dns_tcp_ingress_task,
+        ) = spawn_client_ingress_tasks(
+            client_ingress.as_ref().map(Arc::clone),
+            Arc::clone(&self.state),
+            Arc::clone(&self.config),
+            self.discovery_control.clone(),
+            self.helper.clone(),
+            routes.clone(),
+            routes.clone(),
+            routes.clone(),
+            &shutdown_tx,
+        );
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
             () = &mut shutdown => Ok(()),
@@ -243,6 +249,7 @@ impl Agent {
             _ = &mut ingress_task => Err(AgentError::Task),
             _ = &mut tcp_ingress_task => Err(AgentError::Task),
             _ = &mut dns_ingress_task => Err(AgentError::Task),
+            _ = &mut dns_tcp_ingress_task => Err(AgentError::Task),
         };
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
@@ -252,6 +259,7 @@ impl Agent {
         stop_task(&mut ingress_task).await;
         stop_task(&mut tcp_ingress_task).await;
         stop_task(&mut dns_ingress_task).await;
+        stop_task(&mut dns_tcp_ingress_task).await;
         routes.disconnect().await;
         drop(socket_guard);
         if let Some(client_ingress) = client_ingress {
@@ -296,7 +304,12 @@ fn spawn_client_ingress_tasks(
     udp_routes: ClientRouteControl,
     dns_routes: ClientRouteControl,
     shutdown: &watch::Sender<bool>,
-) -> (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>) {
+) -> (
+    JoinHandle<()>,
+    JoinHandle<()>,
+    JoinHandle<()>,
+    JoinHandle<()>,
+) {
     let udp_config = Arc::clone(&config);
     let udp_discovery = discovery.clone();
     let udp_helper = helper.clone();
@@ -305,6 +318,12 @@ fn spawn_client_ingress_tasks(
     let dns_config = Arc::clone(&udp_config);
     let dns_discovery = udp_discovery.clone();
     let dns_helper = udp_helper.clone();
+    let dns_tcp_runtime = runtime.clone();
+    let dns_tcp_state = Arc::clone(&state);
+    let dns_tcp_config = Arc::clone(&udp_config);
+    let dns_tcp_discovery = udp_discovery.clone();
+    let dns_tcp_helper = udp_helper.clone();
+    let dns_tcp_routes = dns_routes.clone();
     let tcp = tokio::spawn(run_client_tcp_ingress(
         runtime.clone(),
         Arc::clone(&state),
@@ -332,7 +351,16 @@ fn spawn_client_ingress_tasks(
         dns_routes,
         shutdown.subscribe(),
     ));
-    (tcp, udp, dns)
+    let dns_tcp = tokio::spawn(run_client_dns_tcp_ingress(
+        dns_tcp_runtime,
+        dns_tcp_state,
+        dns_tcp_config,
+        dns_tcp_discovery,
+        dns_tcp_helper,
+        dns_tcp_routes,
+        shutdown.subscribe(),
+    ));
+    (tcp, udp, dns, dns_tcp)
 }
 
 #[allow(
@@ -504,14 +532,16 @@ async fn run_client_udp_ingress(
         wait_for_shutdown(&mut shutdown).await;
         return;
     };
-    let Ok(descriptor) = runtime.duplicate_ipv4_udp_poll_descriptor() else {
+    let Ok([ipv4_descriptor, ipv6_descriptor]) = runtime.duplicate_udp_poll_descriptors() else {
         state
             .write()
             .await
             .log(LogLevel::Error, "INGRESS_UDP_POLL_FAILED", unix_millis());
         return;
     };
-    let Ok(poll) = AsyncFd::new(descriptor) else {
+    let (Ok(ipv4_poll), Ok(ipv6_poll)) =
+        (AsyncFd::new(ipv4_descriptor), AsyncFd::new(ipv6_descriptor))
+    else {
         state
             .write()
             .await
@@ -526,7 +556,7 @@ async fn run_client_udp_ingress(
         if !browser_flow_active {
             browser_gate.reset_authorized_if_route_inactive();
         }
-        let mut ready = tokio::select! {
+        let ready = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     return;
@@ -543,7 +573,7 @@ async fn run_client_udp_ingress(
                     match routes.receive_browser_quic_response(&policy, now_ms).await {
                         Ok(Some(response)) => {
                             if runtime
-                                .send_ipv4_udp_response(
+                                .send_udp_response(
                                     response.application(),
                                     response.remote(),
                                     response.payload(),
@@ -572,8 +602,19 @@ async fn run_client_udp_ingress(
                 }
                 continue;
             }
-            result = poll.readable() => match result {
-                Ok(ready) => ready,
+            result = ipv4_poll.readable() => match result {
+                Ok(ready) => (ClientIngressSocketFamily::Ipv4, ready),
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "INGRESS_UDP_POLL_FAILED",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            },
+            result = ipv6_poll.readable() => match result {
+                Ok(ready) => (ClientIngressSocketFamily::Ipv6, ready),
                 Err(_) => {
                     state.write().await.log(
                         LogLevel::Error,
@@ -584,6 +625,7 @@ async fn run_client_udp_ingress(
                 }
             },
         };
+        let (family, mut ready) = ready;
         let now_ms = unix_millis();
         let policy = state.read().await.active_policy(now_ms);
         let Some(policy) = policy else {
@@ -598,7 +640,7 @@ async fn run_client_udp_ingress(
             }
             continue;
         };
-        let observed = match runtime.try_receive_ipv4_udp() {
+        let observed = match runtime.try_receive_udp(family) {
             Ok(ingress) => ingress,
             Err(ClientIngressUdpError::Receive(error))
                 if error.kind() == std::io::ErrorKind::WouldBlock =>
@@ -795,7 +837,7 @@ async fn run_client_udp_ingress(
             },
         };
         if runtime
-            .send_ipv4_udp_response(
+            .send_udp_response(
                 response.application(),
                 response.remote(),
                 response.payload(),
@@ -829,14 +871,17 @@ async fn run_client_dns_ingress(
         wait_for_shutdown(&mut shutdown).await;
         return;
     };
-    let Ok(descriptor) = runtime.duplicate_ipv4_dns_udp_poll_descriptor() else {
+    let Ok([ipv4_descriptor, ipv6_descriptor]) = runtime.duplicate_dns_udp_poll_descriptors()
+    else {
         state
             .write()
             .await
             .log(LogLevel::Error, "INGRESS_DNS_POLL_FAILED", unix_millis());
         return;
     };
-    let Ok(poll) = AsyncFd::new(descriptor) else {
+    let (Ok(ipv4_poll), Ok(ipv6_poll)) =
+        (AsyncFd::new(ipv4_descriptor), AsyncFd::new(ipv6_descriptor))
+    else {
         state
             .write()
             .await
@@ -844,7 +889,7 @@ async fn run_client_dns_ingress(
         return;
     };
     loop {
-        let mut ready = tokio::select! {
+        let ready = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     routes.disconnect().await;
@@ -852,8 +897,19 @@ async fn run_client_dns_ingress(
                 }
                 continue;
             }
-            result = poll.readable() => match result {
-                Ok(ready) => ready,
+            result = ipv4_poll.readable() => match result {
+                Ok(ready) => (ClientIngressSocketFamily::Ipv4, ready),
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "INGRESS_DNS_POLL_FAILED",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            },
+            result = ipv6_poll.readable() => match result {
+                Ok(ready) => (ClientIngressSocketFamily::Ipv6, ready),
                 Err(_) => {
                     state.write().await.log(
                         LogLevel::Error,
@@ -864,6 +920,7 @@ async fn run_client_dns_ingress(
                 }
             },
         };
+        let (family, mut ready) = ready;
         let now_ms = unix_millis();
         let Some(policy) = state.read().await.active_policy(now_ms) else {
             ready.clear_ready();
@@ -878,7 +935,7 @@ async fn run_client_dns_ingress(
             }
             continue;
         };
-        let ingress = match runtime.try_receive_ipv4_dns_udp(&policy, now_ms) {
+        let ingress = match runtime.try_receive_dns_udp(family, &policy, now_ms) {
             Ok(ingress) => ingress,
             Err(ClientIngressUdpError::Receive(error))
                 if error.kind() == std::io::ErrorKind::WouldBlock =>
@@ -947,7 +1004,7 @@ async fn run_client_dns_ingress(
             },
         };
         let sent = runtime
-            .send_ipv4_udp_response(
+            .send_udp_response(
                 response.application(),
                 response.remote(),
                 response.payload(),
@@ -964,6 +1021,211 @@ async fn run_client_dns_ingress(
             },
             unix_millis(),
         );
+    }
+}
+
+/// Own both dedicated DNS-over-TCP listeners. Each accepted stream is bound to its kernel
+/// original resolver tuple; every framed query still crosses the same protected one-relay DNS
+/// association used by UDP, and the Client never opens a resolver socket directly.
+#[allow(clippy::single_match_else, clippy::too_many_lines)]
+async fn run_client_dns_tcp_ingress(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let Some(runtime) = runtime else {
+        wait_for_shutdown(&mut shutdown).await;
+        return;
+    };
+    let Ok([ipv4, ipv6]) = runtime.dns_tcp_listeners() else {
+        state.write().await.log(
+            LogLevel::Error,
+            "INGRESS_DNS_TCP_LISTENER_FAILED",
+            unix_millis(),
+        );
+        return;
+    };
+    loop {
+        let observed = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
+                    return;
+                }
+                continue;
+            }
+            result = ipv4.accept() => result,
+            result = ipv6.accept() => result,
+        };
+        let (mut application, source, resolver) =
+            match observed.and_then(client_ingress::ObservedTcpIngress::into_dns_parts) {
+                Ok(parts) => parts,
+                Err(ClientIngressTcpError::OriginalDestination(_)) => {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_TCP_DESTINATION_REJECTED",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_TCP_ACCEPT_FAILED",
+                        unix_millis(),
+                    );
+                    tokio::time::sleep(INGRESS_POLICY_BACKOFF).await;
+                    continue;
+                }
+            };
+
+        loop {
+            let mut length = [0_u8; 2];
+            let read_length = tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        routes.disconnect().await;
+                        return;
+                    }
+                    continue;
+                }
+                result = tokio::time::timeout(
+                    DNS_TCP_IO_TIMEOUT,
+                    application.read_exact(&mut length),
+                ) => result,
+            };
+            if read_length.is_err() || read_length.is_ok_and(|result| result.is_err()) {
+                break;
+            }
+            let query_length = usize::from(u16::from_be_bytes(length));
+            if query_length == 0 || query_length > MAX_DNS_MESSAGE_BYTES {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_TCP_QUERY_REJECTED",
+                    unix_millis(),
+                );
+                break;
+            }
+            let mut query = vec![0_u8; query_length];
+            let read_query = tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        routes.disconnect().await;
+                        return;
+                    }
+                    continue;
+                }
+                result = tokio::time::timeout(
+                    DNS_TCP_IO_TIMEOUT,
+                    application.read_exact(&mut query),
+                ) => result,
+            };
+            if read_query.is_err() || read_query.is_ok_and(|result| result.is_err()) {
+                break;
+            }
+            let now_ms = unix_millis();
+            let Some(policy) = state.read().await.active_policy(now_ms) else {
+                state.write().await.record_policy_rejection();
+                break;
+            };
+            let ingress = match PolicyAuthorizedDnsIngress::authorize(
+                source, resolver, query, &policy, now_ms,
+            ) {
+                Ok(ingress) => ingress,
+                Err(ClientIngressUdpError::Policy(_)) => {
+                    state.write().await.record_policy_rejection();
+                    break;
+                }
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_TCP_QUERY_REJECTED",
+                        unix_millis(),
+                    );
+                    break;
+                }
+            };
+            if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
+                .await
+                .is_err()
+                || Box::pin(routes.activate_dns_ingress(ingress, &policy, now_ms))
+                    .await
+                    .is_err()
+            {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_TCP_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                break;
+            }
+            let response = tokio::select! {
+                changed = shutdown.changed() => {
+                    routes.disconnect().await;
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+                result = routes.receive_udp_response() => result,
+            };
+            let Ok(response) = response else {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_TCP_RESPONSE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                break;
+            };
+            if response.application() != source || response.remote() != resolver {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_TCP_RESPONSE_REJECTED",
+                    unix_millis(),
+                );
+                break;
+            }
+            let Ok(response_length) = u16::try_from(response.payload().len()) else {
+                routes.disconnect().await;
+                break;
+            };
+            let mut framed = Vec::with_capacity(2 + response.payload().len());
+            framed.extend_from_slice(&response_length.to_be_bytes());
+            framed.extend_from_slice(response.payload());
+            let sent = tokio::select! {
+                changed = shutdown.changed() => {
+                    routes.disconnect().await;
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+                result = tokio::time::timeout(DNS_TCP_IO_TIMEOUT, async {
+                    application.write_all(&framed).await?;
+                    application.flush().await
+                }) => matches!(result, Ok(Ok(()))),
+            };
+            routes.disconnect().await;
+            state.write().await.log(
+                if sent { LogLevel::Info } else { LogLevel::Warn },
+                if sent {
+                    "INGRESS_DNS_TCP_QUERY_COMPLETED"
+                } else {
+                    "INGRESS_DNS_TCP_REPLY_FAILED"
+                },
+                unix_millis(),
+            );
+            if !sent {
+                break;
+            }
+        }
     }
 }
 

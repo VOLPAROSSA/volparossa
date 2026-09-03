@@ -1118,22 +1118,32 @@ pub(crate) fn validate_adopted_ingress_socket(
     Ok(descriptor)
 }
 
-/// Create one connected transparent IPv4 UDP socket for an exact intercepted flow reply.
+/// Create one connected transparent IPv4 or IPv6 UDP socket for an exact intercepted flow reply.
 pub(crate) fn create_client_ingress_reply_socket(
     request: &AcquireClientIngressReplySocket,
 ) -> Result<OwnedFd, WorkerTransportError> {
     let (remote, application) = ingress_reply_endpoints(request)?;
+    let domain = match remote {
+        SocketAddr::V4(_) => Domain::IPV4,
+        SocketAddr::V6(_) => Domain::IPV6,
+    };
     let socket = Socket::new(
-        Domain::IPV4,
+        domain,
         Type::DGRAM.nonblocking().cloexec(),
         Some(Protocol::UDP),
     )?;
     setsockopt(&socket, sockopt::IpTransparent, &true).map_err(errno_io)?;
+    if matches!(remote, SocketAddr::V6(_)) {
+        setsockopt(&socket, sockopt::Ipv6V6Only, &true).map_err(errno_io)?;
+    }
     socket.set_reuse_address(true)?;
     setsockopt(&socket, sockopt::ReusePort, &true).map_err(errno_io)?;
     // A compromised caller cannot turn this local delivery socket into an egress primitive: a
     // packet routed beyond the immediately adjacent parent namespace expires before forwarding.
-    socket.set_ttl_v4(1)?;
+    match remote {
+        SocketAddr::V4(_) => socket.set_ttl_v4(1)?,
+        SocketAddr::V6(_) => socket.set_unicast_hops_v6(1)?,
+    }
     socket.bind(&SockAddr::from(remote))?;
     socket.connect(&SockAddr::from(application))?;
     validate_ingress_reply_socket(&socket, remote, application)?;
@@ -1159,38 +1169,53 @@ pub(crate) fn validate_adopted_ingress_reply_socket(
 fn ingress_reply_endpoints(
     request: &AcquireClientIngressReplySocket,
 ) -> Result<(SocketAddr, SocketAddr), WorkerTransportError> {
-    let remote = concrete_ingress_ipv4(
+    let remote = concrete_ingress_address(
         request
             .remote
             .as_ref()
             .ok_or(WorkerTransportError::Invalid)?,
     )?;
-    let application = concrete_ingress_ipv4(
+    let application = concrete_ingress_address(
         request
             .application
             .as_ref()
             .ok_or(WorkerTransportError::Invalid)?,
     )?;
-    if remote == application {
+    if remote == application || remote.is_ipv4() != application.is_ipv4() {
         return Err(WorkerTransportError::Invalid);
     }
     Ok((remote, application))
 }
 
-fn concrete_ingress_ipv4(
+fn concrete_ingress_address(
     value: &InternalSocketAddress,
 ) -> Result<SocketAddr, WorkerTransportError> {
     let port = u16::try_from(value.port)
         .ok()
         .filter(|port| *port != 0)
         .ok_or(WorkerTransportError::Invalid)?;
-    let address = Ipv4Addr::from(
-        <[u8; 4]>::try_from(value.address.as_slice()).map_err(|_| WorkerTransportError::Invalid)?,
-    );
-    if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST {
-        return Err(WorkerTransportError::Invalid);
+    match value.address.as_slice() {
+        bytes if bytes.len() == 4 => {
+            let address = Ipv4Addr::from(
+                <[u8; 4]>::try_from(bytes).map_err(|_| WorkerTransportError::Invalid)?,
+            );
+            if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST
+            {
+                return Err(WorkerTransportError::Invalid);
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        bytes if bytes.len() == 16 => {
+            let address = Ipv6Addr::from(
+                <[u8; 16]>::try_from(bytes).map_err(|_| WorkerTransportError::Invalid)?,
+            );
+            if address.is_unspecified() || address.is_multicast() {
+                return Err(WorkerTransportError::Invalid);
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        _ => Err(WorkerTransportError::Invalid),
     }
-    Ok(SocketAddr::from((address, port)))
 }
 
 fn validate_ingress_reply_socket(
@@ -1199,9 +1224,16 @@ fn validate_ingress_reply_socket(
     application: SocketAddr,
 ) -> Result<(), WorkerTransportError> {
     validate_common(socket, Type::DGRAM, Protocol::UDP, remote, false)?;
+    let one_hop = match remote {
+        SocketAddr::V4(_) => socket.ttl_v4()? == 1,
+        SocketAddr::V6(_) => socket.unicast_hops_v6()? == 1,
+    };
+    let ipv6_only = !matches!(remote, SocketAddr::V6(_))
+        || getsockopt(socket, sockopt::Ipv6V6Only).map_err(errno_io)?;
     if socket.peer_addr()?.as_socket() != Some(application)
         || !getsockopt(socket, sockopt::IpTransparent).map_err(errno_io)?
-        || socket.ttl_v4()? != 1
+        || !one_hop
+        || !ipv6_only
     {
         return Err(WorkerTransportError::Invalid);
     }

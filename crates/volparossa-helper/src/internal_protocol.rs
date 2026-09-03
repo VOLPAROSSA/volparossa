@@ -6,7 +6,7 @@
 
 use std::{
     collections::BTreeSet,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
 use prost::Message;
@@ -1135,19 +1135,19 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
         }
         Operation::AcquireClientIngressReplySocket(operation) => {
             route_id(&operation.client_runtime_id)?;
-            let remote = concrete_ingress_ipv4(
+            let remote = concrete_ingress_address(
                 operation
                     .remote
                     .as_ref()
                     .ok_or(InternalProtocolError::Invalid)?,
             )?;
-            let application = concrete_ingress_ipv4(
+            let application = concrete_ingress_address(
                 operation
                     .application
                     .as_ref()
                     .ok_or(InternalProtocolError::Invalid)?,
             )?;
-            if remote == application {
+            if remote == application || remote.is_ipv4() != application.is_ipv4() {
                 return Err(InternalProtocolError::Invalid);
             }
             Ok(())
@@ -1246,19 +1246,19 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
             Outcome::ClientIngressDestroyed(outcome) => route_id(&outcome.client_runtime_id),
             Outcome::IngressReplySocketReady(outcome) => {
                 route_id(&outcome.client_runtime_id)?;
-                let remote = concrete_ingress_ipv4(
+                let remote = concrete_ingress_address(
                     outcome
                         .remote
                         .as_ref()
                         .ok_or(InternalProtocolError::Invalid)?,
                 )?;
-                let application = concrete_ingress_ipv4(
+                let application = concrete_ingress_address(
                     outcome
                         .application
                         .as_ref()
                         .ok_or(InternalProtocolError::Invalid)?,
                 )?;
-                if remote == application {
+                if remote == application || remote.is_ipv4() != application.is_ipv4() {
                     return Err(InternalProtocolError::Invalid);
                 }
                 Ok(())
@@ -1320,23 +1320,35 @@ fn validate_ingress_local(
     Ok(())
 }
 
-fn concrete_ingress_ipv4(
+fn concrete_ingress_address(
     value: &InternalSocketAddress,
-) -> Result<std::net::SocketAddrV4, InternalProtocolError> {
-    let address: [u8; 4] = value
-        .address
-        .as_slice()
-        .try_into()
-        .map_err(|_| InternalProtocolError::Invalid)?;
-    let address = Ipv4Addr::from(address);
+) -> Result<SocketAddr, InternalProtocolError> {
     let port = u16::try_from(value.port)
         .ok()
         .filter(|port| *port != 0)
         .ok_or(InternalProtocolError::Invalid)?;
-    if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST {
-        return Err(InternalProtocolError::Invalid);
+    match value.address.as_slice() {
+        bytes if bytes.len() == 4 => {
+            let address = Ipv4Addr::from(
+                <[u8; 4]>::try_from(bytes).map_err(|_| InternalProtocolError::Invalid)?,
+            );
+            if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST
+            {
+                return Err(InternalProtocolError::Invalid);
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        bytes if bytes.len() == 16 => {
+            let address = Ipv6Addr::from(
+                <[u8; 16]>::try_from(bytes).map_err(|_| InternalProtocolError::Invalid)?,
+            );
+            if address.is_unspecified() || address.is_multicast() {
+                return Err(InternalProtocolError::Invalid);
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        _ => Err(InternalProtocolError::Invalid),
     }
-    Ok(std::net::SocketAddrV4::new(address, port))
 }
 
 fn validate_ingress_identities(
@@ -2452,5 +2464,52 @@ mod tests {
         ready.remote.as_mut().expect("remote").port += 1;
         assert!(validate_response_for_request(&acquire, &changed).is_err());
         assert!(ingress_reply_descriptor_binding(&acquire, &changed).is_err());
+    }
+
+    #[test]
+    fn ingress_reply_descriptor_accepts_ipv6_but_not_mixed_families() {
+        let remote = InternalSocketAddress {
+            address: Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
+                .octets()
+                .to_vec(),
+            port: 53,
+        };
+        let application = InternalSocketAddress {
+            address: Ipv6Addr::new(0xfd76, 0, 0, 0, 0, 0, 0, 7).octets().to_vec(),
+            port: 50_001,
+        };
+        let mut acquire = request(
+            internal_worker_request::Operation::AcquireClientIngressReplySocket(
+                AcquireClientIngressReplySocket {
+                    client_runtime_id: vec![7; 16],
+                    remote: Some(remote.clone()),
+                    application: Some(application.clone()),
+                },
+            ),
+        );
+        assert!(encode_request(&acquire).is_ok());
+        let response = correlated_response(
+            &acquire,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: vec![7; 16],
+                    remote: Some(remote),
+                    application: Some(application),
+                },
+            )),
+        );
+        validate_response_for_request(&acquire, &response).expect("exact IPv6 tuple");
+
+        let Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(reply)) =
+            acquire.operation.as_mut()
+        else {
+            panic!("reply request");
+        };
+        reply.application = Some(InternalSocketAddress {
+            address: vec![192, 0, 2, 20],
+            port: 50_001,
+        });
+        assert!(encode_request(&acquire).is_err());
     }
 }

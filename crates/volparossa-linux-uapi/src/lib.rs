@@ -1215,7 +1215,7 @@ pub fn validate_ingress_socket<F: AsFd>(
     validate_ingress_snapshot(snapshot, kind, family, expected_local_port)
 }
 
-/// Revalidate one connected transparent IPv4 UDP reply descriptor.
+/// Revalidate one connected transparent IPv4 or IPv6 UDP reply descriptor.
 ///
 /// The helper must have bound the descriptor to the exact original remote tuple and connected it
 /// to the exact intercepted application tuple before handoff. TTL one confines delivery to the
@@ -1226,18 +1226,19 @@ pub fn validate_ingress_socket<F: AsFd>(
 /// Returns an error unless all immutable kernel socket properties and both tuples match exactly.
 pub fn validate_ingress_udp_reply_socket<F: AsFd>(
     socket: &F,
-    remote: SocketAddrV4,
-    application: SocketAddrV4,
+    remote: SocketAddr,
+    application: SocketAddr,
 ) -> io::Result<()> {
-    if remote == application
-        || remote.ip().is_unspecified()
-        || remote.ip().is_multicast()
-        || *remote.ip() == Ipv4Addr::BROADCAST
-        || application.ip().is_unspecified()
-        || application.ip().is_multicast()
-        || *application.ip() == Ipv4Addr::BROADCAST
-        || remote.port() == 0
-        || application.port() == 0
+    let family = match (remote, application) {
+        (SocketAddr::V4(remote), SocketAddr::V4(application))
+            if *remote.ip() != Ipv4Addr::BROADCAST && *application.ip() != Ipv4Addr::BROADCAST =>
+        {
+            IngressSocketFamily::Ipv4
+        }
+        (SocketAddr::V6(_), SocketAddr::V6(_)) => IngressSocketFamily::Ipv6,
+        _ => return Err(invalid_data("ingress UDP reply families differ")),
+    };
+    if remote == application || !valid_reply_endpoint(remote) || !valid_reply_endpoint(application)
     {
         return Err(invalid_data("invalid ingress UDP reply tuple"));
     }
@@ -1246,13 +1247,26 @@ pub fn validate_ingress_udp_reply_socket<F: AsFd>(
         FdFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFD).map_err(errno_io)?);
     let status_flags =
         OFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFL).map_err(errno_io)?);
-    if reference.domain()? != Domain::IPV4
+    let expected_domain = match family {
+        IngressSocketFamily::Ipv4 => Domain::IPV4,
+        IngressSocketFamily::Ipv6 => Domain::IPV6,
+    };
+    let one_hop = match family {
+        IngressSocketFamily::Ipv4 => reference.ttl_v4()? == 1,
+        IngressSocketFamily::Ipv6 => reference.unicast_hops_v6()? == 1,
+    };
+    let ipv6_only = match family {
+        IngressSocketFamily::Ipv4 => true,
+        IngressSocketFamily::Ipv6 => getsockopt(socket, sockopt::Ipv6V6Only).map_err(errno_io)?,
+    };
+    if reference.domain()? != expected_domain
         || reference.r#type()? != Type::DGRAM
         || reference.protocol()? != Some(Protocol::UDP)
-        || reference.local_addr()?.as_socket() != Some(SocketAddr::V4(remote))
-        || reference.peer_addr()?.as_socket() != Some(SocketAddr::V4(application))
+        || reference.local_addr()?.as_socket() != Some(remote)
+        || reference.peer_addr()?.as_socket() != Some(application)
         || !getsockopt(socket, sockopt::IpTransparent).map_err(errno_io)?
-        || reference.ttl_v4()? != 1
+        || !one_hop
+        || !ipv6_only
         || reference.is_listener()?
         || !descriptor_flags.contains(FdFlag::FD_CLOEXEC)
         || !status_flags.contains(OFlag::O_NONBLOCK)
@@ -1262,6 +1276,20 @@ pub fn validate_ingress_udp_reply_socket<F: AsFd>(
         ));
     }
     Ok(())
+}
+
+fn valid_reply_endpoint(value: SocketAddr) -> bool {
+    match value {
+        SocketAddr::V4(value) => {
+            !value.ip().is_unspecified()
+                && !value.ip().is_multicast()
+                && *value.ip() != Ipv4Addr::BROADCAST
+                && value.port() != 0
+        }
+        SocketAddr::V6(value) => {
+            !value.ip().is_unspecified() && !value.ip().is_multicast() && value.port() != 0
+        }
+    }
 }
 
 fn inspect_ingress_socket<F: AsFd>(socket: &F) -> io::Result<KernelIngressSnapshot> {
@@ -1409,6 +1437,68 @@ pub fn tcp_original_destination<F: AsFd>(
     if destination != local {
         return Err(invalid_data(
             "TPROXY local tuple and original destination disagree",
+        ));
+    }
+    Ok(destination)
+}
+
+/// Recover the original destination of one accepted TCP connection redirected to a dedicated
+/// local ingress listener.
+///
+/// Unlike [`tcp_original_destination`], a REDIRECT listener necessarily has a different concrete
+/// local tuple from the pre-NAT destination. The descriptor shape, address family, peer and
+/// original-destination evidence are still revalidated, and the caller supplies the one closed
+/// destination port accepted by that dedicated listener.
+///
+/// # Errors
+///
+/// Returns an error for a wrong socket shape, family mismatch, invalid tuples, missing kernel
+/// evidence, a zero expected port, or an original destination on any other port.
+pub fn tcp_redirect_original_destination<F: AsFd>(
+    socket: &F,
+    family: IngressSocketFamily,
+    expected_destination_port: u16,
+) -> io::Result<SocketAddr> {
+    if expected_destination_port == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "redirect destination port is zero",
+        ));
+    }
+    let snapshot = inspect_ingress_socket(socket)?;
+    if snapshot.family != family
+        || snapshot.socket_type != Type::STREAM
+        || snapshot.protocol != Some(Protocol::TCP)
+        || !snapshot.transparent
+        || snapshot.listening
+        || !snapshot.nonblocking
+        || !snapshot.close_on_exec
+        || matches!(family, IngressSocketFamily::Ipv6) && snapshot.ipv6_only != Some(true)
+    {
+        return Err(invalid_data(
+            "accepted redirected TCP socket properties do not match",
+        ));
+    }
+    validate_concrete_address(snapshot.local, family)?;
+    let peer = SockRef::from(socket)
+        .peer_addr()?
+        .as_socket()
+        .ok_or_else(|| invalid_data("accepted redirected TCP socket has no Internet peer"))?;
+    validate_concrete_address(peer, family)?;
+    let destination = match family {
+        IngressSocketFamily::Ipv4 => {
+            let raw = getsockopt(socket, sockopt::OriginalDst).map_err(errno_io)?;
+            SocketAddr::V4(ipv4_original_destination(raw)?)
+        }
+        IngressSocketFamily::Ipv6 => {
+            let raw = getsockopt(socket, sockopt::Ip6tOriginalDst).map_err(errno_io)?;
+            SocketAddr::V6(ipv6_original_destination(raw)?)
+        }
+    };
+    let destination = validate_concrete_address(destination, family)?;
+    if destination.port() != expected_destination_port || destination == snapshot.local {
+        return Err(invalid_data(
+            "redirected TCP original destination does not match dedicated listener",
         ));
     }
     Ok(destination)
