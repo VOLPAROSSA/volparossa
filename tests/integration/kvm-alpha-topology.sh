@@ -4386,7 +4386,8 @@ done
 
 timeout --signal=TERM --kill-after=5s 420s \
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
-    --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --clear-groups --inh-caps=+net_bind_service \
+    --ambient-caps=+net_bind_service --bounding-set=+net_bind_service \
     --no-new-privs -- \
     "$WORK/bin/examples/http3-acceptance-fixture" server \
     47.163.4.2:443 "$WORK/destination/http3-cert.der" \
