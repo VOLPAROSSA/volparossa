@@ -2532,7 +2532,13 @@ async fn send_inner_ip<C: MultipathNativeControl>(
             {
                 tokio::time::sleep(NATIVE_SEND_BACKPRESSURE_INTERVAL).await;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                // The native diagnostic is a protocol-bounded code and contains no packet,
+                // destination, route identifier, or credential. Preserve it in the service log
+                // so an acceptance failure can be repaired without guessing at its class.
+                eprintln!("native datagram send failed: {error}");
+                return Err(error);
+            }
         }
     }
     unreachable!("the bounded native send loop always returns")

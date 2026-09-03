@@ -439,7 +439,10 @@ static vmp_transport_error_t configure_client(
                 ? 1
                 : VMP_MAX_PATHS) ==
             MQVPN_OK &&
-        mqvpn_config_set_log_level(config, MQVPN_LOG_ERROR) == MQVPN_OK;
+        /* mqvpn's warning messages expose only bounded transport result codes. Keep them
+         * available in the service log so a native send failure is diagnosable without
+         * logging inner packets, destinations, or credentials. */
+        mqvpn_config_set_log_level(config, MQVPN_LOG_WARN) == MQVPN_OK;
 
     mqvpn_client_callbacks_t callbacks = MQVPN_CLIENT_CALLBACKS_INIT;
     callbacks.tun_output = callback_tun_output;

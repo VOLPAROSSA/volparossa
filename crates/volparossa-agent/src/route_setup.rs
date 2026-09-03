@@ -178,6 +178,7 @@ enum ClientTransportState {
 
 struct ActiveProductionNativeUdpRoute {
     session: ProductionMpquicSession,
+    path: VerifiedSingleRelayPath,
     binding: Option<RouteAuthorizedUdpIngress>,
 }
 
@@ -1205,15 +1206,18 @@ impl ClientRouteControl {
                                 now_ms,
                             )
                             .await
-                            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                            .map_err(|error| {
+                                // This error contains only bounded local/native categories; it
+                                // never contains the datagram, tuple, route ID, or credentials.
+                                eprintln!("native general UDP activation failed: {error}");
+                                ClientRouteConnectError::TransportRuntimeUnavailable
+                            })?;
                         return Ok(ClientRouteProgress::TransportActive);
                     }
                     let route = established
                         .route
                         .as_ref()
                         .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
-                    let path = verified_single_relay_udp_path(&route.established, now_ms)
-                        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
                     let protocol = route
                         .established
                         .owner
@@ -1221,7 +1225,7 @@ impl ClientRouteControl {
                         .and_then(PreparedContextOwner::protocol)
                         .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
                     let authorized = ingress
-                        .bind_to_route(&path, &protocol.coordinator, policy, now_ms)
+                        .bind_to_route(&active.path, &protocol.coordinator, policy, now_ms)
                         .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
                     let (flow, signed_authorization) = authorized.activation();
                     active
@@ -1235,7 +1239,12 @@ impl ClientRouteControl {
                             now_ms,
                         )
                         .await
-                        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                        .map_err(|error| {
+                            // See the repeated-flow branch above: retain a privacy-safe reason
+                            // so acceptance failures do not require speculative datapath changes.
+                            eprintln!("native general UDP activation failed: {error}");
+                            ClientRouteConnectError::TransportRuntimeUnavailable
+                        })?;
                     active.binding = Some(authorized);
                     return Ok(ClientRouteProgress::TransportActive);
                 }
@@ -1941,6 +1950,7 @@ async fn admit_completed_native_route(
                 transport: ClientTransportState::NativeUdp(Box::new(
                     ActiveProductionNativeUdpRoute {
                         session,
+                        path,
                         binding: None,
                     },
                 )),
