@@ -23,7 +23,7 @@ pub fn read_identity_credential(path: &Path) -> Result<Passphrase, CredentialErr
         return Err(CredentialError::UnsafeFile);
     }
     let mode = metadata.mode() & 0o777;
-    if mode & 0o177 != 0 || mode & 0o400 == 0 {
+    if !credential_mode_is_safe(mode, metadata.uid(), metadata.gid()) {
         return Err(CredentialError::UnsafeMode(mode));
     }
     let maximum = MAX_PASSPHRASE_BYTES
@@ -55,6 +55,16 @@ pub fn read_identity_credential(path: &Path) -> Result<Passphrase, CredentialErr
     let result = Passphrase::new(bytes.as_slice()).map_err(CredentialError::Identity);
     bytes.zeroize();
     result
+}
+
+fn credential_mode_is_safe(mode: u32, uid: u32, gid: u32) -> bool {
+    let owner_only = mode & 0o177 == 0 && mode & 0o400 != 0;
+    // systemd creates service credentials as root:root mode 0400, then grants the
+    // service UID read access with a POSIX ACL. The ACL mask is represented in
+    // st_mode as the group-read bit, yielding 0440 even though group:: has no
+    // access. Accept only that exact root-owned projection.
+    let systemd_service_acl = mode == 0o440 && uid == 0 && gid == 0;
+    owner_only || systemd_service_acl
 }
 
 /// Credential validation or loading failure. Its display form contains no
@@ -129,5 +139,14 @@ mod tests {
             read_identity_credential(&link),
             Err(CredentialError::UnsafeFile)
         ));
+    }
+
+    #[test]
+    fn accepts_exact_root_owned_systemd_acl_projection() {
+        assert!(credential_mode_is_safe(0o440, 0, 0));
+        assert!(!credential_mode_is_safe(0o440, 1_000, 0));
+        assert!(!credential_mode_is_safe(0o440, 0, 1_000));
+        assert!(!credential_mode_is_safe(0o460, 0, 0));
+        assert!(!credential_mode_is_safe(0o444, 0, 0));
     }
 }
