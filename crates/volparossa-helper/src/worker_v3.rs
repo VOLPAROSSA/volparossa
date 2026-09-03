@@ -15272,7 +15272,7 @@ mod tests {
     }
 
     fn fake_production_sandbox_snapshot() -> WorkerSandboxSnapshot {
-        let net_admin = 1_u64 << 12;
+        let worker_capabilities = (1_u64 << 10) | (1_u64 << 12);
         WorkerSandboxSnapshot::fixture(
             NetworkNamespaceIdentity::fixture(1, 10),
             NetworkNamespaceIdentity::fixture(1, 11),
@@ -15283,7 +15283,13 @@ mod tests {
                 u8::try_from(libc::SECCOMP_MODE_FILTER).expect("seccomp mode fits u8"),
                 4,
             ),
-            LinuxCapabilitySnapshot::fixture(0, net_admin, net_admin, net_admin, 0),
+            LinuxCapabilitySnapshot::fixture(
+                0,
+                worker_capabilities,
+                worker_capabilities,
+                worker_capabilities,
+                0,
+            ),
         )
     }
 

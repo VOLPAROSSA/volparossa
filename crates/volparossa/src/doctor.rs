@@ -65,9 +65,10 @@ const OVERLAY_PREFIX: [u8; 16] = [
     0xfd, 0x76, 0x6f, 0x6c, 0x70, 0x61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 const OVERLAY_PREFIX_LENGTH: u8 = 48;
-const HELPER_BOOTSTRAP_CAPABILITIES: [&str; 7] = [
+const HELPER_BOOTSTRAP_CAPABILITIES: [&str; 8] = [
     "CAP_KILL",
     "CAP_NET_ADMIN",
+    "CAP_NET_BIND_SERVICE",
     "CAP_NET_RAW",
     "CAP_SETGID",
     "CAP_SETPCAP",
@@ -478,7 +479,7 @@ fn capability_check() -> Check {
     if helper_capability_contract_matches(&service) {
         passed(
             "helper_capabilities",
-            "helper unit grants exactly the reviewed seven-capability worker bootstrap set",
+            "helper unit grants exactly the reviewed eight-capability worker bootstrap set",
         )
     } else {
         failed(

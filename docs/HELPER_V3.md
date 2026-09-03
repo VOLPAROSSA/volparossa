@@ -779,12 +779,14 @@ group-write or world bits, and group-read access only for the resolved live `sha
 service identity can mutate that file. A present POSIX access ACL, or an ACL state that cannot be
 attested as explicitly absent, is rejected fail closed. The read buffer cannot reallocate old password hashes. This closes the
 pre-existing-account collision that idempotent `systemd-sysusers` cannot repair. The shipped helper
-unit and doctor contract now grant and require the reviewed seven-capability bootstrap set. Its
+unit and doctor contract now grant and require the reviewed eight-capability bootstrap set. Its
 `CAP_KILL` authority is retained by the root parent so it can retire the dedicated-UID worker, but
-the child drops it before the namespace-pin barrier and proves a final `CAP_NET_ADMIN`-only state.
+the child drops it before the namespace-pin barrier and proves a final `CAP_NET_ADMIN` plus
+`CAP_NET_BIND_SERVICE` state. The latter is needed only to preserve privileged source ports on
+transparent replies, including HTTPS and QUIC port 443.
 The contract rejects `CAP_SYS_PTRACE` and adds only the individual `seccomp` syscall to the existing systemd syscall
 groups so the fixed child filter can be installed without allowing all of `@sandbox`. After the drop, the worker's
-distinct UID/GID plus exact `CAP_NET_ADMIN` set excludes same-UID signalling of the root parent and
+distinct UID/GID plus exact two-capability set excludes same-UID signalling of the root parent and
 access through the root:`volparossa` runtime-directory mode. The functional-alpha backend now calls
 the launcher. The committed disposable driver now exercises the account transition, pre-filter task
 state, path access denials and parent-signal denial first through its diagnostic selector and then
@@ -1814,7 +1816,7 @@ Exact-main run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reprodu
 forwarding proof and retained artifact 9731470248. It does not join a production route manager,
 transport or ingress, and does not change the alpha score.
 
-- validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
+- validate the shipped eight-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and

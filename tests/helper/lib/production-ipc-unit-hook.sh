@@ -1649,17 +1649,17 @@ worker_status_from_process_fd_is_exact() {
         }
         $1 == "CapPrm:" {
             permitted_count++
-            if (NF != 2 || $2 != "0000000000001000") invalid = 1
+            if (NF != 2 || $2 != "0000000000001400") invalid = 1
             next
         }
         $1 == "CapEff:" {
             effective_count++
-            if (NF != 2 || $2 != "0000000000001000") invalid = 1
+            if (NF != 2 || $2 != "0000000000001400") invalid = 1
             next
         }
         $1 == "CapBnd:" {
             bounding_count++
-            if (NF != 2 || $2 != "0000000000001000") invalid = 1
+            if (NF != 2 || $2 != "0000000000001400") invalid = 1
             next
         }
         $1 == "CapAmb:" {

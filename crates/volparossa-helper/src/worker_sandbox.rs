@@ -5,7 +5,9 @@
 //! denies descendant creation, re-exec and every later namespace transition. While the child is root,
 //! the parent pins that namespace and attests the filter, exact descriptor set and single task. Only
 //! after the pin acknowledgement may the child clear all supplementary groups, irreversibly assume
-//! its dedicated uid/gid and reduce every capability set to exactly `CAP_NET_ADMIN`. The child and
+//! its dedicated uid/gid and reduce every capability set to exactly `CAP_NET_ADMIN` and
+//! `CAP_NET_BIND_SERVICE`. The latter is required only for transparent replies that preserve a
+//! privileged destination source port such as HTTPS/QUIC port 443. The child and
 //! parent both read the final identity and sandbox state back before the first authenticated request.
 //! Test applicators are compiled only under `cfg(test)`; production has no environment or runtime
 //! switch that can select one.
@@ -59,6 +61,7 @@ const CAP_KILL: u32 = 5;
 const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
+const CAP_NET_BIND_SERVICE: u32 = 10;
 const CAP_NET_ADMIN: u32 = 12;
 const CAP_NET_RAW: u32 = 13;
 const CAP_SYS_ADMIN: u32 = 21;
@@ -66,6 +69,7 @@ const CAP_KILL_BIT: u64 = 1_u64 << CAP_KILL;
 const CAP_SETGID_BIT: u64 = 1_u64 << CAP_SETGID;
 const CAP_SETUID_BIT: u64 = 1_u64 << CAP_SETUID;
 const CAP_SETPCAP_BIT: u64 = 1_u64 << CAP_SETPCAP;
+const CAP_NET_BIND_SERVICE_BIT: u64 = 1_u64 << CAP_NET_BIND_SERVICE;
 const CAP_NET_ADMIN_BIT: u64 = 1_u64 << CAP_NET_ADMIN;
 const CAP_NET_RAW_BIT: u64 = 1_u64 << CAP_NET_RAW;
 const CAP_SYS_ADMIN_BIT: u64 = 1_u64 << CAP_SYS_ADMIN;
@@ -75,7 +79,9 @@ const HELPER_BOOTSTRAP_CAPABILITY_BITS: u64 = CAP_KILL_BIT
     | CAP_SETGID_BIT
     | CAP_SETPCAP_BIT
     | CAP_SETUID_BIT
+    | CAP_NET_BIND_SERVICE_BIT
     | CAP_SYS_ADMIN_BIT;
+const WORKER_CAPABILITY_BITS: u64 = CAP_NET_BIND_SERVICE_BIT | CAP_NET_ADMIN_BIT;
 pub(super) const SYSTEMD_RESERVED_ID: u32 = 65_535;
 
 pub(super) type ContextId = [u8; 16];
@@ -563,9 +569,9 @@ impl WorkerSandboxPlan {
             identity,
             capabilities: LinuxCapabilitySnapshot {
                 inheritable: 0,
-                permitted: CAP_NET_ADMIN_BIT,
-                effective: CAP_NET_ADMIN_BIT,
-                bounding: CAP_NET_ADMIN_BIT,
+                permitted: WORKER_CAPABILITY_BITS,
+                effective: WORKER_CAPABILITY_BITS,
+                bounding: WORKER_CAPABILITY_BITS,
                 ambient: 0,
             },
             seccomp: baseline_seccomp.expected_after_worker_filter()?,
@@ -2088,6 +2094,7 @@ impl SandboxKernel for ProductionSandboxKernel {
         let capabilities = CapabilitySet::SETGID
             | CapabilitySet::SETUID
             | CapabilitySet::SETPCAP
+            | CapabilitySet::NET_BIND_SERVICE
             | CapabilitySet::NET_ADMIN;
         set_capabilities(
             None,
@@ -2128,7 +2135,8 @@ impl SandboxKernel for ProductionSandboxKernel {
     }
 
     fn set_post_identity_capabilities(&mut self) -> Result<(), WorkerSandboxError> {
-        let transition = CapabilitySet::NET_ADMIN | CapabilitySet::SETPCAP;
+        let transition =
+            CapabilitySet::NET_BIND_SERVICE | CapabilitySet::NET_ADMIN | CapabilitySet::SETPCAP;
         set_capabilities(
             None,
             CapabilitySets {
@@ -2151,8 +2159,8 @@ impl SandboxKernel for ProductionSandboxKernel {
         set_capabilities(
             None,
             CapabilitySets {
-                effective: CapabilitySet::NET_ADMIN,
-                permitted: CapabilitySet::NET_ADMIN,
+                effective: CapabilitySet::NET_BIND_SERVICE | CapabilitySet::NET_ADMIN,
+                permitted: CapabilitySet::NET_BIND_SERVICE | CapabilitySet::NET_ADMIN,
                 inheritable: CapabilitySet::empty(),
             },
         )
@@ -2226,6 +2234,7 @@ fn pre_identity_capabilities() -> CapabilitySet {
     CapabilitySet::SETGID
         | CapabilitySet::SETUID
         | CapabilitySet::SETPCAP
+        | CapabilitySet::NET_BIND_SERVICE
         | CapabilitySet::NET_ADMIN
 }
 
@@ -2244,7 +2253,7 @@ fn validate_pre_identity_state(
         inheritable: 0,
         permitted: pre_identity_capabilities().bits(),
         effective: pre_identity_capabilities().bits(),
-        bounding: CAP_NET_ADMIN_BIT | CAP_SETPCAP_BIT,
+        bounding: WORKER_CAPABILITY_BITS | CAP_SETPCAP_BIT,
         ambient: 0,
     };
     let required_seccomp = parent_seccomp.expected_after_worker_filter()?;
@@ -2301,7 +2310,10 @@ fn begin_sandbox<K: SandboxKernel>(
     kernel.clear_ambient()?;
     let last_capability = kernel.last_capability()?;
     for capability in 0..=last_capability {
-        if capability != CAP_NET_ADMIN && capability != CAP_SETPCAP {
+        if capability != CAP_NET_BIND_SERVICE
+            && capability != CAP_NET_ADMIN
+            && capability != CAP_SETPCAP
+        {
             kernel.drop_bounding(capability)?;
         }
     }
@@ -2336,7 +2348,8 @@ fn finish_sandbox<K: SandboxKernel>(
         return Err(WorkerSandboxError::Mismatch);
     }
     // CAP_SETPCAP is deliberately the final bounding-set removal. It remains effective until the
-    // subsequent capset atomically reduces effective/permitted to CAP_NET_ADMIN.
+    // subsequent capset atomically reduces effective/permitted to the exact two worker
+    // capabilities.
     kernel.drop_bounding(CAP_SETPCAP)?;
     kernel.set_exact_capabilities()?;
     let snapshot = kernel.observe_final(prepared.parent_network_namespace)?;
@@ -2445,9 +2458,9 @@ mod tests {
             ),
             LinuxCapabilitySnapshot::fixture(
                 0,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
                 0,
             ),
         )
@@ -2505,25 +2518,37 @@ mod tests {
         for capabilities in [
             LinuxCapabilitySnapshot::fixture(
                 1,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                0,
-            ),
-            LinuxCapabilitySnapshot::fixture(0, 0, CAP_NET_ADMIN_BIT, CAP_NET_ADMIN_BIT, 0),
-            LinuxCapabilitySnapshot::fixture(0, CAP_NET_ADMIN_BIT, 0, CAP_NET_ADMIN_BIT, 0),
-            LinuxCapabilitySnapshot::fixture(
-                0,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT | 1,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
                 0,
             ),
             LinuxCapabilitySnapshot::fixture(
                 0,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
-                CAP_NET_ADMIN_BIT,
+                0,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                0,
+            ),
+            LinuxCapabilitySnapshot::fixture(
+                0,
+                WORKER_CAPABILITY_BITS,
+                0,
+                WORKER_CAPABILITY_BITS,
+                0,
+            ),
+            LinuxCapabilitySnapshot::fixture(
+                0,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS | 1,
+                0,
+            ),
+            LinuxCapabilitySnapshot::fixture(
+                0,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
+                WORKER_CAPABILITY_BITS,
                 1,
             ),
         ] {
@@ -3033,9 +3058,9 @@ mod tests {
         assert_eq!(&encoded[144..148], &4_u32.to_be_bytes());
         assert_eq!(&encoded[148..152], &[0; 4]);
         assert_eq!(&encoded[152..160], &0_u64.to_be_bytes());
-        assert_eq!(&encoded[160..168], &CAP_NET_ADMIN_BIT.to_be_bytes());
-        assert_eq!(&encoded[168..176], &CAP_NET_ADMIN_BIT.to_be_bytes());
-        assert_eq!(&encoded[176..184], &CAP_NET_ADMIN_BIT.to_be_bytes());
+        assert_eq!(&encoded[160..168], &WORKER_CAPABILITY_BITS.to_be_bytes());
+        assert_eq!(&encoded[168..176], &WORKER_CAPABILITY_BITS.to_be_bytes());
+        assert_eq!(&encoded[176..184], &WORKER_CAPABILITY_BITS.to_be_bytes());
         assert_eq!(&encoded[184..192], &0_u64.to_be_bytes());
         assert_eq!(
             SandboxProofRecord::decode(&encoded).expect("canonical"),
@@ -3104,9 +3129,9 @@ mod tests {
             "Gid:\t988\t988\t988\t988\n",
             "Groups:\t\n",
             "CapInh:\t0000000000000000\n",
-            "CapPrm:\t0000000000001000\n",
-            "CapEff:\t0000000000001000\n",
-            "CapBnd:\t0000000000001000\n",
+            "CapPrm:\t0000000000001400\n",
+            "CapEff:\t0000000000001400\n",
+            "CapBnd:\t0000000000001400\n",
             "CapAmb:\t0000000000000000\n",
             "NoNewPrivs:\t1\n",
             "Seccomp:\t2\n",
@@ -3167,7 +3192,7 @@ mod tests {
             status().replace_ascii(b"Seccomp_filters:\t4", b"Seccomp_filters:\t04"),
             status().replace_ascii(b"Seccomp_filters:\t4", b"Seccomp_filters:\t+4"),
             status().replace_ascii(b"Seccomp_filters:\t4", b"Seccomp_filters:\t4 "),
-            status().replace_ascii(b"CapBnd:\t0000000000001000", b"CapBnd:\t00000000000001000"),
+            status().replace_ascii(b"CapBnd:\t0000000000001400", b"CapBnd:\t00000000000001400"),
             vec![b'x'; MAX_PROC_STATUS_BYTES + 1],
         ] {
             assert!(parse_process_status(&changed).is_err());
@@ -3278,7 +3303,7 @@ mod tests {
         for changed in invalid {
             assert!(validate_live_proof_parent_status(changed, required_group).is_err());
         }
-        assert_eq!(HELPER_BOOTSTRAP_CAPABILITY_BITS, 0x20_31e0);
+        assert_eq!(HELPER_BOOTSTRAP_CAPABILITY_BITS, 0x20_35e0);
     }
 
     #[test]
@@ -3335,7 +3360,7 @@ mod tests {
                 inheritable: 0,
                 permitted: transition,
                 effective: transition,
-                bounding: CAP_NET_ADMIN_BIT | CAP_SETPCAP_BIT,
+                bounding: WORKER_CAPABILITY_BITS | CAP_SETPCAP_BIT,
                 ambient: 0,
             },
         };
@@ -3367,6 +3392,7 @@ mod tests {
             CAP_SETGID_BIT,
             CAP_SETUID_BIT,
             CAP_SETPCAP_BIT,
+            CAP_NET_BIND_SERVICE_BIT,
             CAP_NET_ADMIN_BIT,
         ] {
             let mut missing_effective = valid;
@@ -3589,6 +3615,7 @@ mod tests {
         assert_eq!(kernel.steps[set_pre + 2], Step::NoNewPrivileges);
         assert_eq!(kernel.steps[set_pre + 3], Step::InstallProcessTreeFilter);
         assert!(!kernel.steps[..set_pre].contains(&Step::Drop(CAP_NET_ADMIN)));
+        assert!(!kernel.steps[..set_pre].contains(&Step::Drop(CAP_NET_BIND_SERVICE)));
         assert!(!kernel.steps[..set_pre].contains(&Step::Drop(CAP_SETPCAP)));
         assert!(kernel.steps[..set_pre].contains(&Step::Drop(CAP_KILL)));
         assert!(!kernel.initial.effective.contains(CapabilitySet::KILL));
@@ -3714,6 +3741,7 @@ mod tests {
             CapabilitySet::SETGID,
             CapabilitySet::SETUID,
             CapabilitySet::SETPCAP,
+            CapabilitySet::NET_BIND_SERVICE,
             CapabilitySet::NET_ADMIN,
         ] {
             for permitted in [false, true] {
@@ -3742,6 +3770,7 @@ mod tests {
             CapabilitySet::SETGID,
             CapabilitySet::SETUID,
             CapabilitySet::SETPCAP,
+            CapabilitySet::NET_BIND_SERVICE,
             CapabilitySet::NET_ADMIN,
             CapabilitySet::SYS_ADMIN,
         ] {

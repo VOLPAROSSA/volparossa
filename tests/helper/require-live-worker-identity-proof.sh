@@ -41,7 +41,8 @@ print_plan() {
         '  start its fixed credential trampoline as blocking Type=exec, then require helper exec;' \
         '  retain diagnostic success with RemainAfterExit=yes and failures with CollectMode=inactive;' \
         '  forbid ignore-failure, aggressive collection, and asynchronous or waiting client modes;' \
-        '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
+        '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_NET_RAW,' \
+        '    CAP_SETGID, CAP_SETPCAP,' \
         '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
         '  bound both large build-artifact staging copies at 128 MiB, then cap' \
         '    the proof process and every transient-unit file write at 1 MiB;' \
@@ -4267,7 +4268,7 @@ state_digest() {
 capture_host_state "$temporary_stage/before"
 before_digest=$(state_digest "$temporary_stage/before")
 
-capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'
+capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'
 account_binds="$temporary_stage/passwd:/etc/passwd:norbind $temporary_stage/group:/etc/group:norbind $temporary_stage/shadow:/etc/shadow:norbind $temporary_stage/nsswitch.conf:/etc/nsswitch.conf:norbind"
 helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-live-proof:norbind"
 system_bus_bind="$system_bus_socket:$system_bus_socket:norbind"
