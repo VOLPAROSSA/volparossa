@@ -183,6 +183,13 @@ grep -F 'tls-policy-acceptance-fixture" denied' "$GUEST" >/dev/null
 grep -F '47.163.4.2:18443' "$GUEST" >/dev/null
 grep -F '"$WORK/tls-policy/tls-policy-cert.der"' "$GUEST" >/dev/null
 grep -F 'destination.volparossa.test' "$GUEST" >/dev/null
+grep -F '"$WORK/bin/dns-policy-client.py" udp "$RUN_ID"' "$GUEST" >/dev/null
+grep -F '"$WORK/bin/dns-policy-client.py" tcp "$RUN_ID"' "$GUEST" >/dev/null
+grep -F 'event=INGRESS_DNS_QUERY_COMPLETED' "$GUEST" >/dev/null
+grep -F 'event=INGRESS_DNS_TCP_QUERY_COMPLETED' "$GUEST" >/dev/null
+grep -F 'and ($dns_udp.response_source == $dns_udp.resolver)' "$GUEST" >/dev/null
+grep -F 'and ($dns_tcp.response_source == $dns_tcp.resolver)' "$GUEST" >/dev/null
+grep -F 'and ($dns_udp.answer_addresses == ["47.163.4.2"])' "$GUEST" >/dev/null
 grep -F 'INGRESS_TCP_POLICY_DENIED' "$GUEST" >/dev/null
 grep -F 'INGRESS_TCP_ECH_DENIED' "$GUEST" >/dev/null
 grep -F 'INGRESS_TCP_CLIENT_HELLO_DENIED' "$GUEST" >/dev/null
@@ -217,6 +224,10 @@ grep -F '.a06_http3_mpquic.evidence.hostname_policy.hostname == "destination.vol
 grep -F '.a07_http3_relay_failover.evidence.application_flow_completed == true' "$WORKFLOW" \
     >/dev/null
 grep -F '.a08_allowed_destination.evidence.protected_flow.tls_handshake_and_payload_completed == true' \
+    "$WORKFLOW" >/dev/null
+grep -F '.a08_allowed_destination.evidence.dns.udp.mode == "udp"' "$WORKFLOW" >/dev/null
+grep -F '.a08_allowed_destination.evidence.dns.tcp.mode == "tcp"' "$WORKFLOW" >/dev/null
+grep -F '.a08_allowed_destination.evidence.dns.answer_addresses == ["47.163.4.2"]' \
     "$WORKFLOW" >/dev/null
 grep -F '.a09_forbidden_destinations.evidence.destination_egress_connections_for_denials == 0' \
     "$WORKFLOW" >/dev/null

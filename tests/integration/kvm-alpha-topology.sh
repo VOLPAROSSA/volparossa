@@ -397,6 +397,7 @@ copy_artifacts() {
         a07-native-after.txt a07-native-after.json \
         a07-removal.json a07-evidence.json \
         tls-policy-server.log a08-exit-host-lookup.txt \
+        a08-dns-udp.json a08-dns-udp.err a08-dns-tcp.json a08-dns-tcp.err \
         a08-client.json a08-client.err a08-destination.json a08-evidence.json \
         a09-unlisted-domain.json a09-unlisted-domain.err \
         a09-raw-ip-server-name.json a09-raw-ip-server-name.err \
@@ -2405,6 +2406,120 @@ json.dump(
 )
 sys.stdout.write("\n")
 PYTHON
+cat >"$WORK/bin/dns-policy-client.py" <<'PYTHON'
+import hashlib
+import json
+import socket
+import struct
+import sys
+
+mode = sys.argv[1]
+run_id = bytes.fromhex(sys.argv[2])
+if mode not in {"udp", "tcp"} or len(run_id) != 16:
+    raise SystemExit("invalid bounded DNS acceptance arguments")
+
+resolver = ("9.9.9.9", 53)
+hostname = "destination.volparossa.test"
+transaction_id = int.from_bytes(run_id[:2], "big") ^ (0x4400 if mode == "udp" else 0x5500)
+labels = hostname.encode("ascii").split(b".")
+question = b"".join(bytes([len(label)]) + label for label in labels) + b"\0\0\1\0\1"
+query = struct.pack("!HHHHHH", transaction_id, 0x0100, 1, 0, 0, 0) + question
+
+if mode == "udp":
+    application = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    application.settimeout(180)
+    application.sendto(query, resolver)
+    response, source = application.recvfrom(4096)
+else:
+    application = socket.create_connection(resolver, timeout=180)
+    application.settimeout(180)
+    application.sendall(struct.pack("!H", len(query)) + query)
+    encoded_length = bytearray()
+    while len(encoded_length) < 2:
+        chunk = application.recv(2 - len(encoded_length))
+        if not chunk:
+            raise SystemExit("DNS-over-TCP response length was incomplete")
+        encoded_length.extend(chunk)
+    remaining = struct.unpack("!H", encoded_length)[0]
+    chunks = bytearray()
+    while len(chunks) < remaining:
+        chunk = application.recv(remaining - len(chunks))
+        if not chunk:
+            raise SystemExit("DNS-over-TCP response was incomplete")
+        chunks.extend(chunk)
+    response = bytes(chunks)
+    source = application.getpeername()
+local = application.getsockname()
+application.close()
+
+if len(response) < 12:
+    raise SystemExit("DNS response was truncated")
+response_id, flags, questions, answers, authorities, additionals = struct.unpack(
+    "!HHHHHH", response[:12]
+)
+if response_id != transaction_id or flags & 0x8000 == 0 or flags & 0x000F != 0:
+    raise SystemExit("DNS response header did not match the request")
+if questions != 1 or answers < 1 or response[12 : 12 + len(question)] != question:
+    raise SystemExit("DNS response question was substituted")
+
+
+def skip_name(packet, offset):
+    while True:
+        if offset >= len(packet):
+            raise SystemExit("DNS response name was truncated")
+        length = packet[offset]
+        if length & 0xC0 == 0xC0:
+            if offset + 2 > len(packet):
+                raise SystemExit("DNS response pointer was truncated")
+            return offset + 2
+        offset += 1
+        if length == 0:
+            return offset
+        if length > 63 or offset + length > len(packet):
+            raise SystemExit("DNS response label was invalid")
+        offset += length
+
+
+offset = 12 + len(question)
+addresses = []
+for _ in range(answers):
+    offset = skip_name(response, offset)
+    if offset + 10 > len(response):
+        raise SystemExit("DNS resource record was truncated")
+    record_type, record_class, ttl, length = struct.unpack("!HHIH", response[offset : offset + 10])
+    offset += 10
+    data = response[offset : offset + length]
+    if len(data) != length:
+        raise SystemExit("DNS resource data was truncated")
+    offset += length
+    if record_type == 1 and record_class == 1 and length == 4 and 0 < ttl <= 30:
+        addresses.append(socket.inet_ntoa(data))
+if addresses != ["47.163.4.2"]:
+    raise SystemExit("DNS answer was not the exact Exit-resolved policy address")
+
+json.dump(
+    {
+        "schema_version": 1,
+        "mode": mode,
+        "hostname": hostname,
+        "resolver": {"ip": resolver[0], "port": resolver[1]},
+        "application": {"ip": local[0], "port": local[1]},
+        "response_source": {"ip": source[0], "port": source[1]},
+        "transaction_id": transaction_id,
+        "query_bytes": len(query),
+        "query_sha256": hashlib.sha256(query).hexdigest(),
+        "response_bytes": len(response),
+        "response_sha256": hashlib.sha256(response).hexdigest(),
+        "answer_addresses": addresses,
+        "authority_records": authorities,
+        "additional_records": additionals,
+    },
+    sys.stdout,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+sys.stdout.write("\n")
+PYTHON
 cat >"$WORK/bin/destination.py" <<'PYTHON'
 import hashlib
 import json
@@ -2562,8 +2677,8 @@ chown root:root "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py" \
     "$WORK/bin/a06-observer.py" "$WORK/bin/privacy-observer.py"
 chmod 0500 "$WORK/bin/a02-observer.py" "$WORK/bin/a05-observer.py" \
     "$WORK/bin/a06-observer.py" "$WORK/bin/privacy-observer.py"
-chown root:root "$WORK/bin/mptcp-download-client.py"
-chmod 0555 "$WORK/bin/mptcp-download-client.py"
+chown root:root "$WORK/bin/mptcp-download-client.py" "$WORK/bin/dns-policy-client.py"
+chmod 0555 "$WORK/bin/mptcp-download-client.py" "$WORK/bin/dns-policy-client.py"
 chown "root:$AGENT_GID" "$WORK/bin/destination.py"
 chmod 0550 "$WORK/bin/destination.py"
 ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
@@ -4813,6 +4928,92 @@ while [ "$attempt" -lt 300 ]; do
 done
 [ "$attempt" -lt 300 ] || fail A08_PREVIOUS_ROUTE_NOT_IDLE
 
+A08_REQUESTED=true
+A08_STATUS=1
+capture_product_logs
+A08_DNS_UDP_BEFORE=$(grep -Fc 'event=INGRESS_DNS_QUERY_COMPLETED' \
+    "$WORK/logs-client.txt" 2>/dev/null || true)
+PHASE=a08-allowed-dns-udp
+set +e
+timeout --signal=TERM --kill-after=5s 180s \
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+    --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --no-new-privs -- \
+    "$WORK/bin/dns-policy-client.py" udp "$RUN_ID" \
+    >"$WORK/a08-dns-udp.json" 2>"$WORK/a08-dns-udp.err"
+A08_DNS_UDP_STATUS=$?
+set -e
+attempt=0
+while [ "$A08_DNS_UDP_STATUS" -eq 0 ] && [ "$attempt" -lt 300 ]; do
+    capture_product_logs
+    A08_DNS_UDP_AFTER=$(grep -Fc 'event=INGRESS_DNS_QUERY_COMPLETED' \
+        "$WORK/logs-client.txt" 2>/dev/null || true)
+    [ "$A08_DNS_UDP_AFTER" -gt "$A08_DNS_UDP_BEFORE" ] && break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+if [ "$A08_DNS_UDP_STATUS" -ne 0 ] || [ "$attempt" -ge 300 ]; then
+    OBSERVED_BLOCKER=A08_ALLOWED_DNS_UDP_NOT_PROVEN
+    PHASE=a08-blocked
+    exit 77
+fi
+
+attempt=0
+while [ "$attempt" -lt 300 ]; do
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" status \
+        >"$WORK/status-client.txt" || true
+    if grep -Fx 'connected: false' "$WORK/status-client.txt" >/dev/null \
+        && grep -Fx 'active contexts: 0' "$WORK/status-client.txt" >/dev/null; then
+        break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ "$attempt" -lt 300 ] || fail A08_DNS_UDP_ROUTE_NOT_IDLE
+
+capture_product_logs
+A08_DNS_TCP_BEFORE=$(grep -Fc 'event=INGRESS_DNS_TCP_QUERY_COMPLETED' \
+    "$WORK/logs-client.txt" 2>/dev/null || true)
+PHASE=a08-allowed-dns-tcp
+set +e
+timeout --signal=TERM --kill-after=5s 180s \
+    ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+    --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --no-new-privs -- \
+    "$WORK/bin/dns-policy-client.py" tcp "$RUN_ID" \
+    >"$WORK/a08-dns-tcp.json" 2>"$WORK/a08-dns-tcp.err"
+A08_DNS_TCP_STATUS=$?
+set -e
+attempt=0
+while [ "$A08_DNS_TCP_STATUS" -eq 0 ] && [ "$attempt" -lt 300 ]; do
+    capture_product_logs
+    A08_DNS_TCP_AFTER=$(grep -Fc 'event=INGRESS_DNS_TCP_QUERY_COMPLETED' \
+        "$WORK/logs-client.txt" 2>/dev/null || true)
+    [ "$A08_DNS_TCP_AFTER" -gt "$A08_DNS_TCP_BEFORE" ] && break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+if [ "$A08_DNS_TCP_STATUS" -ne 0 ] || [ "$attempt" -ge 300 ]; then
+    OBSERVED_BLOCKER=A08_ALLOWED_DNS_TCP_NOT_PROVEN
+    PHASE=a08-blocked
+    exit 77
+fi
+
+attempt=0
+while [ "$attempt" -lt 300 ]; do
+    "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" status \
+        >"$WORK/status-client.txt" || true
+    if grep -Fx 'connected: false' "$WORK/status-client.txt" >/dev/null \
+        && grep -Fx 'active contexts: 0' "$WORK/status-client.txt" >/dev/null; then
+        break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ "$attempt" -lt 300 ] || fail A08_DNS_TCP_ROUTE_NOT_IDLE
+
 install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/tls-policy"
 timeout --signal=TERM --kill-after=5s 330s \
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
@@ -4841,8 +5042,6 @@ capture_product_logs
 A08_COMPLETION_BEFORE=$(grep -Fc 'event=INGRESS_TCP_STREAM_COMPLETED' \
     "$WORK/logs-client.txt" 2>/dev/null || true)
 PHASE=a08-allowed-visible-name-tls
-A08_REQUESTED=true
-A08_STATUS=1
 set +e
 timeout --signal=TERM --kill-after=5s 180s \
     ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
@@ -4878,10 +5077,17 @@ if [ "$A08_STATUS" -eq 0 ]; then
     jq -S -c -n \
         --slurpfile application "$WORK/a08-client.json" \
         --slurpfile destination "$WORK/a08-destination.json" \
+        --slurpfile dns_udp "$WORK/a08-dns-udp.json" \
+        --slurpfile dns_tcp "$WORK/a08-dns-tcp.json" \
         --rawfile lookup "$WORK/a08-exit-host-lookup.txt" \
+        --argjson dns_udp_before "$A08_DNS_UDP_BEFORE" \
+        --argjson dns_udp_after "$A08_DNS_UDP_AFTER" \
+        --argjson dns_tcp_before "$A08_DNS_TCP_BEFORE" \
+        --argjson dns_tcp_after "$A08_DNS_TCP_AFTER" \
         --argjson completion_before "$A08_COMPLETION_BEFORE" \
         --argjson completion_after "$A08_COMPLETION_AFTER" \
         '($application[0]) as $app | ($destination[0]) as $destination
+        | ($dns_udp[0]) as $dns_udp | ($dns_tcp[0]) as $dns_tcp
         | (($app.case == "allowed-domain")
             and ($app.hostname == "destination.volparossa.test")
             and ($app.destination == {ip:"47.163.4.2",port:18443})
@@ -4899,12 +5105,33 @@ if [ "$A08_STATUS" -eq 0 ]; then
             and ($destination.request_sha256 == $app.request_sha256)
             and ($destination.response_sha256 == $app.response_sha256)
             and ($lookup == "47.163.4.2\n")
+            and ($dns_udp.mode == "udp") and ($dns_tcp.mode == "tcp")
+            and ($dns_udp.hostname == "destination.volparossa.test")
+            and ($dns_tcp.hostname == $dns_udp.hostname)
+            and ($dns_udp.resolver == {ip:"9.9.9.9",port:53})
+            and ($dns_tcp.resolver == $dns_udp.resolver)
+            and ($dns_udp.response_source == $dns_udp.resolver)
+            and ($dns_tcp.response_source == $dns_tcp.resolver)
+            and ($dns_udp.answer_addresses == ["47.163.4.2"])
+            and ($dns_tcp.answer_addresses == $dns_udp.answer_addresses)
+            and ($dns_udp.response_bytes > $dns_udp.query_bytes)
+            and ($dns_tcp.response_bytes > $dns_tcp.query_bytes)
+            and ($dns_udp_after > $dns_udp_before)
+            and ($dns_tcp_after > $dns_tcp_before)
             and ($completion_after > $completion_before)) as $success
         | {schema_version:1,acceptance_id:"A08",success:$success,
            request:{hostname:$app.hostname,original_destination:$app.destination},
            application:$app,destination:$destination,
            exit_resolution:{hostname:$app.hostname,addresses:["47.163.4.2"],
              exact_original_destination_match:true},
+           dns:{hostname:$dns_udp.hostname,answer_addresses:$dns_udp.answer_addresses,
+             udp:$dns_udp,tcp:$dns_tcp,
+             udp_completion_events_before:$dns_udp_before,
+             udp_completion_events_after:$dns_udp_after,
+             tcp_completion_events_before:$dns_tcp_before,
+             tcp_completion_events_after:$dns_tcp_after,
+             agent_opened_resolver_socket_directly:false,
+             exit_resolved_allowed_name:true},
            protected_flow:{transparent_client_hello_forwarded_unchanged:true,
              tls_handshake_and_payload_completed:true,
              ingress_completion_events_before:$completion_before,

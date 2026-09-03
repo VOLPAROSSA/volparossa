@@ -236,6 +236,13 @@ jobs:
             .a08_allowed_destination.evidence.protected_flow.transparent_client_hello_forwarded_unchanged == true and
             .a08_allowed_destination.evidence.protected_flow.tls_handshake_and_payload_completed == true and
             .a08_allowed_destination.evidence.destination.accepted_connections == 1 and
+            .a08_allowed_destination.evidence.dns.udp.mode == "udp" and
+            .a08_allowed_destination.evidence.dns.tcp.mode == "tcp" and
+            .a08_allowed_destination.evidence.dns.udp.response_source == {"ip":"9.9.9.9","port":53} and
+            .a08_allowed_destination.evidence.dns.tcp.response_source == {"ip":"9.9.9.9","port":53} and
+            .a08_allowed_destination.evidence.dns.answer_addresses == ["47.163.4.2"] and
+            .a08_allowed_destination.evidence.dns.udp_completion_events_after > .a08_allowed_destination.evidence.dns.udp_completion_events_before and
+            .a08_allowed_destination.evidence.dns.tcp_completion_events_after > .a08_allowed_destination.evidence.dns.tcp_completion_events_before and
             .a09_forbidden_destinations.succeeded == true and
             .a09_forbidden_destinations.evidence.success == true and
             (.a09_forbidden_destinations.evidence.denied_cases | length) == 5 and
