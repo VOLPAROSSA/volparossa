@@ -83,6 +83,7 @@ jobs:
           VMP_RUN_TESTS: no
         run: |
           set -euo pipefail
+          cargo fetch --locked
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
             ./packaging/build-deb.sh --build
           mapfile -t packages < <(find "$(pwd -P)/dist" -maxdepth 1 -type f \
