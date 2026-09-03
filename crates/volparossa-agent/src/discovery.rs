@@ -4765,7 +4765,16 @@ impl DiscoveryRuntime {
                         retained.push(attempt);
                         continue;
                     }
-                    Ok(Ok(_) | Err(_)) | Err(oneshot::error::TryRecvError::Closed) => continue,
+                    Ok(Ok(response)) => {
+                        if response.validated_status() != Ok(ForwardStatus::Granted) {
+                            self.retain_exhausted_exit_fetch_control(attempt.key, now_ms);
+                        }
+                        continue;
+                    }
+                    Ok(Err(_)) | Err(oneshot::error::TryRecvError::Closed) => {
+                        self.retain_exhausted_exit_fetch_control(attempt.key, now_ms);
+                        continue;
+                    }
                 },
                 AutomaticExitFetchAttemptState::RetryNotBefore(retry_at_ms)
                     if *retry_at_ms > now_ms =>
@@ -4794,6 +4803,19 @@ impl DiscoveryRuntime {
             retained.push(attempt);
         }
         self.automatic_exit_fetch_attempts = retained;
+    }
+
+    /// Prevent a failed control Relay from starving later candidates when the Relay set is larger
+    /// than one request deadline can traverse. The provider observation is the authority for the
+    /// current search round, so an exhausted `(Relay, Exit)` pair stays tried until that observation
+    /// expires instead of becoming eligible again after the shorter forwarding deadline.
+    fn retain_exhausted_exit_fetch_control(&mut self, key: ForwardedExitKey, now_ms: u64) {
+        let exhausted_until_ms = self
+            .exit_provider_peers
+            .get(&key.exit_peer)
+            .copied()
+            .unwrap_or_else(|| now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS));
+        self.automatic_exit_fetches.insert(key, exhausted_until_ms);
     }
 
     fn automatic_exit_fetch_retry_is_current(
@@ -18282,6 +18304,84 @@ mod tests {
                         && pending.expected_exit_peer == exit_peer
                         && pending.operation == ExitForwardOperation::FetchExitAdvertisement
                 })
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_scale_controls_stay_retired_until_provider_refresh() {
+        let mut fixture = fixture(RolesConfig::default());
+        let now_ms = unix_millis();
+        let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
+        let request_deadline_ms = now_ms.saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS);
+        let exit_peer = Identity::generate().peer_id().to_owned();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, provider_expires_at_ms);
+
+        let mut controls = (1_u64..=6)
+            .map(|sequence| {
+                direct_capability(
+                    &Identity::generate(),
+                    &fixture.policy,
+                    sequence,
+                    provider_expires_at_ms,
+                )
+            })
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        for control in &controls {
+            fixture
+                .runtime
+                .direct_relays
+                .insert(control.peer_id, control.clone());
+        }
+
+        for (index, control) in controls[..5].iter().enumerate() {
+            let key = ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            };
+            let request = fetch_request(
+                control,
+                exit_peer,
+                [u8::try_from(index + 1).expect("bounded index"); FORWARD_ID_BYTES],
+                request_deadline_ms,
+            );
+            let (reply, receiver) = oneshot::channel();
+            drop(reply);
+            fixture
+                .runtime
+                .automatic_exit_fetches
+                .insert(key, request_deadline_ms);
+            fixture
+                .runtime
+                .automatic_exit_fetch_attempts
+                .push(AutomaticExitFetchAttempt {
+                    key,
+                    authorized_control: control.clone(),
+                    request,
+                    dispatch_attempts: MAX_DISPATCH_ATTEMPTS,
+                    state: AutomaticExitFetchAttemptState::InFlight(receiver),
+                });
+
+            fixture.runtime.drive_automatic_exit_fetch_attempts(now_ms);
+
+            assert_eq!(
+                fixture.runtime.automatic_exit_fetches.get(&key),
+                Some(&provider_expires_at_ms)
+            );
+            assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
+        }
+
+        fixture.runtime.schedule_exit_advertisement_fetches();
+
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert_eq!(
+            fixture.runtime.automatic_exit_fetch_attempts[0]
+                .key
+                .control_relay_peer,
+            controls[5].peer_id
         );
     }
 
