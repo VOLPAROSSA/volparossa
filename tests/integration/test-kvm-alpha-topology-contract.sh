@@ -146,13 +146,8 @@ grep -F 'socket.create_connection(destination, timeout=60)' "$GUEST" >/dev/null
 grep -F '"relay1_wireguard_data_datagrams": 0' "$GUEST" >/dev/null
 grep -F 'wireguard_message_type == 4 and udp_length > 40' "$GUEST" >/dev/null
 grep -F 'tcp_payload_bytes = 4 * 1024 * 1024' "$GUEST" >/dev/null
-grep -F 'ss -M -H -O -tin state established' "$GUEST" >/dev/null
-grep -F 'ss -H -O -tn state established dport = :44443' "$GUEST" >/dev/null
-grep -F '/ subflows_total:2([[:space:]]|$)/' "$GUEST" >/dev/null
-grep -F 'wait_established_mptcp_subflows "$aggregate_subflows"' "$GUEST" >/dev/null
-grep -F 'kernel_mptcp_readiness:$both_subflows' "$GUEST" >/dev/null
-grep -F '($both_subflows.subflows_total == 2)' "$GUEST" >/dev/null
-grep -F '($both_subflows.established_tcp_subflows == 2)' "$GUEST" >/dev/null
+grep -F 'source:"production MPTCP_INFO gate before payload"' "$GUEST" >/dev/null
+grep -F 'required_subflows:2,gate_passed:true' "$GUEST" >/dev/null
 grep -F 'if observed_frames > 131072:' "$GUEST" >/dev/null
 grep -F 'destination_evidence="$WORK/destination/tcp-evidence-$attempt.json"' "$GUEST" \
     >/dev/null

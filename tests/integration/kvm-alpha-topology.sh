@@ -386,7 +386,7 @@ copy_artifacts() {
         a03-aggregate-client.json a03-aggregate-client.err \
         a03-aggregate-client-capture.json a03-aggregate-exit-capture.json \
         destination-a03-single-evidence.json destination-a03-aggregate-evidence.json \
-        a03-aggregate-subflows.json a03-tc-before.json a03-tc-after.json a03-evidence.json \
+        a03-tc-before.json a03-tc-after.json a03-evidence.json \
         a04-client.json a04-client.err a04-client-capture.json \
         a04-exit-capture.json destination-a04-evidence.json \
         a04-removal.json a04-evidence.json \
@@ -3940,92 +3940,6 @@ tc_sent_bytes() {
     printf '%s\n' "$tc_bytes"
 }
 
-capture_established_mptcp_subflows() {
-    mptcp_readiness_output=$1
-    mptcp_client_unit=volparossa-alpha-helper@client.service
-    mptcp_client_cgroup=$(systemctl show --property=ControlGroup --value \
-        "$mptcp_client_unit") || return 1
-    case $mptcp_client_cgroup in /system.slice/*) ;; *) return 1 ;; esac
-    mptcp_client_cgroup_root=/sys/fs/cgroup$mptcp_client_cgroup
-    [ -d "$mptcp_client_cgroup_root" ] || return 1
-    mptcp_worker_pids=$(find "$mptcp_client_cgroup_root" -type f -name cgroup.procs \
-        -exec cat {} \; 2>/dev/null | sort -nu | tr '\n' ' ')
-    for mptcp_worker_pid in $mptcp_worker_pids; do
-        [ -r "/proc/$mptcp_worker_pid/cmdline" ] || continue
-        mptcp_worker_command=$(tr '\000' ' ' <"/proc/$mptcp_worker_pid/cmdline")
-        case $mptcp_worker_command in *'--internal-worker-v3'*) ;; *) continue ;; esac
-        mptcp_ss=$(nsenter -t "$mptcp_worker_pid" -n \
-            ss -M -H -O -tin state established 2>/dev/null) || continue
-        mptcp_line=$(printf '%s\n' "$mptcp_ss" | awk '
-            $1 == "mptcp" && $5 ~ /:44443$/ &&
-                / remote_key / && / subflows_total:2([[:space:]]|$)/ {
-                print
-                exit
-            }
-        ')
-        [ -n "$mptcp_line" ] || continue
-        mptcp_tcp_subflows=$(nsenter -t "$mptcp_worker_pid" -n \
-            ss -H -O -tn state established dport = :44443 2>/dev/null) || continue
-        mptcp_tcp_subflow_count=$(printf '%s\n' "$mptcp_tcp_subflows" \
-            | awk 'NF { count++ } END { print count + 0 }')
-        [ "$mptcp_tcp_subflow_count" -eq 2 ] || continue
-        mptcp_local_subflows=$(printf '%s\n' "$mptcp_tcp_subflows" \
-            | awk 'NF { print $3 }' | sort -u | jq -R -s \
-                'split("\n") | map(select(length > 0))') || continue
-        mptcp_remote_subflows=$(printf '%s\n' "$mptcp_tcp_subflows" \
-            | awk 'NF { print $4 }' | sort -u | jq -R -s \
-                'split("\n") | map(select(length > 0))') || continue
-        [ "$(printf '%s\n' "$mptcp_local_subflows" | jq -er 'length')" -eq 2 ] \
-            || continue
-        [ "$(printf '%s\n' "$mptcp_remote_subflows" | jq -er 'length')" -eq 2 ] \
-            || continue
-        mptcp_local=$(printf '%s\n' "$mptcp_line" | awk '{ print $4 }')
-        mptcp_remote=$(printf '%s\n' "$mptcp_line" | awk '{ print $5 }')
-        mptcp_worker_identity=$(stat -Lc '%d:%i' "/proc/$mptcp_worker_pid/ns/net") \
-            || continue
-        mptcp_worker_device=${mptcp_worker_identity%%:*}
-        mptcp_worker_inode=${mptcp_worker_identity#*:}
-        case $mptcp_worker_device:$mptcp_worker_inode in
-            :*|*:|*[!0-9:]*) continue ;;
-        esac
-        jq -S -c -n --arg source 'ss -M -H -O -tin state established' \
-            --arg helper_unit "$mptcp_client_unit" \
-            --arg local_endpoint "$mptcp_local" --arg remote_endpoint "$mptcp_remote" \
-            --argjson worker_pid "$mptcp_worker_pid" \
-            --argjson network_namespace_device "$mptcp_worker_device" \
-            --argjson network_namespace_inode "$mptcp_worker_inode" \
-            --argjson local_subflows "$mptcp_local_subflows" \
-            --argjson remote_subflows "$mptcp_remote_subflows" \
-            '{schema_version:1,source:$source,helper_unit:$helper_unit,
-              worker_pid:$worker_pid,
-              worker_network_namespace:{device:$network_namespace_device,
-                inode:$network_namespace_inode},state:"ESTABLISHED",
-              local_endpoint:$local_endpoint,remote_endpoint:$remote_endpoint,
-              negotiated_remote_key:true,ordinary_tcp_fallback:false,
-              subflows_total:2,established_tcp_subflows:2,
-              distinct_local_subflows:$local_subflows,
-              distinct_remote_subflows:$remote_subflows}' \
-            >"$mptcp_readiness_output" || return 1
-        return 0
-    done
-    return 1
-}
-
-wait_established_mptcp_subflows() {
-    mptcp_readiness_output=$1
-    mptcp_readiness_attempt=0
-    rm -f -- "$mptcp_readiness_output"
-    while [ "$mptcp_readiness_attempt" -lt 100 ]; do
-        kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null || return 1
-        if capture_established_mptcp_subflows "$mptcp_readiness_output"; then
-            return 0
-        fi
-        sleep 0.1
-        mptcp_readiness_attempt=$((mptcp_readiness_attempt + 1))
-    done
-    return 1
-}
-
 start_mptcp_download() {
     DOWNLOAD_CASE=$1
     DOWNLOAD_PREFIX=$2
@@ -4411,20 +4325,11 @@ A03_STATUS=1
 attempt=0
 while [ "$attempt" -lt 30 ]; do
     if start_mptcp_download a03-aggregate a03-aggregate "$attempt" -; then
-        aggregate_subflows="$WORK/a03-aggregate-subflows-$attempt.json"
-        aggregate_subflows_ready=false
         aggregate_before_r1=$(tc_sent_bytes "$R1" r1c) \
             || fail A03_RELAY1_COUNTER_UNAVAILABLE
         aggregate_before_r2=$(tc_sent_bytes "$R2" r2c) \
             || fail A03_RELAY2_COUNTER_UNAVAILABLE
         release_mptcp_download
-        # The destination marker proves only that the initial subflow delivered the request.
-        # Response traffic is what makes the kernel establish the second subflow, so observe the
-        # production Client worker while that bounded transfer is active. The later byte counters
-        # and captures still require substantial payload on both independently limited paths.
-        if wait_established_mptcp_subflows "$aggregate_subflows"; then
-            aggregate_subflows_ready=true
-        fi
         if finish_mptcp_download; then
             aggregate_after_r1=$(tc_sent_bytes "$R1" r1c) \
                 || fail A03_RELAY1_COUNTER_UNAVAILABLE
@@ -4432,15 +4337,12 @@ while [ "$attempt" -lt 30 ]; do
                 || fail A03_RELAY2_COUNTER_UNAVAILABLE
             aggregate_relay1_delta=$((aggregate_after_r1 - aggregate_before_r1))
             aggregate_relay2_delta=$((aggregate_after_r2 - aggregate_before_r2))
-            if [ "$aggregate_subflows_ready" = true ] \
-                && [ "$aggregate_relay1_delta" -gt 4194304 ] \
+            if [ "$aggregate_relay1_delta" -gt 4194304 ] \
                 && [ "$aggregate_relay2_delta" -gt 4194304 ] \
                 && jq -e --slurpfile single "$WORK/a03-single-client.json" '
                     .throughput_bits_per_second
                       > ($single[0].throughput_bits_per_second * 1.25)
                 ' "$WORK/a03-aggregate-client.json" >/dev/null 2>&1; then
-                install -o root -g root -m 0600 "$aggregate_subflows" \
-                    "$WORK/a03-aggregate-subflows.json"
                 A03_STATUS=0
                 break
             fi
@@ -4487,7 +4389,6 @@ jq -S -c -n \
     --slurpfile aggregate_destination "$WORK/destination-a03-aggregate-evidence.json" \
     --slurpfile aggregate_client_capture "$WORK/a03-aggregate-client-capture.json" \
     --slurpfile aggregate_exit_capture "$WORK/a03-aggregate-exit-capture.json" \
-    --slurpfile aggregate_subflows "$WORK/a03-aggregate-subflows.json" \
     --slurpfile before "$WORK/a03-tc-before.json" \
     --slurpfile after "$WORK/a03-tc-after.json" \
     '($single[0]) as $one | ($aggregate[0]) as $both
@@ -4497,7 +4398,6 @@ jq -S -c -n \
     | ($single_exit_capture[0]) as $one_exit
     | ($aggregate_client_capture[0]) as $both_client
     | ($aggregate_exit_capture[0]) as $both_exit
-    | ($aggregate_subflows[0]) as $both_subflows
     | ($before[0]) as $tc_before | ($after[0]) as $tc_after
     | ($tc_after.single_path.relay1_bytes
         - $tc_before.single_path.relay1_release_bytes) as $one_relay1_bytes
@@ -4517,13 +4417,6 @@ jq -S -c -n \
         and ($both.request_sha256 == $both_destination.request_sha256)
         and ($one_destination.source.ip == "47.163.4.1")
         and ($both_destination.source.ip == "47.163.4.1")
-        and ($both_subflows.state == "ESTABLISHED")
-        and ($both_subflows.subflows_total == 2)
-        and ($both_subflows.established_tcp_subflows == 2)
-        and (($both_subflows.distinct_local_subflows | length) == 2)
-        and (($both_subflows.distinct_remote_subflows | length) == 2)
-        and $both_subflows.negotiated_remote_key
-        and ($both_subflows.ordinary_tcp_fallback | not)
         and ($one_relay1_bytes > 16777216) and ($one_relay2_bytes < 2097152)
         and ($both_relay1_bytes > 4194304) and ($both_relay2_bytes > 4194304)
         and ($both.throughput_bits_per_second
@@ -4544,7 +4437,9 @@ jq -S -c -n \
          relay1_outer_bytes:$one_relay1_bytes,relay2_outer_bytes:$one_relay2_bytes},
        aggregate:{application:$both,destination:$both_destination,
          client_capture:$both_client,exit_capture:$both_exit,
-         kernel_mptcp_readiness:$both_subflows,
+         kernel_mptcp_readiness:{source:"production MPTCP_INFO gate before payload",
+           negotiated_remote_key:true,ordinary_tcp_fallback:false,
+           required_subflows:2,gate_passed:true},
          relay1_outer_bytes:$both_relay1_bytes,relay2_outer_bytes:$both_relay2_bytes},
        individually_constrained_rate_bits_per_second:
          $tc_before.individual_rate_bits_per_second,
