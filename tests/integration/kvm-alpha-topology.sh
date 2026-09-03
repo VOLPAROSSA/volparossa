@@ -3906,6 +3906,10 @@ while [ "$attempt" -lt 30 ]; do
             A03_STATUS=0
         fi
         ip -n "$R2" link set r2c up
+        ip -n "$R2" route replace 43.159.1.1/32 via 10.241.12.1 dev r2c src 45.161.2.1
+        ip -n "$R2" route get 43.159.1.1 \
+            | grep -F 'via 10.241.12.1 dev r2c src 45.161.2.1' >/dev/null \
+            || fail A03_RELAY2_CONTROL_ROUTE_NOT_RESTORED
         break
     fi
     sleep 1
@@ -4096,6 +4100,14 @@ while [ "$attempt" -lt 30 ]; do
         fi
         ip -n "$R1" link set r1x up
         ip -n "$R1" link set r1c up
+        ip -n "$R1" route replace 43.159.1.1/32 via 10.241.11.1 dev r1c src 44.160.1.1
+        ip -n "$R1" route replace 46.162.3.1/32 via 10.241.21.2 dev r1x src 44.160.1.1
+        ip -n "$R1" route get 43.159.1.1 \
+            | grep -F 'via 10.241.11.1 dev r1c src 44.160.1.1' >/dev/null \
+            || fail A04_RELAY1_CLIENT_ROUTE_NOT_RESTORED
+        ip -n "$R1" route get 46.162.3.1 \
+            | grep -F 'via 10.241.21.2 dev r1x src 44.160.1.1' >/dev/null \
+            || fail A04_RELAY1_EXIT_ROUTE_NOT_RESTORED
         break
     fi
     sleep 1
@@ -4579,6 +4591,14 @@ if [ "$A07_STATUS" -eq 0 ] \
 fi
 ip -n "$R1" link set r1x up
 ip -n "$R1" link set r1c up
+ip -n "$R1" route replace 43.159.1.1/32 via 10.241.11.1 dev r1c src 44.160.1.1
+ip -n "$R1" route replace 46.162.3.1/32 via 10.241.21.2 dev r1x src 44.160.1.1
+ip -n "$R1" route get 43.159.1.1 \
+    | grep -F 'via 10.241.11.1 dev r1c src 44.160.1.1' >/dev/null \
+    || fail A07_RELAY1_CLIENT_ROUTE_NOT_RESTORED
+ip -n "$R1" route get 46.162.3.1 \
+    | grep -F 'via 10.241.21.2 dev r1x src 44.160.1.1' >/dev/null \
+    || fail A07_RELAY1_EXIT_ROUTE_NOT_RESTORED
 set +e
 wait "$HTTP3_SERVER_PID"
 HTTP3_SERVER_STATUS=$?
