@@ -249,8 +249,9 @@ executable inode must still match. After proving the old process pidfd exited an
 cgroup is quiescent, the parent runs only
 `/proc/self/exe --internal-restart-reaper-v1`. A credential-authenticated bounded
 `SOCK_SEQPACKET` transcript transfers exactly one matching network-namespace FD. The child joins it
-once, installs the fixed worker sandbox, drops to the worker account with only `CAP_NET_ADMIN`, and
-is independently attested before cleanup. Client/Exit accept only derived-link absence, down
+once, installs the fixed worker sandbox, drops to the worker account with only `CAP_NET_ADMIN` and
+`CAP_NET_BIND_SERVICE`, and is independently attested before cleanup. Client/Exit accept only
+derived-link absence, down
 loopback, empty nftables and disabled IPv6 forwarding. Relay additionally requires IPv6 forwarding
 to remain enabled and removes only its exact restricted DROP fence, accepting exact-empty solely as
 the committed-deletion retry successor. It never deletes WireGuard links or changes forwarding.

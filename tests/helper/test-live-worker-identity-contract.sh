@@ -2340,12 +2340,12 @@ fi
 sh -n "$capability_normalizer"
 # shellcheck source=/dev/null
 . "$capability_normalizer"
-capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'
+capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'
 capability_raw=$temporary_directory/capabilities.raw
 capability_normalized=$temporary_directory/capabilities.normalized
 printf '%s\n' \
     'cap_sys_admin cap_setuid CAP_SETPCAP cap_setgid' \
-    'cap_net_raw CAP_NET_ADMIN cap_net_bind_service cap_kill' >"$capability_raw"
+    'CAP_NET_ADMIN cap_net_bind_service cap_kill' >"$capability_raw"
 chmod 0600 "$capability_raw"
 expect_status 0 normalize_capabilities "$capability_raw" "$capability_normalized"
 if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
@@ -4483,7 +4483,7 @@ printf '%s\n' \
     '  start its fixed credential trampoline as blocking Type=exec, then require helper exec;' \
     '  retain diagnostic success with RemainAfterExit=yes and failures with CollectMode=inactive;' \
     '  forbid ignore-failure, aggressive collection, and asynchronous or waiting client modes;' \
-    '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_NET_RAW,' \
+    '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_BIND_SERVICE,' \
     '    CAP_SETGID, CAP_SETPCAP,' \
     '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
     '  bound both large build-artifact staging copies at 128 MiB, then cap' \
@@ -8506,7 +8506,7 @@ if grep -E 'systemctl[[:space:]]+(kill|clean[[:space:]]+--what=(all|cache|config
     exit 1
 fi
 grep -F \
-    "capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'" \
+    "capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'" \
     "$gate" >/dev/null
 
 if grep -E '(^|[^[:alnum:]_-])(useradd|groupadd|adduser|addgroup|systemd-sysusers)([^[:alnum:]_-]|$)' \

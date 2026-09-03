@@ -141,7 +141,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   only the exact leader. A preview-first root driver now
   stages the real
   component in a transient `PrivateNetwork` systemd unit with synthetic read-only account overlays,
-  a private `/run`, the exact eight-capability parent set, exact singleton staged-agent
+  a private `/run`, the exact seven-capability parent set, exact singleton staged-agent
   supplementary-group attestation (so inherited host-root groups fail closed), confirmed leader
   reap and privacy-safe before/after host-state digests. That driver now requires exact systemd
   v257, retains the shipped `NotifyAccess=main`, 128-entry descriptor-store maximum and
@@ -325,7 +325,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   MainPID. The diagnostic helper parent contract continues to attest the final identity,
   capabilities, no-new-privileges state and seccomp state. The production hook independently
   requires and repeatedly revalidates all four UID/GID fields, its singleton group, NNP, seccomp
-  mode and bounded filter count, and all five capability masks against the exact eight-capability
+  mode and bounded filter count, and all five capability masks against the exact seven-capability
   set. The next non-retained branch smoke
   [run 33272380911](https://github.com/VOLPAROSSA/volparossa/actions/runs/33272380911) at
   `4dad3621fe9ec43ac23de432f57f6b0b7a3582ca` ran the disposable VM in
@@ -950,10 +950,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   checkbox remain unchanged.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
-  and doctor contract now require exactly the reviewed eight-capability bootstrap set
-  (`CAP_KILL`, `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_SETGID`, `CAP_SETPCAP`, `CAP_SETUID`,
+  and doctor contract now require exactly the reviewed seven-capability bootstrap set
+  (`CAP_KILL`, `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_SETGID`, `CAP_SETPCAP`, `CAP_SETUID`,
   `CAP_SYS_ADMIN`) and
-  reject `CAP_SYS_PTRACE`; they also require `LimitCORE=0`, `NotifyAccess=main`, a 128-entry
+  reject capabilities outside that set. The doctor also binds the agent's exact supplementary group,
+  the helper's closed TUN-only device policy, every service's exact writable/read-only path set,
+  and rejects repeated capability, address-family, group, device, or path directives. The helper
+  contract further requires
+  `LimitCORE=0`, `NotifyAccess=main`, a 128-entry
   descriptor store (two descriptors for each of at most 64 workers), preserve that store while the
   unit is retained, and explicitly keep control-group kill escalation. Before tracing or Tokio, a
   separate executable-entry crate performs the only explicit unsafe helper-startup assertion. Its
@@ -1029,7 +1033,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   exists and the production-server phase of the committed disposable driver now exercises one normal
   functional worker lifetime. Staged-package validation remains outstanding. Exact-main Debian 13
   helper-boundary run 33318629099 retains the scoped 18-check PASS described below, and the final
-  worker proof permits only `CAP_NET_ADMIN`.
+  worker proof permits only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`.
 - [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
   and the disposable production-server gate covers normal exact Destroy, worker reap/purge and

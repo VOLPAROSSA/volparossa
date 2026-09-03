@@ -63,7 +63,6 @@ const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
 const CAP_NET_BIND_SERVICE: u32 = 10;
 const CAP_NET_ADMIN: u32 = 12;
-const CAP_NET_RAW: u32 = 13;
 const CAP_SYS_ADMIN: u32 = 21;
 const CAP_KILL_BIT: u64 = 1_u64 << CAP_KILL;
 const CAP_SETGID_BIT: u64 = 1_u64 << CAP_SETGID;
@@ -71,11 +70,9 @@ const CAP_SETUID_BIT: u64 = 1_u64 << CAP_SETUID;
 const CAP_SETPCAP_BIT: u64 = 1_u64 << CAP_SETPCAP;
 const CAP_NET_BIND_SERVICE_BIT: u64 = 1_u64 << CAP_NET_BIND_SERVICE;
 const CAP_NET_ADMIN_BIT: u64 = 1_u64 << CAP_NET_ADMIN;
-const CAP_NET_RAW_BIT: u64 = 1_u64 << CAP_NET_RAW;
 const CAP_SYS_ADMIN_BIT: u64 = 1_u64 << CAP_SYS_ADMIN;
 const HELPER_BOOTSTRAP_CAPABILITY_BITS: u64 = CAP_KILL_BIT
     | CAP_NET_ADMIN_BIT
-    | CAP_NET_RAW_BIT
     | CAP_SETGID_BIT
     | CAP_SETPCAP_BIT
     | CAP_SETUID_BIT
@@ -3418,11 +3415,11 @@ mod tests {
         for field in 0..5 {
             let mut missing = valid;
             match field {
-                0 => missing.capabilities.inheritable &= !CAP_NET_RAW_BIT,
-                1 => missing.capabilities.permitted &= !CAP_NET_RAW_BIT,
-                2 => missing.capabilities.effective &= !CAP_NET_RAW_BIT,
-                3 => missing.capabilities.bounding &= !CAP_NET_RAW_BIT,
-                4 => missing.capabilities.ambient &= !CAP_NET_RAW_BIT,
+                0 => missing.capabilities.inheritable &= !CAP_SYS_ADMIN_BIT,
+                1 => missing.capabilities.permitted &= !CAP_SYS_ADMIN_BIT,
+                2 => missing.capabilities.effective &= !CAP_SYS_ADMIN_BIT,
+                3 => missing.capabilities.bounding &= !CAP_SYS_ADMIN_BIT,
+                4 => missing.capabilities.ambient &= !CAP_SYS_ADMIN_BIT,
                 _ => unreachable!(),
             }
             invalid.push(missing);
@@ -3440,7 +3437,7 @@ mod tests {
         for changed in invalid {
             assert!(validate_live_proof_parent_status(changed, required_group).is_err());
         }
-        assert_eq!(HELPER_BOOTSTRAP_CAPABILITY_BITS, 0x20_35e0);
+        assert_eq!(HELPER_BOOTSTRAP_CAPABILITY_BITS, 0x20_15e0);
     }
 
     #[test]

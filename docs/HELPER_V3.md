@@ -405,7 +405,8 @@ PID supplied by the journal or agent.
 The child is single-threaded. It validates and joins the exact namespace once, closes the namespace
 FD, remeasures the joined identity, sets no-new-privileges and installs the existing monotone filter
 which denies later `setns`, `unshare`, `exec` and process-tree creation. It then assumes the pinned
-worker UID/GID with only `CAP_NET_ADMIN`, rebinds `PDEATHSIG=SIGKILL`, rechecks the parent and emits a
+worker UID/GID with only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`, rebinds `PDEATHSIG=SIGKILL`,
+rechecks the parent and emits a
 challenge-bound sandbox record. The parent independently pins the child pidfd, executable, cgroup,
 namespace, descriptor set, credentials, capabilities and seccomp state before sending the cleanup
 release record. Before spawn it opens one close-on-exec reserve descriptor and requires the default
@@ -756,12 +757,13 @@ stdin. Its bounded self-audit then requires exactly descriptors `{1, 2, 3}`. Bef
 stdout and stderr must resolve to `/dev/null`, while descriptor 3 must remain the exact connected,
 CLOEXEC Unix seqpacket channel. The production-only applicator then captures the parent
 network-namespace identity, validates its
-bootstrap `CAP_KILL`, `CAP_SETGID`, `CAP_SETUID`, `CAP_SETPCAP`, `CAP_NET_ADMIN` and `CAP_SYS_ADMIN`
-authority,
+bootstrap `CAP_KILL`, `CAP_SETGID`, `CAP_SETUID`, `CAP_SETPCAP`, `CAP_NET_BIND_SERVICE`,
+`CAP_NET_ADMIN` and `CAP_SYS_ADMIN` authority,
 and enters a new network namespace. It immediately clears ambient capabilities, reduces the
-bounding set to `CAP_NET_ADMIN | CAP_SETPCAP`, and reduces permitted/effective capabilities to
-exactly `CAP_SETGID | CAP_SETUID | CAP_SETPCAP | CAP_NET_ADMIN`; `CAP_KILL`, `CAP_SYS_ADMIN`,
-`CAP_NET_RAW` and all other surplus authority are therefore gone before any handshake record is
+bounding set to `CAP_NET_BIND_SERVICE | CAP_NET_ADMIN | CAP_SETPCAP`, and reduces
+permitted/effective capabilities to exactly
+`CAP_SETGID | CAP_SETUID | CAP_SETPCAP | CAP_NET_BIND_SERVICE | CAP_NET_ADMIN`; `CAP_KILL`,
+`CAP_SYS_ADMIN` and all other surplus authority are therefore gone before any handshake record is
 processed. It then
 sets `NoNewPrivs` and installs one fixed amd64 classic-BPF program with
 `SECCOMP_FILTER_FLAG_TSYNC`. A kernel error or positive unsynchronised-thread ID aborts bootstrap.
@@ -776,9 +778,9 @@ Only after that acknowledgement does the child require ambient capabilities to r
 all supplementary groups, reduce its bounding set, enable keep-caps, and set all
 real/effective/saved GIDs and UIDs to
 the startup-pinned `volparossa-worker` identity. It immediately reduces permitted/effective
-capabilities to `CAP_NET_ADMIN | CAP_SETPCAP`, disables and verifies keep-caps, removes
+capabilities to `CAP_NET_BIND_SERVICE | CAP_NET_ADMIN | CAP_SETPCAP`, disables and verifies keep-caps, removes
 `CAP_SETPCAP` from the bounding set last, and reduces permitted/effective capabilities to exactly
-`CAP_NET_ADMIN`. The pre-barrier seccomp restrictions are monotonic, remain across the identity
+`CAP_NET_BIND_SERVICE | CAP_NET_ADMIN`. The pre-barrier seccomp restrictions are monotonic, remain across the identity
 transition and exec, and make the pinned network-namespace membership immutable. Final inheritable
 and ambient sets are empty; exact PID, PPID, four-way UID/GID, empty groups, capability and
 `NoNewPrivs` readback, seccomp filter mode with exactly the inherited count plus one, and the
@@ -854,7 +856,7 @@ group-write or world bits, and group-read access only for the resolved live `sha
 service identity can mutate that file. A present POSIX access ACL, or an ACL state that cannot be
 attested as explicitly absent, is rejected fail closed. The read buffer cannot reallocate old password hashes. This closes the
 pre-existing-account collision that idempotent `systemd-sysusers` cannot repair. The shipped helper
-unit and doctor contract now grant and require the reviewed eight-capability bootstrap set. Its
+unit and doctor contract now grant and require the reviewed seven-capability bootstrap set. Its
 `CAP_KILL` authority is retained by the root parent so it can retire the dedicated-UID worker, but
 the child drops it before the namespace-pin barrier and proves a final `CAP_NET_ADMIN` plus
 `CAP_NET_BIND_SERVICE` state. The latter is needed only to preserve privileged source ports on
@@ -888,8 +890,8 @@ operations and their fail-closed resolution. Its compensating boundaries
 are the fixed typed protocol with no caller-selected filesystem paths, `NoNewPrivileges=yes`,
 `ProtectSystem=strict`, fixed host-visible writable runtime paths, private temporary directories,
 `UMask=0077`, and a capability set without `CAP_CHOWN`, `CAP_FSETID` or `CAP_SETFCAP`. The dedicated
-worker then drops to its distinct UID/GID and final `CAP_NET_ADMIN`-only state before accepting any
-operation.
+worker then drops to its distinct UID/GID and final `CAP_NET_ADMIN` plus
+`CAP_NET_BIND_SERVICE` state before accepting any operation.
 
 ### Sequential live worker and production IPC proof driver
 
@@ -1270,7 +1272,8 @@ directory must be `/proc/<child>`, and all parent-held foreign network-namespace
 identify the same distinct namespace. The hook duplicates one parent process-directory pin to FD 8
 and one namespace pin to FD 7. Descriptor-relative `stat` and `status` observations bind the child
 PID, PPID, namespace PID, single thread, starttime, dedicated credentials, empty groups,
-no-new-privileges, one additional seccomp filter and the exact worker-only `CAP_NET_ADMIN` masks
+no-new-privileges, one additional seccomp filter and the exact worker-only `CAP_NET_ADMIN` plus
+`CAP_NET_BIND_SERVICE` masks
 before and after the namespace readback. After Destroy, FD 8 must expose no process records, the
 helper must retain no pidfd, proc-directory or foreign-netns worker custody, and FD 7 must show no
 WireGuard object before both observer pins close. The root-owned setgid mode-2700 proof directory
@@ -1895,11 +1898,11 @@ Exact-main run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reprodu
 forwarding proof and retained artifact 9731470248. It does not join a production route manager,
 transport or ingress, and does not change the alpha score.
 
-- validate the shipped eight-capability helper bootstrap and locked sysusers contract from the staged
+- validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
-  the final worker must retain only `CAP_NET_ADMIN`;
+  the final worker must retain only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`;
 - extend the asynchronous `HelperEngine` backend beyond the current
   Client/Exit-singleton-or-Relay-pair Prepare/Activate/Probe-Commit/Destroy path and narrow committed
   Client/Exit unconnected-QUIC-UDP acquisition: connected/listening MPTCP for the exact Client/Exit

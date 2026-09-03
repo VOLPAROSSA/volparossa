@@ -65,11 +65,10 @@ const OVERLAY_PREFIX: [u8; 16] = [
     0xfd, 0x76, 0x6f, 0x6c, 0x70, 0x61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 const OVERLAY_PREFIX_LENGTH: u8 = 48;
-const HELPER_BOOTSTRAP_CAPABILITIES: [&str; 8] = [
+const HELPER_BOOTSTRAP_CAPABILITIES: [&str; 7] = [
     "CAP_KILL",
     "CAP_NET_ADMIN",
     "CAP_NET_BIND_SERVICE",
-    "CAP_NET_RAW",
     "CAP_SETGID",
     "CAP_SETPCAP",
     "CAP_SETUID",
@@ -495,7 +494,7 @@ fn capability_check() -> Check {
     if helper_capability_contract_matches(&service) {
         passed(
             "helper_capabilities",
-            "helper unit grants exactly the reviewed eight-capability worker bootstrap set",
+            "helper unit grants exactly the reviewed seven-capability worker bootstrap set",
         )
     } else {
         failed(
@@ -1239,6 +1238,21 @@ enum UnitKind {
     Native,
 }
 
+struct UnitSandboxProfile {
+    user: &'static str,
+    executable: &'static str,
+    private_devices: &'static str,
+    kernel_tunables: &'static str,
+    namespaces: &'static str,
+    families: &'static [&'static str],
+    allowed_syscalls: &'static [&'static str],
+    denied_syscalls: &'static [&'static str],
+    supplementary_groups: Option<&'static str>,
+    device_policy: Option<&'static str>,
+    device_allow: Option<&'static str>,
+    read_write_paths: &'static [&'static str],
+}
+
 fn service_sandbox_check() -> Check {
     for (name, kind) in [
         ("volparossa-agent.service", UnitKind::Agent),
@@ -1272,72 +1286,39 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
         return false;
     }
 
+    let profile = unit_sandbox_profile(kind);
     let protect_control_groups = match kind {
         UnitKind::Helper => "strict",
         UnitKind::Agent | UnitKind::Native => "yes",
     };
-    let (
-        user,
-        executable,
-        private_devices,
-        kernel_tunables,
-        namespaces,
-        families,
-        allowed_syscalls,
-        denied_syscalls,
-    ) = match kind {
-        UnitKind::Agent => (
-            "volparossa",
-            "/usr/bin/volparossa-agent",
-            "yes",
-            "yes",
-            "yes",
-            ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"].as_slice(),
-            ["@system-service", "@network-io"].as_slice(),
-            [].as_slice(),
-        ),
-        UnitKind::Helper => (
-            "root",
-            "/usr/libexec/volparossa/volparossa-helper",
-            "no",
-            "no",
-            "net",
-            ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"].as_slice(),
-            ["@system-service", "@network-io", "seccomp"].as_slice(),
-            ["~@mount"].as_slice(),
-        ),
-        UnitKind::Native => (
-            "volparossa",
-            "/usr/libexec/volparossa/volparossa-mpquic-launch",
-            "yes",
-            "yes",
-            "yes",
-            ["AF_UNIX", "AF_INET", "AF_INET6"].as_slice(),
-            ["@system-service", "@network-io"].as_slice(),
-            [].as_slice(),
-        ),
-    };
-    service.get("User").is_some_and(|value| value == user)
+    service
+        .get("User")
+        .is_some_and(|value| value == profile.user)
         && service
             .get("Group")
             .is_some_and(|value| value == "volparossa")
         && service
             .get("ExecStart")
-            .is_some_and(|value| value == executable)
+            .is_some_and(|value| value == profile.executable)
         && service
             .get("PrivateDevices")
-            .is_some_and(|value| value == private_devices)
+            .is_some_and(|value| value == profile.private_devices)
         && service
             .get("ProtectControlGroups")
             .is_some_and(|value| value == protect_control_groups)
         && service
             .get("ProtectKernelTunables")
-            .is_some_and(|value| value == kernel_tunables)
+            .is_some_and(|value| value == profile.kernel_tunables)
         && service
             .get("RestrictNamespaces")
-            .is_some_and(|value| value == namespaces)
-        && value_set_matches(service, "RestrictAddressFamilies", families)
-        && system_call_filter_matches(service, allowed_syscalls, denied_syscalls)
+            .is_some_and(|value| value == profile.namespaces)
+        && value_set_matches(service, "RestrictAddressFamilies", profile.families)
+        && system_call_filter_matches(service, profile.allowed_syscalls, profile.denied_syscalls)
+        && optional_value_matches(service, "SupplementaryGroups", profile.supplementary_groups)
+        && optional_value_matches(service, "DevicePolicy", profile.device_policy)
+        && optional_value_matches(service, "DeviceAllow", profile.device_allow)
+        && value_set_matches(service, "ReadWritePaths", profile.read_write_paths)
+        && value_set_matches(service, "ReadOnlyPaths", &["/etc/volparossa"])
         && match kind {
             UnitKind::Helper => helper_has_required_custody_sandbox(service),
             UnitKind::Agent | UnitKind::Native => {
@@ -1349,6 +1330,57 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
                         .is_some_and(String::is_empty)
             }
         }
+}
+
+fn unit_sandbox_profile(kind: UnitKind) -> UnitSandboxProfile {
+    match kind {
+        UnitKind::Agent => UnitSandboxProfile {
+            user: "volparossa",
+            executable: "/usr/bin/volparossa-agent",
+            private_devices: "yes",
+            kernel_tunables: "yes",
+            namespaces: "yes",
+            families: &["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"],
+            allowed_syscalls: &["@system-service", "@network-io"],
+            denied_syscalls: &[],
+            supplementary_groups: Some("volparossa-users"),
+            device_policy: None,
+            device_allow: None,
+            read_write_paths: &[
+                "/var/lib/volparossa",
+                "/run/volparossa/control",
+                "/run/volparossa/native",
+            ],
+        },
+        UnitKind::Helper => UnitSandboxProfile {
+            user: "root",
+            executable: "/usr/libexec/volparossa/volparossa-helper",
+            private_devices: "no",
+            kernel_tunables: "no",
+            namespaces: "net",
+            families: &["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"],
+            allowed_syscalls: &["@system-service", "@network-io", "seccomp"],
+            denied_syscalls: &["~@mount"],
+            supplementary_groups: None,
+            device_policy: Some("closed"),
+            device_allow: Some("/dev/net/tun rw"),
+            read_write_paths: &["/run/volparossa", "-/run/netns"],
+        },
+        UnitKind::Native => UnitSandboxProfile {
+            user: "volparossa",
+            executable: "/usr/libexec/volparossa/volparossa-mpquic-launch",
+            private_devices: "yes",
+            kernel_tunables: "yes",
+            namespaces: "yes",
+            families: &["AF_UNIX", "AF_INET", "AF_INET6"],
+            allowed_syscalls: &["@system-service", "@network-io"],
+            denied_syscalls: &[],
+            supplementary_groups: None,
+            device_policy: None,
+            device_allow: None,
+            read_write_paths: &["/run/volparossa/native"],
+        },
+    }
 }
 
 fn common_unit_sandbox_matches(service: &BTreeMap<String, String>, kind: UnitKind) -> bool {
@@ -1429,6 +1461,18 @@ fn value_set_matches(service: &BTreeMap<String, String>, key: &str, expected: &[
     service
         .get(key)
         .is_some_and(|value| value.split_ascii_whitespace().collect::<BTreeSet<_>>() == expected)
+}
+
+fn optional_value_matches(
+    service: &BTreeMap<String, String>,
+    key: &str,
+    expected: Option<&str>,
+) -> bool {
+    match (service.get(key), expected) {
+        (Some(observed), Some(expected)) => observed == expected,
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 fn installed_service(name: &str) -> io::Result<Vec<u8>> {
@@ -1520,7 +1564,14 @@ fn parse_service_unit(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
         }
         if matches!(
             key,
-            "CapabilityBoundingSet" | "AmbientCapabilities" | "RestrictAddressFamilies"
+            "CapabilityBoundingSet"
+                | "AmbientCapabilities"
+                | "RestrictAddressFamilies"
+                | "SupplementaryGroups"
+                | "DevicePolicy"
+                | "DeviceAllow"
+                | "ReadWritePaths"
+                | "ReadOnlyPaths"
         ) && values.contains_key(key)
         {
             return None;
@@ -2290,19 +2341,25 @@ mod tests {
     #[test]
     fn service_unit_parser_is_section_scoped_and_bounded() {
         let unit = parse_service_unit(
-            b"[Unit]\nUser=ignored\n[Service]\nUser=root\nGroup=volparossa\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN\n",
+            b"[Unit]\nUser=ignored\n[Service]\nUser=root\nGroup=volparossa\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN\n",
         )
         .expect("valid unit");
         assert_eq!(unit.get("User").map(String::as_str), Some("root"));
         assert!(value_set_matches(
             &unit,
             "CapabilityBoundingSet",
-            &["CAP_SYS_ADMIN", "CAP_NET_RAW", "CAP_NET_ADMIN"],
+            &["CAP_SYS_ADMIN", "CAP_NET_ADMIN"],
         ));
         assert!(parse_service_unit(b"[Service]\nUser=root\\\ncontinued\n").is_none());
         assert!(
             parse_service_unit(
                 b"[Service]\nCapabilityBoundingSet=CAP_SYS_ADMIN\nCapabilityBoundingSet=CAP_NET_ADMIN\n",
+            )
+            .is_none()
+        );
+        assert!(
+            parse_service_unit(
+                b"[Service]\nReadWritePaths=/run/volparossa\nReadWritePaths=/tmp\n",
             )
             .is_none()
         );
@@ -2341,9 +2398,17 @@ mod tests {
             let service = parse_service_unit(unit).expect("packaged service unit");
             assert!(unit_has_required_sandbox(&service, kind));
 
-            let mut without_private_mounts = service;
+            let mut without_private_mounts = service.clone();
             without_private_mounts.remove("PrivateMounts");
             assert!(!unit_has_required_sandbox(&without_private_mounts, kind));
+
+            let mut without_write_boundary = service.clone();
+            without_write_boundary.remove("ReadWritePaths");
+            assert!(!unit_has_required_sandbox(&without_write_boundary, kind));
+
+            let mut unexpected_device = service;
+            unexpected_device.insert("DeviceAllow".to_owned(), "/dev/net/tun rw".to_owned());
+            assert!(!unit_has_required_sandbox(&unexpected_device, kind));
         }
     }
 
@@ -2366,6 +2431,27 @@ mod tests {
             service.insert("RestrictSUIDSGID".to_owned(), "no".to_owned());
             assert!(!unit_has_required_sandbox(&service, kind));
         }
+    }
+
+    fn assert_helper_device_and_path_contract(helper: &BTreeMap<String, String>) {
+        assert_eq!(
+            helper.get("DevicePolicy").map(String::as_str),
+            Some("closed")
+        );
+        assert_eq!(
+            helper.get("DeviceAllow").map(String::as_str),
+            Some("/dev/net/tun rw")
+        );
+        assert!(value_set_matches(
+            helper,
+            "ReadWritePaths",
+            &["/run/volparossa", "-/run/netns"]
+        ));
+        assert!(value_set_matches(
+            helper,
+            "ReadOnlyPaths",
+            &["/etc/volparossa"]
+        ));
     }
 
     #[test]
@@ -2402,6 +2488,7 @@ mod tests {
             Some("yes")
         );
         assert_eq!(helper.get("NotifyAccess").map(String::as_str), Some("main"));
+        assert_helper_device_and_path_contract(&helper);
         for (key, expected) in HELPER_SERVICE_MANAGER_CONTRACT {
             assert_eq!(helper.get(key).map(String::as_str), Some(expected));
         }
@@ -2424,6 +2511,11 @@ mod tests {
             ("FinalKillSignal", "SIGABRT"),
             ("TimeoutStopFailureMode", "abort"),
             ("TimeoutStopSec", "infinity"),
+            ("DevicePolicy", "auto"),
+            ("DeviceAllow", "/dev/null rw"),
+            ("ReadWritePaths", "/run/volparossa -/run/netns /tmp"),
+            ("ReadOnlyPaths", "/etc"),
+            ("SupplementaryGroups", "root"),
         ] {
             let mut service = helper.clone();
             service.insert(key.to_owned(), relaxed.to_owned());
@@ -2465,7 +2557,7 @@ mod tests {
         let mut mismatched_ambient = helper;
         mismatched_ambient.insert(
             "AmbientCapabilities".to_owned(),
-            "CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN".to_owned(),
+            "CAP_NET_ADMIN CAP_SYS_ADMIN".to_owned(),
         );
         assert!(!helper_capability_contract_matches(&mismatched_ambient));
     }
@@ -2868,12 +2960,12 @@ mod tests {
         assert!(verify_policy_at(&config, &manifest_path, &trust_path, now_ms).is_err());
     }
 
-    fn sandbox_fixture(kind: UnitKind) -> BTreeMap<String, String> {
+    fn common_sandbox_fixture(kind: UnitKind) -> BTreeMap<String, String> {
         let restrict_suid_sgid = match kind {
             UnitKind::Helper => "no",
             UnitKind::Agent | UnitKind::Native => "yes",
         };
-        let mut service = [
+        [
             ("Group", "volparossa"),
             ("UMask", "0077"),
             ("NoNewPrivileges", "yes"),
@@ -2894,7 +2986,11 @@ mod tests {
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect::<BTreeMap<_, _>>();
+        .collect()
+    }
+
+    fn sandbox_fixture(kind: UnitKind) -> BTreeMap<String, String> {
+        let mut service = common_sandbox_fixture(kind);
         match kind {
             UnitKind::Agent => {
                 insert_fixture(
@@ -2913,6 +3009,12 @@ mod tests {
                         ("SystemCallFilter", "@system-service @network-io"),
                         ("CapabilityBoundingSet", ""),
                         ("AmbientCapabilities", ""),
+                        ("SupplementaryGroups", "volparossa-users"),
+                        (
+                            "ReadWritePaths",
+                            "/var/lib/volparossa /run/volparossa/control /run/volparossa/native",
+                        ),
+                        ("ReadOnlyPaths", "/etc/volparossa"),
                     ],
                 );
             }
@@ -2940,6 +3042,10 @@ mod tests {
                         ("NotifyAccess", "main"),
                         ("FileDescriptorStoreMax", "128"),
                         ("FileDescriptorStorePreserve", "yes"),
+                        ("DevicePolicy", "closed"),
+                        ("DeviceAllow", "/dev/net/tun rw"),
+                        ("ReadWritePaths", "/run/volparossa -/run/netns"),
+                        ("ReadOnlyPaths", "/etc/volparossa"),
                     ],
                 );
                 insert_fixture(&mut service, &HELPER_SERVICE_MANAGER_CONTRACT);
@@ -2961,6 +3067,8 @@ mod tests {
                         ("SystemCallFilter", "@system-service @network-io"),
                         ("CapabilityBoundingSet", ""),
                         ("AmbientCapabilities", ""),
+                        ("ReadWritePaths", "/run/volparossa/native"),
+                        ("ReadOnlyPaths", "/etc/volparossa"),
                     ],
                 );
             }
