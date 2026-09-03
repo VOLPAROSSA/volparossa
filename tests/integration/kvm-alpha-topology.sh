@@ -1895,6 +1895,7 @@ with open(output_path, "x", encoding="ascii") as output:
     output.write("\n")
 PYTHON
 cat >"$WORK/bin/a06-observer.py" <<'PYTHON'
+import hashlib
 import json
 import os
 import select
@@ -1939,6 +1940,24 @@ truncated = False
 observed_frames = 0
 marker_observed = False
 before_marker = None
+payload_samples = {
+    "client_ingress_requests": [],
+    "client_ingress_responses": [],
+    "destination_requests": [],
+    "destination_responses": [],
+}
+
+
+def sample_payload(bucket, frame, transport_offset, udp_length):
+    if len(payload_samples[bucket]) >= 16 or udp_length < 8:
+        return
+    payload_end = transport_offset + udp_length
+    if payload_end > len(frame):
+        return
+    payload = frame[transport_offset + 8 : payload_end]
+    payload_samples[bucket].append(
+        {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+    )
 
 
 def stop(*_unused):
@@ -1992,7 +2011,7 @@ while running and time.monotonic() < deadline:
                 )[0]
             is_wireguard_data = wireguard_message_type == 4 and udp_length > 40
             if role == "client":
-                if source == "43.159.1.1" and destination in {
+                if interface == "underlay" and source == "43.159.1.1" and destination in {
                     "10.241.21.2",
                     "10.241.22.2",
                     "10.241.31.1",
@@ -2015,6 +2034,17 @@ while running and time.monotonic() < deadline:
                     }:
                         counters["relay2_wireguard_data_datagrams"] += 1
                         counters["relay2_wireguard_data_bytes"] += udp_length - 8
+                if interface.startswith("vpih") and protocol == socket.IPPROTO_UDP:
+                    if source == "43.159.1.1" and destination == "47.163.4.2" \
+                            and destination_port == 443:
+                        sample_payload(
+                            "client_ingress_requests", frame, transport_offset, udp_length
+                        )
+                    if source == "47.163.4.2" and source_port == 443 \
+                            and destination == "43.159.1.1":
+                        sample_payload(
+                            "client_ingress_responses", frame, transport_offset, udp_length
+                        )
             else:
                 if protocol == socket.IPPROTO_UDP and is_wireguard_data:
                     if interface == "xr1" and {source, destination} == {
@@ -2032,8 +2062,14 @@ while running and time.monotonic() < deadline:
                 if interface == "xd" and protocol == socket.IPPROTO_UDP:
                     if destination == "47.163.4.2" and destination_port == 443:
                         counters["destination_request_datagrams"] += 1
+                        sample_payload(
+                            "destination_requests", frame, transport_offset, udp_length
+                        )
                     if source == "47.163.4.2" and source_port == 443:
                         counters["destination_response_datagrams"] += 1
+                        sample_payload(
+                            "destination_responses", frame, transport_offset, udp_length
+                        )
 
 for capture in sockets:
     capture.close()
@@ -2051,6 +2087,7 @@ with open(output_path, "x", encoding="ascii") as output:
             "marker_observed": marker_observed,
             "before_marker": before_marker,
             "after_marker": after_marker,
+            "payload_samples": payload_samples,
             **counters,
         },
         output,
@@ -3126,10 +3163,14 @@ wait_native_mpquic_paths() {
 start_http3_observers() {
     http3_prefix=$1
     http3_marker=$2
+    client_ingress_interface=$(ip -n "$CLIENT" -o link show \
+        | awk -F': ' '$2 ~ /^vpih/ {sub(/@.*/, "", $2); print $2; exit}')
+    [ -n "$client_ingress_interface" ] || return 1
     ip netns exec "$CLIENT" python3 "$WORK/bin/a06-observer.py" \
         client "$WORK/$http3_prefix-client-capture.json" \
         "$WORK/$http3_prefix-client-capture.ready" "$http3_marker" \
-        cr1 cr2 underlay >"$WORK/$http3_prefix-client-capture.log" \
+        cr1 cr2 underlay "$client_ingress_interface" \
+        >"$WORK/$http3_prefix-client-capture.log" \
         2>"$WORK/$http3_prefix-client-capture.err" &
     CLIENT_OBSERVER_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a06-observer.py" \
