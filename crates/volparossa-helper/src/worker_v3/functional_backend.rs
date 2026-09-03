@@ -2371,7 +2371,7 @@ impl FunctionalAlphaLeaseBackend {
             let mut kernel = BirthNamespaceKernel::connect(deadline)
                 .map_err(|_| BackendError::CleanupIncomplete)?;
             let routing = kernel
-                .install_client_ingress_parent_ipv4_routing(link, deadline)
+                .install_client_ingress_parent_routing(link, deadline)
                 .map_err(|_| BackendError::CleanupIncomplete)?;
             let coordinates = (routing.parent_ifindex(), routing.loopback_ifindex());
             entry.parent_routing = Some(routing);
@@ -2600,7 +2600,7 @@ impl FunctionalAlphaLeaseBackend {
         };
         if let Some(parent_routing) = parent_routing {
             let removed = BirthNamespaceKernel::connect(deadline).and_then(|mut kernel| {
-                kernel.remove_client_ingress_parent_ipv4_routing(&parent_routing, deadline)
+                kernel.remove_client_ingress_parent_routing(&parent_routing, deadline)
             });
             if removed.is_err() {
                 let mut state = self

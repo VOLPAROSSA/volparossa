@@ -2011,15 +2011,13 @@ impl WorkerClientIngress {
         {
             return Err(InternalWorkerResult::Conflict);
         }
-        let ports = client_ingress_policy::ClientIngressIpv4Ports {
-            transparent_tcp: self.ipv4_port(InternalIngressSocketKind::TransparentTcpListener)?,
-            transparent_udp: self.ipv4_port(InternalIngressSocketKind::TransparentUdp)?,
-            dns_tcp: self.ipv4_port(InternalIngressSocketKind::DnsTcpListener)?,
-            dns_udp: self.ipv4_port(InternalIngressSocketKind::DnsUdp)?,
+        let ports = client_ingress_policy::ClientIngressPorts {
+            ipv4: self.family_ports(InternalIngressAddressFamily::Ipv4)?,
+            ipv6: self.family_ports(InternalIngressAddressFamily::Ipv6)?,
         };
         let routing = self
             .kernel
-            .install_client_ingress_ipv4_routing(self.ingress_ifindex, deadline)
+            .install_client_ingress_routing(self.ingress_ifindex, deadline)
             .map_err(|_| InternalWorkerResult::Kernel)?;
         let Ok(policy) = client_ingress_policy::install(
             self.client_runtime_id,
@@ -2031,7 +2029,7 @@ impl WorkerClientIngress {
                 client_ingress_policy::cleanup_runtime(self.client_runtime_id, deadline).is_ok();
             let routing_absent = self
                 .kernel
-                .remove_client_ingress_ipv4_routing(routing, deadline)
+                .remove_client_ingress_routing(routing, deadline)
                 .is_ok();
             return Err(if policy_absent && routing_absent {
                 InternalWorkerResult::Kernel
@@ -2071,9 +2069,27 @@ impl WorkerClientIngress {
         ))
     }
 
-    fn ipv4_port(&self, kind: InternalIngressSocketKind) -> Result<u16, InternalWorkerResult> {
+    fn family_ports(
+        &self,
+        family: InternalIngressAddressFamily,
+    ) -> Result<client_ingress_policy::ClientIngressFamilyPorts, InternalWorkerResult> {
+        Ok(client_ingress_policy::ClientIngressFamilyPorts {
+            transparent_tcp: self
+                .ingress_port(InternalIngressSocketKind::TransparentTcpListener, family)?,
+            transparent_udp: self
+                .ingress_port(InternalIngressSocketKind::TransparentUdp, family)?,
+            dns_tcp: self.ingress_port(InternalIngressSocketKind::DnsTcpListener, family)?,
+            dns_udp: self.ingress_port(InternalIngressSocketKind::DnsUdp, family)?,
+        })
+    }
+
+    fn ingress_port(
+        &self,
+        kind: InternalIngressSocketKind,
+        family: InternalIngressAddressFamily,
+    ) -> Result<u16, InternalWorkerResult> {
         self.locals
-            .get(&(kind, InternalIngressAddressFamily::Ipv4))
+            .get(&(kind, family))
             .and_then(|local| u16::try_from(local.port).ok())
             .filter(|port| *port != 0)
             .ok_or(InternalWorkerResult::Kernel)
@@ -2084,8 +2100,7 @@ impl WorkerClientIngress {
             client_ingress_policy::remove(policy, deadline)
         });
         let routing_result = self.routing.take().map_or(Ok(()), |routing| {
-            self.kernel
-                .remove_client_ingress_ipv4_routing(routing, deadline)
+            self.kernel.remove_client_ingress_routing(routing, deadline)
         });
         self.active = false;
         if policy_result.is_ok() && routing_result.is_ok() {

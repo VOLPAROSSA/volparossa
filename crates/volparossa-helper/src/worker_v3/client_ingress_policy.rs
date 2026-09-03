@@ -11,7 +11,10 @@ use thiserror::Error;
 
 use crate::{
     deadline::HardDeadline,
-    kernel::{CLIENT_INGRESS_IPV4_MARK, CLIENT_INGRESS_PARENT_IPV4_MARK},
+    kernel::{
+        CLIENT_INGRESS_IPV4_MARK, CLIENT_INGRESS_IPV6_MARK, CLIENT_INGRESS_PARENT_IPV4_MARK,
+        CLIENT_INGRESS_PARENT_IPV6_MARK,
+    },
 };
 
 const TABLE_PREFIX: &[u8] = b"vpi_";
@@ -26,10 +29,10 @@ const NAT_CHAIN_TYPE: &[u8] = b"nat";
 const ROUTE_CHAIN_TYPE: &[u8] = b"route";
 
 const MAX_BATCH_BYTES: usize = 16 * 1024;
-const MAX_BATCH_MESSAGES: usize = 16;
+const MAX_BATCH_MESSAGES: usize = 24;
 const MAX_ACK_BYTES: usize = 16 * 1024;
-const MAX_ACK_DATAGRAMS: usize = 16;
-const MAX_ACK_FRAMES: usize = 16;
+const MAX_ACK_DATAGRAMS: usize = 24;
+const MAX_ACK_FRAMES: usize = 24;
 const NLMSG_HEADER_LEN: usize = 16;
 const ATTRIBUTE_HEADER_LEN: usize = 4;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -53,6 +56,7 @@ const NFNL_MSG_BATCH_END: u16 = 0x11;
 const AF_UNSPEC: u8 = 0;
 const NFPROTO_INET: u8 = 1;
 const NFPROTO_IPV4: u8 = 2;
+const NFPROTO_IPV6: u8 = 10;
 const NFNETLINK_V0: u8 = 0;
 const NF_INET_PRE_ROUTING: u32 = 0;
 const NF_INET_LOCAL_OUT: u32 = 3;
@@ -124,9 +128,15 @@ pub(super) enum ClientIngressPolicyError {
     Limit,
 }
 
-/// Fixed IPv4 ingress ports selected by the kernel during Prepare.
+/// Fixed dual-stack ingress ports selected by the kernel during Prepare.
 #[derive(Clone, Copy)]
-pub(super) struct ClientIngressIpv4Ports {
+pub(super) struct ClientIngressPorts {
+    pub(super) ipv4: ClientIngressFamilyPorts,
+    pub(super) ipv6: ClientIngressFamilyPorts,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ClientIngressFamilyPorts {
     pub(super) transparent_tcp: u16,
     pub(super) transparent_udp: u16,
     pub(super) dns_tcp: u16,
@@ -145,7 +155,7 @@ pub(super) struct ActiveParentClientIngressPolicy {
 pub(super) fn install(
     client_runtime_id: [u8; 16],
     ingress_ifindex: u32,
-    ports: ClientIngressIpv4Ports,
+    ports: ClientIngressPorts,
     deadline: HardDeadline,
 ) -> Result<ActiveClientIngressPolicy, ClientIngressPolicyError> {
     if ingress_ifindex == 0 {
@@ -216,7 +226,12 @@ fn delete_table(table: &[u8], deadline: HardDeadline) -> Result<(), ClientIngres
     }
 }
 
-fn validate_ports(ports: ClientIngressIpv4Ports) -> Result<(), ClientIngressPolicyError> {
+fn validate_ports(ports: ClientIngressPorts) -> Result<(), ClientIngressPolicyError> {
+    validate_family_ports(ports.ipv4)?;
+    validate_family_ports(ports.ipv6)
+}
+
+fn validate_family_ports(ports: ClientIngressFamilyPorts) -> Result<(), ClientIngressPolicyError> {
     if ports.transparent_tcp == 0
         || ports.transparent_udp == 0
         || ports.dns_tcp == 0
@@ -253,11 +268,12 @@ fn derived_table_name(
     Ok(name)
 }
 
+#[allow(clippy::too_many_lines)] // One atomic transaction makes the complete dual-stack policy visible together.
 fn install_transaction(
     table: &[u8],
     runtime: [u8; 16],
     ingress_ifindex: u32,
-    ports: ClientIngressIpv4Ports,
+    ports: ClientIngressPorts,
 ) -> Result<Transaction, ClientIngressPolicyError> {
     if ingress_ifindex == 0 {
         return Err(ClientIngressPolicyError::Malformed);
@@ -312,27 +328,110 @@ fn install_transaction(
             interface_exclusion_expressions(ingress_ifindex)?,
         )?,
         rule(table, MANGLE_CHAIN, mark_exclusion_expressions()?)?,
-        rule(table, MANGLE_CHAIN, dns_accept_expressions(IPPROTO_TCP)?)?,
-        rule(table, MANGLE_CHAIN, dns_accept_expressions(IPPROTO_UDP)?)?,
         rule(
             table,
             MANGLE_CHAIN,
-            tproxy_expressions(IPPROTO_TCP, ports.transparent_tcp)?,
+            mark_accept_expressions(CLIENT_INGRESS_IPV6_MARK)?,
         )?,
         rule(
             table,
             MANGLE_CHAIN,
-            tproxy_expressions(IPPROTO_UDP, ports.transparent_udp)?,
+            dns_accept_expressions(NFPROTO_IPV4, IPPROTO_TCP)?,
+        )?,
+        rule(
+            table,
+            MANGLE_CHAIN,
+            dns_accept_expressions(NFPROTO_IPV4, IPPROTO_UDP)?,
+        )?,
+        rule(
+            table,
+            MANGLE_CHAIN,
+            dns_accept_expressions(NFPROTO_IPV6, IPPROTO_TCP)?,
+        )?,
+        rule(
+            table,
+            MANGLE_CHAIN,
+            dns_accept_expressions(NFPROTO_IPV6, IPPROTO_UDP)?,
+        )?,
+        rule(
+            table,
+            MANGLE_CHAIN,
+            tproxy_expressions(
+                NFPROTO_IPV4,
+                IPPROTO_TCP,
+                ports.ipv4.transparent_tcp,
+                CLIENT_INGRESS_IPV4_MARK,
+            )?,
+        )?,
+        rule(
+            table,
+            MANGLE_CHAIN,
+            tproxy_expressions(
+                NFPROTO_IPV4,
+                IPPROTO_UDP,
+                ports.ipv4.transparent_udp,
+                CLIENT_INGRESS_IPV4_MARK,
+            )?,
+        )?,
+        rule(
+            table,
+            MANGLE_CHAIN,
+            tproxy_expressions(
+                NFPROTO_IPV6,
+                IPPROTO_TCP,
+                ports.ipv6.transparent_tcp,
+                CLIENT_INGRESS_IPV6_MARK,
+            )?,
+        )?,
+        rule(
+            table,
+            MANGLE_CHAIN,
+            tproxy_expressions(
+                NFPROTO_IPV6,
+                IPPROTO_UDP,
+                ports.ipv6.transparent_udp,
+                CLIENT_INGRESS_IPV6_MARK,
+            )?,
         )?,
         rule(
             table,
             NAT_CHAIN,
-            dns_redirect_expressions(ingress_ifindex, IPPROTO_TCP, ports.dns_tcp)?,
+            dns_redirect_expressions(
+                ingress_ifindex,
+                NFPROTO_IPV4,
+                IPPROTO_TCP,
+                ports.ipv4.dns_tcp,
+            )?,
         )?,
         rule(
             table,
             NAT_CHAIN,
-            dns_redirect_expressions(ingress_ifindex, IPPROTO_UDP, ports.dns_udp)?,
+            dns_redirect_expressions(
+                ingress_ifindex,
+                NFPROTO_IPV4,
+                IPPROTO_UDP,
+                ports.ipv4.dns_udp,
+            )?,
+        )?,
+        rule(
+            table,
+            NAT_CHAIN,
+            dns_redirect_expressions(
+                ingress_ifindex,
+                NFPROTO_IPV6,
+                IPPROTO_TCP,
+                ports.ipv6.dns_tcp,
+            )?,
+        )?,
+        rule(
+            table,
+            NAT_CHAIN,
+            dns_redirect_expressions(
+                ingress_ifindex,
+                NFPROTO_IPV6,
+                IPPROTO_UDP,
+                ports.ipv6.dns_udp,
+            )?,
         )?,
     ];
     for (index, rule) in rules.iter().enumerate() {
@@ -343,7 +442,7 @@ fn install_transaction(
             rule,
         )?;
     }
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 13, &batch_nfgen())?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 20, &batch_nfgen())?;
     Ok(transaction)
 }
 
@@ -395,7 +494,17 @@ fn parent_install_transaction(
         rule(
             table,
             OUTPUT_CHAIN,
+            mark_accept_expressions(CLIENT_INGRESS_PARENT_IPV6_MARK)?,
+        )?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
             mark_accept_expressions(CLIENT_INGRESS_IPV4_MARK)?,
+        )?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
+            mark_accept_expressions(CLIENT_INGRESS_IPV6_MARK)?,
         )?,
         rule(
             table,
@@ -412,7 +521,16 @@ fn parent_install_transaction(
             OUTPUT_CHAIN,
             uid_accept_expressions(trusted_agent_uid)?,
         )?,
-        rule(table, OUTPUT_CHAIN, ipv4_parent_steering_expressions()?)?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
+            parent_steering_expressions(NFPROTO_IPV4, CLIENT_INGRESS_PARENT_IPV4_MARK)?,
+        )?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
+            parent_steering_expressions(NFPROTO_IPV6, CLIENT_INGRESS_PARENT_IPV6_MARK)?,
+        )?,
     ];
     for (index, rule) in rules.iter().enumerate() {
         transaction.push(
@@ -422,7 +540,7 @@ fn parent_install_transaction(
             rule,
         )?;
     }
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 10, &batch_nfgen())?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 13, &batch_nfgen())?;
     Ok(transaction)
 }
 
@@ -520,11 +638,18 @@ fn uid_accept_expressions(uid: u32) -> Result<Vec<Expression>, ClientIngressPoli
     ])
 }
 
-fn ipv4_parent_steering_expressions() -> Result<Vec<Expression>, ClientIngressPolicyError> {
+fn parent_steering_expressions(
+    family: u8,
+    mark: u32,
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    validate_nfproto(family)?;
+    if mark == 0 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
     Ok(vec![
         meta_load(NFT_META_NFPROTO)?,
-        compare(NFT_CMP_EQ, &[NFPROTO_IPV4])?,
-        immediate_value(&CLIENT_INGRESS_PARENT_IPV4_MARK.to_ne_bytes())?,
+        compare(NFT_CMP_EQ, &[family])?,
+        immediate_value(&mark.to_ne_bytes())?,
         meta_set(NFT_META_MARK)?,
         verdict(NF_ACCEPT)?,
     ])
@@ -540,31 +665,39 @@ fn interface_exclusion_expressions(
     ])
 }
 
-fn dns_accept_expressions(protocol: u8) -> Result<Vec<Expression>, ClientIngressPolicyError> {
-    let mut expressions = ipv4_protocol_expressions(protocol)?;
+fn dns_accept_expressions(
+    family: u8,
+    protocol: u8,
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    let mut expressions = protocol_expressions(family, protocol)?;
     expressions.extend(destination_port_expressions(DNS_PORT)?);
     expressions.push(verdict(NF_ACCEPT)?);
     Ok(expressions)
 }
 
 fn tproxy_expressions(
+    family: u8,
     protocol: u8,
     port: u16,
+    mark: u32,
 ) -> Result<Vec<Expression>, ClientIngressPolicyError> {
-    let mut expressions = ipv4_protocol_expressions(protocol)?;
+    if port == 0 || mark == 0 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
+    let mut expressions = protocol_expressions(family, protocol)?;
     expressions.push(immediate_value(&port.to_be_bytes())?);
     let mut tproxy = Vec::new();
     attr(
         &mut tproxy,
         NFTA_TPROXY_FAMILY,
-        &u32::from(NFPROTO_IPV4).to_be_bytes(),
+        &u32::from(family).to_be_bytes(),
     )?;
     attr(&mut tproxy, NFTA_TPROXY_REG_PORT, &NFT_REG_1.to_be_bytes())?;
     expressions.push(Expression {
         name: b"tproxy",
         data: tproxy,
     });
-    expressions.push(immediate_value(&CLIENT_INGRESS_IPV4_MARK.to_ne_bytes())?);
+    expressions.push(immediate_value(&mark.to_ne_bytes())?);
     expressions.push(meta_set(NFT_META_MARK)?);
     expressions.push(verdict(NF_ACCEPT)?);
     Ok(expressions)
@@ -572,14 +705,18 @@ fn tproxy_expressions(
 
 fn dns_redirect_expressions(
     ingress_ifindex: u32,
+    family: u8,
     protocol: u8,
     port: u16,
 ) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    if port == 0 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
     let mut expressions = vec![
         meta_load(NFT_META_IIF)?,
         compare(NFT_CMP_EQ, &ingress_ifindex.to_ne_bytes())?,
     ];
-    expressions.extend(ipv4_protocol_expressions(protocol)?);
+    expressions.extend(protocol_expressions(family, protocol)?);
     expressions.extend(destination_port_expressions(DNS_PORT)?);
     expressions.push(immediate_value(&port.to_be_bytes())?);
     let mut redir = Vec::new();
@@ -596,13 +733,27 @@ fn dns_redirect_expressions(
     Ok(expressions)
 }
 
-fn ipv4_protocol_expressions(protocol: u8) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+fn protocol_expressions(
+    family: u8,
+    protocol: u8,
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    validate_nfproto(family)?;
+    if protocol != IPPROTO_TCP && protocol != IPPROTO_UDP {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
     Ok(vec![
         meta_load(NFT_META_NFPROTO)?,
-        compare(NFT_CMP_EQ, &[NFPROTO_IPV4])?,
+        compare(NFT_CMP_EQ, &[family])?,
         meta_load(NFT_META_L4PROTO)?,
         compare(NFT_CMP_EQ, &[protocol])?,
     ])
+}
+
+fn validate_nfproto(family: u8) -> Result<(), ClientIngressPolicyError> {
+    if family != NFPROTO_IPV4 && family != NFPROTO_IPV6 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
+    Ok(())
 }
 
 fn destination_port_expressions(port: u16) -> Result<Vec<Expression>, ClientIngressPolicyError> {
@@ -1048,20 +1199,28 @@ mod tests {
     const SMOKE_REPLY: &[u8] = b"volparossa-real-ingress-reply";
 
     #[test]
-    fn ipv4_policy_is_one_atomic_bounded_batch() {
+    fn dual_stack_policy_is_one_atomic_bounded_batch() {
         let transaction = install_transaction(
             &table_name([7; 16]).expect("table"),
             [7; 16],
             9,
-            ClientIngressIpv4Ports {
-                transparent_tcp: 20_001,
-                transparent_udp: 20_002,
-                dns_tcp: 20_003,
-                dns_udp: 20_004,
+            ClientIngressPorts {
+                ipv4: ClientIngressFamilyPorts {
+                    transparent_tcp: 20_001,
+                    transparent_udp: 20_002,
+                    dns_tcp: 20_003,
+                    dns_udp: 20_004,
+                },
+                ipv6: ClientIngressFamilyPorts {
+                    transparent_tcp: 21_001,
+                    transparent_udp: 21_002,
+                    dns_tcp: 21_003,
+                    dns_udp: 21_004,
+                },
             },
         )
         .expect("transaction");
-        assert_eq!(transaction.requests.len(), 13);
+        assert_eq!(transaction.requests.len(), 20);
         assert!(transaction.bytes.len() <= MAX_BATCH_BYTES);
         assert_eq!(
             transaction
@@ -1069,8 +1228,40 @@ mod tests {
                 .iter()
                 .filter(|request| request.ack)
                 .count(),
-            11
+            18
         );
+    }
+
+    #[test]
+    fn ipv6_rules_bind_exact_family_ports_and_marks() {
+        let protocol = protocol_expressions(NFPROTO_IPV6, IPPROTO_UDP).expect("IPv6 UDP match");
+        let expected_family = compare(NFT_CMP_EQ, &[NFPROTO_IPV6]).expect("family comparison");
+        assert_eq!(protocol[1].name, expected_family.name);
+        assert_eq!(protocol[1].data, expected_family.data);
+
+        let tproxy =
+            tproxy_expressions(NFPROTO_IPV6, IPPROTO_UDP, 24_002, CLIENT_INGRESS_IPV6_MARK)
+                .expect("IPv6 TPROXY rule");
+        let expected_port = immediate_value(&24_002_u16.to_be_bytes()).expect("port immediate");
+        let expected_mark =
+            immediate_value(&CLIENT_INGRESS_IPV6_MARK.to_ne_bytes()).expect("mark immediate");
+        assert_eq!(tproxy[4].data, expected_port.data);
+        assert_eq!(tproxy[6].data, expected_mark.data);
+
+        let redirect = dns_redirect_expressions(9, NFPROTO_IPV6, IPPROTO_TCP, 24_003)
+            .expect("IPv6 DNS redirect");
+        let expected_dns_port =
+            immediate_value(&24_003_u16.to_be_bytes()).expect("DNS port immediate");
+        assert_eq!(redirect[8].data, expected_dns_port.data);
+
+        let steering = parent_steering_expressions(NFPROTO_IPV6, CLIENT_INGRESS_PARENT_IPV6_MARK)
+            .expect("IPv6 parent steering");
+        let expected_parent_mark = immediate_value(&CLIENT_INGRESS_PARENT_IPV6_MARK.to_ne_bytes())
+            .expect("parent mark immediate");
+        assert_eq!(steering[2].data, expected_parent_mark.data);
+
+        assert!(protocol_expressions(NFPROTO_INET, IPPROTO_UDP).is_err());
+        assert!(protocol_expressions(NFPROTO_IPV6, 0).is_err());
     }
 
     #[test]
@@ -1083,7 +1274,7 @@ mod tests {
             1_001,
         )
         .expect("transaction");
-        assert_eq!(transaction.requests.len(), 10);
+        assert_eq!(transaction.requests.len(), 13);
         assert!(transaction.bytes.len() <= MAX_BATCH_BYTES);
         assert_eq!(
             transaction
@@ -1091,7 +1282,7 @@ mod tests {
                 .iter()
                 .filter(|request| request.ack)
                 .count(),
-            8
+            11
         );
     }
 
@@ -1229,7 +1420,7 @@ mod tests {
                     address_family: InternalIngressAddressFamily::Ipv4 as i32,
                     expected_local: Some(InternalSocketAddress {
                         address: vec![0; 4],
-                        port: u32::from(ports.transparent_udp),
+                        port: u32::from(ports.ipv4.transparent_udp),
                     }),
                 },
             ),
@@ -1244,7 +1435,7 @@ mod tests {
         let transparent_udp = execution.descriptor.take().expect("transparent UDP owner");
 
         let parent_routing = parent_kernel
-            .install_client_ingress_parent_ipv4_routing(&ingress_link, deadline)
+            .install_client_ingress_parent_routing(&ingress_link, deadline)
             .expect("install parent marked route");
         let parent_policy = install_parent(
             SMOKE_RUNTIME,
@@ -1310,7 +1501,7 @@ mod tests {
 
         remove_parent(&parent_policy, deadline).expect("remove exact parent nft table");
         parent_kernel
-            .remove_client_ingress_parent_ipv4_routing(&parent_routing, deadline)
+            .remove_client_ingress_parent_routing(&parent_routing, deadline)
             .expect("remove exact parent route and rule");
         let destroy = ingress_request(
             [0xa2; 16],
@@ -1364,26 +1555,35 @@ mod tests {
             InternalIngressSocketKind::DnsTcpListener,
             InternalIngressSocketKind::DnsUdp,
         ] {
-            let (descriptor, local) =
-                create_client_ingress_socket(kind, InternalIngressAddressFamily::Ipv4)
-                    .expect("create real IPv4 ingress socket");
-            sockets.insert(kind, descriptor);
-            locals.insert(kind, local);
+            for family in [
+                InternalIngressAddressFamily::Ipv4,
+                InternalIngressAddressFamily::Ipv6,
+            ] {
+                let (descriptor, local) = create_client_ingress_socket(kind, family)
+                    .expect("create real dual-stack ingress socket");
+                sockets.insert((kind, family), descriptor);
+                locals.insert((kind, family), local);
+            }
         }
-        let ports = ClientIngressIpv4Ports {
-            transparent_tcp: local_port(&locals, InternalIngressSocketKind::TransparentTcpListener),
-            transparent_udp: local_port(&locals, InternalIngressSocketKind::TransparentUdp),
-            dns_tcp: local_port(&locals, InternalIngressSocketKind::DnsTcpListener),
-            dns_udp: local_port(&locals, InternalIngressSocketKind::DnsUdp),
+        let ports = ClientIngressPorts {
+            ipv4: local_family_ports(&locals, InternalIngressAddressFamily::Ipv4),
+            ipv6: local_family_ports(&locals, InternalIngressAddressFamily::Ipv6),
         };
         let routing = kernel
-            .install_client_ingress_ipv4_routing(ingress_ifindex, deadline)
+            .install_client_ingress_routing(ingress_ifindex, deadline)
             .expect("worker TPROXY route");
         let policy =
             install(SMOKE_RUNTIME, ingress_ifindex, ports, deadline).expect("worker TPROXY policy");
         println!(
-            "VPI_PORTS {} {} {} {}",
-            ports.transparent_tcp, ports.transparent_udp, ports.dns_tcp, ports.dns_udp
+            "VPI_PORTS {} {} {} {} {} {} {} {}",
+            ports.ipv4.transparent_tcp,
+            ports.ipv4.transparent_udp,
+            ports.ipv4.dns_tcp,
+            ports.ipv4.dns_udp,
+            ports.ipv6.transparent_tcp,
+            ports.ipv6.transparent_udp,
+            ports.ipv6.dns_tcp,
+            ports.ipv6.dns_udp,
         );
         io::stdout().flush().expect("flush socket ports");
 
@@ -1402,7 +1602,10 @@ mod tests {
             .expect("receive Acquire")
             .request;
         let expected_local = locals
-            .get(&InternalIngressSocketKind::TransparentUdp)
+            .get(&(
+                InternalIngressSocketKind::TransparentUdp,
+                InternalIngressAddressFamily::Ipv4,
+            ))
             .cloned()
             .expect("UDP local");
         assert!(matches!(
@@ -1427,7 +1630,10 @@ mod tests {
         )
         .expect("correlated Acquire response");
         let udp = sockets
-            .remove(&InternalIngressSocketKind::TransparentUdp)
+            .remove(&(
+                InternalIngressSocketKind::TransparentUdp,
+                InternalIngressAddressFamily::Ipv4,
+            ))
             .expect("UDP owner");
         send_credential_worker_response(&channel, &acquire, &response, Some(udp))
             .expect("transfer transparent UDP descriptor");
@@ -1467,7 +1673,7 @@ mod tests {
         ));
         remove(policy, deadline).expect("remove worker nft table");
         kernel
-            .remove_client_ingress_ipv4_routing(routing, deadline)
+            .remove_client_ingress_routing(routing, deadline)
             .expect("remove worker TPROXY route");
         let response = super::super::correlated_response(
             &destroy,
@@ -1505,11 +1711,34 @@ mod tests {
         }
     }
 
+    fn local_family_ports(
+        locals: &BTreeMap<
+            (InternalIngressSocketKind, InternalIngressAddressFamily),
+            InternalSocketAddress,
+        >,
+        family: InternalIngressAddressFamily,
+    ) -> ClientIngressFamilyPorts {
+        ClientIngressFamilyPorts {
+            transparent_tcp: local_port(
+                locals,
+                InternalIngressSocketKind::TransparentTcpListener,
+                family,
+            ),
+            transparent_udp: local_port(locals, InternalIngressSocketKind::TransparentUdp, family),
+            dns_tcp: local_port(locals, InternalIngressSocketKind::DnsTcpListener, family),
+            dns_udp: local_port(locals, InternalIngressSocketKind::DnsUdp, family),
+        }
+    }
+
     fn local_port(
-        locals: &BTreeMap<InternalIngressSocketKind, InternalSocketAddress>,
+        locals: &BTreeMap<
+            (InternalIngressSocketKind, InternalIngressAddressFamily),
+            InternalSocketAddress,
+        >,
         kind: InternalIngressSocketKind,
+        family: InternalIngressAddressFamily,
     ) -> u16 {
-        u16::try_from(locals.get(&kind).expect("local").port)
+        u16::try_from(locals.get(&(kind, family)).expect("local").port)
             .ok()
             .filter(|port| *port != 0)
             .expect("kernel port")
@@ -1525,18 +1754,26 @@ mod tests {
         }
     }
 
-    fn parse_worker_ports(line: &str) -> ClientIngressIpv4Ports {
+    fn parse_worker_ports(line: &str) -> ClientIngressPorts {
         let values = line
             .split_whitespace()
             .skip(1)
             .map(|value| value.parse::<u16>().expect("numeric port"))
             .collect::<Vec<_>>();
-        assert_eq!(values.len(), 4);
-        ClientIngressIpv4Ports {
-            transparent_tcp: values[0],
-            transparent_udp: values[1],
-            dns_tcp: values[2],
-            dns_udp: values[3],
+        assert_eq!(values.len(), 8);
+        ClientIngressPorts {
+            ipv4: ClientIngressFamilyPorts {
+                transparent_tcp: values[0],
+                transparent_udp: values[1],
+                dns_tcp: values[2],
+                dns_udp: values[3],
+            },
+            ipv6: ClientIngressFamilyPorts {
+                transparent_tcp: values[4],
+                transparent_udp: values[5],
+                dns_tcp: values[6],
+                dns_udp: values[7],
+            },
         }
     }
 
