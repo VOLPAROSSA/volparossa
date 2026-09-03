@@ -161,11 +161,22 @@ enum ClientRouteControlState {
 }
 
 struct EstablishedClientRoute {
+    expiry: ClientRouteExpiry,
     transport: ClientTransportState,
     tcp_flow: Option<ActiveProductionMptcpClientFlow>,
     route: Option<ProductionRoute>,
     orchestrator: ProductionRouteOrchestrator,
     helper: HelperClient,
+}
+
+/// Immutable hard lifetime retained independently of transport-specific route ownership.
+///
+/// The wall deadline preserves the signed/helper authority boundary. Its monotonic projection
+/// additionally prevents a backward wall-clock adjustment from resurrecting an established route.
+#[derive(Clone, Copy, Debug)]
+struct ClientRouteExpiry {
+    hard_expires_at_ms: u64,
+    monotonic_deadline: Instant,
 }
 
 enum ClientTransportState {
@@ -222,6 +233,10 @@ struct CommittedMpquicRouteIdentity {
 }
 
 impl EstablishedClientRoute {
+    fn is_expired(&self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
+        self.expiry.is_expired(wall_now_ms, monotonic_now)
+    }
+
     const fn progress(&self) -> ClientRouteProgress {
         match &self.transport {
             ClientTransportState::UdpReady(_) => ClientRouteProgress::UdpRouteReady,
@@ -275,6 +290,28 @@ impl EstablishedClientRoute {
             let _ = Box::pin(route.disconnect()).await;
         }
         let _ = self.orchestrator.shutdown().await;
+    }
+}
+
+impl ClientRouteExpiry {
+    fn from_hard_expiry(
+        hard_expires_at_unix: u64,
+        wall_now_ms: u64,
+        monotonic_now: Instant,
+    ) -> Self {
+        let hard_expires_at_ms = hard_expires_at_unix.saturating_mul(1_000);
+        let remaining = hard_expires_at_ms.saturating_sub(wall_now_ms);
+        let monotonic_deadline = monotonic_now
+            .checked_add(Duration::from_millis(remaining))
+            .unwrap_or(monotonic_now);
+        Self {
+            hard_expires_at_ms,
+            monotonic_deadline,
+        }
+    }
+
+    fn is_expired(self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
+        wall_now_ms >= self.hard_expires_at_ms || monotonic_now >= self.monotonic_deadline
     }
 }
 
@@ -711,6 +748,30 @@ impl ClientRouteControl {
         }
     }
 
+    /// Retire an established route as soon as either projection of its signed hard deadline has
+    /// elapsed. Cleanup runs outside the state lock behind `Connecting`; callers therefore never
+    /// observe either an expired reusable owner or Idle until its shutdown has completed.
+    async fn retire_expired_route(&self, wall_now_ms: u64, monotonic_now: Instant) {
+        let expired = {
+            let mut state = self.state.lock().await;
+            let should_retire = matches!(
+                &*state,
+                ClientRouteControlState::Established(established)
+                    if established.is_expired(wall_now_ms, monotonic_now)
+            );
+            should_retire
+                .then(|| std::mem::replace(&mut *state, ClientRouteControlState::Connecting))
+        };
+        if let Some(ClientRouteControlState::Established(established)) = expired {
+            Box::pin(established.shutdown()).await;
+            self.clear_agent_mpquic_paths().await;
+            let mut state = self.state.lock().await;
+            if matches!(*state, ClientRouteControlState::Connecting) {
+                *state = ClientRouteControlState::Idle;
+            }
+        }
+    }
+
     /// Select and establish one normal relay-only MPTCP route for transparent TCP ingress.
     ///
     /// The transport-specific view prevents an enabled UDP profile from changing this TCP flow
@@ -730,11 +791,14 @@ impl ClientRouteControl {
         let _connect = self.tcp_connect.lock().await;
         let retry_deadline = Instant::now() + TCP_CONNECT_RECOVERY_HORIZON;
         loop {
+            self.retire_expired_route(crate::unix_millis(), Instant::now())
+                .await;
             let route_available = {
                 let state = self.state.lock().await;
                 match &*state {
                     ClientRouteControlState::Established(established)
-                        if matches!(established.transport, ClientTransportState::TcpMptcp(_)) =>
+                        if matches!(established.transport, ClientTransportState::TcpMptcp(_))
+                            && !established.is_expired(crate::unix_millis(), Instant::now()) =>
                     {
                         return Ok(ClientRouteProgress::TransportActive);
                     }
@@ -783,10 +847,13 @@ impl ClientRouteControl {
             return Err(ClientRouteConnectError::InvalidProfile);
         }
         {
+            self.retire_expired_route(crate::unix_millis(), Instant::now())
+                .await;
             let state = self.state.lock().await;
             match &*state {
                 ClientRouteControlState::Established(established)
-                    if matches!(established.transport, ClientTransportState::Mpquic(_)) =>
+                    if matches!(established.transport, ClientTransportState::Mpquic(_))
+                        && !established.is_expired(crate::unix_millis(), Instant::now()) =>
                 {
                     return Ok(ClientRouteProgress::TransportActive);
                 }
@@ -813,10 +880,13 @@ impl ClientRouteControl {
             return Err(ClientRouteConnectError::InvalidProfile);
         }
         {
+            self.retire_expired_route(crate::unix_millis(), Instant::now())
+                .await;
             let state = self.state.lock().await;
             match &*state {
                 ClientRouteControlState::Established(established)
-                    if matches!(established.transport, ClientTransportState::UdpReady(_)) =>
+                    if matches!(established.transport, ClientTransportState::UdpReady(_))
+                        && !established.is_expired(crate::unix_millis(), Instant::now()) =>
                 {
                     return Ok(ClientRouteProgress::UdpRouteReady);
                 }
@@ -871,7 +941,8 @@ impl ClientRouteControl {
             match std::mem::replace(&mut *state, ClientRouteControlState::Connecting) {
                 ClientRouteControlState::Idle => None,
                 ClientRouteControlState::Established(established)
-                    if established.matches_transport(requested_transport, native_single_udp) =>
+                    if established.matches_transport(requested_transport, native_single_udp)
+                        && !established.is_expired(crate::unix_millis(), Instant::now()) =>
                 {
                     let progress = established.progress();
                     *state = ClientRouteControlState::Established(established);
@@ -917,6 +988,13 @@ impl ClientRouteControl {
         };
         match result {
             Ok(established) => {
+                if established.is_expired(crate::unix_millis(), Instant::now()) {
+                    Box::pin(established.shutdown()).await;
+                    self.clear_agent_mpquic_paths().await;
+                    let mut state = self.state.lock().await;
+                    *state = ClientRouteControlState::Idle;
+                    return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+                }
                 let progress = established.progress();
                 let mpquic_paths = match &established.transport {
                     ClientTransportState::Mpquic(active) => match active.path_summaries().await {
@@ -1051,6 +1129,7 @@ impl ClientRouteControl {
         ),
         ClientRouteConnectError,
     > {
+        self.retire_expired_route(now_ms, Instant::now()).await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Err(ClientRouteConnectError::Busy);
@@ -1140,6 +1219,8 @@ impl ClientRouteControl {
         if payload.is_empty() || payload.len() > MAXIMUM_TCP_STREAM_CHUNK_BYTES {
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Err(ClientRouteConnectError::Busy);
@@ -1159,6 +1240,8 @@ impl ClientRouteControl {
 
     /// Read at most one fixed-size payload chunk from the active protected TCP stream.
     pub(crate) async fn read_tcp_payload(&self) -> Result<Vec<u8>, ClientRouteConnectError> {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Err(ClientRouteConnectError::Busy);
@@ -1186,6 +1269,7 @@ impl ClientRouteControl {
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        self.retire_expired_route(now_ms, Instant::now()).await;
         {
             let mut state = self.state.lock().await;
             if let ClientRouteControlState::Established(established) = &mut *state {
@@ -1263,6 +1347,7 @@ impl ClientRouteControl {
             }
         };
         let EstablishedClientRoute {
+            expiry,
             transport,
             tcp_flow,
             route,
@@ -1272,6 +1357,7 @@ impl ClientRouteControl {
         let ClientTransportState::UdpReady(ready) = transport else {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                expiry,
                 transport,
                 tcp_flow,
                 route,
@@ -1293,6 +1379,7 @@ impl ClientRouteControl {
         let Ok(authorized) = ready.bind_ingress(ingress, policy, now_ms) else {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                expiry,
                 transport: ClientTransportState::UdpReady(ready),
                 tcp_flow: None,
                 route: None,
@@ -1320,6 +1407,7 @@ impl ClientRouteControl {
                 }
                 let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    expiry,
                     transport: ClientTransportState::UdpActive(active),
                     tcp_flow: None,
                     route: None,
@@ -1345,6 +1433,7 @@ impl ClientRouteControl {
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        self.retire_expired_route(now_ms, Instant::now()).await;
         let previous = {
             let mut state = self.state.lock().await;
             std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
@@ -1358,6 +1447,7 @@ impl ClientRouteControl {
             }
         };
         let EstablishedClientRoute {
+            expiry,
             transport,
             tcp_flow,
             route,
@@ -1367,6 +1457,7 @@ impl ClientRouteControl {
         let ClientTransportState::UdpReady(ready) = transport else {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                expiry,
                 transport,
                 tcp_flow,
                 route,
@@ -1388,6 +1479,7 @@ impl ClientRouteControl {
         let Ok(authorized) = ready.bind_dns_ingress(ingress, policy, now_ms) else {
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                expiry,
                 transport: ClientTransportState::UdpReady(ready),
                 tcp_flow,
                 route: None,
@@ -1415,6 +1507,7 @@ impl ClientRouteControl {
                 }
                 let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    expiry,
                     transport: ClientTransportState::UdpActive(active),
                     tcp_flow,
                     route: None,
@@ -1437,6 +1530,8 @@ impl ClientRouteControl {
     pub(crate) async fn receive_udp_response(
         &self,
     ) -> Result<ClientUdpResponse, ClientRouteConnectError> {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Err(ClientRouteConnectError::Busy);
@@ -1503,6 +1598,7 @@ impl ClientRouteControl {
         if !ingress.is_browser_quic() {
             return Err(ClientRouteConnectError::UdpIngressUnavailable);
         }
+        self.retire_expired_route(now_ms, Instant::now()).await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Err(ClientRouteConnectError::Busy);
@@ -1607,6 +1703,7 @@ impl ClientRouteControl {
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<Option<ClientUdpResponse>, ClientRouteConnectError> {
+        self.retire_expired_route(now_ms, Instant::now()).await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Ok(None);
@@ -1657,6 +1754,8 @@ impl ClientRouteControl {
 
     /// Whether periodic reverse polling is meaningful for the current route owner.
     pub(crate) async fn browser_quic_flow_active(&self) -> bool {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
         let state = self.state.lock().await;
         matches!(
             &*state,
@@ -1677,6 +1776,7 @@ impl ClientRouteControl {
         &self,
         now_ms: u64,
     ) -> Result<ClientPathMaintenance, ClientRouteConnectError> {
+        self.retire_expired_route(now_ms, Instant::now()).await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Ok(ClientPathMaintenance::Unchanged);
@@ -1947,6 +2047,7 @@ async fn admit_completed_native_route(
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
             Ok(EstablishedClientRoute {
+                expiry: route.expiry,
                 transport: ClientTransportState::NativeUdp(Box::new(
                     ActiveProductionNativeUdpRoute {
                         session,
@@ -1961,6 +2062,7 @@ async fn admit_completed_native_route(
             })
         }
         Ok(route) if route.selected_transport() == Some(Transport::UdpSinglePath) => {
+            let expiry = route.expiry;
             let prepared = route
                 .prepare_single_relay_udp(helper, crate::unix_millis())
                 .await;
@@ -1970,6 +2072,7 @@ async fn admit_completed_native_route(
                     .await
                 {
                     Ok(ready) => Ok(EstablishedClientRoute {
+                        expiry,
                         transport: ClientTransportState::UdpReady(ready),
                         tcp_flow: None,
                         route: None,
@@ -2006,6 +2109,7 @@ async fn admit_completed_native_route(
             };
             match activate_committed_transport(&route, helper, Some(signal)).await {
                 Ok(transport) => Ok(EstablishedClientRoute {
+                    expiry: route.expiry,
                     transport,
                     tcp_flow: None,
                     route: Some(route),
@@ -2092,6 +2196,7 @@ async fn admit_completed_native_route(
                     return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
                 };
                 Ok(EstablishedClientRoute {
+                    expiry: route.expiry,
                     transport: ClientTransportState::Mpquic(Box::new(
                         ActiveProductionMpquicRoute {
                             session,
@@ -4429,6 +4534,7 @@ pub(crate) struct ProductionRouteAttempt {
 #[must_use = "an established route must remain owned until disconnect"]
 pub(crate) struct ProductionRoute {
     established: EstablishedRoute<ReservationSession>,
+    expiry: ClientRouteExpiry,
 }
 
 /// A committed one-relay UDP route with its helper-owned Client socket adopted but not yet
@@ -4594,7 +4700,17 @@ impl ProductionRouteAttempt {
         self.handle
             .wait()
             .await
-            .map(|established| ProductionRoute { established })
+            .map(|established| {
+                let expiry = ClientRouteExpiry::from_hard_expiry(
+                    established.request.parameters.hard_expires_at_unix,
+                    crate::unix_millis(),
+                    Instant::now(),
+                );
+                ProductionRoute {
+                    established,
+                    expiry,
+                }
+            })
             .map_err(|failure| {
                 tracing::warn!(
                     error = %failure.cause,
@@ -7139,6 +7255,41 @@ mod tests {
     const NOW_MS: u64 = 1_700_000_000_000;
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
+
+    #[test]
+    fn client_route_expiry_fails_closed_at_the_signed_wall_deadline() {
+        let monotonic_now = Instant::now();
+        let expiry =
+            ClientRouteExpiry::from_hard_expiry((NOW_MS + 2_000) / 1_000, NOW_MS, monotonic_now);
+
+        assert!(!expiry.is_expired(NOW_MS + 1_999, monotonic_now));
+        assert!(expiry.is_expired(NOW_MS + 2_000, monotonic_now));
+    }
+
+    #[test]
+    fn client_route_expiry_monotonic_projection_survives_wall_clock_rollback() {
+        let monotonic_now = Instant::now();
+        let expiry =
+            ClientRouteExpiry::from_hard_expiry((NOW_MS + 2_000) / 1_000, NOW_MS, monotonic_now);
+
+        assert!(!expiry.is_expired(
+            NOW_MS.saturating_sub(60_000),
+            monotonic_now + Duration::from_millis(1_999),
+        ));
+        assert!(expiry.is_expired(
+            NOW_MS.saturating_sub(60_000),
+            monotonic_now + Duration::from_millis(2_000),
+        ));
+    }
+
+    #[test]
+    fn already_expired_route_projection_is_never_reusable() {
+        let monotonic_now = Instant::now();
+        let expiry =
+            ClientRouteExpiry::from_hard_expiry((NOW_MS - 1_000) / 1_000, NOW_MS, monotonic_now);
+
+        assert!(expiry.is_expired(NOW_MS, monotonic_now));
+    }
 
     #[test]
     fn mptcp_acquire_retires_only_a_helper_route_that_is_no_longer_owned() {
@@ -11619,7 +11770,15 @@ mod tests {
                 .tls_server_name,
             "route.exit.example"
         );
-        let route = ProductionRoute { established };
+        let expiry = ClientRouteExpiry::from_hard_expiry(
+            established.request.parameters.hard_expires_at_unix,
+            NOW_MS,
+            Instant::now(),
+        );
+        let route = ProductionRoute {
+            established,
+            expiry,
+        };
         assert_eq!(route.active_path_ids(), [1]);
         assert!(route.warm_path_ids().is_empty());
         assert_eq!(retirement_state.outstanding(), 1);
