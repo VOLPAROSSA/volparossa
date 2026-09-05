@@ -20,6 +20,21 @@ SPEC.loader.exec_module(FIXTURE)
 
 
 class WifiLinkEvidence(unittest.TestCase):
+    def test_non_mesh_config_preserves_success_after_the_wifi_condition(self):
+        for node in ("client", "relay0", "bootstrap1", "relay1", "relay2", "exit"):
+            with self.subTest(node=node):
+                result = subprocess.run([
+                    "sh", "-eu", "-c",
+                    '. "$1"\nnode=$2\nwifi_link=yes\n'
+                    'WIFI_LINK_CLIENT_PARENT=wlan0\nWIFI_LINK_RELAY_PARENT=wlan1\n'
+                    '[ "$wifi_link" != yes ] || wifi_link_config\n'
+                    'printf "configuration-continued\\n"',
+                    "wifi-config-test", str(HERE / "wifi-link-smoke.sh"), node,
+                ], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("configuration-continued", result.stdout)
+                self.assertEqual("wifi_mesh:" in result.stdout, node in ("client", "relay0"))
+
     def test_kernel_snapshot_and_exact_mdns_record(self):
         name = "vw" + "a" * 13
         links = [{"ifname": name, "ifindex": 7, "address": "02:00:00:00:00:01",

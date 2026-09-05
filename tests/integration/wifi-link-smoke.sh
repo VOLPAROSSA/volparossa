@@ -40,7 +40,7 @@ wifi_link_config() {
     case $node in
         client) wifi_link_parent=$WIFI_LINK_CLIENT_PARENT; wifi_link_address=10.241.10.1 ;;
         relay0) wifi_link_parent=$WIFI_LINK_RELAY_PARENT; wifi_link_address=10.241.10.2 ;;
-        *) return ;;
+        *) return 0 ;;
     esac
     printf 'wifi_mesh:\n  enabled: true\n  acknowledge_open_underlay: true\n'
     printf '  parent_interface: %s\n  mesh_id: volparossa-wifi-link\n' "$wifi_link_parent"
