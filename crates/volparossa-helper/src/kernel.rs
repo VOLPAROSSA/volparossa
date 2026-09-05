@@ -72,6 +72,9 @@ const IFLA_LINKINFO: u16 = 18;
 const IFLA_NET_NS_FD: u16 = 28;
 const IFLA_IFALIAS: u16 = 20;
 const IFLA_NEW_IFINDEX: u16 = 49;
+const IFLA_AF_SPEC: u16 = 26;
+const IFLA_INET_CONF: u16 = 1;
+const IPV4_DEVCONF_SRC_VMARK: u16 = 24;
 const IFLA_INFO_KIND: u16 = 1;
 const IFLA_INFO_DATA: u16 = 2;
 const VETH_INFO_PEER: u16 = 1;
@@ -441,6 +444,14 @@ impl BirthNamespaceKernel {
                 details.index,
                 &CLIENT_INGRESS_PARENT_IPV6_ADDRESS,
                 126,
+                deadline,
+            )?;
+            // Preserve the host's reverse-path filtering. Only this newly owned veth uses
+            // its exact PREROUTING reply mark for source validation through our route table.
+            self.route.request_ack(
+                RTM_NEWLINK,
+                0,
+                &encode_client_ingress_source_mark(details.index)?,
                 deadline,
             )?;
             self.route.set_link_state(details.index, true, deadline)
@@ -2584,6 +2595,24 @@ fn encode_create_client_ingress_veth(
     Ok(payload)
 }
 
+fn encode_client_ingress_source_mark(index: u32) -> Result<Vec<u8>, KernelError> {
+    if index == 0 {
+        return Err(KernelError::Invalid);
+    }
+    // Linux inet_set_link_af accepts individual nested configuration IDs on SET (GET uses
+    // a packed array). Do not replace other interface settings or touch all/default values.
+    let mut conf = Vec::new();
+    push_attribute(&mut conf, IPV4_DEVCONF_SRC_VMARK, &1_u32.to_ne_bytes())?;
+    let mut inet = Vec::new();
+    push_attribute(&mut inet, IFLA_INET_CONF | NLA_F_NESTED, &conf)?;
+    let mut families = Vec::new();
+    let family = u16::try_from(libc::AF_INET).map_err(|_| KernelError::Invalid)?;
+    push_attribute(&mut families, family | NLA_F_NESTED, &inet)?;
+    let mut payload = interface_info(index, 0, 0)?;
+    push_attribute(&mut payload, IFLA_AF_SPEC | NLA_F_NESTED, &families)?;
+    Ok(payload)
+}
+
 fn encode_set_link_alias(index: u32, alias: &str) -> Result<(u16, u16, Vec<u8>), KernelError> {
     if index == 0 || index > i32::MAX as u32 || !valid_string_field(alias, MAX_IFALIAS_BYTES) {
         return Err(KernelError::Invalid);
@@ -3169,6 +3198,26 @@ mod tests {
             ownership_seed,
         )
         .expect("durable WireGuard resource fixture")
+    }
+
+    #[test]
+    fn client_ingress_source_mark_changes_only_exact_interface_ipv4_setting() {
+        assert!(encode_client_ingress_source_mark(0).is_err());
+        let payload = encode_client_ingress_source_mark(7).expect("source-mark setting");
+        assert_eq!(read_u32(&payload, 4), Some(7));
+        assert_eq!(read_u32(&payload, 8), Some(0));
+        assert_eq!(read_u32(&payload, 12), Some(0));
+        let link = attributes(&payload[16..]).expect("link attributes");
+        assert_eq!(link.len(), 1);
+        let families = attributes(attribute(&link, IFLA_AF_SPEC)).expect("families");
+        assert_eq!(families.len(), 1);
+        let inet = attributes(attribute(&families, 2)).expect("IPv4 only");
+        assert_eq!(inet.len(), 1);
+        let conf = attributes(attribute(&inet, IFLA_INET_CONF)).expect("configuration");
+        assert_eq!(
+            conf,
+            vec![(IPV4_DEVCONF_SRC_VMARK, 1_u32.to_ne_bytes().as_slice())]
+        );
     }
 
     #[test]

@@ -569,6 +569,20 @@ capture_worker_network_diagnostics() {
                     "$diagnostic_pid" "$(stat -Lc '%d:%i' "/proc/$diagnostic_pid/ns/net")" \
                     "$diagnostic_command"
                 nsenter -t "$diagnostic_pid" -n ip -details -statistics link show || true
+                nsenter -t "$diagnostic_pid" -n ip -4 address show || true
+                nsenter -t "$diagnostic_pid" -n ip -4 rule show || true
+                nsenter -t "$diagnostic_pid" -n ip -4 route show table all || true
+                # Namespace-local reverse-path evidence: no payload, history or sysctl writes.
+                nsenter -t "$diagnostic_pid" -n sh -c '
+                    for setting in /proc/sys/net/ipv4/conf/*/rp_filter \
+                        /proc/sys/net/ipv4/conf/*/src_valid_mark; do
+                        printf "%s=" "$setting"
+                        cat "$setting"
+                    done
+                    awk "\$1 == \"TcpExt:\" { if (!seen++) {
+                        for (i=2;i<=NF;i++) if (\$i == \"IPReversePathFilter\") field=i
+                    } else if (field) print \"IPReversePathFilter=\" \$field }" /proc/net/netstat
+                ' || true
                 nsenter -t "$diagnostic_pid" -n ip -6 address show || true
                 nsenter -t "$diagnostic_pid" -n ip -6 route show table main || true
                 nsenter -t "$diagnostic_pid" -n ip -details mptcp endpoint show || true

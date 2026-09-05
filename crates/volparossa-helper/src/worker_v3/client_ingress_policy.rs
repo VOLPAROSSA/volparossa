@@ -530,8 +530,59 @@ fn parent_install_transaction(
             rule,
         )?;
     }
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 14, &batch_nfgen())?;
+    append_parent_return_path(&mut transaction, table, ingress_ifindex)?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 16, &batch_nfgen())?;
     Ok(transaction)
+}
+
+fn append_parent_return_path(
+    transaction: &mut Transaction,
+    table: &[u8],
+    ingress_ifindex: u32,
+) -> Result<(), ClientIngressPolicyError> {
+    transaction.push(
+        NFT_MSG_NEWCHAIN,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        14,
+        &chain(
+            table,
+            MANGLE_CHAIN,
+            FILTER_CHAIN_TYPE,
+            NF_INET_PRE_ROUTING,
+            MANGLE_PRIORITY,
+            NF_ACCEPT,
+        )?,
+    )?;
+    transaction.push(
+        NFT_MSG_NEWRULE,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
+        15,
+        &rule(
+            table,
+            MANGLE_CHAIN,
+            parent_reply_mark_expressions(ingress_ifindex)?,
+        )?,
+    )
+}
+
+fn parent_reply_mark_expressions(
+    ingress_ifindex: u32,
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    if ingress_ifindex == 0 {
+        return Err(ClientIngressPolicyError::Malformed);
+    }
+    // A reply crossing namespaces loses its socket mark. Only our owned parent-veth input
+    // receives this mark; ordinary host input is unchanged. src_valid_mark on that veth
+    // lets strict RPF find the same interface even when the parent has no physical default.
+    let mut expressions = vec![
+        meta_load(NFT_META_IIF)?,
+        compare(NFT_CMP_EQ, &ingress_ifindex.to_ne_bytes())?,
+    ];
+    expressions.extend(parent_steering_expressions(
+        NFPROTO_IPV4,
+        CLIENT_INGRESS_PARENT_IPV4_MARK,
+    )?);
+    Ok(expressions)
 }
 
 fn delete_transaction(table: &[u8]) -> Result<Transaction, ClientIngressPolicyError> {
@@ -1324,7 +1375,7 @@ mod tests {
             1_001,
         )
         .expect("transaction");
-        assert_eq!(transaction.requests.len(), 14);
+        assert_eq!(transaction.requests.len(), 16);
         assert!(transaction.bytes.len() <= MAX_BATCH_BYTES);
         assert_eq!(
             transaction
@@ -1332,8 +1383,26 @@ mod tests {
                 .iter()
                 .filter(|request| request.ack)
                 .count(),
-            12
+            14
         );
+    }
+
+    #[test]
+    fn parent_reply_mark_is_limited_to_exact_owned_veth_and_ipv4() {
+        assert!(parent_reply_mark_expressions(0).is_err());
+        let expressions = parent_reply_mark_expressions(7).expect("reply mark");
+        let mut expected = vec![
+            meta_load(NFT_META_IIF).unwrap(),
+            compare(NFT_CMP_EQ, &7_u32.to_ne_bytes()).unwrap(),
+        ];
+        expected.extend(
+            parent_steering_expressions(NFPROTO_IPV4, CLIENT_INGRESS_PARENT_IPV4_MARK).unwrap(),
+        );
+        assert_eq!(expressions.len(), expected.len());
+        for (actual, expected) in expressions.iter().zip(expected) {
+            assert_eq!(actual.name, expected.name);
+            assert_eq!(actual.data, expected.data);
+        }
     }
 
     #[test]
@@ -1465,7 +1534,7 @@ mod tests {
         let parent_routing = parent_kernel
             .install_client_ingress_root_smoke_routing(&ingress_link, deadline)
             .expect("install parent marked route");
-        let parent_policy = install_parent(
+        let mut parent_policy = install_parent(
             SMOKE_RUNTIME,
             parent_routing.parent_ifindex(),
             parent_routing.loopback_ifindex(),
@@ -1547,16 +1616,14 @@ mod tests {
                     .take()
                     .expect("source-bound reply descriptor"),
             );
-            app.set_read_timeout(Some(Duration::from_secs(2)))
-                .expect("bounded application receive");
-            reply
-                .send_to(SMOKE_REPLY, application)
-                .expect("send exact transparent reply");
-            let (length, source) = app
-                .recv_from(&mut datagram)
-                .expect("application received transparent reply");
-            assert_eq!(source, remote);
-            assert_eq!(&datagram[..length], SMOKE_REPLY);
+            prove_offline_reply(
+                &app,
+                &reply,
+                remote,
+                ingress_link.parent_name(),
+                &mut parent_policy,
+                &parent_routing,
+            );
 
             // Keep the reply descriptor alive while proving that Linux TPROXY still sends the next
             // datagram on the exact same four-tuple to the transparent ingress owner. A connected
@@ -1590,6 +1657,118 @@ mod tests {
             .expect("delete exact veth pair");
         drop(parent_channel);
         assert!(child.wait().expect("wait worker smoke child").success());
+    }
+
+    fn prove_offline_reply(
+        app: &UdpSocket,
+        reply: &UdpSocket,
+        remote: std::net::SocketAddr,
+        ingress_name: &str,
+        parent_policy: &mut ActiveParentClientIngressPolicy,
+        routing: &crate::kernel::ClientIngressParentIpv4Routing,
+    ) {
+        // This runs only inside the existing disposable user+network namespace. No initial
+        // namespace sysctl is changed: enforce strict source checks for both proof halves.
+        for interface in ["all", ingress_name] {
+            std::fs::write(
+                format!("/proc/sys/net/ipv4/conf/{interface}/rp_filter"),
+                b"1\n",
+            )
+            .expect("strict RPF in disposable namespace");
+        }
+        assert_eq!(
+            std::fs::read_to_string(format!(
+                "/proc/sys/net/ipv4/conf/{ingress_name}/src_valid_mark"
+            ))
+            .expect("read production-owned source mark")
+            .trim(),
+            "1",
+        );
+        run_disposable_ip(&["route", "del", "default", "via", "192.0.2.1", "dev", "vpu0"]);
+        let defaults = Command::new("/usr/bin/ip")
+            .args(["route", "show", "table", "main", "default"])
+            .output()
+            .expect("inspect disposable physical routes");
+        assert!(defaults.status.success() && defaults.stdout.is_empty());
+        assert!(
+            !Command::new("/usr/bin/ip")
+                .args(["route", "get", &remote.ip().to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        // Without the exact owned input mark, the real kernel rejects the reply despite its
+        // valid local destination. This reproduces the offline failure without disabling RPF.
+        let deadline = HardDeadline::after(Duration::from_secs(3)).unwrap();
+        remove_parent(parent_policy, deadline).expect("remove owned mark for negative control");
+        let drops_before = reverse_path_filter_drops();
+        app.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        reply
+            .send_to(SMOKE_REPLY, app.local_addr().unwrap())
+            .unwrap();
+        let mut datagram = [0_u8; 128];
+        let error = app
+            .recv_from(&mut datagram)
+            .expect_err("unmarked offline reply must fail RPF");
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ));
+        assert_eq!(reverse_path_filter_drops(), drops_before + 1);
+
+        *parent_policy = install_parent(
+            SMOKE_RUNTIME,
+            routing.parent_ifindex(),
+            routing.loopback_ifindex(),
+            1_001,
+            deadline,
+        )
+        .expect("restore exact parent policy");
+        app.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        reply
+            .send_to(SMOKE_REPLY, app.local_addr().unwrap())
+            .unwrap();
+        let (length, source) = app
+            .recv_from(&mut datagram)
+            .expect("offline exact reply under strict RPF");
+        assert_eq!(source, remote);
+        assert_eq!(&datagram[..length], SMOKE_REPLY);
+        assert_eq!(reverse_path_filter_drops(), drops_before + 1);
+        run_disposable_ip(&[
+            "route",
+            "add",
+            "default",
+            "via",
+            "192.0.2.1",
+            "dev",
+            "vpu0",
+            "onlink",
+        ]);
+    }
+
+    fn reverse_path_filter_drops() -> u64 {
+        let counters =
+            std::fs::read_to_string("/proc/net/netstat").expect("disposable IP counters");
+        let mut lines = counters.lines();
+        while let Some(names) = lines.next() {
+            let values = lines.next().expect("counter values");
+            if let Some(index) = names
+                .split_whitespace()
+                .position(|name| name == "IPReversePathFilter")
+            {
+                return values
+                    .split_whitespace()
+                    .nth(index)
+                    .expect("RPF counter")
+                    .parse()
+                    .unwrap();
+            }
+        }
+        panic!("kernel IPReversePathFilter counter unavailable");
     }
 
     fn receive_smoke_udp(
@@ -1890,17 +2069,21 @@ mod tests {
                 "onlink",
             ],
         ] {
-            assert!(
-                Command::new("/usr/bin/ip")
-                    .args(&arguments)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .expect("run disposable ip setup")
-                    .success(),
-                "failed disposable ip {arguments:?}"
-            );
+            run_disposable_ip(&arguments);
         }
+    }
+
+    fn run_disposable_ip(arguments: &[&str]) {
+        assert!(
+            Command::new("/usr/bin/ip")
+                .args(arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("run disposable ip setup")
+                .success(),
+            "failed disposable ip {arguments:?}"
+        );
     }
 }

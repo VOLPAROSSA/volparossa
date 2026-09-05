@@ -206,6 +206,13 @@ about 60 seconds. The offline consumer's destination received 30 requests and em
 but its application received zero. This proves real contribution, not the complete simultaneous
 offline give-and-take scenario; the offline return path remains under diagnosis. Cleanup completed
 with unchanged host-state hashes.
+The missing-default return path is now reproduced in the disposable ingress smoke with strict
+Linux reverse-path filtering: removing the owned reply policy produces one measured RPF drop;
+restoring it delivers the exact UDP/DNS source tuple and payload with no further drop. Production
+sets source-mark validation only on its own newly created parent veth and marks only replies
+arriving from that interface. Existing global/default RPF settings are not weakened. Sixteen
+focused ingress tests and strict helper Clippy pass. The earlier KVM artifact lacked RPF counters,
+so attributing that exact historical failure remains an inference; new runs retain those counters.
 The other consumer's observed data path used the WAN neighbor, with the offline node as its
 control Relay. Therefore this run does not prove the offline node's simultaneous dataplane
 contribution. The fixture now checks the actual selected Relay before starting applications,
