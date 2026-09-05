@@ -34,8 +34,13 @@ flow transferred 1 MiB with matching hashes and the exact Exit source. A08 never
 remained failed because the fixture compared total completion-event counts across a rotating
 400-record log snapshot: a previous event had disappeared when the new event arrived.
 The fixture now measures exact events newer than its pre-request timestamp, retaining the
-same bounded log window and all payload/source checks. A08--A14 as a complete sequence still
-need a passing live rerun; working DNS/TLS is not reported as a completed acceptance sequence.
+same bounded log window and all payload/source checks. The
+[corrected datapath run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33984428352)
+at `7a9ef998` **passed A01--A10 and A15**, including both DNS transports, allowed TLS,
+all five A09 policy denials and both A10 ECH/unverifiable denials. It stopped at
+`PRIVACY_CAPTURE_INCOMPLETE` because the Relay1 observer exited during A07's deliberate
+link-down. A11--A13 remain unfinalized and A14 was not executed; cleanup completed with zero
+owned objects and unchanged host-state hashes. A passing all-A01--A15 sequence is still required.
 Both [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982300867) and
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982298530) passed at `9da11b81`.
 Retained captures also exposed an A11 observer failure during A07's intentional Relay link-down.
@@ -189,10 +194,17 @@ with priority-zero owner traffic ahead of contribution and actual role-specific 
 classification. It starts before participation, survives route-only cleanup and is retired at
 daemon shutdown; partial installation remains owned for cleanup. Real disposable-veth
 contention/recovery and engine-to-kernel lifecycle checks pass, as do focused wire/config/agent
-checks and strict helper/agent Clippy. The complete-node `sharing` scenario has no live pass yet.
-Only supported pristine queue roots without options are accepted in this slice; physical `mq`
-and nonempty `fq_codel` setups, download control, automatic available-bandwidth estimation and
-radio airtime remain unfinished. These narrower results do not check the full sharing item above.
+checks and strict helper/agent Clippy. Standard software `fq_codel` and `mq` roots are also
+supported: real single/two-queue TAP tests transfer UDP through the installed aggregate tree
+and restore the exact original kernel defaults. Custom roots/options, classifiers, offload and
+unsupported queue geometry are rejected before mutation. This does not cover concurrent
+administrator changes or crash recovery. The complete-node
+[sharing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33985062548) at `01727102`
+installed and removed the scheduler with exact baseline restoration, but stopped at
+`SHARING_NATIVE_ROUTE_UNAVAILABLE`: the route's CapacityHold was rejected after the native
+probe, before the application/competition windows. There is no whole-node sharing pass yet.
+Download control, automatic available-bandwidth estimation and radio airtime remain unfinished.
+These narrower results do not check the full sharing item above.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

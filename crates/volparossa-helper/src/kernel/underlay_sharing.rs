@@ -37,6 +37,9 @@ const MAX_DUMP_BYTES: usize = 256 * 1024;
 const MAX_OPTIONS_BYTES: usize = 4096;
 const FILTER_INFO: u32 = (1 << 16) | (3_u16.to_be() as u32); // priority 1, ETH_P_ALL.
 
+mod defaults;
+use defaults::{DefaultTree, LinkGeometry};
+
 /// Explicit operator capacities; this structure is not an interface-selection authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SharingConfig {
@@ -83,7 +86,8 @@ pub(crate) struct SharingOwner {
     config: SharingConfig,
     namespace: File,
     link: LinkDetails,
-    baseline: TcRecord,
+    geometry: LinkGeometry,
+    baseline: DefaultTree,
     specifications: Vec<QdiscSpec>,
     removed: bool,
 }
@@ -125,18 +129,21 @@ pub(crate) fn install(
         config.validate()?;
         let namespace = File::open("/proc/thread-self/ns/net")?;
         let mut route = NetlinkClient::connect(NETLINK_ROUTE, deadline)?;
-        let (link, mtu) = observe_link(&mut route, config.egress_ifindex, deadline)?;
-        if link.flags & (libc::IFF_LOOPBACK as u32) != 0 || !(1280..=65_535).contains(&mtu) {
+        let (link, geometry) = observe_link(&mut route, config.egress_ifindex, deadline)?;
+        if link.flags & (libc::IFF_LOOPBACK as u32) != 0 || !(1280..=65_535).contains(&geometry.mtu)
+        {
             return Err(KernelError::Invalid);
         }
         let records = dump(&mut route, RTM_GETQDISC, config.egress_ifindex, 0, deadline)?;
-        let baseline = pristine_baseline(&records)?.clone();
+        let baseline = DefaultTree::from_records(&records, geometry)?;
+        baseline.verify_no_filters(&mut route, config.egress_ifindex, deadline)?;
         Ok(SharingOwner {
             config,
             namespace,
             link,
+            geometry,
             baseline,
-            specifications: specifications(config, mtu),
+            specifications: specifications(config, geometry.mtu),
             removed: false,
         })
     };
@@ -165,11 +172,12 @@ impl SharingOwner {
             return Err(KernelError::Invalid);
         }
         let mut route = NetlinkClient::connect(NETLINK_ROUTE, deadline)?;
-        let current = route.link_details_by_index(self.config.egress_ifindex, deadline)?;
+        let (current, geometry) = observe_link(&mut route, self.config.egress_ifindex, deadline)?;
         if current.index != self.link.index
             || current.name != self.link.name
             || current.alias != self.link.alias
             || current.kind != self.link.kind
+            || geometry != self.geometry
         {
             return Err(KernelError::Invalid);
         }
@@ -185,12 +193,11 @@ impl SharingOwner {
             0,
             deadline,
         )?;
-        if !self
-            .baseline
-            .same_configuration(pristine_baseline(&before)?)
-        {
+        if !self.baseline.matches(&before, self.geometry) {
             return Err(KernelError::Invalid);
         }
+        self.baseline
+            .verify_no_filters(&mut route, self.config.egress_ifindex, deadline)?;
         for (index, specification) in self.specifications.iter().enumerate() {
             let flags = if index == 0 {
                 NLM_F_CREATE | NLM_F_EXCL
@@ -253,7 +260,9 @@ impl SharingOwner {
             0,
             deadline,
         )?;
-        if before.len() == 1 && self.baseline.same_configuration(&before[0]) {
+        if self.baseline.matches(&before, self.geometry) {
+            self.baseline
+                .verify_no_filters(&mut route, self.config.egress_ifindex, deadline)?;
             self.removed = true;
             return Ok(());
         }
@@ -278,9 +287,11 @@ impl SharingOwner {
             0,
             deadline,
         )?;
-        if after.len() != 1 || !self.baseline.same_configuration(&after[0]) {
+        if !self.baseline.matches(&after, self.geometry) {
             return Err(KernelError::Malformed);
         }
+        self.baseline
+            .verify_no_filters(&mut route, self.config.egress_ifindex, deadline)?;
         self.removed = true;
         Ok(())
     }
@@ -360,6 +371,7 @@ struct TcRecord {
     kind: String,
     options: Vec<u8>,
     counters: QueueCounters,
+    extra_configuration: bool,
 }
 
 impl TcRecord {
@@ -368,23 +380,8 @@ impl TcRecord {
             && self.parent == other.parent
             && self.kind == other.kind
             && self.options == other.options
+            && self.extra_configuration == other.extra_configuration
     }
-}
-
-fn pristine_baseline(records: &[TcRecord]) -> Result<&TcRecord, KernelError> {
-    let [root] = records else {
-        return Err(KernelError::Invalid);
-    };
-    if root.handle != 0
-        || root.parent != TC_ROOT
-        || !matches!(root.kind.as_str(), "noqueue" | "noop" | "fq_codel")
-        // A handle-0 fq_codel may have administrator-modified options. Deleting our replacement
-        // cannot reproduce those settings automatically, so reject before the first mutation.
-        || !root.options.is_empty()
-    {
-        return Err(KernelError::Invalid);
-    }
-    Ok(root)
 }
 
 #[derive(Clone, Debug)]
@@ -516,6 +513,7 @@ impl QdiscSpec {
         if record.handle != self.handle
             || record.parent != self.parent
             || record.kind != self.name()
+            || record.extra_configuration
         {
             return Err(KernelError::Invalid);
         }
@@ -579,7 +577,7 @@ fn observe_link(
     route: &mut NetlinkClient,
     ifindex: u32,
     deadline: HardDeadline,
-) -> Result<(LinkDetails, u32), KernelError> {
+) -> Result<(LinkDetails, LinkGeometry), KernelError> {
     let (reply, sequence) =
         route.request_reply(RTM_GETLINK, &interface_info(ifindex, 0, 0)?, deadline)?;
     validate_kernel_sender(&reply.sender)?;
@@ -594,11 +592,16 @@ fn observe_link(
     validate_kernel_header(frame, sequence, RTM_NEWLINK, route.local_port_id)?;
     let link = parse_link_details_frame(frame)?;
     let fields = attributes(&frame[NLMSG_HEADER_LEN + 16..])?;
-    let mtu = exact_u32(&fields, super::IFLA_MTU)?;
+    let geometry = LinkGeometry {
+        mtu: exact_u32(&fields, super::IFLA_MTU)?,
+        hardware_type: read_u16(frame, NLMSG_HEADER_LEN + 2).ok_or(KernelError::Malformed)?,
+        tx_queues: exact_u32(&fields, 31)?, // IFLA_NUM_TX_QUEUES.
+        tx_queue_length: exact_u32(&fields, 13)?, // IFLA_TXQLEN.
+    };
     if link.index != ifindex {
         return Err(KernelError::Malformed);
     }
-    Ok((link, mtu))
+    Ok((link, geometry))
 }
 
 fn exact_attribute<'a>(fields: &[(u16, &'a [u8])], wanted: u16) -> Result<&'a [u8], KernelError> {
@@ -696,6 +699,13 @@ fn parse_tc(frame: &[u8]) -> Result<TcRecord, KernelError> {
         .filter(|p| p.len() >= TC_MESSAGE_BYTES)
         .ok_or(KernelError::Malformed)?;
     let fields = attributes(&payload[TC_MESSAGE_BYTES..])?;
+    let extra_configuration = fields
+        .iter()
+        .any(|(kind, bytes)| match kind & NLA_TYPE_MASK {
+            1..=4 | 6 | 7 | 9 => false, // Kind, options, statistics and padding.
+            12 => *bytes != [0], // Hardware offload is not a software-default restoration authority.
+            _ => true, // Reject estimators, STAB, shared blocks and unknown configuration.
+        });
     let kind = super::parse_string_attribute(exact_attribute(&fields, TCA_KIND)?, 16)?;
     let options = fields
         .iter()
@@ -730,6 +740,7 @@ fn parse_tc(frame: &[u8]) -> Result<TcRecord, KernelError> {
         kind,
         options: options.to_vec(),
         counters,
+        extra_configuration,
     })
 }
 

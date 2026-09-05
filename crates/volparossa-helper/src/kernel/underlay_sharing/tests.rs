@@ -20,6 +20,8 @@ const LIVE_TEST: &str =
 const CHILD_ROLE: &str = "VOLPAROSSA_SHARING_SMOKE_ROLE";
 const PARENT_NS: &str = "VOLPAROSSA_SHARING_SMOKE_PARENT_NS";
 
+mod defaults;
+
 fn config(ifindex: u32) -> SharingConfig {
     SharingConfig {
         egress_ifindex: ifindex,
@@ -86,6 +88,7 @@ fn foreign_qdiscs_and_changed_defaults_are_not_owned() {
         kind: "noqueue".to_owned(),
         options: Vec::new(),
         counters: QueueCounters::default(),
+        extra_configuration: false,
     };
     assert!(pristine_baseline(std::slice::from_ref(&baseline)).is_ok());
     let mut foreign = baseline.clone();
@@ -101,6 +104,18 @@ fn foreign_qdiscs_and_changed_defaults_are_not_owned() {
     assert!(pristine_baseline(std::slice::from_ref(&foreign)).is_err());
     foreign.kind = "fq_codel".to_owned();
     assert!(pristine_baseline(std::slice::from_ref(&foreign)).is_err());
+}
+
+fn pristine_baseline(records: &[TcRecord]) -> Result<DefaultTree, KernelError> {
+    DefaultTree::from_records(
+        records,
+        LinkGeometry {
+            mtu: 1500,
+            hardware_type: 1,
+            tx_queues: 1,
+            tx_queue_length: 1000,
+        },
+    )
 }
 
 #[test]
