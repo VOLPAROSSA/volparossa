@@ -2752,7 +2752,7 @@ impl HelperEngine {
         let Some(context_id) = fixed::<16>(&value.route_context_id) else {
             return Some(execution(invalid_response(request), None));
         };
-        let (token, next_generation) = {
+        let (token, next_generation, activation_started_at_unix) = {
             let mut state = self.inner.state.lock().await;
             let Some(context) = state.contexts.get(&context_id) else {
                 return Some(execution(
@@ -2829,7 +2829,7 @@ impl HelperEngine {
             };
             state.next_generation = next_generation;
             state.cleanup_pending.insert((context_id, generation));
-            (token, next_generation)
+            (token, next_generation, now.unix)
         };
 
         let backend = Arc::clone(&self.inner.backend);
@@ -2937,7 +2937,9 @@ impl HelperEngine {
         }
         context.generation = next_generation;
         context.phase = ContextPhase::Activated;
-        context.activated_at_unix = Some(now.unix);
+        // A fresh peer can handshake while the backend is applying activation. Use the
+        // pre-dispatch lower bound, not a later response second that would reject that handshake.
+        context.activated_at_unix = Some(activation_started_at_unix);
         let context_handle = context.handle;
         let lease_handles = context
             .leases
@@ -6113,6 +6115,7 @@ mod tests {
         substitute_prepare_deadline: AtomicBool,
         substitute_acquire_generation: AtomicBool,
         completion_boottime_ns: StdMutex<Option<Arc<AtomicU64>>>,
+        activate_completion_wall_clock: StdMutex<Option<(Arc<AdjustableClock>, u64)>>,
         activate_completion_boottime_ns: AtomicU64,
         probe_completion_boottime_ns: AtomicU64,
         prepare_bindings: StdMutex<Vec<BackendBinding>>,
@@ -6384,6 +6387,14 @@ mod tests {
                         .as_ref()
                         .expect("configured completion clock")
                         .store(completion_boottime_ns, Ordering::Release);
+                }
+                if let Some((clock, wall_ns)) = self
+                    .activate_completion_wall_clock
+                    .lock()
+                    .expect("activation wall clock")
+                    .as_ref()
+                {
+                    clock.set_wall_ns(*wall_ns);
                 }
                 completion.complete(Ok(result))
             })
@@ -7339,6 +7350,34 @@ mod tests {
         assert_eq!(probes[1].0.request_id, [5; 16]);
         assert_ne!(probes[0].0.request_id, probes[1].0.request_id);
         assert_eq!(probes[0].1.commit, probes[1].1.commit);
+    }
+
+    #[tokio::test]
+    async fn activation_crossing_second_boundary_keeps_actual_handshake_eligible() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.proof_increment.store(1, Ordering::Relaxed);
+        let clock = Arc::new(AdjustableClock::new(
+            101 * NANOSECONDS_PER_SECOND + 971_000_000,
+            700 * NANOSECONDS_PER_SECOND,
+        ));
+        *backend
+            .activate_completion_wall_clock
+            .lock()
+            .expect("activation completion clock") =
+            Some((Arc::clone(&clock), 102 * NANOSECONDS_PER_SECOND + 2_000_000));
+        let engine = adjustable_engine(Arc::clone(&backend), Arc::clone(&clock));
+        let prepared = prepared(&execute_prepare(&engine, prepare_request(1)).await);
+        let activated = engine.execute(activate_request_for(&prepared, 2)).await;
+        assert_eq!(activated.result, HelperResult::Ok as i32);
+        assert_eq!(clock.now_unix(), 102);
+
+        // The backend proves handshake second 101 and exact bidirectional growth. Crossing a
+        // second while completing Activate cannot demand an unrelated later WG re-handshake.
+        let committed = engine.execute(commit_request_for(&prepared, 3)).await;
+        assert_eq!(committed.result, HelperResult::Ok as i32);
+        let probes = backend.probe_requests.lock().expect("probe request");
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].1.activated_at_unix, 101);
     }
 
     #[tokio::test]
