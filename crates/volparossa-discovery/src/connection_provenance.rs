@@ -438,11 +438,20 @@ impl ConnectionRegistry {
             .values()
             .filter(|record| record.peer_id == peer_id);
         let record = records.next()?;
-        if records.next().is_some() || record.relayed {
+        if record.relayed {
             return None;
         }
         let prefix = record.prefix.as_ref()?;
-        (prefix.is_consistent() && prefix.normalized.is_local_lan()).then_some(prefix.normalized)
+        (prefix.is_consistent()
+            && prefix.normalized.is_local_lan()
+            && records.all(|record| {
+                !record.relayed
+                    && record
+                        .prefix
+                        .as_ref()
+                        .is_some_and(|other| other.is_consistent() && other.same_as(prefix))
+            }))
+        .then_some(prefix.normalized)
     }
 
     fn exact_witness(
@@ -1217,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn advisory_local_prefix_requires_one_current_direct_unpoisoned_connection() {
+    fn advisory_local_prefix_requires_consistent_current_direct_unpoisoned_connections() {
         let peer = PeerId::random();
         let local = dialer("/ip4/192.168.20.2/udp/443/quic-v1");
         let public = dialer("/ip4/8.8.4.4/udp/443/quic-v1");
@@ -1232,7 +1241,12 @@ mod tests {
         );
         assert!(behaviour.advisory_local_prefix(PeerId::random()).is_none());
         established(&mut behaviour, peer, 2, &local, 1);
-        assert!(behaviour.advisory_local_prefix(peer).is_none());
+        assert!(
+            behaviour
+                .advisory_local_prefix(peer)
+                .unwrap()
+                .is_local_lan()
+        );
         closed(&mut behaviour, peer, 2, &local, 1);
         assert!(
             behaviour
@@ -1253,6 +1267,64 @@ mod tests {
         let mut behaviour = ConnectionProvenanceBehaviour::new();
         established(&mut behaviour, peer, 1, &circuit, 0);
         assert!(behaviour.advisory_local_prefix(peer).is_none());
+    }
+
+    #[test]
+    fn advisory_local_prefix_agreement_does_not_merge_exact_connection_authority() {
+        for (outbound, inbound, family, expected) in [
+            (
+                "/ip4/192.168.20.2/udp/443/quic-v1",
+                "/ip4/192.168.20.3/udp/444/quic-v1",
+                IpFamily::Ipv4,
+                ObservedNetworkPrefix::local_ipv4_24([192, 168, 20]),
+            ),
+            (
+                "/ip6/fd12:3456:789a::2/udp/443/quic-v1",
+                "/ip6/fd12:3456:789a::3/udp/444/quic-v1",
+                IpFamily::Ipv6,
+                ObservedNetworkPrefix::local_ipv6_48([0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a]),
+            ),
+        ] {
+            let peer = PeerId::random();
+            let mut behaviour = ConnectionProvenanceBehaviour::new();
+            established(&mut behaviour, peer, 1, &dialer(outbound), 0);
+            established(&mut behaviour, peer, 2, &listener(outbound, inbound), 1);
+            assert!(behaviour.advisory_local_prefix(peer) == Some(expected));
+            assert!(behaviour.unique_witness(peer, family).is_none());
+            for connection in [1, 2] {
+                let connection = ConnectionId::new_unchecked(connection);
+                let witness = behaviour.exact_witness(peer, connection, family).unwrap();
+                let observation = behaviour.bind(witness, peer, connection).unwrap();
+                assert!(
+                    observation.consume_into_client_preselection_prefix(family) == Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn advisory_local_prefix_rejects_conflicting_or_relayed_sibling_connections() {
+        let peer = PeerId::random();
+        let local = dialer("/ip4/192.168.20.2/udp/443/quic-v1");
+        let circuit = format!(
+            "/ip4/192.168.20.3/udp/443/quic-v1/p2p/{}/p2p-circuit/p2p/{peer}",
+            PeerId::random()
+        );
+        for other in [
+            "/ip4/192.168.21.2/udp/443/quic-v1",
+            "/ip6/fd12:3456:789a::2/udp/443/quic-v1",
+            "/ip4/8.8.4.4/udp/443/quic-v1",
+            "/memory/1234",
+            circuit.as_str(),
+        ] {
+            let mut behaviour = ConnectionProvenanceBehaviour::new();
+            established(&mut behaviour, peer, 1, &local, 0);
+            let other = dialer(other);
+            established(&mut behaviour, peer, 2, &other, 1);
+            assert!(behaviour.advisory_local_prefix(peer).is_none());
+            closed(&mut behaviour, peer, 2, &other, 1);
+            assert!(behaviour.advisory_local_prefix(peer).is_some());
+        }
     }
 
     #[test]

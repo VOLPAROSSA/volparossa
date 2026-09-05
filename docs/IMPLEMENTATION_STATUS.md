@@ -164,6 +164,14 @@ node could consume advertisements but never publish its own Relay capability. Th
 now accepts truthful LocalOnly Relay service without an ASN or invented public prefix, while
 rejecting LocalOnly Exit service. A real signed-advertisement regression and strict agent
 Clippy pass; the extended live scenario still needs a successful rerun.
+The [publisher-fix rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/33983669024)
+at `36e3ae72` admitted the offline Relay and established the offline consumer's native route.
+The second consumer still stopped with `PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS`; no complete
+two-flow application result is claimed. The local advisory prefix required exactly one control
+connection, although simultaneous direct connections are normal. Advisory selection now accepts
+multiple currently authenticated connections only when all agree on one consistent local prefix;
+each dispatched response still binds its own exact connection witness. Conflicting prefixes,
+families, public/circuit addresses and unparsed records remain ineligible.
 Client native preselection and single-path Exit Ready also carry exact observer-bound local
 interface hints into their helper Prepare operations. They cannot rely on a public default route
 on a LocalOnly node. Multi-path Exit Ready still prepares its full lease batch before receiving

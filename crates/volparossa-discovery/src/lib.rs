@@ -977,11 +977,11 @@ impl DiscoveryService {
         self.swarm.local_peer_id()
     }
 
-    /// Return an advisory LAN prefix from one current authenticated direct peer connection.
+    /// Return an advisory LAN prefix agreed by current authenticated direct peer connections.
     ///
-    /// Multiple connections, non-LAN endpoints and poisoned lineage yield no hint. This copies
-    /// no endpoint or connection authority and creates no affine proof: selection must still
-    /// obtain its normal signed, connection-bound freshness evidence before admission.
+    /// Conflicting prefixes, relayed or non-LAN endpoints and poisoned lineage yield no hint.
+    /// This copies no endpoint or connection authority and creates no affine proof: selection
+    /// must still obtain its normal signed, exact-connection freshness evidence before admission.
     #[must_use]
     pub fn authenticated_local_peer_prefix(
         &self,
