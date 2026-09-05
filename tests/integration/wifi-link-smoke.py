@@ -62,7 +62,7 @@ def parse_snapshot(links, info, stations):
 
 def snapshot(directory, node, stage):
     if node not in ("client", "relay0") or stage not in (
-            "associated", "payload-before", "payload-after", "disconnected"):
+            "pre-auth", "associated", "payload-before", "payload-after", "disconnected"):
         raise ValueError("invalid snapshot selector")
     value = parse_snapshot(load(directory, f"wifi-link-links-{node}-{stage}.json"),
                            read(directory, f"wifi-link-info-{node}-{stage}.txt"),
@@ -70,18 +70,53 @@ def snapshot(directory, node, stage):
     write(directory, f"wifi-link-mesh-{node}-{stage}.json", value)
 
 
-def mdns_packet(frame, interface, remote_peer):
-    if not MESH_NAME.fullmatch(interface) or len(frame) < 42 or frame[12:14] != b"\x08\x00":
-        return False
+def udp_datagram(frame):
+    if len(frame) < 42 or frame[12:14] != b"\x08\x00":
+        return None
     ihl = (frame[14] & 15) * 4
-    if ihl < 20 or len(frame) < 14 + ihl + 20 or frame[23] != 17:
+    if ihl < 20 or len(frame) < 14 + ihl + 8 or frame[23] != 17:
+        return None
+    source, destination, length = struct.unpack_from("!HHH", frame, 14 + ihl)
+    if source == 0 or length < 8 or 14 + ihl + length > len(frame):
+        return None
+    payload = frame[14 + ihl + 8:14 + ihl + length]
+    return {"source": socket.inet_ntoa(frame[26:30]), "source_port": source,
+            "destination": socket.inet_ntoa(frame[30:34]), "destination_port": destination}, payload
+
+
+def mdns_datagram(frame):
+    packet = udp_datagram(frame)
+    if packet is None:
+        return None
+    metadata, dns = packet
+    if metadata["destination_port"] != 5353 or len(dns) < 12:
+        return None
+    return {**metadata, "response": bool(dns[2] & 128)}, dns
+
+
+def count_tuple(rows, metadata):
+    matching = next((item for item in rows
+                     if all(item[key] == value for key, value in metadata.items())), None)
+    if matching is not None:
+        matching["packets"] += 1
+    elif len(rows) < 64:
+        rows.append({**metadata, "packets": 1})
+    else:
         return False
-    if socket.inet_ntoa(frame[26:30]) != "10.241.10.2" or socket.inet_ntoa(frame[30:34]) != "224.0.0.251":
+    return True
+
+
+def mdns_packet(frame, interface, remote_peer):
+    packet = mdns_datagram(frame)
+    if packet is None or not MESH_NAME.fullmatch(interface):
         return False
-    source, destination = struct.unpack_from("!HH", frame, 14 + ihl)
-    dns = frame[14 + ihl + 8:]
-    return (source == destination == 5353 and bool(dns[2] & 128)
-            and b"dnsaddr=" in dns and (b"/p2p/" + remote_peer.encode("ascii")) in dns)
+    metadata, dns = packet
+    # libp2p-mdns 0.48 binds its send socket to (interface_address, 0), so replies use
+    # ephemeral source ports. Destination5353, exact remote source/interface and peer TXT
+    # remain mandatory; the public listen address of that peer is not mesh-address evidence.
+    expected = b"dnsaddr=/ip4/10.241.10.2/udp/41000/quic-v1/p2p/" + remote_peer.encode("ascii")
+    return (metadata["source"] == "10.241.10.2" and metadata["destination"] == "224.0.0.251"
+            and metadata["response"] and expected in dns)
 
 
 def observe_mdns(directory, peer):
@@ -98,8 +133,9 @@ def observe_mdns(directory, peer):
     signal.signal(signal.SIGINT, stop)
     (directory / "wifi-link-mdns.ready").write_text("ready\n", encoding="ascii")
     record = {"peer_id": peer, "remote_peer_records": 0, "mesh_interfaces": [],
-              "observed_frames": 0, "truncated": False, "packet_socket_drops": 0}
-    deadline = time.monotonic() + 100
+              "observed_frames": 0, "truncated": False, "packet_socket_drops": 0,
+              "mdns_tuples": [], "lan_discovery_udp_tuples": []}
+    deadline = time.monotonic() + 130  # Covers the bounded25s association plus90s auth gate.
     while running and time.monotonic() < deadline:
         if not select.select([observer], [], [], 0.2)[0]:
             continue
@@ -108,8 +144,26 @@ def observe_mdns(directory, peer):
         if record["observed_frames"] > 32768:
             record["truncated"] = True
             break
+        packet = mdns_datagram(frame)
+        if packet is not None:
+            metadata, _dns = packet
+            metadata["interface"] = address[0]
+            if not count_tuple(record["mdns_tuples"], metadata):
+                record["truncated"] = True
+                break
+        packet = udp_datagram(frame)
+        if packet is not None:
+            metadata, _payload = packet
+            if (41000 in (metadata["source_port"], metadata["destination_port"])
+                    and {metadata["source"], metadata["destination"]}.intersection({"10.241.10.1", "10.241.10.2"})):
+                metadata["interface"] = address[0]
+                if not count_tuple(record["lan_discovery_udp_tuples"], metadata):
+                    record["truncated"] = True
+                    break
         if mdns_packet(frame, address[0], peer):
             record["remote_peer_records"] += 1
+            if record["remote_peer_records"] == 1:
+                write(directory, "wifi-link-mdns-seen.json", {"peer_id": peer, "interface": address[0]})
             if address[0] not in record["mesh_interfaces"]:
                 record["mesh_interfaces"].append(address[0])
     _, record["packet_socket_drops"] = struct.unpack("II", observer.getsockopt(263, 6, 8))
@@ -127,16 +181,57 @@ def association(directory):
             or mdns["mesh_interfaces"] != [a["interface"]]):
         raise ValueError("no exact mesh mDNS discovery evidence")
     peers = load(directory, "a01-expected-peers.json")
-    for node, remote, roles in (("client", "relay0", "0b111"), ("relay0", "client", "0b011")):
-        if not any(line.split()[:2] == [peers[remote], "roles=" + roles]
-                   for line in read(directory, f"wifi-link-mdns-peers-{node}.txt").splitlines()):
-            raise ValueError("mDNS peer has no authenticated signed capability view")
+    authenticated = load(directory, "wifi-link-authenticated.json")
+    if (len(authenticated) != 2 or {item["node"] for item in authenticated} != {"client", "relay0"}
+            or not all(item["active_peers"] == 1 for item in authenticated)):
+        raise ValueError("mesh peer has no current exact authenticated connection evidence")
     if mdns["peer_id"] != peers["relay0"]:
         raise ValueError("wrong mDNS remote peer")
     write(directory, "wifi-link-interfaces.json", {node: item["interface"] for node, item in pair.items()})
     write(directory, "wifi-link-association.json", {"success": True,
           "other_agents_not_started": True, "mutual_mesh_bootstrap_contacts": 0,
-          "authenticated_signed_peers": 2, "mdns_remote_peer_records": mdns["remote_peer_records"]})
+          "authenticated_transport_peers": authenticated,
+          "signed_capability_gate": "after_remaining_agents_start",
+          "mdns_remote_peer_records": mdns["remote_peer_records"]})
+
+
+def authenticated_link(text, expected_peer, remote_ip):
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:  # A concurrent append can leave the final JSON line incomplete.
+            continue
+        if (event.get("target") != "volparossa_discovery::authenticated_link"
+                or event.get("level") != "DEBUG"):
+            continue
+        fields = event.get("fields", {})
+        endpoint = fields.get("remote_endpoint", "")
+        if (fields.get("event") != "DISCOVERY_AUTHENTICATED_LINK"
+                or fields.get("peer_id") != expected_peer or not isinstance(endpoint, str)
+                or len(endpoint) > 512):
+            continue
+        match = re.fullmatch(r"/ip4/" + re.escape(remote_ip) + r"/udp/([1-9][0-9]{0,4})/quic-v1"
+                             r"(?:/p2p/" + re.escape(expected_peer) + r")?", endpoint)
+        if match is not None and int(match[1]) <= 65535:
+            return {"peer_id": expected_peer, "remote_endpoint": endpoint,
+                    "connection_id": fields.get("connection_id")}
+    raise ValueError("no exact mesh Swarm ConnectionEstablished event")
+
+
+def authenticate(directory):
+    peers = load(directory, "a01-expected-peers.json")
+    evidence = []
+    for node, remote, address in (("client", "relay0", "10.241.10.2"),
+                                   ("relay0", "client", "10.241.10.1")):
+        # Status counts registry entries populated only by ConnectionEstablished and removed
+        # by final ConnectionClosed, not bootstrap/provider records. Exact identity/IP comes
+        # from the opt-in transport event, never from this count alone.
+        status = read(directory, f"wifi-link-mdns-status-{node}.txt")
+        if re.findall(r"^active peers: (\d+)$", status, re.MULTILINE) != ["1"]:
+            raise ValueError("isolated mesh agent has no single live authenticated peer")
+        record = authenticated_link(read(directory, f"agent-{node}.log"), peers[remote], address)
+        evidence.append({"node": node, "active_peers": 1, **record})
+    write(directory, "wifi-link-authenticated.json", evidence)
 
 
 def build_report(directory):
@@ -144,6 +239,13 @@ def build_report(directory):
     if not base["success"]:
         raise ValueError("protected consume/GIVE evidence failed")
     association_proof = load(directory, "wifi-link-association.json")
+    peers = load(directory, "a01-expected-peers.json")
+    for node, remote, roles in (("client", "relay0", "0b111"), ("relay0", "client", "0b011")):
+        if not any(line.split()[:2] == [peers[remote], "roles=" + roles]
+                   for line in read(directory, f"local-link-peers-{node}.txt").splitlines()):
+            raise ValueError("later full-topology signed capability gate missing")
+    association_proof = {**association_proof, "authenticated_signed_peers": 2,
+                         "signed_capabilities_after_remaining_agents": True}
     meshes = []
     for node in ("client", "relay0"):
         stages = {stage: load(directory, f"wifi-link-mesh-{node}-{stage}.json") for stage in (
@@ -203,4 +305,5 @@ def report(directory, status):
 if __name__ == "__main__":
     action, root, *args = sys.argv[1:]
     directory = Path(root)
-    {"snapshot": snapshot, "mdns": observe_mdns, "association": association, "report": report}[action](directory, *args)
+    {"snapshot": snapshot, "mdns": observe_mdns, "association": association,
+     "authenticate": authenticate, "report": report}[action](directory, *args)

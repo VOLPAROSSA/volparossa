@@ -1824,6 +1824,35 @@ impl DiscoveryService {
                 }
                 event => {
                     match &event {
+                        libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } => {
+                            let remote = endpoint.get_remote_address();
+                            // Opt-in diagnostics distinguish an authenticated transport peer
+                            // from the separately gated signed-advertisement candidate cache.
+                            // Do not retain hostnames or application data, even at debug level.
+                            if remote.len() <= MAX_DISCOVERY_ADDRESS_BYTES
+                                && matches!(
+                                    remote.iter().next(),
+                                    Some(
+                                        libp2p::multiaddr::Protocol::Ip4(_)
+                                            | libp2p::multiaddr::Protocol::Ip6(_)
+                                    )
+                                )
+                            {
+                                tracing::debug!(
+                                    target: "volparossa_discovery::authenticated_link",
+                                    event = "DISCOVERY_AUTHENTICATED_LINK",
+                                    %peer_id,
+                                    %connection_id,
+                                    remote_endpoint = %remote,
+                                    "authenticated control-plane connection"
+                                );
+                            }
+                        }
                         libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::ExitForward(
                             request_response::Event::Message {
                                 message: request_response::Message::Request { request, .. },

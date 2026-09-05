@@ -4,6 +4,7 @@
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import socket
 import struct
@@ -51,11 +52,27 @@ class WifiLinkEvidence(unittest.TestCase):
         ip = bytearray(20)
         ip[0], ip[9] = 0x45, 17
         ip[12:16], ip[16:20] = socket.inet_aton("10.241.10.2"), socket.inet_aton("224.0.0.251")
-        frame = b"\0" * 12 + b"\x08\x00" + ip + struct.pack("!HHHH", 5353, 5353, len(dns) + 8, 0) + dns
+        frame = b"\0" * 12 + b"\x08\x00" + ip + struct.pack("!HHHH", 49152, 5353, len(dns) + 8, 0) + dns
         self.assertTrue(FIXTURE.mdns_packet(frame, name, peer))
+        self.assertEqual(FIXTURE.mdns_datagram(frame)[0]["source_port"], 49152)
         self.assertFalse(FIXTURE.mdns_packet(frame, "cr2", peer))
         self.assertFalse(FIXTURE.mdns_packet(frame, name, peer + "B"))
         self.assertFalse(FIXTURE.mdns_packet(frame[:30], name, peer))
+        wrong = bytearray(frame)
+        struct.pack_into("!H", wrong, 36, 5354)
+        self.assertFalse(FIXTURE.mdns_packet(wrong, name, peer))
+        struct.pack_into("!H", wrong, 36, 41000)
+        metadata, _payload = FIXTURE.udp_datagram(wrong)
+        self.assertEqual(metadata["destination_port"], 41000)
+        tuples = []
+        self.assertTrue(FIXTURE.count_tuple(tuples, metadata))
+        self.assertTrue(FIXTURE.count_tuple(tuples, metadata))
+        self.assertEqual(tuples[0]["packets"], 2)
+        self.assertNotIn("payload", tuples[0])
+        wrong = bytearray(frame)
+        wrong[26:30] = socket.inet_aton("42.158.0.1")
+        self.assertFalse(FIXTURE.mdns_packet(wrong, name, peer))
+        self.assertFalse(FIXTURE.mdns_packet(frame.replace(b"10.241.10.2/udp", b"42.158.0.1/udp"), name, peer))
 
     def test_report_requires_mesh_payload_growth_and_lifetime(self):
         with tempfile.TemporaryDirectory(prefix="volparossa-wifi-link-test-") as temporary:
@@ -64,6 +81,9 @@ class WifiLinkEvidence(unittest.TestCase):
                           "flows": [{"client_node": "client", "relay_node": "relay2"},
                                     {"client_node": "relay0", "relay_node": "client"}]})
             FIXTURE.write(directory, "wifi-link-association.json", {"success": True})
+            FIXTURE.write(directory, "a01-expected-peers.json", {"client": "peerC", "relay0": "peerR"})
+            (directory / "local-link-peers-client.txt").write_text("peerR roles=0b111\n")
+            (directory / "local-link-peers-relay0.txt").write_text("peerC roles=0b011\n")
             FIXTURE.write(directory, "wifi-link-shutdown.json",
                           {"remaining_mesh_interfaces": 0, "agents_stopped_before_helpers": True})
             FIXTURE.write(directory, "wifi-link-radio-cleanup.json",
@@ -93,6 +113,31 @@ class WifiLinkEvidence(unittest.TestCase):
             with self.assertRaises(ValueError):
                 FIXTURE.build_report(directory)
 
+    def test_two_agent_authentication_does_not_require_three_provider_advertisements(self):
+        with tempfile.TemporaryDirectory(prefix="volparossa-wifi-auth-") as temporary:
+            directory = Path(temporary)
+            peers = {"client": "12D3KooW" + "A" * 44, "relay0": "12D3KooW" + "B" * 44}
+            FIXTURE.write(directory, "a01-expected-peers.json", peers)
+            for node, remote, ip in (("client", "relay0", "10.241.10.2"),
+                                       ("relay0", "client", "10.241.10.1")):
+                (directory / f"wifi-link-mdns-status-{node}.txt").write_text("active peers: 1\n")
+                (directory / f"wifi-link-mdns-peers-{node}.txt").write_text("")
+                event = {"target": "volparossa_discovery::authenticated_link", "level": "DEBUG",
+                         "fields": {"event": "DISCOVERY_AUTHENTICATED_LINK", "peer_id": peers[remote],
+                                    "connection_id": "1", "remote_endpoint": f"/ip4/{ip}/udp/49153/quic-v1"}}
+                (directory / f"agent-{node}.log").write_text(json.dumps(event) + "\n")
+            FIXTURE.authenticate(directory)
+            self.assertEqual(len(FIXTURE.load(directory, "wifi-link-authenticated.json")), 2)
+            log = (directory / "agent-client.log").read_text()
+            for changed in (log.replace(peers["relay0"], peers["client"]),
+                            log.replace("10.241.10.2", "42.158.0.1"),
+                            log.replace("DISCOVERY_AUTHENTICATED_LINK", "MDNS_DISCOVERED")):
+                with self.assertRaises(ValueError):
+                    FIXTURE.authenticated_link(changed, peers["relay0"], "10.241.10.2")
+            (directory / "wifi-link-mdns-status-client.txt").write_text("active peers: 0\n")
+            with self.assertRaises(ValueError):
+                FIXTURE.authenticate(directory)
+
     def test_early_failure_report_without_local_link_artifact(self):
         with tempfile.TemporaryDirectory(prefix="volparossa-wifi-link-failure-") as temporary:
             directory = Path(temporary)
@@ -118,6 +163,14 @@ class WifiLinkEvidence(unittest.TestCase):
         self.assertIn('launch_agent relay0 "$R0"\nif [ "$wifi_link" = yes ]; then\n'
                       '    wifi_link_wait_mdns\n    launch_agent bootstrap1 "$B1"', source)
         self.assertIn("case $node in client|relay0) bootstrap_one=none", source)
+        wifi = (HERE / "wifi-link-smoke.sh").read_text()
+        early_gate = wifi.split("wifi_link_wait_mdns() {", 1)[1].split("wifi_link_after_payload()", 1)[0]
+        self.assertNotIn("roles=", early_gate)
+        self.assertNotIn("mdns-peers-", early_gate)
+        self.assertIn("authenticate", early_gate)
+        self.assertIn("wifi-link-mdns-seen.json", early_gate)
+        self.assertIn("volparossa_discovery::authenticated_link=debug", source)
+        self.assertIn("local_link_wait_neighbors || fail", (HERE / "local-link-smoke.sh").read_text())
         self.assertLess(source.index("wifi_link_agents_stopped ||"),
                         source.index('for cleanup_unit in $HELPER_UNITS; do retire_unit'))
 

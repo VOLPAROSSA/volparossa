@@ -376,8 +376,9 @@ removed its exact interface, and namespace/guest-network baselines were restored
 objects remaining. This is real kernel 802.11s behavior on simulated radios, not physical-radio,
 phone, capacity-gain or full-agent-overlay evidence.
 The next `wifi-link` vertical now composes the actual agents with those simulated radios:
-mesh-only mDNS plus authenticated signed peer discovery occurs before the other agents start,
-then the offline node consumes and contributes real protected traffic concurrently. An Ethernet
+mesh-only mDNS plus exact authenticated transport discovery occurs before the other agents start;
+their later arrival enables the normal signed-capability candidate pool. The offline node then
+consumes and contributes real protected traffic concurrently. An Ethernet
 contact remains for distinct local-prefix diversity. The actual contributing flow must traverse
 the mesh, with per-interface WireGuard transport counts and station counter growth; consumption
 is attributed only to its observed selected underlay. Mesh survives route-only Disconnect and
@@ -388,7 +389,17 @@ configuration branch returned the previous shell condition's nonzero status. A d
 regression fails on the old code and passes with explicit success for non-mesh nodes; all five
 Wi-Fi fixture checks pass. Simulated radios were removed and guest-state hashes matched.
 The [corrected full-agent mesh run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33991872480)
-at `590378a9` is pending; the backend-only radio pass is unchanged.
+at `590378a9` installed both real agent-owned mesh interfaces, then failed at
+`WIFI_LINK_MDNS_AUTHENTICATION_UNAVAILABLE`: both authenticated peer views stayed empty.
+The observer also wrongly required response source port 5353, although pinned libp2p mDNS uses
+an ephemeral sending port. Its corrected exact-peer/interface filter and bounded early station
+diagnostics pass focused fixture checks. Both status artifacts actually retained one active
+transport peer: the early fixture incorrectly waited for signed candidate rows whose normal
+privacy partition requires at least three providers, while only two agents had started.
+The corrected ordering requires exact authenticated PeerID/mesh-IP events, mDNS and kernel
+peering first, then preserves the full signed-role check after the remaining agents start.
+Six focused fixture checks pass; the real application run still needs to pass. All mesh/radio
+objects were removed and guest-state hashes matched; the backend-only radio pass is unchanged.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

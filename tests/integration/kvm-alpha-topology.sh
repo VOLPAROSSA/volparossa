@@ -1940,6 +1940,12 @@ launch_agent() {
     chmod 0600 "$agent_log"
     [ "$(unit_load_state "$agent_unit")" = not-found ] || fail AGENT_UNIT_COLLISION
     AGENT_UNITS="$AGENT_UNITS $agent_unit"
+    agent_rust_log=volparossa_agent=info
+    if [ "$wifi_link" = yes ]; then
+        case $node in client|relay0)
+            agent_rust_log=$agent_rust_log,volparossa_discovery::authenticated_link=debug ;;
+        esac
+    fi
     systemd-run --no-block --unit="$agent_unit" --slice=system.slice \
         --description="VOLPAROSSA disposable alpha agent $node" \
         --service-type=exec \
@@ -1981,7 +1987,7 @@ launch_agent() {
         --property=Environment=VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock \
         --property=Environment=VOLPAROSSA_MPQUIC_SOCKET=/run/volparossa/native/mpquic.sock \
         --property="Environment=CREDENTIALS_DIRECTORY=$WORK/credential-$node" \
-        --property=Environment=RUST_LOG=volparossa_agent=info \
+        --property="Environment=RUST_LOG=$agent_rust_log" \
         --property=KillMode=control-group \
         --property=SendSIGKILL=yes \
         --property=TimeoutStartSec=30s \

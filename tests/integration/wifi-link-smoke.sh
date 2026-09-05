@@ -78,20 +78,29 @@ wifi_link_wait_mdns() {
     PHASE=wifi-link-mdns-only
     [ "$(printf '%s\n' "$AGENT_UNITS" | awk '{print NF}')" -eq 2 ] \
         || fail WIFI_LINK_OTHER_AGENTS_STARTED_EARLY
+    for wifi_link_unit in $AGENT_UNITS; do
+        case $wifi_link_unit in volparossa-alpha-agent@client.service|volparossa-alpha-agent@relay0.service) ;;
+            *) fail WIFI_LINK_OTHER_AGENTS_STARTED_EARLY ;; esac
+    done
+    # Association is asynchronous. Retain the actual kernel station/link snapshots even if
+    # discovery later fails, instead of withholding radio evidence behind the auth gate.
+    wifi_link_peering_deadline=$(($(date +%s) + 25))
+    while ! wifi_link_snapshot pre-auth 2>"$WORK/wifi-link-pre-auth.log"; do
+        [ "$(date +%s)" -lt "$wifi_link_peering_deadline" ] || fail WIFI_LINK_PRE_AUTH_PEERING_UNAVAILABLE
+        sleep 0.2
+    done
     wifi_link_deadline=$(($(date +%s) + 90))
     while [ "$(date +%s)" -lt "$wifi_link_deadline" ]; do
         wifi_link_ready=yes
         for wifi_link_node in client relay0; do
-            case $wifi_link_node in client) wifi_link_peer=$R0_PEER; wifi_link_roles=0b111 ;;
-                relay0) wifi_link_peer=$CLIENT_PEER; wifi_link_roles=0b011 ;; esac
             "$binary_directory/volparossa" --control-socket "$WORK/runtime-$wifi_link_node/control/agent.sock" \
-                peers >"$WORK/wifi-link-mdns-peers-$wifi_link_node.txt" 2>/dev/null \
+                status >"$WORK/wifi-link-mdns-status-$wifi_link_node.txt" 2>/dev/null \
                 || wifi_link_ready=no
-            awk -v peer="$wifi_link_peer" -v roles="roles=$wifi_link_roles" \
-                '$1 == peer && $2 == roles {found=1} END {exit !found}' \
-                "$WORK/wifi-link-mdns-peers-$wifi_link_node.txt" || wifi_link_ready=no
         done
-        [ "$wifi_link_ready" != yes ] || break
+        if [ "$wifi_link_ready" = yes ] && python3 "$WORK/bin/wifi-link-smoke.py" authenticate \
+            "$WORK" 2>"$WORK/wifi-link-authentication.log" \
+            && [ -s "$WORK/wifi-link-mdns-seen.json" ]; then break; fi
+        wifi_link_ready=no
         sleep 0.2
     done
     [ "$wifi_link_ready" = yes ] || fail WIFI_LINK_MDNS_AUTHENTICATION_UNAVAILABLE
