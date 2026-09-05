@@ -10616,8 +10616,7 @@ impl DiscoveryRuntime {
         let exit_node_id = fixed_bytes::<32>(request.exit_node_id())?;
         let exit_peer = Libp2pPeerId::from_bytes(request.exit_peer_id()).ok()?;
         let local_peer = *self.service.local_peer_id();
-        let exit_control_address =
-            identity_bound_exit_control_address(&self.control_addresses, &scope, local_peer)?;
+        let exit_control_address = self.native_permit_exit_control_address(&scope)?;
         let current_control = native_probe_relay_capability_from_advertisement(
             request.control_advertisement(),
             control,
@@ -10689,6 +10688,59 @@ impl DiscoveryRuntime {
         )
         .ok()?;
         Some((connection, authenticated_control_relay, response.into()))
+    }
+
+    /// Select this Exit's listener for the signed data Relay, not the forwarding control Relay.
+    /// A private listener requires that exact peer's current authenticated direct-LAN lineage
+    /// and unambiguous observation of our own address. This is only control dial eligibility;
+    /// it creates no native endpoint/lease authority and does not replace helper route proof.
+    fn native_permit_exit_control_address(&self, scope: &NativeProbePathScope) -> Option<String> {
+        let relay = scope.data_relay.as_ref()?;
+        let peer = Libp2pPeerId::from_bytes(&relay.peer_id).ok()?;
+        let family = ObservationAddressFamily::try_from(scope.address_family).ok()?;
+        let local_family = self
+            .service
+            .authenticated_local_peer_prefix(peer)
+            .is_some_and(|prefix| {
+                matches!(
+                    (family, prefix.family()),
+                    (
+                        ObservationAddressFamily::Ipv4,
+                        volparossa_core::IpFamily::Ipv4
+                    ) | (
+                        ObservationAddressFamily::Ipv6,
+                        volparossa_core::IpFamily::Ipv6
+                    )
+                )
+            });
+        let local_hint = if local_family {
+            let hints = self
+                .exact_endpoint_traversal_hints(vec![EndpointTraversalBinding {
+                    path_id: scope.candidate_ordinal,
+                    role: WireguardRole::Exit,
+                    observer_id: fixed_bytes::<32>(&relay.node_id)?,
+                    observer_peer_id: peer,
+                }])
+                .ok()?;
+            Some(hints.into_iter().find_map(|hint| {
+                hint.on_link.filter(|link| {
+                    matches!(
+                        (family, link.local_address.len()),
+                        (ObservationAddressFamily::Ipv4, 4) | (ObservationAddressFamily::Ipv6, 16)
+                    )
+                })
+            })?)
+        } else {
+            None
+        };
+        identity_bound_exit_control_address(
+            &self.control_addresses,
+            scope,
+            *self.service.local_peer_id(),
+            local_hint
+                .as_ref()
+                .map(|hint| hint.local_address.as_slice()),
+        )
     }
 
     fn send_prepared_native_probe_permit_response(
@@ -15655,16 +15707,31 @@ fn identity_bound_exit_control_address(
     control_addresses: &BTreeSet<String>,
     scope: &NativeProbePathScope,
     exit_peer: Libp2pPeerId,
+    adjacent_local_address: Option<&[u8]>,
 ) -> Option<String> {
     let family = ObservationAddressFamily::try_from(scope.address_family).ok()?;
     control_addresses.iter().find_map(|text| {
         let address = Multiaddr::from_str(text).ok()?;
+        let ip = multiaddr_ip(&address)?;
         let address_matches_family = matches!(
-            (family, multiaddr_ip(&address)),
-            (ObservationAddressFamily::Ipv4, Some(IpAddr::V4(_)))
-                | (ObservationAddressFamily::Ipv6, Some(IpAddr::V6(_)))
+            (family, ip),
+            (ObservationAddressFamily::Ipv4, IpAddr::V4(_))
+                | (ObservationAddressFamily::Ipv6, IpAddr::V6(_))
         );
         if !address_matches_family {
+            return None;
+        }
+        let eligible = adjacent_local_address.map_or_else(
+            || is_public_routable_ip(ip),
+            |local| {
+                is_local_lan_ip(ip)
+                    && match ip {
+                        IpAddr::V4(ip) => local == ip.octets(),
+                        IpAddr::V6(ip) => local == ip.octets(),
+                    }
+            },
+        );
+        if !eligible {
             return None;
         }
         let peerlink = PeerLink::new(exit_peer, address).ok()?;
@@ -17170,6 +17237,102 @@ mod tests {
             tampered,
         );
         assert!(verified_native_probe_forward_scope(&wrong_signature, fixture.now_ms).is_none());
+    }
+
+    #[tokio::test]
+    async fn native_permit_control_address_selects_lan_and_public_relay_listeners_separately() {
+        let fixture = native_permit_forward_fixture();
+        let scope = &fixture.scope;
+        let exit_peer = *fixture.fixture.runtime.service.local_peer_id();
+        // The unrelated private address sorts first, exactly as the mixed-link regression.
+        let listeners = [
+            "/ip4/10.241.20.2/udp/41000/quic-v1",
+            "/ip4/10.241.21.2/udp/41000/quic-v1",
+            "/ip4/46.162.3.1/udp/41000/quic-v1",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let lan = identity_bound_exit_control_address(
+            &listeners,
+            scope,
+            exit_peer,
+            Some(&[10, 241, 21, 2]),
+        )
+        .expect("the LAN Relay receives its exact observed active Exit listener");
+        let public = identity_bound_exit_control_address(&listeners, scope, exit_peer, None)
+            .expect("the public Relay does not inherit another peer's private listener");
+        assert_eq!(
+            lan,
+            format!("/ip4/10.241.21.2/udp/41000/quic-v1/p2p/{exit_peer}")
+        );
+        assert_eq!(
+            public,
+            format!("/ip4/46.162.3.1/udp/41000/quic-v1/p2p/{exit_peer}")
+        );
+        assert!(
+            identity_bound_exit_control_address(
+                &listeners,
+                scope,
+                exit_peer,
+                Some(&[10, 241, 22, 2]),
+            )
+            .is_none(),
+            "an unserved observed address never falls back to a different LAN"
+        );
+        let private_only = listeners
+            .into_iter()
+            .filter(|address| address.contains("/10."))
+            .collect();
+        assert!(
+            identity_bound_exit_control_address(&private_only, scope, exit_peer, None).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_permit_private_listener_needs_current_authenticated_data_relay_lineage() {
+        let mut fixture = native_permit_forward_fixture();
+        let relay = fixture.scope.data_relay.as_ref().unwrap();
+        let relay_peer = Libp2pPeerId::from_bytes(&relay.peer_id).unwrap();
+        let runtime = &mut fixture.fixture.runtime;
+        runtime.control_addresses = [
+            "/ip4/10.241.21.2/udp/41000/quic-v1",
+            "/ip4/46.162.3.1/udp/41000/quic-v1",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+        // A remembered/private peer claim alone cannot select a private listener. The live,
+        // bounded connection registry must still agree that this exact data peer is direct LAN.
+        runtime.observed_endpoints.insert(
+            relay_peer,
+            (
+                "/ip4/10.241.21.1/udp/41000/quic-v1".to_owned(),
+                Some("10.241.21.1".parse().unwrap()),
+            ),
+        );
+        runtime.record_local_endpoint_observation(
+            relay_peer,
+            &"/ip4/10.241.21.2/udp/41000/quic-v1".parse().unwrap(),
+        );
+        assert!(
+            runtime
+                .service
+                .authenticated_local_peer_prefix(relay_peer)
+                .is_none()
+        );
+        let selected = runtime
+            .native_permit_exit_control_address(&fixture.scope)
+            .unwrap();
+        assert!(selected.starts_with("/ip4/46.162.3.1/"));
+        runtime
+            .control_addresses
+            .retain(|address| address.contains("/10."));
+        assert!(
+            runtime
+                .native_permit_exit_control_address(&fixture.scope)
+                .is_none()
+        );
     }
 
     #[test]

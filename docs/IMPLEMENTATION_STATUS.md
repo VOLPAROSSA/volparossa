@@ -241,6 +241,13 @@ more than 1 MiB on each WireGuard leg, scoped privacy captures and full cleanup.
 focused report/observer checks and shell/workflow contract pass; the
 [live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33987800329) is pending.
 It makes no aggregate-bandwidth or real-radio claim.
+The [first mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33987800329)
+failed before transfer: the public data Relay received the Exit's lexicographically first private
+listener, which belonged to another LAN. Permit issuance now selects the exact data Relay's
+currently authenticated adjacent listener, or only a public listener for a public peer. A cached
+or unrelated private observation cannot choose that address. Ten Permit tests and strict agent
+Clippy pass; the private-dial guard and helper endpoint proof remain unchanged. Live recovery is
+still pending.
 Direct radio setup, simultaneous WAN+LAN aggregation and owner-priority sharing remain
 unfinished. No direct-radio or phone-without-SIM support is claimed by Debian KVM evidence.
 The first owner-priority **upload** runtime is now implemented behind explicit `sharing`
