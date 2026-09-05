@@ -253,8 +253,69 @@ awk '
     }
     END { if (!found) exit 1 }
 ' "$GUEST"
-grep -F 'event=INGRESS_DNS_QUERY_COMPLETED' "$GUEST" >/dev/null
-grep -F 'event=INGRESS_DNS_TCP_QUERY_COMPLETED' "$GUEST" >/dev/null
+grep -F 'INGRESS_DNS_QUERY_COMPLETED "$WORK/a08-dns-udp-completion-events.txt"' "$GUEST" >/dev/null
+grep -F 'INGRESS_DNS_TCP_QUERY_COMPLETED "$WORK/a08-dns-tcp-completion-events.txt"' "$GUEST" >/dev/null
+grep -F 'INGRESS_TCP_STREAM_COMPLETED "$WORK/a08-tls-completion-events.txt"' "$GUEST" >/dev/null
+# Exercise the real bounded-log helpers without sourcing the privileged fixture.
+(
+    WORK=$(mktemp -d -t volparossa-a08-log-contract.XXXXXX)
+    trap 'rm -f "$WORK/logs-client.txt" "$WORK/events.txt"; rmdir "$WORK"' 0
+    trap 'exit 1' HUP INT TERM
+    eval "$(awk '
+        /^client_log_baseline_ms\(\) \{$/ || /^client_event_count_after\(\) \{$/ { copy = 1 }
+        copy { print }
+        copy && /^\}$/ { copy = 0 }
+    ' "$GUEST")"
+    # A fresh event replaces an older event in a full 400-record retained window:
+    # aggregate count remains one, but the fresh interval contains one completion.
+    for event_ms in 1788631765000 1788631766720; do
+        awk -v event_ms="$event_ms" 'BEGIN {
+            print event_ms " level=1 event=INGRESS_TCP_STREAM_COMPLETED session= path="
+            for (i = 1; i < 400; i++) print "1788631766001 level=1 event=OTHER session= path="
+        }' >"$WORK/logs-client.txt"
+        [ "$(wc -l <"$WORK/logs-client.txt")" -eq 400 ]
+        [ "$(grep -Fc event=INGRESS_TCP_STREAM_COMPLETED "$WORK/logs-client.txt")" -eq 1 ]
+        fresh=$(client_event_count_after 1788631766000 INGRESS_TCP_STREAM_COMPLETED "$WORK/events.txt")
+        if [ "$event_ms" -lt 1788631766000 ]; then
+            [ "$fresh" -eq 0 ] && [ ! -s "$WORK/events.txt" ]
+        else
+            [ "$fresh" -eq 1 ] && [ "$(wc -l <"$WORK/events.txt")" -eq 1 ]
+            grep -F "$event_ms level=1 event=INGRESS_TCP_STREAM_COMPLETED" "$WORK/events.txt" >/dev/null
+        fi
+    done
+    # Same-baseline timestamps, invalid timestamps and partial event names cannot
+    # pass. Two genuine records in the same later millisecond remain two records.
+    printf '%s\n' \
+        '1788631765999 level=1 event=INGRESS_TCP_STREAM_COMPLETED' \
+        '1788631766000 level=1 event=INGRESS_TCP_STREAM_COMPLETED' \
+        'invalid level=1 event=INGRESS_TCP_STREAM_COMPLETED' \
+        '1788631766001 level=1 event=INGRESS_TCP_STREAM_COMPLETED_EXTRA' \
+        '1788631766001 level=1 event=OTHER note=event=INGRESS_TCP_STREAM_COMPLETED' \
+        '1788631766001 level=1 event=INGRESS_TCP_STREAM_COMPLETED' \
+        '1788631766001 level=1 event=INGRESS_TCP_STREAM_COMPLETED' >"$WORK/logs-client.txt"
+    [ "$(client_event_count_after 1788631766000 INGRESS_TCP_STREAM_COMPLETED "$WORK/events.txt")" -eq 2 ]
+    [ "$(wc -l <"$WORK/events.txt")" -eq 2 ]
+    [ "$(client_event_count_after 1788631766001 INGRESS_TCP_STREAM_COMPLETED "$WORK/events.txt")" -eq 0 ]
+    [ ! -s "$WORK/events.txt" ]
+    baseline=$(client_log_baseline_ms)
+    [ "$(date +%s%3N)" -gt "$baseline" ]
+    (
+        # The extracted function invokes these clock fakes indirectly.
+        # shellcheck disable=SC2317
+        date() { printf '%s\n' 100; }
+        # shellcheck disable=SC2317
+        sleep() { :; }
+        # Wall clock behind the already captured records fails closed.
+        if client_log_baseline_ms; then exit 1; fi
+        printf '%s\n' '100 level=1 event=OTHER' >"$WORK/logs-client.txt"
+        # A clock that does not cross the millisecond boundary is bounded too.
+        if client_log_baseline_ms; then exit 1; fi
+    )
+)
+printf '%s\n' 'A08 bounded-log rollover and timestamp contract passed'
+grep -F 'denial_baseline_ms=$(client_log_baseline_ms) || return 1' "$GUEST" >/dev/null
+grep -F '"$denial_event" "$WORK/$denial_output-rejection-events.txt"' "$GUEST" >/dev/null
+if grep -F 'tls_policy_event_count' "$GUEST" >/dev/null; then exit 1; fi
 grep -F 'and ($dns_udp.response_source == $dns_udp.resolver)' "$GUEST" >/dev/null
 grep -F 'and ($dns_tcp.response_source == $dns_tcp.resolver)' "$GUEST" >/dev/null
 grep -F 'and ($dns_udp.answer_addresses == ["47.163.4.2"])' "$GUEST" >/dev/null

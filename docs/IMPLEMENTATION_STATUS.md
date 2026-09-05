@@ -22,11 +22,22 @@ Provider-triggered refresh is restored. The next
 again passed A01--A07 and A15, confirming discovery restart recovery. It reached A08 but still
 stopped at `A08_ALLOWED_DNS_UDP_NOT_PROVEN`: the DNS client produced no response before its
 deadline, although the Exit's own resolver returned the permitted fixture address. This is a
-remaining DNS integration blocker, not a successful A08 result. A08--A14 remain unproven here.
+DNS integration failure in that revision, not a successful A08 result.
 The cause is now corrected in the helper: UDP DNS uses TPROXY so the receiving agent keeps
 the original resolver address and port 53; TCP DNS retains REDIRECT with `SO_ORIGINAL_DST`.
 The real disposable-veth ingress smoke passed with exact DNS destination/reply-source metadata
-and a subsequent datagram while the reply descriptor remained live. A full A08 rerun is pending.
+and a subsequent datagram while the reply descriptor remained live. The
+[next complete datapath run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982369167)
+at `9da11b81` again passed A01--A07 and A15. Its A08 DNS queries over **both UDP and TCP**
+returned the exact allowed address `47.163.4.2` from `9.9.9.9:53`, and the permitted TLS 1.3
+flow transferred 1 MiB with matching hashes and the exact Exit source. A08 nevertheless
+remained failed because the fixture compared total completion-event counts across a rotating
+400-record log snapshot: a previous event had disappeared when the new event arrived.
+The fixture now measures exact events newer than its pre-request timestamp, retaining the
+same bounded log window and all payload/source checks. A08--A14 as a complete sequence still
+need a passing live rerun; working DNS/TLS is not reported as a completed acceptance sequence.
+Both [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982300867) and
+[CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982298530) passed at `9da11b81`.
 `0075033e` also passed
 [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972360525) and
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972358060).

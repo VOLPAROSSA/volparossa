@@ -3557,6 +3557,41 @@ capture_product_logs() {
     done
 }
 
+# Agent logs are a bounded ring of Unix-millisecond records, not cumulative counters.
+# Start the request after the captured millisecond, so a same-timestamp record is never
+# accepted as fresh. Clock regression or failure to cross the boundary fails closed.
+client_log_baseline_ms() {
+    baseline_ms=$(date +%s%3N)
+    case $baseline_ms in ''|*[!0-9]*) return 1 ;; esac
+    latest_log_ms=$(awk '$1 ~ /^[0-9]+$/ && $1 > latest { latest = $1 }
+        END { printf "%.0f\n", latest + 0 }' "$WORK/logs-client.txt")
+    [ "$baseline_ms" -ge "$latest_log_ms" ] || return 1
+    baseline_attempt=0
+    while [ "$baseline_attempt" -lt 100 ]; do
+        current_ms=$(date +%s%3N)
+        case $current_ms in ''|*[!0-9]*) return 1 ;; esac
+        [ "$current_ms" -ge "$baseline_ms" ] || return 1
+        if [ "$current_ms" -gt "$baseline_ms" ]; then
+            printf '%s\n' "$baseline_ms"
+            return 0
+        fi
+        sleep 0.001
+        baseline_attempt=$((baseline_attempt + 1))
+    done
+    return 1
+}
+
+client_event_count_after() {
+    awk -v baseline="$1" -v event="event=$2" -v evidence="$3" '
+        BEGIN { printf "" > evidence }
+        $1 ~ /^[0-9]+$/ && $1 > baseline && $3 == event {
+            print > evidence
+            count++
+        }
+        END { print count + 0 }
+    ' "$WORK/logs-client.txt"
+}
+
 wait_observer() {
     observer_pid=$1
     observer_ready=$2
@@ -5384,8 +5419,8 @@ done
 A08_REQUESTED=true
 A08_STATUS=1
 capture_product_logs
-A08_DNS_UDP_BEFORE=$(grep -Fc 'event=INGRESS_DNS_QUERY_COMPLETED' \
-    "$WORK/logs-client.txt" 2>/dev/null || true)
+A08_DNS_UDP_BASELINE_MS=$(client_log_baseline_ms) || fail A08_EVENT_BASELINE_UNAVAILABLE
+A08_DNS_UDP_BEFORE=0
 PHASE=a08-allowed-dns-udp
 set +e
 timeout --signal=TERM --kill-after=5s 180s \
@@ -5399,8 +5434,8 @@ set -e
 attempt=0
 while [ "$A08_DNS_UDP_STATUS" -eq 0 ] && [ "$attempt" -lt 300 ]; do
     capture_product_logs
-    A08_DNS_UDP_AFTER=$(grep -Fc 'event=INGRESS_DNS_QUERY_COMPLETED' \
-        "$WORK/logs-client.txt" 2>/dev/null || true)
+    A08_DNS_UDP_AFTER=$(client_event_count_after "$A08_DNS_UDP_BASELINE_MS" \
+        INGRESS_DNS_QUERY_COMPLETED "$WORK/a08-dns-udp-completion-events.txt")
     [ "$A08_DNS_UDP_AFTER" -gt "$A08_DNS_UDP_BEFORE" ] && break
     sleep 0.1
     attempt=$((attempt + 1))
@@ -5426,8 +5461,8 @@ done
 [ "$attempt" -lt 300 ] || fail A08_DNS_UDP_ROUTE_NOT_IDLE
 
 capture_product_logs
-A08_DNS_TCP_BEFORE=$(grep -Fc 'event=INGRESS_DNS_TCP_QUERY_COMPLETED' \
-    "$WORK/logs-client.txt" 2>/dev/null || true)
+A08_DNS_TCP_BASELINE_MS=$(client_log_baseline_ms) || fail A08_EVENT_BASELINE_UNAVAILABLE
+A08_DNS_TCP_BEFORE=0
 PHASE=a08-allowed-dns-tcp
 set +e
 timeout --signal=TERM --kill-after=5s 180s \
@@ -5441,8 +5476,8 @@ set -e
 attempt=0
 while [ "$A08_DNS_TCP_STATUS" -eq 0 ] && [ "$attempt" -lt 300 ]; do
     capture_product_logs
-    A08_DNS_TCP_AFTER=$(grep -Fc 'event=INGRESS_DNS_TCP_QUERY_COMPLETED' \
-        "$WORK/logs-client.txt" 2>/dev/null || true)
+    A08_DNS_TCP_AFTER=$(client_event_count_after "$A08_DNS_TCP_BASELINE_MS" \
+        INGRESS_DNS_TCP_QUERY_COMPLETED "$WORK/a08-dns-tcp-completion-events.txt")
     [ "$A08_DNS_TCP_AFTER" -gt "$A08_DNS_TCP_BEFORE" ] && break
     sleep 0.1
     attempt=$((attempt + 1))
@@ -5492,8 +5527,8 @@ install -o "$WORKER_UID" -g "$WORKER_GID" -m 0400 \
     "$WORK/destination/tls-policy-cert.der" "$WORK/tls-policy/tls-policy-cert.der"
 
 capture_product_logs
-A08_COMPLETION_BEFORE=$(grep -Fc 'event=INGRESS_TCP_STREAM_COMPLETED' \
-    "$WORK/logs-client.txt" 2>/dev/null || true)
+A08_COMPLETION_BASELINE_MS=$(client_log_baseline_ms) || fail A08_EVENT_BASELINE_UNAVAILABLE
+A08_COMPLETION_BEFORE=0
 PHASE=a08-allowed-visible-name-tls
 set +e
 timeout --signal=TERM --kill-after=5s 180s \
@@ -5509,8 +5544,8 @@ set -e
 attempt=0
 while [ "$A08_STATUS" -eq 0 ] && [ "$attempt" -lt 300 ]; do
     capture_product_logs
-    A08_COMPLETION_AFTER=$(grep -Fc 'event=INGRESS_TCP_STREAM_COMPLETED' \
-        "$WORK/logs-client.txt" 2>/dev/null || true)
+    A08_COMPLETION_AFTER=$(client_event_count_after "$A08_COMPLETION_BASELINE_MS" \
+        INGRESS_TCP_STREAM_COMPLETED "$WORK/a08-tls-completion-events.txt")
     A08_DESTINATION_SUCCESSES=$(jq -er '.successful_exchanges' \
         "$WORK/destination/tls-policy.json" 2>/dev/null || printf 0)
     if [ "$A08_COMPLETION_AFTER" -gt "$A08_COMPLETION_BEFORE" ] \
@@ -5537,6 +5572,9 @@ if [ "$A08_STATUS" -eq 0 ]; then
         --argjson dns_udp_after "$A08_DNS_UDP_AFTER" \
         --argjson dns_tcp_before "$A08_DNS_TCP_BEFORE" \
         --argjson dns_tcp_after "$A08_DNS_TCP_AFTER" \
+        --argjson dns_udp_baseline_ms "$A08_DNS_UDP_BASELINE_MS" \
+        --argjson dns_tcp_baseline_ms "$A08_DNS_TCP_BASELINE_MS" \
+        --argjson completion_baseline_ms "$A08_COMPLETION_BASELINE_MS" \
         --argjson completion_before "$A08_COMPLETION_BEFORE" \
         --argjson completion_after "$A08_COMPLETION_AFTER" \
         '($application[0]) as $app | ($destination[0]) as $destination
@@ -5579,6 +5617,10 @@ if [ "$A08_STATUS" -eq 0 ]; then
              exact_original_destination_match:true},
            dns:{hostname:$dns_udp.hostname,answer_addresses:$dns_udp.answer_addresses,
              udp:$dns_udp,tcp:$dns_tcp,
+             event_count_scope:"retained exact events strictly after baseline",
+             udp_baseline_ms:$dns_udp_baseline_ms,tcp_baseline_ms:$dns_tcp_baseline_ms,
+             udp_completion_evidence:"a08-dns-udp-completion-events.txt",
+             tcp_completion_evidence:"a08-dns-tcp-completion-events.txt",
              udp_completion_events_before:$dns_udp_before,
              udp_completion_events_after:$dns_udp_after,
              tcp_completion_events_before:$dns_tcp_before,
@@ -5587,6 +5629,9 @@ if [ "$A08_STATUS" -eq 0 ]; then
              exit_resolved_allowed_name:true},
            protected_flow:{transparent_client_hello_forwarded_unchanged:true,
              tls_handshake_and_payload_completed:true,
+             event_count_scope:"retained exact events strictly after baseline",
+             baseline_ms:$completion_baseline_ms,
+             completion_evidence:"a08-tls-completion-events.txt",
              ingress_completion_events_before:$completion_before,
              ingress_completion_events_after:$completion_after}}' \
         >"$WORK/a08-evidence.json"
@@ -5607,11 +5652,6 @@ tls_policy_accept_count() {
         || printf '%s\n' -1
 }
 
-tls_policy_event_count() {
-    tls_event=$1
-    grep -Fc "event=$tls_event" "$WORK/logs-client.txt" 2>/dev/null || true
-}
-
 run_tls_policy_denial() {
     denial_case=$1
     denial_remote=$2
@@ -5619,7 +5659,8 @@ run_tls_policy_denial() {
     denial_output=$4
     capture_product_logs
     denial_accepts_before=$(tls_policy_accept_count)
-    denial_events_before=$(tls_policy_event_count "$denial_event")
+    denial_baseline_ms=$(client_log_baseline_ms) || return 1
+    denial_events_before=0
     case $denial_accepts_before:$denial_events_before in
         *[!0-9:]*) return 1 ;;
     esac
@@ -5640,7 +5681,8 @@ run_tls_policy_denial() {
     denial_event_seen=false
     while [ "$denial_attempt" -lt 200 ]; do
         capture_product_logs
-        denial_events_after=$(tls_policy_event_count "$denial_event")
+        denial_events_after=$(client_event_count_after "$denial_baseline_ms" \
+            "$denial_event" "$WORK/$denial_output-rejection-events.txt")
         if [ "$denial_events_after" -gt "$denial_events_before" ]; then
             denial_event_seen=true
             break
@@ -5659,9 +5701,16 @@ run_tls_policy_denial() {
             "$WORK/tls-policy/$denial_output.json" >/dev/null 2>&1 \
         || return 1
     jq -S -c --arg expected_event "$denial_event" \
+        --arg event_evidence "$denial_output-rejection-events.txt" \
+        --argjson baseline_ms "$denial_baseline_ms" \
+        --argjson events_before "$denial_events_before" \
+        --argjson events_after "$denial_events_after" \
         --argjson accepts_before "$denial_accepts_before" \
         --argjson accepts_after "$denial_accepts_after" \
         '. + {expected_rejection_event:$expected_event,
+          event_count_scope:"retained exact events strictly after baseline",
+          baseline_ms:$baseline_ms,rejection_evidence:$event_evidence,
+          rejection_events_before:$events_before,rejection_events_after:$events_after,
           destination_accepts_before:$accepts_before,
           destination_accepts_after:$accepts_after,
           destination_egress_connections:($accepts_after - $accepts_before)}' \
