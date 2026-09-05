@@ -16910,7 +16910,7 @@ mod tests {
         let operator_read = publish
             .find("let Some(operator_id)")
             .expect("operator read");
-        let state_read = publish.find("let (roles, policy)").expect("state read");
+        let state_read = publish.find("state.read().await").expect("state read");
         let signer_borrow = publish
             .find("self.publisher.sign(&self.identity, &input, now_ms)")
             .expect("actor-owned signer borrow");
