@@ -14,8 +14,11 @@ network:
   advertised_ipv4_prefix: null
   advertised_ipv6_prefix: null
 
+# Installation does not start network participation or Internet egress.
+# To use the network, explicitly enable all three roles and configure the
+# operator identity, service origin, positive capacity limits, and policy below.
 roles:
-  client: true
+  client: false
   relay: false
   exit: false
 

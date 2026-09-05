@@ -267,6 +267,14 @@ async fn connect_response(
 ) -> ControlResponse {
     {
         let mut state = context.state.write().await;
+        if !state.roles().client {
+            return response(
+                request_id,
+                ControlResult::InvalidState,
+                "CLIENT_ROLE_DISABLED",
+                control_response::Payload::Ack(Empty {}),
+            );
+        }
         if !state.policy_active(unix_millis()) {
             state.record_policy_rejection();
             state.log(LogLevel::Warn, "CONNECT_POLICY_UNAVAILABLE", unix_millis());
@@ -439,6 +447,9 @@ async fn connect_response(
 }
 
 fn requested_connect_profile(config: &Config, transport: Option<i32>) -> Option<Config> {
+    if !config.roles.client || config.validate().is_err() {
+        return None;
+    }
     let Some(transport) = transport else {
         return Some(config.clone());
     };
@@ -602,7 +613,7 @@ async fn set_role_response(
 const fn changed_roles(current: RolesConfig, role: NodeRole, enabled: bool) -> RolesConfig {
     match role {
         NodeRole::Client => RolesConfig {
-            client: true,
+            client: enabled,
             ..current
         },
         NodeRole::Relay => RolesConfig {
@@ -695,18 +706,63 @@ mod tests {
     }
 
     #[test]
-    fn configured_client_cannot_be_disabled() {
+    fn client_role_change_preserves_service_consent_and_honors_disable() {
         let roles = RolesConfig {
             client: true,
-            relay: false,
-            exit: false,
+            relay: true,
+            exit: true,
         };
-        assert!(changed_roles(roles, NodeRole::Client, false).client);
+        assert_eq!(
+            changed_roles(roles, NodeRole::Client, false),
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: true,
+            }
+        );
+
+        let dormant = RolesConfig::default();
+        assert_eq!(changed_roles(dormant, NodeRole::Client, false), dormant);
+        assert_eq!(
+            changed_roles(dormant, NodeRole::Client, true),
+            RolesConfig {
+                client: true,
+                relay: false,
+                exit: false,
+            }
+        );
+        let candidate = Config {
+            roles: changed_roles(dormant, NodeRole::Client, true),
+            ..Config::default()
+        };
+        assert!(candidate.validate().is_err());
+        assert!(requested_connect_profile(&candidate, None).is_none());
+    }
+
+    #[test]
+    fn dormant_node_cannot_request_a_client_transport_profile() {
+        let config = Config::default();
+        for transport in [
+            None,
+            Some(SessionTransport::Mptcp as i32),
+            Some(SessionTransport::SinglePathUdp as i32),
+            Some(SessionTransport::MultipathQuic as i32),
+        ] {
+            assert!(requested_connect_profile(&config, transport).is_none());
+        }
     }
 
     #[test]
     fn explicit_connect_transport_selects_only_that_enabled_product_path() {
-        let config = Config::default();
+        let config = Config {
+            runtime_mode: volparossa_config::RuntimeMode::Development,
+            roles: RolesConfig {
+                client: true,
+                relay: false,
+                exit: false,
+            },
+            ..Config::default()
+        };
         for (transport, expected) in [
             (SessionTransport::Mptcp, (true, false, false)),
             (SessionTransport::SinglePathUdp, (false, true, false)),

@@ -96,11 +96,11 @@ pub struct ConnectRequest {
     pub transport: Option<i32>,
 }
 
-/// Independently configurable node role.
+/// Node role subject to agent-side participation prerequisites and restart requirements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
 pub enum NodeRole {
-    /// Local client role, always enabled in v1 production configuration.
+    /// Local client role; production use requires relay and exit contribution.
     Client = 0,
     /// Relay forwarding role.
     Relay = 1,
@@ -599,13 +599,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
             }
         }
         control_request::Operation::SetRole(change) => {
-            let role = NodeRole::try_from(change.role)
-                .map_err(|_| ControlProtocolError::Invalid("role"))?;
-            if role == NodeRole::Client && !change.enabled {
-                return Err(ControlProtocolError::Invalid(
-                    "client role cannot be disabled",
-                ));
-            }
+            NodeRole::try_from(change.role).map_err(|_| ControlProtocolError::Invalid("role"))?;
         }
         control_request::Operation::Logs(query) => {
             if !(1..=1_000).contains(&query.maximum_records) {
@@ -777,14 +771,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_version_and_client_disable() {
+    fn rejects_unknown_versions_roles_and_transports() {
         let mut request = status_request();
         request.protocol_version = CONTROL_PROTOCOL_VERSION + 1;
         assert!(encode_request(&request).is_err());
 
         request.protocol_version = CONTROL_PROTOCOL_VERSION;
         request.operation = Some(control_request::Operation::SetRole(RoleChange {
-            role: NodeRole::Client as i32,
+            role: 99,
             enabled: false,
         }));
         assert!(encode_request(&request).is_err());
@@ -793,6 +787,21 @@ mod tests {
             transport: Some(99),
         }));
         assert!(encode_request(&request).is_err());
+    }
+
+    #[test]
+    fn every_explicit_role_toggle_round_trips_for_agent_side_validation() {
+        for role in [NodeRole::Client, NodeRole::Relay, NodeRole::Exit] {
+            for enabled in [false, true] {
+                let mut request = status_request();
+                request.operation = Some(control_request::Operation::SetRole(RoleChange {
+                    role: role as i32,
+                    enabled,
+                }));
+                let bytes = encode_request(&request).expect("valid role toggle");
+                assert_eq!(decode_request(&bytes).expect("role toggle"), request);
+            }
+        }
     }
 
     #[test]

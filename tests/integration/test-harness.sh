@@ -114,6 +114,7 @@ jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-restart-vm-environment-v1.sch
 "$REPOSITORY_DIRECTORY/tests/helper/test-production-ipc-busctl-parser.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-qemu-pidfd-supervisor.sh"
 "$REPOSITORY_DIRECTORY/tests/packaging/test-package-lifecycle-contract.sh"
+sh "$REPOSITORY_DIRECTORY/tests/packaging/test-native-launcher.sh"
 "$REPOSITORY_DIRECTORY/tests/integration/test-alpha-acceptance-report.sh"
 "$REPOSITORY_DIRECTORY/tests/integration/test-kvm-alpha-topology-contract.sh"
 

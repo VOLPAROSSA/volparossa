@@ -22,6 +22,34 @@ token. Expired or idle Exit browser flows are retired independently of other flo
 sharing the same native connection. Live failover verification of this correction is
 still pending; A07 remains unchecked.
 
+## Reciprocal participation revision (2026-09-05)
+
+The user changed production participation from optional contribution to mandatory reciprocity:
+any consuming Client must also offer Relay AND Exit service. Installation is dormant; explicit
+configuration enables contribution with nonzero capacity and the existing policy prerequisites.
+All nodes use the same software. Development fixtures may still isolate roles to test boundaries.
+
+- [x] Production config rejects client-only/partial contribution; the default config is dormant.
+- [x] CLI/wire/agent honor Client disable; dormant Connect is rejected before route work.
+- [x] One packaged node supervises separate immutable native Client and Exit workers/sockets.
+- [x] Local Client candidate/provenance state is separate from Relay forwarding and Exit incoming
+  data-relay authority for other clients. Provider scheduling retains forwarded-only Exit choices
+  in a homogeneous combined-role candidate pool.
+- [ ] Live reciprocal datapath proof: the same participant daemons concurrently consume the
+  network and carry other participants' Relay and policy-limited Exit traffic.
+
+Verification for the implemented items: 369 agent library tests, 18 config tests, the Client
+wire/CLI cases, strict Clippy for the changed Rust packages, and the combined native launcher
+functional smoke passed locally. This does not substitute for the unchecked live datapath proof.
+The historical scorecard below predates the vertical runtime and this participation revision;
+do not use its old percentage as a current completion estimate.
+
+Development priority: integrate complete executable functionality and agreed ideas first.
+During this phase use compilation and focused functional checks; defer additional release
+hardening, exhaustive repeated regression runs, optimization and polish. Real datapaths,
+route-specific privacy/policy enforcement and disposable-network cleanup remain functional
+requirements, never labels that can be satisfied by mocks or configuration alone.
+
 ## Fixed alpha v1 scorecard
 
 This scorecard measures progress toward a **working alpha**, separately from
@@ -66,8 +94,9 @@ invariant.
 | AV1-19 | Disposable full-topology runner and machine-readable evidence | 3 | Open | — |
 | AV1-20 | One unchanged clean build passes all required quality gates and A01--A15, including privacy and host safety | 3 | Open | — |
 
-Current fixed alpha score: **11/100 (11%)**. Alpha requires **100/100** and the
-single clean-build A01--A15 run; the score is not a release claim.
+Historical pre-vertical checkpoint: **11/100 (11%)**, not a current estimate.
+The original v1 completion criterion remains **100/100** and the clean-build A01--A15
+proof; the newly required reciprocal datapath must also be demonstrated.
 
 ## Repository and engineering baseline
 

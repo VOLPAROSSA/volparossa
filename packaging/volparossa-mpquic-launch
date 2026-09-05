@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Start the native transport in the one role enabled for this packaged node.
+# Start separate immutable-role native workers for the roles of this one node.
 set -eu
 
 export LC_ALL=C
@@ -60,7 +60,7 @@ mode=$(awk '
         if (invalid || client == "" || exit_role == "") {
             print "invalid"
         } else if (client == "true" && exit_role == "true") {
-            print "conflict"
+            print "combined"
         } else if (client == "true") {
             print "client"
         } else if (exit_role == "true") {
@@ -79,10 +79,31 @@ case "$mode" in
         printf '%s\n' 'Native transport is not required: client and exit roles are disabled.'
         exit 0
         ;;
-    conflict)
-        printf '%s\n' \
-            'This development package requires separate nodes for simultaneous client and exit roles.' >&2
-        exit 78
+    combined)
+        # Keep the existing socket as the Client endpoint. The Agent derives the same
+        # second path for Exit operations; each native process retains one immutable role.
+        client_pid=
+        exit_pid=
+        stop_workers() {
+            trap '' HUP INT TERM
+            [ -z "$client_pid" ] || kill -TERM "$client_pid" 2>/dev/null || :
+            [ -z "$exit_pid" ] || kill -TERM "$exit_pid" 2>/dev/null || :
+            [ -z "$client_pid" ] || wait "$client_pid" 2>/dev/null || :
+            [ -z "$exit_pid" ] || wait "$exit_pid" 2>/dev/null || :
+        }
+        trap 'stop_workers; exit 0' HUP INT TERM
+        "$binary" --mode client --socket "$socket" &
+        client_pid=$!
+        "$binary" --mode exit --socket "$socket.exit" &
+        exit_pid=$!
+        # A worker failure stops its companion and lets systemd restart the pair.
+        # No worker is orphaned when the supervisor receives a shutdown signal.
+        while kill -0 "$client_pid" 2>/dev/null && kill -0 "$exit_pid" 2>/dev/null; do
+            sleep 1
+        done
+        stop_workers
+        printf '%s\n' 'A native transport worker stopped; both roles have been stopped.' >&2
+        exit 1
         ;;
     *)
         printf '%s\n' 'The roles.client and roles.exit configuration must each be true or false.' >&2

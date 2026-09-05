@@ -1616,6 +1616,10 @@ pub struct DiscoveryRuntime {
     role_commands: mpsc::Receiver<DiscoveryCommand>,
     client_preselection: ClientPreselectionOwner,
     provider_queries: HashMap<kad::QueryId, ProviderQueryKind>,
+    relay_provider_peers: HashMap<Libp2pPeerId, u64>,
+    // Scheduling-only partition: these untrusted provider IDs are never dialed for Client relay
+    // advertisements. Signed forwarded provenance is still required to become an Exit candidate.
+    reserved_provider_exit_peers: HashMap<Libp2pPeerId, u64>,
     relay_advertisement_requests: HashMap<request_response::OutboundRequestId, Libp2pPeerId>,
     exit_provider_peers: HashMap<Libp2pPeerId, u64>,
     automatic_exit_fetches: HashMap<ForwardedExitKey, u64>,
@@ -1624,6 +1628,8 @@ pub struct DiscoveryRuntime {
     // direct Relay capability, provider observation, signed Exit advertisement and policy.
     preferred_exit_controls: HashMap<Libp2pPeerId, Libp2pPeerId>,
     direct_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
+    // Incoming data-relay authority for this node's Exit service is not local Client selection.
+    exit_data_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
     local_relay_snapshot: Option<DirectRelayCapability>,
     forwarded_exits: HashMap<ForwardedExitKey, ForwardedExitCapability>,
     forwarded_exit_targets: HashMap<Libp2pPeerId, u64>,
@@ -1763,12 +1769,15 @@ impl DiscoveryRuntime {
             role_commands,
             client_preselection,
             provider_queries: HashMap::new(),
+            relay_provider_peers: HashMap::new(),
+            reserved_provider_exit_peers: HashMap::new(),
             relay_advertisement_requests: HashMap::new(),
             exit_provider_peers: HashMap::new(),
             automatic_exit_fetches: HashMap::new(),
             automatic_exit_fetch_attempts: Vec::new(),
             preferred_exit_controls: HashMap::new(),
             direct_relays: HashMap::new(),
+            exit_data_relays: HashMap::new(),
             local_relay_snapshot: None,
             forwarded_exits: HashMap::new(),
             forwarded_exit_targets: HashMap::new(),
@@ -3487,6 +3496,15 @@ impl DiscoveryRuntime {
             .retain(|_, record| record.expires_at_ms > now_ms);
         self.exit_provider_peers
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.relay_provider_peers
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.reserved_provider_exit_peers
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.exit_data_relays.retain(|_, capability| {
+            capability.expires_at_ms > now_ms
+                && capability.advertisement_expires_at_ms > now_ms
+                && capability.policy_expires_at_ms > now_ms
+        });
         self.preferred_exit_controls
             .retain(|exit_peer, control_peer| {
                 exit_peer != control_peer
@@ -3683,26 +3701,21 @@ impl DiscoveryRuntime {
     }
 
     fn peer_is_forwarded_exit_target(&self, peer: Libp2pPeerId, now_ms: u64) -> bool {
+        let local_peer = *self.service.local_peer_id();
         self.forwarded_exit_targets
             .get(&peer)
             .is_some_and(|expires_at_ms| *expires_at_ms > now_ms)
             || self.forwarded_exits.values().any(|capability| {
-                capability.exit_peer_id == peer && capability.expires_at_ms > now_ms
+                capability.control_relay_peer_id != local_peer
+                    && capability.exit_peer_id == peer
+                    && capability.expires_at_ms > now_ms
             })
             || self
                 .pending_client_forwards
                 .values()
                 .any(|pending| pending.expected_exit_peer == peer)
             || self
-                .pending_relay_forwards
-                .values()
-                .any(|pending| pending.expected_exit_peer == peer)
-            || self
                 .retry_client_forwards
-                .values()
-                .any(|entry| entry.target_peer == peer && entry.expires_at_ms > now_ms)
-            || self
-                .retry_relay_forwards
                 .values()
                 .any(|entry| entry.target_peer == peer && entry.expires_at_ms > now_ms)
     }
@@ -3725,13 +3738,44 @@ impl DiscoveryRuntime {
         !(direct_association || privacy_conflict || pending_direct_association)
     }
 
-    /// Admit an Exit target already bound by the verified, short-lived native Permit chain.
-    ///
-    /// Native Ready and Authorization do not require an unrelated local provider-catalog entry:
-    /// the signed chain is their target authority. Direct Exit association and privacy-conflict
-    /// state remain independent fail-closed guards.
-    fn permit_bound_exit_peer_is_eligible(&self, peer: Libp2pPeerId, now_ms: u64) -> bool {
-        peer != *self.service.local_peer_id() && self.forwarded_exit_peer_is_eligible(peer, now_ms)
+    /// Server-side forwarding belongs to the authenticated remote client, not this node's own
+    /// Client selection. Its exact signed Relay/Exit authority is checked by each caller.
+    fn relay_forward_exit_peer_is_eligible(
+        &self,
+        authenticated_client_peer: Libp2pPeerId,
+        exit_peer: Libp2pPeerId,
+    ) -> bool {
+        let local_peer = *self.service.local_peer_id();
+        self.roles.relay
+            && authenticated_client_peer != local_peer
+            && exit_peer != local_peer
+            && exit_peer != authenticated_client_peer
+    }
+
+    /// A local Relay-owned capability must not inherit unrelated local Client provenance guards.
+    /// Remote-control capabilities remain subject to the original Client fail-closed checks.
+    fn forwarded_exit_authority_is_eligible(
+        &self,
+        control_relay_peer: Libp2pPeerId,
+        exit_peer: Libp2pPeerId,
+        now_ms: u64,
+    ) -> bool {
+        let local_peer = *self.service.local_peer_id();
+        if control_relay_peer == local_peer {
+            self.roles.relay && exit_peer != local_peer
+        } else {
+            self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+        }
+    }
+
+    /// Native Ready and Authorization derive their target from an exact, verified Permit chain.
+    /// A simultaneous local Client role cannot invalidate forwarding for a different client.
+    fn permit_bound_exit_peer_is_eligible(
+        &self,
+        authenticated_client_peer: Libp2pPeerId,
+        exit_peer: Libp2pPeerId,
+    ) -> bool {
+        self.relay_forward_exit_peer_is_eligible(authenticated_client_peer, exit_peer)
     }
 
     fn mark_forwarded_exit_target(&mut self, peer: Libp2pPeerId, expires_at_ms: u64) -> bool {
@@ -3829,6 +3873,14 @@ impl DiscoveryRuntime {
                 && policy.expires_at_ms == expires_at_ms
                 && expires_at_ms > now_ms
         };
+
+        self.exit_data_relays.retain(|_, capability| {
+            policy_matches(
+                capability.policy_version,
+                capability.policy_hash,
+                capability.policy_expires_at_ms,
+            )
+        });
 
         let stale_direct = self
             .direct_relays
@@ -4560,17 +4612,11 @@ impl DiscoveryRuntime {
             }
             match kind {
                 ProviderQueryKind::Relay => {
-                    if self.relay_advertisement_requests.len() >= self.candidate_limit.max(1)
-                        || self.peer_is_forwarded_exit_target(peer, now_ms)
-                        || self
-                            .relay_advertisement_requests
-                            .values()
-                            .any(|pending_peer| *pending_peer == peer)
+                    if self.relay_provider_peers.contains_key(&peer)
+                        || self.relay_provider_peers.len() < self.candidate_limit.max(1)
                     {
-                        continue;
-                    }
-                    if let Ok(request_id) = self.service.request_relay_advertisement(&peer) {
-                        self.relay_advertisement_requests.insert(request_id, peer);
+                        self.relay_provider_peers
+                            .insert(peer, provider_expires_at_ms);
                     }
                 }
                 ProviderQueryKind::Exit => {
@@ -4583,7 +4629,77 @@ impl DiscoveryRuntime {
                 }
             }
         }
+        self.schedule_relay_advertisement_fetches(now_ms);
         self.schedule_exit_advertisement_fetches();
+    }
+
+    fn schedule_relay_advertisement_fetches(&mut self, now_ms: u64) {
+        if self.roles.client && self.roles.relay && self.roles.exit {
+            // On a homogeneous network the Relay and Exit provider indexes contain the same
+            // peers. Fetching every Relay advertisement first would irreversibly associate every
+            // possible Exit directly with this Client. Reserve a sticky, bounded portion before
+            // making those requests. Provider-result order does not decide the privacy boundary.
+            self.reserve_provider_exit_candidates(now_ms);
+            if self.reserved_provider_exit_peers.is_empty() {
+                return;
+            }
+        }
+        let mut peers = self
+            .relay_provider_peers
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        peers.sort_by_key(|peer| peer.to_bytes());
+        for peer in peers {
+            if self.relay_advertisement_requests.len() >= self.candidate_limit.max(1)
+                || self.reserved_provider_exit_peers.contains_key(&peer)
+                || self.peer_is_forwarded_exit_target(peer, now_ms)
+                || self
+                    .direct_relays
+                    .get(&peer)
+                    .is_some_and(|entry| entry.expires_at_ms > now_ms.saturating_add(1_000))
+                || self
+                    .relay_advertisement_requests
+                    .values()
+                    .any(|pending| *pending == peer)
+            {
+                continue;
+            }
+            if let Ok(request_id) = self.service.request_relay_advertisement(&peer) {
+                self.relay_advertisement_requests.insert(request_id, peer);
+            }
+        }
+    }
+
+    fn reserve_provider_exit_candidates(&mut self, now_ms: u64) {
+        for (peer, expires_at_ms) in &mut self.reserved_provider_exit_peers {
+            if let Some(observed_expiry) = self.exit_provider_peers.get(peer) {
+                *expires_at_ms = (*expires_at_ms).max(*observed_expiry);
+            }
+        }
+        let target_count = (self.exit_provider_peers.len() / 3)
+            .max(1)
+            .min(self.candidate_limit.max(1));
+        let mut peers = self.exit_provider_peers.keys().copied().collect::<Vec<_>>();
+        // Selection is local to each Client, not a network-wide permanent Relay/Exit class.
+        peers.sort_by_cached_key(|peer| {
+            let mut hash = Sha256::new();
+            hash.update(b"VOLPAROSSA-provider-partition-v1");
+            hash.update(self.local_node_id);
+            hash.update(peer.to_bytes());
+            <[u8; 32]>::from(hash.finalize())
+        });
+        for peer in peers {
+            if self.reserved_provider_exit_peers.len() >= target_count {
+                break;
+            }
+            if !self.reserved_provider_exit_peers.contains_key(&peer)
+                && self.forwarded_exit_peer_is_eligible(peer, now_ms)
+            {
+                self.reserved_provider_exit_peers
+                    .insert(peer, self.exit_provider_peers[&peer]);
+            }
+        }
     }
 
     /// Fetch provider-only Exit advertisements through one authenticated control Relay.
@@ -5755,7 +5871,6 @@ impl DiscoveryRuntime {
         if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
             || self.relay_forward_index.contains_key(&key)
             || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
-            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
         {
             reject!("UDP_SESSION_RELAY_CAPACITY");
         }
@@ -6001,7 +6116,6 @@ impl DiscoveryRuntime {
         if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
             || self.relay_forward_index.contains_key(&key)
             || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
-            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
         {
             reject!("MPTCP_SESSION_RELAY_CAPACITY");
         }
@@ -6234,7 +6348,6 @@ impl DiscoveryRuntime {
         if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
             || self.relay_forward_index.contains_key(&key)
             || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
-            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
         {
             reject!("MPQUIC_SESSION_RELAY_CAPACITY");
         }
@@ -6383,7 +6496,7 @@ impl DiscoveryRuntime {
         else {
             reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
         };
-        if !self.permit_bound_exit_peer_is_eligible(exit_peer, now_ms) {
+        if !self.permit_bound_exit_peer_is_eligible(authenticated_client_peer, exit_peer) {
             reject!("NATIVE_PROBE_READY_EXIT_UNAVAILABLE");
         }
         let Ok(exit_control_address) = Multiaddr::from_str(permit.exit_control_address()) else {
@@ -6495,7 +6608,6 @@ impl DiscoveryRuntime {
         if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
             || self.relay_forward_index.contains_key(&key)
             || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
-            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
         {
             let _ = self.helper.destroy_context(&helper_owner).await;
             reject!("NATIVE_PROBE_READY_CAPACITY");
@@ -6792,7 +6904,7 @@ impl DiscoveryRuntime {
             reject!("NATIVE_PROBE_AUTHORIZATION_RELAY_AUTHORITY_UNAVAILABLE");
         }
         let authorized_control = prepared.authorized_relay.clone();
-        if !self.permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
+        if !self.permit_bound_exit_peer_is_eligible(authenticated_client_peer, exit_peer)
             || !native_probe_data_relay_capability_matches(
                 &authorized_control,
                 data_relay,
@@ -6835,7 +6947,6 @@ impl DiscoveryRuntime {
         if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
             || self.relay_forward_index.contains_key(&key)
             || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
-            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
         {
             reject!("NATIVE_PROBE_AUTHORIZATION_CAPACITY");
         }
@@ -7037,7 +7148,6 @@ impl DiscoveryRuntime {
         if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
             || self.relay_forward_index.contains_key(&key)
             || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
-            || !self.mark_forwarded_exit_target(exit_peer, request.deadline_unix_ms())
         {
             let _ = self.helper.destroy_context(&active.helper_owner).await;
             reject!("NATIVE_PROBE_RESULT_CAPACITY");
@@ -7175,7 +7285,7 @@ impl DiscoveryRuntime {
             reject!("EXIT_FORWARD_RELAY_SCOPE_REJECTED");
         }
         if !self.exit_provider_peers.contains_key(&exit_peer)
-            || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+            || !self.relay_forward_exit_peer_is_eligible(authenticated_client_peer, exit_peer)
         {
             reject!("EXIT_FORWARD_RELAY_PROVIDER_UNAVAILABLE");
         }
@@ -7240,7 +7350,6 @@ impl DiscoveryRuntime {
                 })
                 .count()
                 >= MAX_PENDING_PER_PEER
-            || !self.mark_forwarded_exit_target(exit_peer, operation_expires_at_ms)
         {
             reject!("EXIT_FORWARD_RELAY_CAPACITY");
         }
@@ -7994,7 +8103,11 @@ impl DiscoveryRuntime {
             )
         });
         if !control_current
-            || !self.forwarded_exit_peer_is_eligible(pending.expected_exit_peer, now_ms)
+            || pending.operation_expires_at_ms <= now_ms
+            || !self.relay_forward_exit_peer_is_eligible(
+                pending.key.authenticated_client_peer,
+                pending.expected_exit_peer,
+            )
         {
             return false;
         }
@@ -10981,68 +11094,18 @@ impl DiscoveryRuntime {
         {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         }
-        let current_data_relay = self
-            .direct_relays
-            .get(&authenticated_data_relay)
-            .filter(|current| {
-                native_probe_data_relay_capability_matches(
-                    current,
-                    data_relay,
-                    &scope,
-                    authenticated_data_relay,
-                    scope.attempt_expires_at_ms,
-                )
-            })
-            .cloned();
-        let authorized_data_relay = if let Some(current) = current_data_relay {
-            current
-        } else {
-            if has_active_privacy_conflict(
-                &self.privacy_conflicts,
-                self.forwarded_exit_fail_closed_until_ms,
-                authenticated_data_relay,
-                now_ms,
-            ) {
-                reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
-            }
-            let Some(capability) = native_probe_data_relay_capability_from_advertisement(
-                forward.signed_relay_advertisement(),
-                data_relay,
-                &scope,
-                authenticated_data_relay,
-                now_ms,
-            ) else {
-                reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
-            };
-            if !native_probe_data_relay_capability_matches(
-                &capability,
-                data_relay,
-                &scope,
-                authenticated_data_relay,
-                scope.attempt_expires_at_ms,
-            ) {
-                reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
-            }
-            let replace_cached = match self.direct_relays.get(&authenticated_data_relay) {
-                Some(current)
-                    if current.node_id != capability.node_id
-                        || current.public_key != capability.public_key
-                        || current.peer_id != capability.peer_id
-                        || current.policy_version != capability.policy_version
-                        || current.policy_hash != capability.policy_hash
-                        || current.policy_expires_at_ms != capability.policy_expires_at_ms
-                        || current.advertisement_sequence == capability.advertisement_sequence =>
-                {
-                    reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
-                }
-                Some(current) => current.advertisement_sequence < capability.advertisement_sequence,
-                None => true,
-            };
-            if replace_cached {
-                self.direct_relays
-                    .insert(authenticated_data_relay, capability.clone());
-            }
-            capability
+        // This capability serves another Client's signed route at our Exit. It must not enter
+        // this node's own Client candidate/provenance cache or inherit that Client's conflicts.
+        let Some(authorized_data_relay) = cache_exit_data_relay_capability(
+            &mut self.exit_data_relays,
+            self.candidate_limit,
+            forward.signed_relay_advertisement(),
+            data_relay,
+            &scope,
+            authenticated_data_relay,
+            now_ms,
+        ) else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         };
         let Some(prepare) = native_service_prepare_request(
             &scope,
@@ -11327,8 +11390,12 @@ impl DiscoveryRuntime {
                 *control_relay_peer,
                 *request_deadline_ms,
             )
-        }) && self.forwarded_exit_peer_is_eligible(*exit_peer, clock.unix_ms)
-            && self.peer_is_forwarded_exit_target(*exit_peer, clock.unix_ms)
+        }) && self.forwarded_exit_authority_is_eligible(
+            *control_relay_peer,
+            *exit_peer,
+            clock.unix_ms,
+        ) && (*control_relay_peer == *self.service.local_peer_id()
+            || self.peer_is_forwarded_exit_target(*exit_peer, clock.unix_ms))
     }
 
     async fn ingest_advertisement(
@@ -11643,8 +11710,9 @@ impl DiscoveryRuntime {
                     || *control_relay_node_id == accepted.node_id
                     || !deadline_is_bounded(*request_deadline_ms, now_ms)
                     || !control_valid
-                    || !self.forwarded_exit_peer_is_eligible(peer, now_ms)
-                    || !self.peer_is_forwarded_exit_target(peer, now_ms)
+                    || !self.forwarded_exit_authority_is_eligible(*control_relay_peer, peer, now_ms)
+                    || (*control_relay_peer != *self.service.local_peer_id()
+                        && !self.peer_is_forwarded_exit_target(peer, now_ms))
                 {
                     0
                 } else {
@@ -11839,8 +11907,12 @@ impl DiscoveryRuntime {
                     self.preferred_exit_controls
                         .insert(exit_peer, control_relay_peer);
                 }
-                let _ = self
-                    .mark_forwarded_exit_target(exit_peer, accepted.advertisement_expires_at_ms);
+                if control_relay_peer != *self.service.local_peer_id() {
+                    let _ = self.mark_forwarded_exit_target(
+                        exit_peer,
+                        accepted.advertisement_expires_at_ms,
+                    );
+                }
             }
         }
         AdvertisementCommitOutcome::accepted(accepted, diagnostic)
@@ -11880,6 +11952,18 @@ impl DiscoveryRuntime {
         relay_authorized: bool,
         force_control_revoke: bool,
     ) -> Option<u64> {
+        let local_control_peer = *self.service.local_peer_id();
+        let exit_authority_changed = force_control_revoke
+            || self.forwarded_exits.iter().any(|(key, capability)| {
+                key.control_relay_peer == local_control_peer
+                    && key.exit_peer == peer
+                    && (capability.exit_node_id != accepted.node_id
+                        || capability.exit_peer_id != accepted.peer_id
+                        || capability.exit_public_key != accepted.public_key
+                        || capability.policy_version != accepted.policy_version
+                        || capability.policy_hash != accepted.policy_hash
+                        || capability.policy_expires_at_ms != accepted.policy_expires_at_ms)
+            });
         let control_authority_changed = force_control_revoke
             || !relay_authorized
             || self.direct_relays.get(&peer).is_some_and(|current| {
@@ -11899,7 +11983,8 @@ impl DiscoveryRuntime {
             .forwarded_exits
             .iter()
             .filter_map(|(key, capability)| {
-                let target_conflict = key.exit_peer == peer;
+                let target_conflict = key.exit_peer == peer
+                    && (key.control_relay_peer != local_control_peer || exit_authority_changed);
                 let control_changed = key.control_relay_peer == peer
                     && control_authority_changed
                     && (!relay_authorized
@@ -11913,7 +11998,6 @@ impl DiscoveryRuntime {
                 (target_conflict || control_changed).then_some(*key)
             })
             .collect::<Vec<_>>();
-        let local_control_peer = *self.service.local_peer_id();
         for pending in self.pending_client_forwards.values() {
             if pending.expected_exit_peer == peer
                 || (control_authority_changed && pending.key.control_relay_peer == peer)
@@ -11928,7 +12012,7 @@ impl DiscoveryRuntime {
             }
         }
         for pending in self.pending_relay_forwards.values() {
-            if pending.expected_exit_peer == peer
+            if (pending.expected_exit_peer == peer && exit_authority_changed)
                 || (control_authority_changed && pending.authorized_control.peer_id == peer)
             {
                 let key = ForwardedExitKey {
@@ -11954,7 +12038,7 @@ impl DiscoveryRuntime {
             }
         }
         for entry in self.retry_relay_forwards.values() {
-            if entry.target_peer == peer
+            if (entry.target_peer == peer && exit_authority_changed)
                 || (control_authority_changed && local_control_peer == peer)
             {
                 let key = ForwardedExitKey {
@@ -11980,7 +12064,7 @@ impl DiscoveryRuntime {
             }
         }
         for entry in self.completed_relay_forwards.values() {
-            if entry.target_peer == peer
+            if (entry.target_peer == peer && exit_authority_changed)
                 || (control_authority_changed && local_control_peer == peer)
             {
                 let key = ForwardedExitKey {
@@ -14015,6 +14099,67 @@ fn native_probe_control_capability_lineage_matches(
         && current.expires_at_ms >= operation_deadline_ms
 }
 
+fn cache_exit_data_relay_capability(
+    cache: &mut HashMap<Libp2pPeerId, DirectRelayCapability>,
+    candidate_limit: usize,
+    encoded_advertisement: &[u8],
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    now_ms: u64,
+) -> Option<DirectRelayCapability> {
+    if scope.attempt_expires_at_ms <= now_ms {
+        return None;
+    }
+    if let Some(current) = cache.get(&authenticated_peer).filter(|current| {
+        native_probe_data_relay_capability_matches(
+            current,
+            actor,
+            scope,
+            authenticated_peer,
+            scope.attempt_expires_at_ms,
+        )
+    }) {
+        return Some(current.clone());
+    }
+    let capability = native_probe_data_relay_capability_from_advertisement(
+        encoded_advertisement,
+        actor,
+        scope,
+        authenticated_peer,
+        now_ms,
+    )?;
+    if !native_probe_data_relay_capability_matches(
+        &capability,
+        actor,
+        scope,
+        authenticated_peer,
+        scope.attempt_expires_at_ms,
+    ) {
+        return None;
+    }
+    let replace_cached = match cache.get(&authenticated_peer) {
+        Some(current)
+            if current.node_id != capability.node_id
+                || current.public_key != capability.public_key
+                || current.peer_id != capability.peer_id
+                || current.policy_version != capability.policy_version
+                || current.policy_hash != capability.policy_hash
+                || current.policy_expires_at_ms != capability.policy_expires_at_ms
+                || current.advertisement_sequence == capability.advertisement_sequence =>
+        {
+            return None;
+        }
+        Some(current) => current.advertisement_sequence < capability.advertisement_sequence,
+        None if cache.len() >= candidate_limit.max(1) => return None,
+        None => true,
+    };
+    if replace_cached {
+        cache.insert(authenticated_peer, capability.clone());
+    }
+    Some(capability)
+}
+
 fn native_probe_data_relay_capability_matches(
     capability: &DirectRelayCapability,
     actor: &PreselectionActorBinding,
@@ -15309,6 +15454,14 @@ mod tests {
 
     static NEXT_MEMORY_ADDRESS: AtomicU64 = AtomicU64::new(90_000);
 
+    const fn test_client_roles() -> RolesConfig {
+        RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        }
+    }
+
     struct RuntimeFixture {
         runtime: DiscoveryRuntime,
         control: DiscoveryControlHandle,
@@ -15330,6 +15483,7 @@ mod tests {
             .expect("memory address");
         let mut config = Config {
             roles,
+            runtime_mode: volparossa_config::RuntimeMode::Development,
             ..Config::default()
         };
         config.network.operator_id = Some("operator-test".to_owned());
@@ -15388,7 +15542,7 @@ mod tests {
 
     #[tokio::test]
     async fn traversal_observations_bind_only_the_exact_active_peer_and_path() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let observer = Identity::generate().peer_id().to_owned();
         fixture
             .runtime
@@ -15755,7 +15909,7 @@ mod tests {
 
     #[tokio::test]
     async fn actor_identity_cryptographically_matches_swarm_and_local_advertisement() {
-        let fixture = fixture(RolesConfig::default());
+        let fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let public_key = fixture
             .runtime
@@ -15848,7 +16002,7 @@ mod tests {
         let mut expired = active.clone();
         expired.expires_at_ms = now_ms;
         for (roles, policy) in [
-            (RolesConfig::default(), active),
+            (test_client_roles(), active),
             (relay_roles, inactive),
             (relay_roles, malformed),
             (relay_roles, zero_version),
@@ -16656,6 +16810,136 @@ mod tests {
         ));
     }
 
+    fn exit_data_relay_cache_input(
+        fixture: &NativePermitForwardFixture,
+        relay: &Identity,
+        sequence: u64,
+    ) -> (Vec<u8>, NativeProbePathScope) {
+        let encoded = service_advertisement(
+            relay,
+            RolesConfig {
+                client: true,
+                relay: true,
+                exit: true,
+            },
+            &fixture.fixture.policy,
+            sequence,
+            generate_nonce(),
+            fixture.now_ms,
+            &fixture.fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let mut scope = fixture.scope.clone();
+        scope.data_relay = Some(actor_from_signed_advertisement(
+            &encoded,
+            relay,
+            scope.attempt_expires_at_ms,
+            fixture.now_ms,
+        ));
+        (encoded, scope)
+    }
+
+    #[tokio::test]
+    async fn native_ready_exit_service_cache_is_separate_from_local_client_provenance() {
+        let mut fixture = native_permit_forward_fixture();
+        fixture.fixture.runtime.roles = RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        };
+        let relay = Identity::generate();
+        let peer = *relay.peer_id();
+        let (encoded, scope) = exit_data_relay_cache_input(&fixture, &relay, 31);
+        fixture
+            .fixture
+            .runtime
+            .record_privacy_conflict(peer, 31, scope.attempt_expires_at_ms);
+        let client_candidates = fixture.fixture.runtime.direct_relays.clone();
+        let client_conflicts = fixture.fixture.runtime.privacy_conflicts.clone();
+        let runtime = &mut fixture.fixture.runtime;
+        let accepted = cache_exit_data_relay_capability(
+            &mut runtime.exit_data_relays,
+            runtime.candidate_limit,
+            &encoded,
+            scope.data_relay.as_ref().unwrap(),
+            &scope,
+            peer,
+            fixture.now_ms,
+        )
+        .expect("another Client's signed data-Relay authority is Exit-service scoped");
+        assert_eq!(runtime.exit_data_relays.get(&peer), Some(&accepted));
+        assert_eq!(runtime.direct_relays, client_candidates);
+        assert_eq!(runtime.privacy_conflicts, client_conflicts);
+        let production = include_str!("discovery.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .unwrap()
+            .0;
+        let ready = braced_item(production, "async fn answer_native_probe_ready_upstream(");
+        assert!(ready.contains("&mut self.exit_data_relays"));
+        assert!(!ready.contains(".direct_relays"));
+        assert!(!ready.contains("self.privacy_conflicts"));
+        assert!(ready.contains("verify_native_probe_permit("));
+        assert!(ready.contains(".bind_native_probe_data_relay_connection("));
+    }
+
+    #[tokio::test]
+    async fn native_ready_exit_service_cache_bounds_peers_and_preserves_signed_lineage() {
+        let fixture = native_permit_forward_fixture();
+        let relay = Identity::generate();
+        let peer = *relay.peer_id();
+        let mut cache = HashMap::new();
+        let (encoded, scope) = exit_data_relay_cache_input(&fixture, &relay, 31);
+        let admit =
+            |cache: &mut HashMap<_, _>, encoded: &[u8], scope: &NativeProbePathScope, peer| {
+                cache_exit_data_relay_capability(
+                    cache,
+                    1,
+                    encoded,
+                    scope.data_relay.as_ref().unwrap(),
+                    scope,
+                    peer,
+                    fixture.now_ms,
+                )
+            };
+        let first = admit(&mut cache, &encoded, &scope, peer).expect("first peer");
+        let other = Identity::generate();
+        let (other_encoded, other_scope) = exit_data_relay_cache_input(&fixture, &other, 31);
+        assert!(admit(&mut cache, &other_encoded, &other_scope, *other.peer_id()).is_none());
+        assert_eq!(cache.len(), 1);
+        assert!(admit(&mut cache, &encoded, &scope, *other.peer_id()).is_none());
+        let (conflict_encoded, conflict_scope) = exit_data_relay_cache_input(&fixture, &relay, 31);
+        assert!(admit(&mut cache, &conflict_encoded, &conflict_scope, peer).is_none());
+        assert_eq!(cache.get(&peer), Some(&first));
+
+        let (new_encoded, new_scope) = exit_data_relay_cache_input(&fixture, &relay, 32);
+        let latest = admit(&mut cache, &new_encoded, &new_scope, peer).expect("same-peer refresh");
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&peer), Some(&latest));
+        assert_eq!(admit(&mut cache, &encoded, &scope, peer), Some(first));
+        assert_eq!(
+            cache.get(&peer),
+            Some(&latest),
+            "old signed scope cannot roll cache back"
+        );
+        let mut wrong_policy = scope.clone();
+        wrong_policy.policy_hash[0] ^= 1;
+        assert!(admit(&mut cache, &encoded, &wrong_policy, peer).is_none());
+        assert!(
+            cache_exit_data_relay_capability(
+                &mut cache,
+                1,
+                &new_encoded,
+                new_scope.data_relay.as_ref().unwrap(),
+                &new_scope,
+                peer,
+                new_scope.attempt_expires_at_ms,
+            )
+            .is_none()
+        );
+        assert_eq!(cache.get(&peer), Some(&latest));
+    }
+
     #[tokio::test]
     async fn native_ready_recovers_exact_previous_local_relay_advertisement_after_refresh() {
         let roles = RolesConfig {
@@ -17018,11 +17302,13 @@ mod tests {
 
         let generic = braced_item(production, "fn begin_relay_forward_inner(");
         assert!(generic.contains("self.exit_provider_peers.contains_key(&exit_peer)"));
-        assert!(generic.contains("self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)"));
+        assert!(generic.contains(
+            "self.relay_forward_exit_peer_is_eligible(authenticated_client_peer, exit_peer)"
+        ));
     }
 
     #[tokio::test]
-    async fn permit_bound_exit_target_keeps_direct_and_conflict_guards_fail_closed() {
+    async fn permit_bound_exit_target_scopes_client_conflicts_to_the_client_role() {
         let now_ms = unix_millis();
         let mut fixture = fixture(RolesConfig {
             client: false,
@@ -17031,19 +17317,26 @@ mod tests {
         });
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
+        let client_peer = Identity::generate().peer_id().to_owned();
+        let local_peer = *fixture.runtime.service.local_peer_id();
 
         assert!(!fixture.runtime.exit_provider_peers.contains_key(&exit_peer));
         assert!(
             fixture
                 .runtime
-                .permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
+                .permit_bound_exit_peer_is_eligible(client_peer, exit_peer)
         );
-        assert!(
-            !fixture.runtime.permit_bound_exit_peer_is_eligible(
-                *fixture.runtime.service.local_peer_id(),
-                now_ms
-            )
-        );
+        for (client, exit) in [
+            (client_peer, local_peer),
+            (local_peer, exit_peer),
+            (exit_peer, exit_peer),
+        ] {
+            assert!(
+                !fixture
+                    .runtime
+                    .permit_bound_exit_peer_is_eligible(client, exit)
+            );
+        }
 
         let direct = direct_capability(
             &exit_identity,
@@ -17053,9 +17346,14 @@ mod tests {
         );
         fixture.runtime.direct_relays.insert(exit_peer, direct);
         assert!(
+            fixture
+                .runtime
+                .permit_bound_exit_peer_is_eligible(client_peer, exit_peer)
+        );
+        assert!(
             !fixture
                 .runtime
-                .permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
+                .forwarded_exit_peer_is_eligible(exit_peer, now_ms)
         );
 
         fixture.runtime.direct_relays.remove(&exit_peer);
@@ -17063,9 +17361,14 @@ mod tests {
             .runtime
             .record_privacy_conflict(exit_peer, 2, now_ms.saturating_add(20_000));
         assert!(
+            fixture
+                .runtime
+                .permit_bound_exit_peer_is_eligible(client_peer, exit_peer)
+        );
+        assert!(
             !fixture
                 .runtime
-                .permit_bound_exit_peer_is_eligible(exit_peer, now_ms)
+                .forwarded_exit_peer_is_eligible(exit_peer, now_ms)
         );
     }
 
@@ -17572,7 +17875,7 @@ mod tests {
         advertised: PreselectionTestCapabilities,
     ) -> PreselectionSnapshotFixture {
         assert!((1..=8).contains(&other_relays));
-        let mut fixture = Box::new(fixture(RolesConfig::default()));
+        let mut fixture = Box::new(fixture(test_client_roles()));
         let now_ms = unix_millis();
         let relay_roles = RolesConfig {
             client: false,
@@ -17683,7 +17986,7 @@ mod tests {
                 (1..=other_relays).contains(&clusters) && clusters <= 32
             })
         );
-        let mut fixture = Box::new(fixture(RolesConfig::default()));
+        let mut fixture = Box::new(fixture(test_client_roles()));
         let now_ms = unix_millis();
         let relay_roles = RolesConfig {
             client: false,
@@ -18122,7 +18425,7 @@ mod tests {
 
     #[tokio::test]
     async fn role_changes_require_restart_without_mutation_or_persistence() {
-        let expected = RolesConfig::default();
+        let expected = test_client_roles();
         let mut fixture = fixture(expected);
         let persisted_before =
             fs::read(fixture.directory.path().join("roles.json")).expect("initial persisted roles");
@@ -18156,7 +18459,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_wrapper_deadline_is_bounded_to_thirty_seconds() {
-        let fixture = fixture(RolesConfig::default());
+        let fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let now_ms = unix_millis();
@@ -18194,7 +18497,7 @@ mod tests {
 
     #[tokio::test]
     async fn ambiguous_automatic_exit_fetch_retries_exact_lineage_after_short_backoff() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_peer = Identity::generate().peer_id().to_owned();
         let now_ms = unix_millis();
@@ -18300,7 +18603,7 @@ mod tests {
 
     #[tokio::test]
     async fn exhausted_automatic_exit_fetch_lineages_rotate_to_an_untried_control() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let deadline_unix_ms = now_ms.saturating_add(25_000);
         let exit_peer = Identity::generate().peer_id().to_owned();
@@ -18363,7 +18666,7 @@ mod tests {
 
     #[tokio::test]
     async fn exhausted_scale_controls_rotate_then_retry_inside_provider_lifetime() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
         let request_deadline_ms = now_ms.saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS);
@@ -18441,7 +18744,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_exhausted_exit_fetch_controls_have_a_bounded_quiet_period() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
         let exit_peer = Identity::generate().peer_id().to_owned();
@@ -18503,7 +18806,7 @@ mod tests {
 
     #[tokio::test]
     async fn automatic_exit_fetch_stops_after_one_control_binds_the_exit() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let exit = Identity::generate();
         let exit_peer = exit.peer_id().to_owned();
@@ -18538,7 +18841,7 @@ mod tests {
         reason = "the regression keeps all three control replacements and invalidation together"
     )]
     async fn automatic_exit_fetch_keeps_current_control_until_it_is_invalid() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let deadline = now_ms.saturating_add(25_000);
         let exit = Identity::generate();
@@ -18652,7 +18955,7 @@ mod tests {
 
     #[tokio::test]
     async fn forwarded_exit_capability_outlives_completed_fetch_operation() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -18691,7 +18994,7 @@ mod tests {
         reason = "one end-to-end regression covers lineage projection and selectable recovery"
     )]
     async fn refreshed_control_lineage_keeps_forwarded_exit_selectable() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let initial_ms = unix_millis();
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
@@ -18782,7 +19085,7 @@ mod tests {
 
     #[tokio::test]
     async fn affine_forwarded_capability_survives_refresh_but_not_policy_change() {
-        let fixture = fixture(RolesConfig::default());
+        let fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let now_ms = unix_millis();
@@ -18885,7 +19188,7 @@ mod tests {
 
     #[tokio::test]
     async fn ledger_reserves_max_response_bytes_globally_and_per_peer() {
-        let mut global = fixture(RolesConfig::default());
+        let mut global = fixture(test_client_roles());
         let frame_bytes = usize::try_from(MAX_FORWARDING_FRAME_BYTES).expect("frame bound");
         let reserved = ledger_reservation_bytes(frame_bytes).expect("max-frame reservation");
         let expires_at_ms = unix_millis().saturating_add(20_000);
@@ -18923,7 +19226,7 @@ mod tests {
         let fresh_peer = Identity::generate().peer_id().to_owned();
         assert!(!global.runtime.ledger_can_reserve(fresh_peer, reserved));
 
-        let mut per_peer = fixture(RolesConfig::default());
+        let mut per_peer = fixture(test_client_roles());
         let peer = Identity::generate().peer_id().to_owned();
         let mut peer_entries = 0_usize;
         while per_peer.runtime.ledger_can_reserve(peer, reserved) {
@@ -18960,7 +19263,7 @@ mod tests {
     )]
     #[tokio::test]
     async fn completed_route_ledgers_charge_only_bytes_they_retain() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let expires_at_ms = now_ms.saturating_add(20_000);
         let relay_identity = Identity::generate();
@@ -19093,7 +19396,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_tombstone_ledger_returns_exact_cached_result_without_dispatch() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -19176,7 +19479,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_ambiguity_dispatches_exactly_three_times_then_tombstones() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -19236,7 +19539,7 @@ mod tests {
 
     #[tokio::test]
     async fn received_unavailable_is_definitive_until_operation_expiry() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -19317,7 +19620,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_or_pending_direct_exit_association_causes_zero_forward_dispatch() {
-        let mut direct_fixture = fixture(RolesConfig::default());
+        let mut direct_fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -19352,7 +19655,7 @@ mod tests {
         );
         assert!(direct_fixture.runtime.pending_client_forwards.is_empty());
 
-        let mut pending_fixture = fixture(RolesConfig::default());
+        let mut pending_fixture = fixture(test_client_roles());
         let (control, request) = authorize_fetch(
             &mut pending_fixture,
             &control_identity,
@@ -19384,8 +19687,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn combined_role_provider_partition_keeps_exit_and_two_relays_in_either_event_order() {
+        let combined_roles = RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        };
+        for relay_first in [true, false] {
+            let mut fixture = fixture(combined_roles);
+            let peers = (0..3)
+                .map(|_| *Identity::generate().peer_id())
+                .collect::<HashSet<_>>();
+            let first = if relay_first {
+                ProviderQueryKind::Relay
+            } else {
+                ProviderQueryKind::Exit
+            };
+            let second = if relay_first {
+                ProviderQueryKind::Exit
+            } else {
+                ProviderQueryKind::Relay
+            };
+            fixture.runtime.handle_provider_peers(first, peers.clone());
+            assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+            fixture.runtime.handle_provider_peers(second, peers.clone());
+            assert_eq!(fixture.runtime.reserved_provider_exit_peers.len(), 1);
+            assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 2);
+            let reserved = *fixture
+                .runtime
+                .reserved_provider_exit_peers
+                .keys()
+                .next()
+                .unwrap();
+            assert!(
+                fixture
+                    .runtime
+                    .forwarded_exit_peer_is_eligible(reserved, unix_millis())
+            );
+            assert!(
+                fixture
+                    .runtime
+                    .relay_advertisement_requests
+                    .values()
+                    .all(|peer| *peer != reserved)
+            );
+            // A refreshed untrusted provider index neither changes an existing partition nor
+            // creates selectable signed authority. The original Exit remains undialed.
+            fixture
+                .runtime
+                .handle_provider_peers(ProviderQueryKind::Relay, peers.clone());
+            fixture
+                .runtime
+                .handle_provider_peers(ProviderQueryKind::Exit, peers);
+            assert!(
+                fixture
+                    .runtime
+                    .reserved_provider_exit_peers
+                    .contains_key(&reserved)
+            );
+            assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 2);
+            assert!(fixture.runtime.direct_relays.is_empty());
+            assert!(fixture.runtime.forwarded_exits.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn forwarded_target_blocks_direct_relay_provider_fetch_and_expires() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let exit_peer = Identity::generate().peer_id().to_owned();
         let now_ms = unix_millis();
         assert!(
@@ -19413,7 +19781,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_provenance_revokes_capless_inflight_fetch_and_late_response() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -19482,7 +19850,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_exit_ad_is_scoped_per_control_relay_but_replay_is_rejected_per_pair() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let relay_a = Identity::generate();
         let relay_b = Identity::generate();
         let exit = Identity::generate();
@@ -19563,6 +19931,90 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn relay_owned_exit_authority_coexists_with_local_client_relay_observations() {
+        let roles = RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        };
+        for direct_first in [false, true] {
+            let mut fixture = fixture(roles);
+            let now_ms = unix_millis();
+            let deadline = now_ms.saturating_add(20_000);
+            let local = direct_capability(
+                &fixture.runtime.identity,
+                &fixture.policy,
+                1,
+                deadline.saturating_add(10_000),
+            );
+            fixture.runtime.local_relay_snapshot = Some(local.clone());
+            let exit = Identity::generate();
+            let exit_peer = exit.peer_id().to_owned();
+            let advertisement = service_advertisement(
+                &exit,
+                roles,
+                &fixture.policy,
+                1,
+                generate_nonce(),
+                now_ms,
+                &fixture.directory,
+            );
+            let direct = AdvertisementProvenance::DirectRelay {
+                authenticated_peer: exit_peer,
+            };
+            let forwarded = forwarded_provenance(&local, &exit, deadline);
+            let provenances = if direct_first {
+                [direct, forwarded]
+            } else {
+                [forwarded, direct]
+            };
+            for provenance in provenances {
+                assert!(
+                    fixture
+                        .runtime
+                        .ingest_advertisement(
+                            exit_peer,
+                            advertisement.clone(),
+                            provenance,
+                            &fixture.state,
+                        )
+                        .await
+                        .is_some()
+                );
+            }
+            let key = ForwardedExitKey {
+                control_relay_peer: local.peer_id,
+                exit_peer,
+            };
+            assert!(fixture.runtime.forwarded_exits.contains_key(&key));
+            assert!(fixture.runtime.direct_relays.contains_key(&exit_peer));
+            assert!(
+                !fixture
+                    .runtime
+                    .peer_is_forwarded_exit_target(exit_peer, now_ms)
+            );
+            assert!(
+                !fixture
+                    .runtime
+                    .forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+            );
+            assert!(fixture.runtime.forwarded_exit_authority_is_eligible(
+                local.peer_id,
+                exit_peer,
+                now_ms,
+            ));
+
+            // An actual signed policy change still invalidates server-owned Exit authority.
+            let mut changed = accepted_for_identity(&exit, &fixture.policy, 2, deadline);
+            changed.policy_hash[0] ^= 1;
+            fixture
+                .runtime
+                .revoke_for_direct_advertisement(exit_peer, &changed, true, false);
+            assert!(!fixture.runtime.forwarded_exits.contains_key(&key));
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "both provenance event orders are one invariant"
@@ -19577,7 +20029,7 @@ mod tests {
         let now_ms = unix_millis();
         let deadline = now_ms.saturating_add(20_000);
 
-        let mut direct_first = fixture(RolesConfig::default());
+        let mut direct_first = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let control = install_control(&mut direct_first, &relay, now_ms);
@@ -19631,7 +20083,7 @@ mod tests {
                 })
         );
 
-        let mut forwarded_first = fixture(RolesConfig::default());
+        let mut forwarded_first = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let control = install_control(&mut forwarded_first, &relay, now_ms);
@@ -19698,7 +20150,7 @@ mod tests {
 
     #[tokio::test]
     async fn higher_exit_sequence_with_role_withdrawal_revokes_old_authority() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let now_ms = unix_millis();
@@ -19735,7 +20187,7 @@ mod tests {
         );
         let withdrawal = service_advertisement(
             &exit,
-            RolesConfig::default(),
+            test_client_roles(),
             &fixture.policy,
             2,
             generate_nonce(),
@@ -19778,7 +20230,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_relay_role_withdrawal_revokes_control_and_forwarded_exit_authority() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let relay_peer = relay.peer_id().to_owned();
@@ -19849,7 +20301,7 @@ mod tests {
 
         let withdrawal = service_advertisement(
             &relay,
-            RolesConfig::default(),
+            test_client_roles(),
             &fixture.policy,
             2,
             generate_nonce(),
@@ -19882,7 +20334,7 @@ mod tests {
 
     #[tokio::test]
     async fn active_policy_change_revokes_all_old_capability_authority() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let now_ms = unix_millis();
@@ -20333,7 +20785,7 @@ mod tests {
 
     #[tokio::test]
     async fn stored_advertisement_revalidation_preserves_roles_without_minting_exit_authority() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let service = Identity::generate();
         let peer = service.peer_id().to_owned();
         let now_ms = unix_millis();
@@ -20401,7 +20853,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_candidate_snapshot_is_exact_bounded_and_deterministic() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         for (index, identity) in (0_u8..3).map(|index| (index, Identity::generate())) {
             assert!(
@@ -20495,7 +20947,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_candidate_snapshot_never_observes_half_committed_advertisement() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let identity = Identity::generate();
         let peer = identity.peer_id().to_owned();
         let now_ms = unix_millis();
@@ -20587,7 +21039,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_candidate_snapshot_policy_revocation_linearizes_before_reply() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let identity = Identity::generate();
         let now_ms = unix_millis();
         assert!(
@@ -21653,7 +22105,7 @@ mod tests {
     )]
     async fn route_snapshot_rejects_external_and_forwarded_control_provenance_drift() {
         for mutation in 0_u8..7 {
-            let mut fixture = fixture(RolesConfig::default());
+            let mut fixture = fixture(test_client_roles());
             let now_ms = unix_millis();
             let (control, exit_peer) = install_valid_snapshot_route(&mut fixture, now_ms).await;
             let baseline = route_snapshot_at(&mut fixture, 10, now_ms)
@@ -21987,7 +22439,7 @@ mod tests {
     #[tokio::test]
     async fn route_candidate_snapshot_excludes_expired_conflicted_unpaired_and_direct_exit_records()
     {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
 
         let (control, valid_exit_peer) = install_valid_snapshot_route(&mut fixture, now_ms).await;
@@ -22038,7 +22490,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_candidate_snapshot_store_failure_and_dropped_reply_fail_closed() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         fixture.runtime.route_snapshot_store_failure = true;
         let (reply, received) = oneshot::channel();
         fixture
@@ -22221,7 +22673,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_datapath_replies_once_only_for_exact_typed_authority() {
-        let fixture = fixture(RolesConfig::default());
+        let fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let local_node_id = fixture.runtime.local_node_id;
         let local_peer = *fixture.runtime.service.local_peer_id();
@@ -22389,7 +22841,7 @@ mod tests {
     )]
     #[tokio::test]
     async fn forwarded_ingest_expiry_at_commit_boundary_has_no_response_mutation() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -22476,7 +22928,7 @@ mod tests {
     #[tokio::test]
     async fn client_fetch_rejects_late_or_revoked_response_before_ingest() {
         for case in 0_u8..3 {
-            let mut fixture = fixture(RolesConfig::default());
+            let mut fixture = fixture(test_client_roles());
             let control_identity = Identity::generate();
             let exit_identity = Identity::generate();
             let exit_peer = exit_identity.peer_id().to_owned();
@@ -22592,7 +23044,7 @@ mod tests {
     )]
     #[tokio::test]
     async fn client_fetch_purges_expired_cap_after_owning_pending() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -22898,7 +23350,7 @@ mod tests {
     )]
     #[tokio::test]
     async fn client_fetch_after_commit_deadline_is_not_reclassified() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -23184,7 +23636,7 @@ mod tests {
     )]
     #[tokio::test]
     async fn client_completion_is_cached_and_replied_before_refresh() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();

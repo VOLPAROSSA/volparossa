@@ -4,6 +4,22 @@ This document distinguishes the **required v1 design** from verified implementat
 claim that a diagram is working code. Consult [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
 for test-backed completion evidence.
 
+## Reciprocal peer participation (revised 2026-09-05)
+
+All network nodes run the same software. A production node consuming client service must also
+offer both relay and policy-limited exit service with nonzero capacity. This supersedes the older
+optional client-only participation model. Installation leaves all roles disabled; participation is
+an explicit configuration accepting bandwidth contribution and allowed egress through the node's
+public address. Role-isolated development fixtures are for boundary testing, not an alternative
+production participation mode. There are no required central relay or exit servers.
+
+Roles are functions of a node, not permanent network classes. For each route the client, each
+relay, and exit remain distinct nodes. Offering exit service never authorizes a direct client-to-exit
+datapath, unrestricted egress, or bypassing the common signed whitelist. The native Client and Exit
+process roles remain immutable and isolated even when both workers run on the same user node.
+The implementation status must separately record combined-role runtime and topology verification;
+these requirements are not a claim that those checks have passed.
+
 ## Trust and process boundaries
 
 The permanent Ed25519 identity anchors the node's libp2p Peer ID and signed advertisements. A route
@@ -40,6 +56,15 @@ selected control relay. Direct-then-forwarded provenance is rejected; forwarded-
 provenance withdraws and quarantines the exit capability for the advertisement lifetime. Within one
 route, the exit must differ by node ID and Peer ID from the control relay and every datapath relay.
 The control relay may also become one datapath relay only after its own v4 probe and grant.
+
+These provenance restrictions are scoped to the local Client's own route choices. A node also
+serving as Relay may forward another authenticated client's exact signed request to an Exit that
+it knows separately as a Relay for its own use. That server-owned Exit capability cannot enter the
+local Client selection snapshot. Likewise, an Exit's incoming data-relay authority has its own
+bounded cache. A fresh direct advertisement does not revoke an independent server-owned route
+merely because its provenance differs; actual identity, policy and lifetime changes still apply.
+Combined-role provider discovery reserves a bounded local subset of Exit candidates before direct
+Relay fetches, so a network of identical participants is not exhausted by the first provider query.
 
 ```mermaid
 sequenceDiagram

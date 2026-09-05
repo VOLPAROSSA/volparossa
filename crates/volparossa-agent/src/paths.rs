@@ -8,6 +8,7 @@ use std::{
 };
 
 use thiserror::Error;
+use volparossa_config::RolesConfig;
 
 /// Packaged configuration file.
 pub const DEFAULT_CONFIG: &str = "/etc/volparossa/config.yaml";
@@ -53,6 +54,22 @@ pub struct AgentPaths {
 }
 
 impl AgentPaths {
+    /// Native Exit control endpoint for the configured roles.
+    ///
+    /// A combined node keeps the original endpoint for Client operations and uses a separate
+    /// immutable Exit worker on the `.exit` endpoint, matching the packaged launcher. A
+    /// service-only Exit retains the original endpoint for existing deployment configurations.
+    #[must_use]
+    pub fn mpquic_exit_socket(&self, roles: RolesConfig) -> PathBuf {
+        if roles.client && roles.exit {
+            let mut path = self.mpquic_socket.as_os_str().to_os_string();
+            path.push(".exit");
+            PathBuf::from(path)
+        } else {
+            self.mpquic_socket.clone()
+        }
+    }
+
     /// Loads only documented packaging variables. Secrets are never accepted
     /// through arguments or environment values.
     ///
@@ -177,5 +194,24 @@ mod tests {
             checked_path("test", OsStr::new("/")),
             Err(PathError::Invalid("test"))
         );
+    }
+
+    #[test]
+    fn combined_node_uses_separate_native_role_endpoints() {
+        let mut paths = AgentPaths::from_environment().expect("default paths");
+        paths.mpquic_socket = PathBuf::from("/run/volparossa/native/custom.sock");
+        for bits in 0_u8..8 {
+            let roles = RolesConfig {
+                client: bits & 1 != 0,
+                relay: bits & 2 != 0,
+                exit: bits & 4 != 0,
+            };
+            let expected = if roles.client && roles.exit {
+                "/run/volparossa/native/custom.sock.exit"
+            } else {
+                "/run/volparossa/native/custom.sock"
+            };
+            assert_eq!(paths.mpquic_exit_socket(roles), PathBuf::from(expected));
+        }
     }
 }

@@ -363,6 +363,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_agent_role_snapshot_is_dormant_and_disconnected() {
+        let config = Config::default();
+        let state = AgentState::new(&config, config.roles, None, MetricsRegistry::new())
+            .expect("dormant state");
+        let roles = state.role_snapshot();
+        assert!(!roles.client && !roles.relay && !roles.exit);
+        assert!(!state.status().connected);
+        assert_eq!(state.status().active_contexts, 0);
+    }
+
+    #[test]
     fn aggregate_metrics_follow_state_without_identity_labels() {
         let config = Config::default();
         let registry = MetricsRegistry::new();

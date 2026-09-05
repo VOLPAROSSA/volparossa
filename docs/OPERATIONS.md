@@ -47,8 +47,8 @@ override before applying the documented scanner exemptions; see
 
 `just package-deb` and `./packaging/build-deb.sh` are non-writing previews. Building requires the
 explicit `./packaging/build-deb.sh --build` form and refuses to run as root or overwrite an existing
-candidate. The development native launcher supports exactly one enabled client or exit role per
-node and refuses simultaneous client-plus-exit mode until separate native control sockets exist.
+candidate. A combined client/exit node runs two immutable-role native workers under one service;
+its Client socket is `VOLPAROSSA_MPQUIC_SOCKET`, and its Exit socket appends `.exit` to that path.
 
 The candidate package build uses `Cargo.lock`, a caller-supplied or repository source timestamp,
 root-owned archive metadata, deterministic file ordering from `dpkg-deb`, and a clean temporary
@@ -104,9 +104,16 @@ encrypted credential and identity file together when backing up or rotating the 
 identity. This provisioning flow still requires a Debian 13 systemd integration test before a
 package is declared releasable.
 
-The packaged example keeps client on, relay and exit off, the kill switch on, direct-exit debug off,
+The packaged example keeps all roles off, the kill switch on, direct-exit debug off,
 plain-TCP fallback off, required MPQUIC paths at two or more, and policy fail-closed. An empty policy
 path means connections fail closed; it is not an allow-all policy.
+
+Production client participation requires `roles.client`, `roles.relay`, and `roles.exit` to be
+explicitly enabled together, with positive relay and exit capacity and a valid policy. Installing
+or initializing the package does not consent to Internet egress. Configure those responsibilities
+in `/etc/volparossa/config.yaml`, run `volparossa config validate`, then start the services or
+restart them after changing an existing configuration. Role-isolated development fixtures are
+not a client-only production participation option.
 
 Privacy-v4 is a hard-incompatible migration: set `network.protocol_version: 4`. Signed peer
 control and `/volparossa/advertisement/4` accept exactly v4; v1, v2, v3, zero, and future values are
@@ -114,7 +121,7 @@ rejected without negotiation or fallback. The retired direct exit/relay/confirma
 IDs are never registered. This does not retire the independently versioned threshold policy
 manifest v2 or libp2p Circuit Relay v2, which remains control-plane connectivity only.
 
-The default client-only configuration may leave `network.operator_id: null`. Enabling relay or exit
+The default dormant configuration may leave `network.operator_id: null`. Enabling relay or exit
 instead requires an explicit operator ID of 1..=128 ASCII letters, digits, `-`, `_`, `.`, or
 `:` plus a non-zero `advertised_asn` and at least one canonical
 `advertised_ipv4_prefix` (`/24`) or `advertised_ipv6_prefix` (`/48`). Region and two-letter country
@@ -154,16 +161,16 @@ Candidate units are installed as:
   control-plane network access, the helper socket, and an agent-owned mode-0660 socket under a
   non-group-writable `/run/volparossa/control`; the unit loads only the named encrypted identity
   credential;
-- `volparossa-mpquic.service`: candidate unprivileged isolation only. It is not runnable yet.
+- `volparossa-mpquic.service`: unprivileged Client and Exit role workers, not a release-security claim.
   API v6 preflights one client or exit role/process lifetime, targets that instance thereafter, and
   correlates every response to the exact canonical request. It accepts exact 43-character
   base64url client auth and TLS names only in bounded, signed-scope route-session messages; the
   native commitment check proves bearer equality, not generator entropy or binary attestation.
   `AddPath` consumes exactly one request-bound UDP descriptor and native never creates or binds a
-  path socket, but the agent does not yet call this API and production helper acquisition does not
-  provide independently authenticated descriptor provenance. The package also has only one
-  same-UID native unit/socket; separate client/exit service identities and role sockets remain
-  required before an untrusted agent can use this as an authenticated boundary.
+  path socket. The agent calls the role-specific native socket, but production helper acquisition
+  does not provide independently authenticated descriptor provenance. Combined roles have
+  separate native workers and sockets under one same-UID service; separate service identities
+  remain required before an untrusted agent can use this as an authenticated boundary.
   `StartExitSession` carries bounded, unparsed in-memory TLS candidate material and consumes exactly
   one caller-supplied, pre-bound IPv6 UDP descriptor whose current tuple and flags are checked by
   Rust and native. Those descriptor checks do not prove assigned-address or network-namespace
@@ -199,14 +206,18 @@ volparossa disconnect           volparossa peers
 volparossa paths                volparossa sessions
 volparossa policy status        volparossa policy verify <file>
 volparossa role show            volparossa role enable|disable relay
-volparossa role enable|disable exit
+volparossa role enable|disable client|exit
 volparossa config validate      volparossa logs
 volparossa cleanup              volparossa demo
 ```
 
-`role enable exit` must require explicit valid policy and non-zero configured exit capacity;
-installation never enables it. Relay enablement similarly requires explicit capacity, and either
-service role requires the explicit `network.operator_id` described above. `status`,
+Role commands validate the proposed change but effective changes require editing configuration
+and restarting the service: the current agent returns `ROLE_RESTART_REQUIRED`, without silently
+changing its active protocols or persisted roles. `role enable client` alone on a dormant
+production node returns `ROLE_PREREQUISITES`; it never silently enables relay or exit service.
+Exit enablement requires explicit valid policy and nonzero configured capacity. Relay enablement
+requires explicit capacity, and both service roles require the operator identity described above.
+`status`,
 `paths`, and `sessions` distinguish configured, validated, active, and real data-carrying paths and
 separate user bytes from tunnel bytes. Output never contains private keys.
 

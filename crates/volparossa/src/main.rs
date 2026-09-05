@@ -159,14 +159,15 @@ enum PolicyCommand {
 enum RoleCommand {
     /// Show role state.
     Show,
-    /// Enable a voluntary role after agent-side safety validation.
-    Enable { role: VoluntaryRole },
-    /// Disable a voluntary role and drain its reservations.
-    Disable { role: VoluntaryRole },
+    /// Request a role change; participation prerequisites and restart requirements apply.
+    Enable { role: ConfigurableRole },
+    /// Request a role disable; apply effective changes through configuration and restart.
+    Disable { role: ConfigurableRole },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum VoluntaryRole {
+enum ConfigurableRole {
+    Client,
     Relay,
     Exit,
 }
@@ -591,10 +592,11 @@ async fn cleanup(execute: bool, control_socket: &Path) -> Result<()> {
     systemctl("stop").await
 }
 
-async fn set_role(socket: &Path, role: VoluntaryRole, enabled: bool) -> Result<()> {
+async fn set_role(socket: &Path, role: ConfigurableRole, enabled: bool) -> Result<()> {
     let role = match role {
-        VoluntaryRole::Relay => NodeRole::Relay,
-        VoluntaryRole::Exit => NodeRole::Exit,
+        ConfigurableRole::Client => NodeRole::Client,
+        ConfigurableRole::Relay => NodeRole::Relay,
+        ConfigurableRole::Exit => NodeRole::Exit,
     };
     let response = control::request(
         socket,
@@ -737,6 +739,8 @@ mod tests {
                 "93.184.216.34=tcp:8443",
             ],
             &["volparossa", "role", "show"],
+            &["volparossa", "role", "enable", "client"],
+            &["volparossa", "role", "disable", "client"],
             &["volparossa", "role", "enable", "relay"],
             &["volparossa", "role", "disable", "relay"],
             &["volparossa", "role", "enable", "exit"],

@@ -15,12 +15,14 @@ fi
 set -- \
     packaging/test-collect-cargo-licenses.sh \
     packaging/build-deb.sh \
+    packaging/volparossa-mpquic-launch \
     packaging/collect-cargo-licenses.sh \
     packaging/debian/postinst \
     packaging/debian/postrm \
     packaging/debian/prerm \
     tests/packaging/debian13-package-lifecycle.sh \
     tests/packaging/test-package-lifecycle-contract.sh \
+    tests/packaging/test-native-launcher.sh \
     scripts/bootstrap-debian13-dev.sh \
     scripts/check-rust-dependencies.sh \
     scripts/check-shell.sh \

@@ -5,7 +5,7 @@ These instructions apply to the entire repository and must remain in force in fu
 ## Mission and truthfulness
 
 - Build VOLPAROSSA v1 as an open-source, decentralised VPN overlay for Debian 13 amd64.
-- The normal data path is always `client -> exactly one voluntary relay -> exit -> destination`; every parallel path uses a different relay between the same client and exit.
+- The normal data path is always `client -> exactly one relay -> exit -> destination`; every parallel path uses a different relay between the same client and exit.
 - Never describe ordinary TCP or single-path QUIC as MPTCP or Multipath QUIC. A feature is complete only when tests prove that its real datapath and required number of paths carry data.
 - Keep `docs/IMPLEMENTATION_STATUS.md` current. Checked items must be supported by passing tests or explicit evidence; incomplete work stays unchecked.
 - Do not leave essential mocks, stubs, `TODO`s, or `unimplemented!()` calls in production datapaths.
@@ -16,7 +16,8 @@ These instructions apply to the entire repository and must remain in force in fu
 - Relays learn the client address and selected exit, but not the Internet destination. Exits learn destinations and incoming relays, but not the client's public address. Destinations see only the exit address.
 - Client-to-exit payloads remain end-to-end encrypted even though a relay terminates two distinct WireGuard links.
 - Relays may forward only explicitly authorised, short-lived route IDs between the two relevant WireGuard interfaces. They must never provide Internet NAT/egress for relayed sessions or access to the relay host.
-- Only an explicitly enabled exit may provide egress. Exit mode defaults to disabled. Nodes may independently enable client, relay, and exit roles.
+- Participation is reciprocal (user requirement revised 2026-09-05): every production node using the network as a client must also offer relay AND exit service with nonzero capacity. All nodes run the same software; there is no privileged central server class. Relay-only or exit-only contribution may exist, but client-only consumption is rejected.
+- Installing the package does not activate network participation or Internet egress. All roles default off; explicitly enabling participation requires accepting the combined client/relay/exit responsibilities. Only an enabled, policy-authorized exit may provide egress. Disposable development fixtures may isolate roles to test individual boundaries; that is not a production participation mode.
 - All exits fail closed against the same threshold-signed whitelist manifest. No open proxy, implicit raw-IP egress, arbitrary DNS, destination changes, or unsafe port fallback is allowed.
 - Product configuration rejects development policy keys. Never add production private keys, accounts, analytics, telemetry, hidden update channels, or automatic code downloads.
 - Do not persist URLs, DNS history, payloads, full browsing hostnames, destination IP history, private keys, or a durable node-to-browsing association by default.
@@ -54,7 +55,8 @@ These instructions apply to the entire repository and must remain in force in fu
 
 ## Quality workflow
 
-- After every meaningful change run the narrowest relevant formatter, static analysis, and tests; regularly run the full required suite:
+- Functional-development priority (user revised 2026-09-05): integrate complete executable slices and agreed ideas rapidly. Use the narrowest relevant formatter/compile check and targeted functional smoke during development. Defer repeated exhaustive regression runs, extra hardening, optimization and polish until the desired functionality is integrated. Never defer the evidence needed to distinguish real datapaths from substitutes, or disposable-network cleanup.
+- The broad verification suite remains available for integration/release preparation; do not rerun it for every small change:
   - `cargo fmt --check`
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   - `cargo test --workspace --all-features`
@@ -67,7 +69,7 @@ These instructions apply to the entire repository and must remain in force in fu
 
 ## Safe operating defaults
 
-- Default roles: client on, relay off, exit off. Default kill switch and policy fail-closed are on.
+- Default roles: client off, relay off, exit off until explicit participation configuration. Production client mode requires relay and exit mode. Default kill switch and policy fail-closed are on.
 - Default multipath settings: four active, at least two, at most eight, two warm backups, 20 ms maximum RTT spread; a new active path should add roughly 10% unique throughput or meaningful failover value.
 - Route contexts are scoped by local profile, registrable domain/origin, transport, and policy version; never move an established flow to a new exit. Expiry affects new flows, and LRU cleanup removes all associated interfaces, routes, MPTCP/MPQUIC paths, and firewall state.
 - Treat DHT records, advertisements, peers, parsers, and the unprivileged agent as untrusted. Fail closed on ambiguity.

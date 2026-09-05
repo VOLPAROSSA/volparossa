@@ -73,7 +73,7 @@ pub struct Config {
     pub runtime_mode: RuntimeMode,
     /// Overlay identity and discovery settings.
     pub network: NetworkConfig,
-    /// Independently enabled node roles.
+    /// Explicit node roles; consuming the network requires offering relay and exit service.
     pub roles: RolesConfig,
     /// Exit and relay selection parameters.
     pub selection: SelectionConfig,
@@ -154,6 +154,7 @@ impl Config {
     /// Returns an error when a field or cross-field safety invariant is violated.
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_exact_version(self.network.protocol_version)?;
+        validate_roles(self.runtime_mode, self.roles)?;
         if let Some(operator_id) = self.network.operator_id.as_deref() {
             OperatorId::new(operator_id).map_err(|_| {
                 validation(
@@ -248,11 +249,14 @@ impl Default for NetworkConfig {
     }
 }
 
-/// Independently enabled roles. Exit is deliberately off by default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Explicit network participation roles. Installation is dormant by default.
+///
+/// A production client must also offer relay and exit service. Service-only nodes are permitted.
+/// Development mode may isolate roles for disposable integration fixtures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RolesConfig {
-    /// Permit local client sessions.
+    /// Permit local client sessions; production requires relay and exit service alongside them.
     pub client: bool,
     /// Permit authorised relay forwarding.
     pub relay: bool,
@@ -260,14 +264,14 @@ pub struct RolesConfig {
     pub exit: bool,
 }
 
-impl Default for RolesConfig {
-    fn default() -> Self {
-        Self {
-            client: true,
-            relay: false,
-            exit: false,
-        }
+fn validate_roles(mode: RuntimeMode, roles: RolesConfig) -> Result<(), ConfigError> {
+    if mode == RuntimeMode::Production && roles.client && !(roles.relay && roles.exit) {
+        return Err(validation(
+            "roles.client",
+            "client participation requires both relay and exit roles; configure their capacity and policy explicitly",
+        ));
     }
+    Ok(())
 }
 
 /// Path selection settings.
@@ -960,7 +964,7 @@ mod tests {
         config.validate().expect("defaults must validate");
         assert_eq!(config.network.protocol_version, 4);
         assert_eq!(config.network.operator_id, None);
-        assert!(config.roles.client);
+        assert!(!config.roles.client);
         assert!(!config.roles.relay);
         assert!(!config.roles.exit);
         assert!(config.routing.kill_switch);
@@ -989,6 +993,108 @@ mod tests {
         let shipped = include_str!("../../../config/examples/default.yaml");
         let actual = Config::from_yaml(shipped).expect("shipped default YAML must validate");
         assert_eq!(actual, Config::default());
+    }
+
+    fn explicit_participant_config() -> Config {
+        let mut config = Config {
+            roles: RolesConfig {
+                client: true,
+                relay: true,
+                exit: true,
+            },
+            ..Config::default()
+        };
+        config.network.operator_id = Some("participant-a".to_owned());
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.12.34.0/24".to_owned());
+        config.capacity = CapacityConfig {
+            relay_upload_limit_mbps: 100,
+            relay_download_limit_mbps: 100,
+            exit_upload_limit_mbps: 100,
+            exit_download_limit_mbps: 100,
+            maximum_relay_sessions: 10,
+            maximum_exit_sessions: 10,
+        };
+        config.policy.manifest_path = "/etc/volparossa/policy.cbor".into();
+        config
+    }
+
+    #[test]
+    fn production_requires_reciprocity_while_disposable_fixtures_can_isolate_roles() {
+        for runtime_mode in [RuntimeMode::Production, RuntimeMode::Development] {
+            for bits in 0_u8..8 {
+                let mut config = explicit_participant_config();
+                config.runtime_mode = runtime_mode;
+                config.roles = RolesConfig {
+                    client: bits & 1 != 0,
+                    relay: bits & 2 != 0,
+                    exit: bits & 4 != 0,
+                };
+                if runtime_mode == RuntimeMode::Production
+                    && config.roles.client
+                    && !(config.roles.relay && config.roles.exit)
+                {
+                    assert!(matches!(
+                        config.validate(),
+                        Err(ConfigError::Validation {
+                            field: "roles.client",
+                            ..
+                        })
+                    ));
+                } else {
+                    config
+                        .validate()
+                        .expect("dormant, donating, or reciprocal node");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enabling_client_does_not_implicitly_enable_internet_egress() {
+        let error = Config::from_yaml("roles:\n  client: true\n")
+            .expect_err("client participation requires explicit service consent");
+        assert!(matches!(
+            error,
+            ConfigError::Validation {
+                field: "roles.client",
+                ..
+            }
+        ));
+        assert_eq!(
+            Config::from_yaml("{}").expect("dormant config"),
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn reciprocal_participation_keeps_all_capacity_and_policy_prerequisites() {
+        let config = explicit_participant_config();
+        config
+            .validate()
+            .expect("explicit reciprocal participation");
+        for missing in 0_u8..6 {
+            let mut missing_capacity = config.clone();
+            match missing {
+                0 => missing_capacity.capacity.relay_upload_limit_mbps = 0,
+                1 => missing_capacity.capacity.relay_download_limit_mbps = 0,
+                2 => missing_capacity.capacity.maximum_relay_sessions = 0,
+                3 => missing_capacity.capacity.exit_upload_limit_mbps = 0,
+                4 => missing_capacity.capacity.exit_download_limit_mbps = 0,
+                5 => missing_capacity.capacity.maximum_exit_sessions = 0,
+                _ => unreachable!(),
+            }
+            assert!(missing_capacity.validate().is_err());
+        }
+        let mut missing_manifest = config.clone();
+        missing_manifest.policy.manifest_path.clear();
+        assert!(missing_manifest.validate().is_err());
+        let mut missing_operator = config.clone();
+        missing_operator.network.operator_id = None;
+        assert!(missing_operator.validate().is_err());
+        let mut missing_origin = config;
+        missing_origin.network.advertised_ipv4_prefix = None;
+        assert!(missing_origin.validate().is_err());
     }
 
     #[test]

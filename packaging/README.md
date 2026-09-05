@@ -88,16 +88,18 @@ and the disposable VM must be discarded.
 Package removal stops services but preserves `/var/lib/volparossa`, including the encrypted identity.
 See `docs/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.
 
-The development package now includes a bounded native launcher. It reads only `roles.client` and
-`roles.exit` from the packaged configuration, starts the fixed native executable in that exact
-mode, passes only the absolute control-socket path, and never accepts route credentials or TLS
-material through arguments, environment, or files. Nodes with neither role do not need a native
-process. Because the current agent has one native control socket, the launcher deliberately refuses
-a node that enables client and exit simultaneously; use separate development nodes until the two
-role-specific sockets are wired.
+The development package includes a native launcher that reads `roles.client` and `roles.exit`
+from the packaged configuration. A combined node starts two copies of the same fixed native
+executable, each retaining one immutable transport role: Client uses `VOLPAROSSA_MPQUIC_SOCKET`
+and Exit uses that path with `.exit` appended. Both workers belong to the same systemd control
+group. The launcher stops both on shutdown or worker failure; systemd can then restart the pair.
+The agent sends Client and Exit operations to their respective sockets. A service-only Exit
+retains the base socket, preserving role-isolated disposable development topologies. Nodes with
+neither role do not start a native process. Route credentials and TLS material are never passed
+through process arguments, environment, or files.
 
-This is sufficient to build and operate the current single-role development topology, not a
-release-security claim. `AddPath` and `StartExitSession` consume operation-bound UDP descriptors,
+This process wiring is not a claim of completed reciprocal-network acceptance or release
+security. `AddPath` and `StartExitSession` consume operation-bound UDP descriptors,
 but same-UID `SCM_RIGHTS` correlation still does not authenticate privileged-helper origin. Before
 release, separate role service identities/sockets and helper-derived descriptor namespace and
 assigned-address provenance remain required.
