@@ -16,13 +16,15 @@ mpquic_path=
 package_path=
 output_directory=
 expected_commit=
+scenario=alpha
 
 usage() {
     printf '%s\n' \
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA'
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity]' \
+        '       --package is required for alpha; datapath and reciprocity skip packaging.'
 }
 
 print_plan() {
@@ -31,14 +33,25 @@ print_plan() {
         '  verify the reviewed Debian 13 amd64 image by its pinned SHA-512;' \
         '  archive only the exact clean checked-out Git revision;' \
         '  verify and copy the locally built pinned mqvpn/xquic daemon;' \
-        '  verify and copy the exact candidate Debian package;' \
         '  boot one temporary KVM-only qcow2 overlay with QEMU user networking;' \
-        '  prove package install, doctor, start, upgrade and removal in the guest;' \
         '  install Debian build/runtime packages and build only required test binaries;' \
         '  run the twelve-node production-helper topology as guest root;' \
         '  retrieve bounded non-secret logs and its machine-readable result;' \
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'
+    if [ "$scenario" = alpha ]; then
+        printf '%s\n' \
+            'Alpha scenario: verify/copy the exact candidate Debian package and prove' \
+            '  install, doctor, start, upgrade and removal inside the guest first.'
+    elif [ "$scenario" = reciprocity ]; then
+        printf '%s\n' \
+            'Reciprocity scenario: simultaneous client/relay/exit datapaths;' \
+            '  package/release checks are skipped, not reported as passed.'
+    else
+        printf '%s\n' \
+            'Datapath scenario: run the full A01-A15 functional topology;' \
+            '  package/release checks are skipped, not reported as passed.'
+    fi
 }
 
 while [ "$#" -gt 0 ]; do
@@ -46,6 +59,12 @@ while [ "$#" -gt 0 ]; do
         --preview) mode=preview ;;
         --execute) mode=execute ;;
         --yes) approval=yes ;;
+        --scenario)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            scenario=$2
+            case $scenario in alpha|datapath|reciprocity) ;; *) usage >&2; exit 64 ;; esac
+            shift
+            ;;
         --image)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             image_path=$2
@@ -95,15 +114,16 @@ if [ "$mode" = preview ]; then
 fi
 
 if [ "$approval" != yes ] || [ -z "$image_path" ] || [ -z "$mpquic_path" ] \
-    || [ -z "$package_path" ] \
     || [ -z "$output_directory" ] || [ -z "$expected_commit" ]; then
     usage >&2
     exit 64
 fi
-case $image_path:$mpquic_path:$package_path:$output_directory in
-    /*:/*:/*:/*) ;;
+case $image_path:$mpquic_path:$output_directory in
+    /*:/*:/*) ;;
     *) exit 64 ;;
 esac
+if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
+case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
 case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'VM runner must remain unprivileged' >&2; exit 77; }
@@ -155,6 +175,8 @@ case $MPQUIC_SIZE in ''|0|*[!0-9]*) exit 64 ;; esac
 [ "$MPQUIC_SIZE" -le 67108864 ] || exit 64
 [ "$("$mpquic_path" --api-version)" = 6 ] || exit 64
 MPQUIC_SHA256=$(sha256sum "$mpquic_path" | awk '{ print $1 }')
+PACKAGE_SHA256=none
+if [ -n "$package_path" ]; then
 [ "$(readlink -f -- "$package_path")" = "$package_path" ] || exit 64
 [ -f "$package_path" ] && [ ! -L "$package_path" ] || exit 64
 [ "$(dpkg-deb -f "$package_path" Package)" = volparossa ] || exit 64
@@ -163,6 +185,7 @@ PACKAGE_SIZE=$(stat -Lc '%s' "$package_path")
 case $PACKAGE_SIZE in ''|0|*[!0-9]*) exit 64 ;; esac
 [ "$PACKAGE_SIZE" -le 536870912 ] || exit 64
 PACKAGE_SHA256=$(sha256sum "$package_path" | awk '{ print $1 }')
+fi
 [ -d "$output_directory" ] && [ ! -L "$output_directory" ] || exit 64
 [ -z "$(find "$output_directory" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 64
 
@@ -267,12 +290,16 @@ expected_commit=$1
 source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
+scenario=$5
+case $scenario in alpha|datapath|reciprocity) ;; *) exit 64 ;; esac
 cd /home/vpci
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
 printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
-printf '%s  volparossa.deb\n' "$package_sha256" | sha256sum --check --strict -
 [ "$(stat -Lc '%s' volparossa-mpquic)" -le 67108864 ]
-[ "$(stat -Lc '%s' volparossa.deb)" -le 536870912 ]
+if [ "$scenario" = alpha ]; then
+    printf '%s  volparossa.deb\n' "$package_sha256" | sha256sum --check --strict -
+    [ "$(stat -Lc '%s' volparossa.deb)" -le 536870912 ]
+fi
 chmod 0555 volparossa-mpquic
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
@@ -307,6 +334,8 @@ mkdir /home/vpci/alpha-output
 # /run/volparossa. Exercise it before the topology's transient units can create
 # that bind-mount target; successful package removal leaves no active services
 # or installed binaries that could affect the later datapath evidence.
+package_status=0
+if [ "$scenario" = alpha ]; then
 mkdir /home/vpci/alpha-output/package
 package_stdout=/home/vpci/package-lifecycle.stdout
 package_stderr=/home/vpci/package-lifecycle.stderr
@@ -321,13 +350,17 @@ set -e
 mv -- "$package_stdout" /home/vpci/alpha-output/package/runner.stdout
 mv -- "$package_stderr" /home/vpci/alpha-output/package/runner.stderr
 printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-status
+fi
 
+topology_scenario=alpha
+[ "$scenario" != reciprocity ] || topology_scenario=reciprocity
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
     --execute --yes \
     --source /home/vpci/source \
     --bin /home/vpci/target/debug \
     --mpquic /home/vpci/volparossa-mpquic \
+    --scenario "$topology_scenario" \
     --output /home/vpci/alpha-output \
     --expected-commit "$expected_commit" \
     >/home/vpci/alpha-output/runner.stdout \
@@ -409,13 +442,13 @@ done
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
 scp_to "$mpquic_path" /home/vpci/volparossa-mpquic
-scp_to "$package_path" /home/vpci/volparossa.deb
+if [ -n "$package_path" ]; then scp_to "$package_path" /home/vpci/volparossa.deb; fi
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
 ssh_base chmod 0700 /home/vpci/guest-driver.sh
 
 set +e
 ssh_base /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
-    "$MPQUIC_SHA256" "$PACKAGE_SHA256"
+    "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
 GUEST_STATUS=$?
 set -e
 if ! scp_from /home/vpci/alpha-output.tar.gz "$RUN_DIRECTORY/alpha-output.tar.gz"; then

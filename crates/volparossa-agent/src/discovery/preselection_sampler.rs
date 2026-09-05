@@ -1007,10 +1007,9 @@ mod tests {
         assert!(discovery.contains("Relay and Exit runtimes now publish"));
         assert!(status.contains("Relay and Exit runtimes now publish"));
         assert!(protocol.contains("Relay and Exit runtimes install"));
-        assert!(status.contains(
-            "| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |"
-        ));
-        assert!(status.contains("Current fixed alpha score: **11/100 (11%)**"));
+        // Keep the sampler's evidence boundary documented above, but do not freeze a
+        // project-wide percentage or milestone state in a sampler regression test.
+        // Those change when later live integration supplies the missing evidence.
     }
 
     struct SeededRng(u64);

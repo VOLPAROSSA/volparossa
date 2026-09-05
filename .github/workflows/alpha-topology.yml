@@ -2,6 +2,16 @@ name: Alpha production-helper topology
 
 on:
   workflow_dispatch:
+    inputs:
+      scenario:
+        description: Datapath/reciprocity are functional-only; alpha also verifies packaging
+        required: true
+        default: datapath
+        type: choice
+        options:
+          - datapath
+          - alpha
+          - reciprocity
   pull_request:
     branches:
       - main
@@ -10,12 +20,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: alpha-production-helper-topology-${{ github.ref }}
+  group: alpha-production-helper-topology-${{ github.ref }}-${{ inputs.scenario || 'datapath' }}
   cancel-in-progress: true
 
 defaults:
   run:
     shell: bash
+
+env:
+  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario || 'datapath' }}
 
 jobs:
   alpha-topology:
@@ -77,6 +90,7 @@ jobs:
           printf 'VOLPAROSSA_ALPHA_MPQUIC=%s\n' "$native_binary" >>"$GITHUB_ENV"
 
       - name: Build twice and verify exact candidate Debian package
+        if: env.VOLPAROSSA_ALPHA_SCENARIO == 'alpha'
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/volparossa-package-target
           VMP_BUILD_JOBS: 2
@@ -152,6 +166,10 @@ jobs:
           set -euo pipefail
           runner_uid=$(id -u)
           case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          package_args=()
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = alpha; then
+            package_args=(--package "$VOLPAROSSA_ALPHA_PACKAGE")
+          fi
           set +e
           sudo -n -- /usr/bin/setpriv \
             --reuid "$runner_uid" \
@@ -167,7 +185,8 @@ jobs:
             --execute --yes \
             --image "$VOLPAROSSA_ALPHA_IMAGE" \
             --mpquic "$VOLPAROSSA_ALPHA_MPQUIC" \
-            --package "$VOLPAROSSA_ALPHA_PACKAGE" \
+            "${package_args[@]}" \
+            --scenario "$VOLPAROSSA_ALPHA_SCENARIO" \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" \
             --expected-commit "$GITHUB_SHA"
           topology_status=$?
@@ -178,6 +197,24 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = reciprocity; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/reciprocity-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "reciprocal runtime succeeded: \(.success)",
+                "completed flows: \([.flows[] | select(.success)] | length)/4",
+                "nodes observed: \(.nodes | length)",
+                "simultaneous consuming/relaying/egress witnesses: \(.reciprocal_witnesses | length)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "cleanup complete: \(.cleanup.complete)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish reciprocal runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           report="$VOLPAROSSA_ALPHA_OUTPUT/report.json"
           if test -f "$report"; then
             jq -r '
@@ -208,6 +245,11 @@ jobs:
             printf '%s\n' 'The VM did not publish a topology report.' \
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" != alpha; then
+            printf '%s\n' 'Functional-only run: package/release checks were not executed.' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           package_report="$VOLPAROSSA_ALPHA_OUTPUT/package/package-lifecycle.json"
           if test -f "$package_report"; then
             jq -r '
@@ -224,7 +266,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always()
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -267,6 +309,35 @@ jobs:
             all(.cases[]; .selected == true and .result == "PASS")
           ' "$report" >/dev/null
 
+      - name: Require real reciprocal runtime evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/reciprocity-smoke.json"
+          test -f "$report"
+          test ! -L "$report"
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-reciprocal-node-runtime" and
+            .source_revision == $revision and .success == true and
+            (.flows | length) == 4 and
+            all(.flows[]; .success == true and
+              (.route_context_id | type == "string" and length > 0) and
+              (.relay_peer_id | type == "string" and length > 0) and
+              (.exit_peer_id | type == "string" and length > 0) and
+              .relay_peer_id != .exit_peer_id and
+              (.path_evidence | type == "object" and length > 0)) and
+            (.nodes | length) == 4 and
+            all(.nodes[]; .roles == {"client":true,"relay":true,"exit":true} and
+              .same_agent_pid == true and .agent_pid_before > 0 and
+              .agent_pid_before == .agent_pid_after) and
+            (.reciprocal_witnesses | length) >= 1 and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$report" >/dev/null
+
       - name: Upload bounded topology diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -277,6 +348,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -380,6 +452,7 @@ jobs:
             .cleanup.remaining_units == 0 and
             .cleanup.remaining_owned_objects == 0
           ' "$VOLPAROSSA_ALPHA_OUTPUT/report.json" >/dev/null
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" != alpha; then exit 0; fi
           test "$(cat "$VOLPAROSSA_ALPHA_OUTPUT/package/guest-exit-status")" = 0
           jq -e '
             .schema_version == 1 and

@@ -194,6 +194,7 @@ enum ClientTransportState {
 struct ActiveProductionNativeUdpRoute {
     session: ProductionMpquicSession,
     path: VerifiedSingleRelayPath,
+    identity: CommittedSingleUdpRouteIdentity,
     binding: Option<RouteAuthorizedUdpIngress>,
     lifetime: Option<GeneralUdpSessionLifetime>,
 }
@@ -243,6 +244,14 @@ struct CommittedMpquicRouteIdentity {
     route_context_id: [u8; ID_BYTES],
     exit_peer_id: String,
     paths: Vec<CommittedMpquicPathIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommittedSingleUdpRouteIdentity {
+    route_context_id: [u8; ID_BYTES],
+    native_path: u32,
+    relay_peer_id: String,
+    exit_peer_id: String,
 }
 
 impl EstablishedClientRoute {
@@ -312,6 +321,15 @@ impl EstablishedClientRoute {
 }
 
 impl ActiveProductionNativeUdpRoute {
+    async fn path_summary(&self) -> Result<PathSummary, ClientRouteConnectError> {
+        let statuses = self
+            .session
+            .path_statuses()
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        self.identity.project(&statuses)
+    }
+
     fn flow_expired(&self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
         match (&self.binding, self.lifetime) {
             (None, None) => false,
@@ -322,6 +340,33 @@ impl ActiveProductionNativeUdpRoute {
 
     fn retirement_deadline(&self) -> Option<Instant> {
         self.lifetime.map(GeneralUdpSessionLifetime::deadline)
+    }
+}
+
+impl CommittedSingleUdpRouteIdentity {
+    fn project(
+        &self,
+        statuses: &[NativePathStatus],
+    ) -> Result<PathSummary, ClientRouteConnectError> {
+        let [status] = statuses else {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        };
+        if status.path_id != self.native_path {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        Ok(PathSummary {
+            route_context_id: self.route_context_id.to_vec(),
+            path_id: self.native_path,
+            relay_peer_id: self.relay_peer_id.clone(),
+            exit_peer_id: self.exit_peer_id.clone(),
+            state: if status.data_carrying {
+                PathState::Active
+            } else {
+                PathState::Reachable
+            } as i32,
+            smoothed_rtt_micros: status.smoothed_rtt_us,
+            user_bytes: status.delivered_bytes,
+        })
     }
 }
 
@@ -846,7 +891,7 @@ impl ClientRouteControl {
         };
         if let Some(ClientRouteControlState::Established(established)) = expired {
             Box::pin(established.shutdown()).await;
-            self.clear_agent_mpquic_paths().await;
+            self.clear_agent_transport_paths().await;
             let mut state = self.state.lock().await;
             if matches!(*state, ClientRouteControlState::Connecting) {
                 *state = ClientRouteControlState::Idle;
@@ -1082,7 +1127,7 @@ impl ClientRouteControl {
         };
         if let Some(previous) = previous {
             Box::pin(previous.shutdown()).await;
-            self.clear_agent_mpquic_paths().await;
+            self.clear_agent_transport_paths().await;
         }
 
         let result = Box::pin(begin_client_route(config, discovery)).await;
@@ -1113,49 +1158,76 @@ impl ClientRouteControl {
             Err(error) => Err(error),
         };
         match result {
-            Ok(established) => {
-                if established.is_expired(crate::unix_millis(), Instant::now()) {
-                    Box::pin(established.shutdown()).await;
-                    self.clear_agent_mpquic_paths().await;
-                    let mut state = self.state.lock().await;
-                    *state = ClientRouteControlState::Idle;
-                    return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
-                }
-                let progress = established.progress();
-                let mpquic_paths = match &established.transport {
-                    ClientTransportState::Mpquic(active) => match active.path_summaries().await {
-                        Ok(paths) => Some(paths),
-                        Err(error) => {
-                            Box::pin(established.shutdown()).await;
-                            let mut state = self.state.lock().await;
-                            *state = ClientRouteControlState::Idle;
-                            return Err(error);
-                        }
-                    },
-                    _ => None,
-                };
-                let mut state = self.state.lock().await;
-                *state = ClientRouteControlState::Established(Box::new(established));
-                if let Some(paths) = mpquic_paths {
-                    if self.replace_agent_mpquic_paths(paths).await.is_err() {
-                        let previous =
-                            std::mem::replace(&mut *state, ClientRouteControlState::Idle);
-                        drop(state);
-                        if let ClientRouteControlState::Established(established) = previous {
-                            Box::pin(established.shutdown()).await;
-                        }
-                        self.clear_agent_mpquic_paths().await;
-                        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
-                    }
-                }
-                Ok(progress)
-            }
+            Ok(established) => self.publish_established_route(established).await,
             Err(error) => {
                 let mut state = self.state.lock().await;
                 *state = ClientRouteControlState::Idle;
                 Err(error)
             }
         }
+    }
+
+    async fn publish_established_route(
+        &self,
+        established: EstablishedClientRoute,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if established.is_expired(crate::unix_millis(), Instant::now()) {
+            Box::pin(established.shutdown()).await;
+            self.clear_agent_transport_paths().await;
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Idle;
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let progress = established.progress();
+        let mpquic_paths = match &established.transport {
+            ClientTransportState::Mpquic(active) => match active.path_summaries().await {
+                Ok(paths) => Some(paths),
+                Err(error) => {
+                    Box::pin(established.shutdown()).await;
+                    let mut state = self.state.lock().await;
+                    *state = ClientRouteControlState::Idle;
+                    return Err(error);
+                }
+            },
+            _ => None,
+        };
+        let single_udp_path = match &established.transport {
+            ClientTransportState::NativeUdp(active) => match active.path_summary().await {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    Box::pin(established.shutdown()).await;
+                    self.clear_agent_transport_paths().await;
+                    *self.state.lock().await = ClientRouteControlState::Idle;
+                    return Err(error);
+                }
+            },
+            _ => None,
+        };
+        let mut state = self.state.lock().await;
+        *state = ClientRouteControlState::Established(Box::new(established));
+        if let Some(paths) = mpquic_paths {
+            if self.replace_agent_mpquic_paths(paths).await.is_err() {
+                let previous = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
+                drop(state);
+                if let ClientRouteControlState::Established(established) = previous {
+                    Box::pin(established.shutdown()).await;
+                }
+                self.clear_agent_transport_paths().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+        }
+        if let Some(path) = single_udp_path {
+            if self.replace_agent_single_udp_path(path).await.is_err() {
+                let previous = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
+                drop(state);
+                if let ClientRouteControlState::Established(established) = previous {
+                    Box::pin(established.shutdown()).await;
+                }
+                self.clear_agent_transport_paths().await;
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+        }
+        Ok(progress)
     }
 
     async fn replace_agent_mpquic_paths(
@@ -1172,9 +1244,25 @@ impl ClientRouteControl {
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
     }
 
-    async fn clear_agent_mpquic_paths(&self) {
+    async fn replace_agent_single_udp_path(
+        &self,
+        path: PathSummary,
+    ) -> Result<(), ClientRouteConnectError> {
+        let Some(agent_state) = self.agent_state.as_ref() else {
+            return Ok(());
+        };
+        agent_state
+            .write()
+            .await
+            .replace_single_udp_path(path)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    async fn clear_agent_transport_paths(&self) {
         if let Some(agent_state) = self.agent_state.as_ref() {
-            agent_state.write().await.clear_mpquic_paths();
+            let mut state = agent_state.write().await;
+            state.clear_mpquic_paths();
+            state.clear_single_udp_path();
         }
     }
 
@@ -1289,7 +1377,7 @@ impl ClientRouteControl {
             if let ClientRouteControlState::Established(established) = prior_route {
                 Box::pin(established.shutdown()).await;
             }
-            self.clear_agent_mpquic_paths().await;
+            self.clear_agent_transport_paths().await;
         }
         Err(ClientRouteConnectError::TransportRuntimeUnavailable)
     }
@@ -1431,6 +1519,8 @@ impl ClientRouteControl {
                                 ClientRouteConnectError::TransportRuntimeUnavailable
                             })?;
                         lifetime.record_activity(crate::unix_millis(), Instant::now())?;
+                        self.replace_agent_single_udp_path(active.path_summary().await?)
+                            .await?;
                         return Ok(ClientRouteProgress::TransportActive);
                     }
                     if active.lifetime.is_some() {
@@ -1486,6 +1576,8 @@ impl ClientRouteControl {
                     )?;
                     active.binding = Some(authorized);
                     active.lifetime = Some(lifetime);
+                    self.replace_agent_single_udp_path(active.path_summary().await?)
+                        .await?;
                     return Ok(ClientRouteProgress::TransportActive);
                 }
             }
@@ -1736,11 +1828,14 @@ impl ClientRouteControl {
                 .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
                 .to_vec();
             lifetime.record_activity(crate::unix_millis(), Instant::now())?;
-            return Ok(ClientUdpResponse {
+            let response = ClientUdpResponse {
                 application: binding.source(),
                 remote: binding.destination(),
                 payload,
-            });
+            };
+            self.replace_agent_single_udp_path(active.path_summary().await?)
+                .await?;
+            return Ok(response);
         }
         let ClientTransportState::UdpActive(active) = &established.transport else {
             return Err(ClientRouteConnectError::Busy);
@@ -1971,7 +2066,7 @@ impl ClientRouteControl {
         if let ClientRouteControlState::Established(established) = previous {
             Box::pin(established.shutdown()).await;
         }
-        self.clear_agent_mpquic_paths().await;
+        self.clear_agent_transport_paths().await;
     }
 }
 
@@ -2192,6 +2287,11 @@ async fn admit_completed_native_route(
                 orchestrator.shutdown_detached();
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             };
+            let Ok(identity) = route.committed_single_udp_identity(&path) else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
             let signal = start_native_udp_exit_session(&route, &path, discovery, now_ms).await;
             let Ok(signal) = signal else {
                 let _ = route.disconnect().await;
@@ -2237,6 +2337,7 @@ async fn admit_completed_native_route(
                     ActiveProductionNativeUdpRoute {
                         session,
                         path,
+                        identity,
                         binding: None,
                         lifetime: None,
                     },
@@ -4946,6 +5047,29 @@ impl ProductionRoute {
     #[must_use]
     pub(crate) fn context_handle(&self) -> &[u8] {
         &self.established.commit_proof.context_handle
+    }
+
+    fn committed_single_udp_identity(
+        &self,
+        path: &VerifiedSingleRelayPath,
+    ) -> Result<CommittedSingleUdpRouteIdentity, ClientRouteConnectError> {
+        let [authority] = self.established.relay_authorities.as_slice() else {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        };
+        if self.selected_transport() != Some(Transport::UdpSinglePath)
+            || path.route_context_id() != &self.established.request.parameters.route_context_id
+            || path.relay_node_id() != &authority.node_id
+            || path.exit_node_id() != &self.established.request.exit.wire_node_id
+            || authority.peer_id == self.established.request.exit.peer_id
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        Ok(CommittedSingleUdpRouteIdentity {
+            route_context_id: *path.route_context_id(),
+            native_path: path.path_id(),
+            relay_peer_id: authority.peer_id.to_string(),
+            exit_peer_id: self.established.request.exit.peer_id.to_string(),
+        })
     }
 
     fn committed_mpquic_identity(
@@ -7678,6 +7802,35 @@ mod tests {
         assert_eq!(summaries[1].state, PathState::Active as i32);
         assert_eq!(summaries[1].smoothed_rtt_micros, 2_000);
         assert!(summaries.iter().all(|summary| summary.user_bytes == 0));
+    }
+
+    #[test]
+    fn committed_single_udp_identity_projects_only_its_real_native_path() {
+        let identity = CommittedSingleUdpRouteIdentity {
+            route_context_id: [9; ID_BYTES],
+            native_path: 1,
+            relay_peer_id: "udp-relay".to_owned(),
+            exit_peer_id: "udp-exit".to_owned(),
+        };
+        let reachable = identity
+            .project(&[native_path_status(1, false)])
+            .expect("native path");
+        assert_eq!(reachable.route_context_id, vec![9; ID_BYTES]);
+        assert_eq!(reachable.relay_peer_id, "udp-relay");
+        assert_eq!(reachable.exit_peer_id, "udp-exit");
+        assert_eq!(reachable.state, PathState::Reachable as i32);
+        assert_eq!(reachable.user_bytes, 0);
+        let mut active = native_path_status(1, true);
+        active.delivered_bytes = 1234;
+        let projected = identity
+            .project(std::slice::from_ref(&active))
+            .expect("native active path");
+        assert_eq!(projected.state, PathState::Active as i32);
+        assert_eq!(projected.user_bytes, 1234);
+        assert_eq!(projected.smoothed_rtt_micros, active.smoothed_rtt_us);
+        assert!(identity.project(&[]).is_err());
+        assert!(identity.project(&[native_path_status(2, true)]).is_err());
+        assert!(identity.project(&[active.clone(), active]).is_err());
     }
 
     #[test]

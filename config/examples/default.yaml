@@ -3,6 +3,8 @@ runtime_mode: production
 network:
   name: VOLPAROSSA
   protocol_version: 4
+  # Operator declaration, not an automatic connectivity or uptime measurement.
+  uplink: independent_internet
   operator_id: null
   listen_addresses: []
   bootstrap_peers: []
@@ -15,8 +17,11 @@ network:
   advertised_ipv6_prefix: null
 
 # Installation does not start network participation or Internet egress.
-# To use the network, explicitly enable all three roles and configure the
-# operator identity, service origin, positive capacity limits, and policy below.
+# With an independent Internet uplink, consuming nodes must enable all three roles
+# and configure operator identity, service origin, positive capacity, and policy.
+# With uplink: local_only, consumers must enable client + relay and keep exit off;
+# do not invent an ASN or public prefix. This configuration intent does not yet
+# provide a working offline/private-endpoint overlay datapath.
 roles:
   client: false
   relay: false

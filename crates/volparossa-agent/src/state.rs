@@ -26,6 +26,7 @@ pub struct AgentState {
     peers: BTreeMap<String, PeerSummary>,
     paths: Vec<PathSummary>,
     mpquic_context_id: Option<Vec<u8>>,
+    single_udp_context_id: Option<Vec<u8>>,
     sessions: Vec<SessionSummary>,
     logs: VecDeque<LogRecord>,
     candidate_pool: usize,
@@ -55,6 +56,7 @@ impl AgentState {
             peers: BTreeMap::new(),
             paths: Vec::new(),
             mpquic_context_id: None,
+            single_udp_context_id: None,
             sessions: Vec::new(),
             logs: VecDeque::with_capacity(MAX_LOG_RECORDS),
             candidate_pool: 0,
@@ -73,7 +75,8 @@ impl AgentState {
         let active_contexts = self
             .route_contexts
             .context_count()
-            .saturating_add(usize::from(self.mpquic_context_id.is_some()));
+            .saturating_add(usize::from(self.mpquic_context_id.is_some()))
+            .saturating_add(usize::from(self.single_udp_context_id.is_some()));
         StatusSnapshot {
             connected: active_contexts > 0 && (!self.paths.is_empty() || !self.sessions.is_empty()),
             active_peers: bounded_u32(self.connected_peers.len()),
@@ -201,6 +204,9 @@ impl AgentState {
     /// untouched.
     pub fn replace_mpquic_paths(&mut self, mut paths: Vec<PathSummary>) -> Result<(), StateError> {
         let context_id = validate_mpquic_paths(&paths)?.to_vec();
+        if self.single_udp_context_id.as_ref() == Some(&context_id) {
+            return Err(StateError::InvalidMpquicPaths);
+        }
         if let Some(previous) = self.mpquic_context_id.as_ref() {
             self.paths
                 .retain(|path| path.route_context_id.as_slice() != previous.as_slice());
@@ -227,6 +233,43 @@ impl AgentState {
                 .retain(|path| path.route_context_id != context_id);
         }
         self.mpquic_paths = 0;
+        self.sync_metrics();
+    }
+
+    /// Publishes one committed native general-UDP path without claiming it is multipath.
+    pub fn replace_single_udp_path(&mut self, path: PathSummary) -> Result<(), StateError> {
+        if path.route_context_id.len() != ROUTE_CONTEXT_ID_BYTES
+            || path.route_context_id.iter().all(|byte| *byte == 0)
+            || path.path_id == 0
+            || usize::try_from(path.path_id).map_or(true, |id| id > MAX_MPQUIC_PATHS)
+            || path.relay_peer_id.is_empty()
+            || path.exit_peer_id.is_empty()
+            || path.relay_peer_id == path.exit_peer_id
+            || !matches!(
+                PathState::try_from(path.state).ok(),
+                Some(PathState::Reachable | PathState::Active)
+            )
+            || self.mpquic_context_id.as_ref() == Some(&path.route_context_id)
+        {
+            return Err(StateError::InvalidSingleUdpPath);
+        }
+        if let Some(previous) = self.single_udp_context_id.take() {
+            self.paths.retain(|path| path.route_context_id != previous);
+        }
+        self.paths
+            .retain(|existing| existing.route_context_id != path.route_context_id);
+        self.single_udp_context_id = Some(path.route_context_id.clone());
+        self.paths.push(path);
+        self.sync_metrics();
+        Ok(())
+    }
+
+    /// Removes only the general-UDP projection after its native and helper owners stop.
+    pub fn clear_single_udp_path(&mut self) {
+        if let Some(context_id) = self.single_udp_context_id.take() {
+            self.paths
+                .retain(|path| path.route_context_id != context_id);
+        }
         self.sync_metrics();
     }
 
@@ -269,6 +312,7 @@ impl AgentState {
         )?;
         self.paths.clear();
         self.mpquic_context_id = None;
+        self.single_udp_context_id = None;
         self.sessions.clear();
         self.mptcp_subflows = 0;
         self.mpquic_paths = 0;
@@ -281,6 +325,7 @@ impl AgentState {
     pub fn has_network_state(&self) -> bool {
         self.route_contexts.context_count() > 0
             || self.mpquic_context_id.is_some()
+            || self.single_udp_context_id.is_some()
             || !self.paths.is_empty()
             || !self.sessions.is_empty()
     }
@@ -290,7 +335,7 @@ impl AgentState {
         update_metric(self.metrics.set_candidate_pool(self.candidate_pool));
         update_metric(
             self.metrics
-                .set_active_route_contexts(self.route_contexts.context_count()),
+                .set_active_route_contexts(self.status().active_contexts as usize),
         );
         update_metric(
             self.metrics
@@ -356,6 +401,9 @@ pub enum StateError {
     /// Native MPQUIC status did not describe one exact bounded route.
     #[error("native MPQUIC path state is invalid")]
     InvalidMpquicPaths,
+    /// Native single-path UDP status did not describe one exact bounded route.
+    #[error("native single-path UDP path state is invalid")]
+    InvalidSingleUdpPath,
 }
 
 #[cfg(test)]
@@ -458,5 +506,56 @@ mod tests {
             Err(StateError::InvalidMpquicPaths)
         ));
         assert_eq!(state.path_list(), before);
+    }
+
+    #[test]
+    fn single_udp_projection_counts_its_context_without_claiming_multipath() {
+        let config = Config::default();
+        let registry = MetricsRegistry::new();
+        let mut state =
+            AgentState::new(&config, config.roles, None, registry.clone()).expect("state");
+        state
+            .replace_single_udp_path(path(3, 1, "udp-relay", PathState::Active))
+            .expect("UDP path");
+        assert!(state.status().connected);
+        assert_eq!(state.status().active_contexts, 1);
+        assert_eq!(registry.snapshot().active_route_contexts, 1);
+        assert_eq!(state.status().mpquic_paths, 0);
+        assert_eq!(registry.snapshot().mpquic_paths, 0);
+        state
+            .replace_mpquic_paths(vec![
+                path(7, 1, "relay-one", PathState::Active),
+                path(7, 2, "relay-two", PathState::Active),
+            ])
+            .expect("independent MPQUIC paths");
+        assert_eq!(state.status().active_contexts, 2);
+        state.clear_single_udp_path();
+        assert_eq!(state.status().active_contexts, 1);
+        assert_eq!(state.status().mpquic_paths, 2);
+        assert_eq!(state.path_list().paths.len(), 2);
+        state.clear_mpquic_paths();
+        assert!(!state.status().connected);
+        assert_eq!(registry.snapshot().active_route_contexts, 0);
+    }
+
+    #[test]
+    fn invalid_single_udp_projection_preserves_exact_existing_path() {
+        let config = Config::default();
+        let mut state =
+            AgentState::new(&config, config.roles, None, MetricsRegistry::new()).expect("state");
+        let original = path(3, 1, "udp-relay", PathState::Active);
+        state
+            .replace_single_udp_path(original.clone())
+            .expect("UDP path");
+        let mut invalid = original.clone();
+        invalid.relay_peer_id.clone_from(&invalid.exit_peer_id);
+        assert!(matches!(
+            state.replace_single_udp_path(invalid),
+            Err(StateError::InvalidSingleUdpPath)
+        ));
+        assert_eq!(state.path_list().paths, vec![original]);
+        state.clear_after_helper_cleanup(&config).expect("cleanup");
+        assert!(!state.has_network_state());
+        assert!(!state.status().connected);
     }
 }

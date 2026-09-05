@@ -4475,7 +4475,7 @@ impl DiscoveryRuntime {
                     );
                 }
                 if step.last {
-                    self.provider_queries.remove(&id);
+                    self.finish_provider_query(id);
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
@@ -4499,7 +4499,7 @@ impl DiscoveryRuntime {
                 kad::Event::OutboundQueryProgressed { id, step, .. },
             )) => {
                 if step.last {
-                    self.provider_queries.remove(&id);
+                    self.finish_provider_query(id);
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Advertisements(
@@ -4633,12 +4633,33 @@ impl DiscoveryRuntime {
         self.schedule_exit_advertisement_fetches();
     }
 
+    fn finish_provider_query(&mut self, id: kad::QueryId) {
+        if self.provider_queries.remove(&id) == Some(ProviderQueryKind::Exit) {
+            // The service coalesces same-capability queries. Partition only after its complete
+            // result stream, including terminal events with no additional provider records.
+            self.schedule_relay_advertisement_fetches(unix_millis());
+            self.schedule_exit_advertisement_fetches();
+        }
+    }
+
     fn schedule_relay_advertisement_fetches(&mut self, now_ms: u64) {
-        if self.roles.client && self.roles.relay && self.roles.exit {
+        if self.roles.client && self.roles.relay {
             // On a homogeneous network the Relay and Exit provider indexes contain the same
             // peers. Fetching every Relay advertisement first would irreversibly associate every
             // possible Exit directly with this Client. Reserve a sticky, bounded portion before
             // making those requests. Provider-result order does not decide the privacy boundary.
+            // This also applies to local-only consumers: not offering Exit service themselves
+            // must not make them directly contact every available remote Exit as a Relay.
+            if self.reserved_provider_exit_peers.is_empty()
+                && self
+                    .provider_queries
+                    .values()
+                    .any(|kind| *kind == ProviderQueryKind::Exit)
+            {
+                // A streamed result may contain only adjacent peers before the opposite peer
+                // arrives. Do not turn that partial observation into a sticky privacy boundary.
+                return;
+            }
             self.reserve_provider_exit_candidates(now_ms);
             if self.reserved_provider_exit_peers.is_empty() {
                 return;
@@ -4680,7 +4701,27 @@ impl DiscoveryRuntime {
         let target_count = (self.exit_provider_peers.len() / 3)
             .max(1)
             .min(self.candidate_limit.max(1));
+        // These endpoints come only from authenticated ConnectionEstablished events, not DHT
+        // provider records. Connectivity is a preference, never signed service authority.
+        let directly_connected = self
+            .observed_endpoints
+            .iter()
+            .filter_map(|(peer, (endpoint, _))| {
+                (!endpoint.contains("/p2p-circuit")).then_some(*peer)
+            })
+            .collect::<HashSet<_>>();
         let mut peers = self.exit_provider_peers.keys().copied().collect::<Vec<_>>();
+        let has_provider_only_exit = peers.iter().any(|peer| {
+            !directly_connected.contains(peer)
+                && self.forwarded_exit_peer_is_eligible(*peer, now_ms)
+        });
+        // Keep existing reservations private even if the topology changed. A newly discovered
+        // provider-only Exit can still be reserved when an earlier fallback reserved a neighbor.
+        let mut preferred_count = self
+            .reserved_provider_exit_peers
+            .keys()
+            .filter(|peer| !has_provider_only_exit || !directly_connected.contains(peer))
+            .count();
         // Selection is local to each Client, not a network-wide permanent Relay/Exit class.
         peers.sort_by_cached_key(|peer| {
             let mut hash = Sha256::new();
@@ -4690,14 +4731,18 @@ impl DiscoveryRuntime {
             <[u8; 32]>::from(hash.finalize())
         });
         for peer in peers {
-            if self.reserved_provider_exit_peers.len() >= target_count {
+            if preferred_count >= target_count
+                || self.reserved_provider_exit_peers.len() >= self.candidate_limit.max(1)
+            {
                 break;
             }
-            if !self.reserved_provider_exit_peers.contains_key(&peer)
+            if (!has_provider_only_exit || !directly_connected.contains(&peer))
+                && !self.reserved_provider_exit_peers.contains_key(&peer)
                 && self.forwarded_exit_peer_is_eligible(peer, now_ms)
             {
                 self.reserved_provider_exit_peers
                     .insert(peer, self.exit_provider_peers[&peer]);
+                preferred_count += 1;
             }
         }
     }
@@ -19688,12 +19733,14 @@ mod tests {
 
     #[tokio::test]
     async fn combined_role_provider_partition_keeps_exit_and_two_relays_in_either_event_order() {
-        let combined_roles = RolesConfig {
-            client: true,
-            relay: true,
-            exit: true,
-        };
-        for relay_first in [true, false] {
+        for (offers_exit, relay_first) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let combined_roles = RolesConfig {
+                client: true,
+                relay: true,
+                exit: offers_exit,
+            };
             let mut fixture = fixture(combined_roles);
             let peers = (0..3)
                 .map(|_| *Identity::generate().peer_id())
@@ -19749,6 +19796,148 @@ mod tests {
             assert!(fixture.runtime.direct_relays.is_empty());
             assert!(fixture.runtime.forwarded_exits.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn provider_partition_preserves_square_neighbors_after_a_complete_result_stream() {
+        for offers_exit in [true, false] {
+            let mut fixture = fixture(RolesConfig {
+                client: true,
+                relay: true,
+                exit: offers_exit,
+            });
+            let neighbors = [
+                *Identity::generate().peer_id(),
+                *Identity::generate().peer_id(),
+            ];
+            let opposite = *Identity::generate().peer_id();
+            for peer in neighbors {
+                fixture
+                    .runtime
+                    .observed_endpoints
+                    .insert(peer, ("/ip4/44.12.34.1/udp/41000/quic-v1".to_owned(), None));
+            }
+            // Relay and Exit queries are independent; duplicate Exit queries are coalesced.
+            let mut queries = Vec::new();
+            for (capability_key, kind) in [
+                (capability::EXIT, ProviderQueryKind::Exit),
+                (capability::RELAY, ProviderQueryKind::Relay),
+            ] {
+                let query = fixture
+                    .runtime
+                    .service
+                    .find_providers(capability_key)
+                    .unwrap();
+                fixture.runtime.provider_queries.insert(query, kind);
+                queries.push(query);
+            }
+            fixture.runtime.handle_provider_peers(
+                ProviderQueryKind::Relay,
+                HashSet::from([neighbors[0], neighbors[1], opposite]),
+            );
+            fixture
+                .runtime
+                .handle_provider_peers(ProviderQueryKind::Exit, HashSet::from([neighbors[0]]));
+            assert!(fixture.runtime.reserved_provider_exit_peers.is_empty());
+            assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+            fixture.runtime.handle_provider_peers(
+                ProviderQueryKind::Exit,
+                HashSet::from([neighbors[1], opposite]),
+            );
+            assert!(fixture.runtime.reserved_provider_exit_peers.is_empty());
+            fixture.runtime.finish_provider_query(queries[0]);
+            assert_eq!(fixture.runtime.provider_queries.len(), 1);
+            assert_eq!(fixture.runtime.reserved_provider_exit_peers.len(), 1);
+            assert!(
+                fixture
+                    .runtime
+                    .reserved_provider_exit_peers
+                    .contains_key(&opposite)
+            );
+            assert_eq!(
+                fixture
+                    .runtime
+                    .relay_advertisement_requests
+                    .values()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                HashSet::from(neighbors)
+            );
+            assert!(fixture.runtime.direct_relays.is_empty());
+            assert!(fixture.runtime.forwarded_exits.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_partition_all_connected_fallback_is_deterministic_and_can_expand_privately() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        });
+        let peers = (0..3)
+            .map(|_| *Identity::generate().peer_id())
+            .collect::<HashSet<_>>();
+        for peer in &peers {
+            fixture.runtime.observed_endpoints.insert(
+                *peer,
+                ("/ip4/44.12.34.1/udp/41000/quic-v1".to_owned(), None),
+            );
+        }
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Exit, peers.clone());
+        let first_partition = fixture.runtime.reserved_provider_exit_peers.clone();
+        assert_eq!(first_partition.len(), 1);
+        fixture.runtime.reserved_provider_exit_peers.clear();
+        fixture
+            .runtime
+            .reserve_provider_exit_candidates(unix_millis());
+        assert_eq!(
+            fixture.runtime.reserved_provider_exit_peers,
+            first_partition
+        );
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, peers);
+        assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 2);
+
+        let opposite = *Identity::generate().peer_id();
+        // A logical connection through Circuit Relay is not a directly connected neighbor.
+        fixture.runtime.observed_endpoints.insert(
+            opposite,
+            (
+                format!(
+                    "/ip4/44.12.34.1/udp/41000/quic-v1/p2p/{}/p2p-circuit",
+                    fixture.runtime.service.local_peer_id()
+                ),
+                None,
+            ),
+        );
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Exit, HashSet::from([opposite]));
+        assert!(
+            fixture
+                .runtime
+                .reserved_provider_exit_peers
+                .contains_key(&opposite)
+        );
+        assert!(first_partition.keys().all(|peer| {
+            fixture
+                .runtime
+                .reserved_provider_exit_peers
+                .contains_key(peer)
+        }));
+        assert!(
+            fixture
+                .runtime
+                .relay_advertisement_requests
+                .values()
+                .all(|peer| *peer != opposite)
+        );
+        assert!(fixture.runtime.direct_relays.is_empty());
+        assert!(fixture.runtime.forwarded_exits.is_empty());
     }
 
     #[tokio::test]

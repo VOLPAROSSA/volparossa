@@ -7,10 +7,12 @@ for test-backed completion evidence.
 ## Reciprocal peer participation (revised 2026-09-05)
 
 All network nodes run the same software. A production node consuming client service must also
-offer both relay and policy-limited exit service with nonzero capacity. This supersedes the older
+offer relay service with nonzero capacity and, when it has its own usable Internet uplink,
+policy-limited exit service. Local-only nodes contribute direct connectivity and forwarding
+without pretending to provide independent Internet egress. This supersedes the older
 optional client-only participation model. Installation leaves all roles disabled; participation is
 an explicit configuration accepting bandwidth contribution and allowed egress through the node's
-public address. Role-isolated development fixtures are for boundary testing, not an alternative
+public address when one exists. Role-isolated development fixtures are for boundary testing, not an alternative
 production participation mode. There are no required central relay or exit servers.
 
 Roles are functions of a node, not permanent network classes. For each route the client, each
@@ -19,6 +21,11 @@ datapath, unrestricted egress, or bypassing the common signed whitelist. The nat
 process roles remain immutable and isolated even when both workers run on the same user node.
 The implementation status must separately record combined-role runtime and topology verification;
 these requirements are not a claim that those checks have passed.
+
+The [direct-link extension](LOCAL_LINK_NETWORK.md) adds local Ethernet/Wi-Fi underlays to the
+same route model. Local links do not authorize a direct Client--Exit datapath. Independence
+and spare capacity must be measured: two relays sharing one uplink or radio channel do not
+automatically provide additive throughput.
 
 ## Trust and process boundaries
 
@@ -134,8 +141,9 @@ That order is normative: no final relay is selected without real probe evidence,
 finalization precedes helper `Prepare`, and no local path is activated before every exact signed
 confirmation receipt exists. A received fail-closed `Unavailable` is a failed setup; only a truly
 ambiguous transport outcome permits an exact-byte retry within the original deadline and expiry.
-Production currently cannot complete the real probe or helper steps, so this sequence is a design
-and protocol boundary rather than an operational route claim.
+The Debian 13 role-isolated topology now exercises these production probe/helper steps through
+real MPTCP and MPQUIC traffic. Combined-role and local-only operation require their own runtime
+evidence; see the exact-revision checkpoint in IMPLEMENTATION_STATUS.md.
 
 Reservation messages bind the fresh `client_session_id`, random route-context ID, and path ID but
 carry no permanent client identity, overlay prefix, or overlay host address. Client, relay, and exit

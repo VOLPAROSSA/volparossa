@@ -8,28 +8,38 @@ Last updated: 2026-09-05
 
 The detailed historical checklist below has not yet been reconciled with the complete
 vertical runtime. It must not be read as a current measurement of elapsed work.
-The latest retained [Debian 13 KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33743981933)
-at `1ebbf976` passed A01--A06 and A15, including a real two-relay HTTP/3 transfer;
-A07 failed during the 32 MiB active-transfer relay-removal case. Later cases were not
-reached. The last pushed candidate `5968efec` passed
-[Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33746672039) and
-[CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33746669221).
+The latest retained [Debian 13 KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972373384)
+at `0075033e` passed A01--A07 and A15. A07 completed its 4 MiB HTTP/3 request and
+32 MiB response after one relay was physically removed, with matching application hashes,
+data on both paths before removal, data on the surviving path afterwards, and zero direct
+Client--Exit packets. The run then stopped at `A08_ALLOWED_DNS_UDP_NOT_PROVEN`:
+the generated Python DNS client lacked a shebang and was interpreted as shell code.
+That fixture correction still requires a live rerun; A08--A14 remain unproven in this run.
+`0075033e` also passed
+[Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972360525) and
+[CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972358060).
 This is partial evidence, not an all-A01--A15 alpha pass.
 
 The current A07 correction gives a browser flow an explicit signature bounded by its
 route, manifest and protocol lifetime, rather than the unrelated 60-second ingress
 token. Expired or idle Exit browser flows are retired independently of other flows
-sharing the same native connection. Live failover verification of this correction is
-still pending; A07 remains unchecked.
+sharing the same native connection. The live A07 result above verifies this correction;
+it is not evidence for the separate combined-role or local-link extensions.
 
 ## Reciprocal participation revision (2026-09-05)
 
 The user changed production participation from optional contribution to mandatory reciprocity:
-any consuming Client must also offer Relay AND Exit service. Installation is dormant; explicit
+any consuming Client must also offer Relay service and, when it has its own usable Internet
+uplink, Exit service. The later same-day clarification permits a node without its own uplink
+to contribute direct links and forwarding instead; it must not advertise fictitious Internet
+egress. Installation is dormant; explicit
 configuration enables contribution with nonzero capacity and the existing policy prerequisites.
 All nodes use the same software. Development fixtures may still isolate roles to test boundaries.
 
-- [x] Production config rejects client-only/partial contribution; the default config is dormant.
+- [x] Production config rejects client-only consumption; the default config is dormant.
+- [x] Explicit `network.uplink` capability declaration: `local_only` permits Client + Relay
+  configuration without fabricated ASN/public origin, and forbids Exit mode. This is config
+  validation, not runtime connectivity proof or automatic uplink detection.
 - [x] CLI/wire/agent honor Client disable; dormant Connect is rejected before route work.
 - [x] One packaged node supervises separate immutable native Client and Exit workers/sockets.
 - [x] Local Client candidate/provenance state is separate from Relay forwarding and Exit incoming
@@ -38,9 +48,18 @@ All nodes use the same software. Development fixtures may still isolate roles to
 - [ ] Live reciprocal datapath proof: the same participant daemons concurrently consume the
   network and carry other participants' Relay and policy-limited Exit traffic.
 
-Verification for the implemented items: 369 agent library tests, 18 config tests, the Client
+Verification for the initial combined-role implementation: 369 agent library tests, 18 config tests, the Client
 wire/CLI cases, strict Clippy for the changed Rust packages, and the combined native launcher
 functional smoke passed locally. This does not substitute for the unchecked live datapath proof.
+The capability declaration passed all 20 config tests and strict config/agent Clippy; focused
+UDP path projection checks verify that general UDP reports one live native context without
+claiming an MPQUIC path count. Local-only consumers retain the same forwarded-only Exit
+candidate partition as consumers offering all three roles.
+The disposable `reciprocity` scenario now starts four simultaneous participant flows and
+separately verifies application hashes, selected WireGuard legs, exit source addresses and
+unchanged agent processes. Its script/evidence-parser checks pass; live execution is pending.
+The workflow defaults to `datapath` (all A01--A15 without package/release work); `alpha` retains
+the additional package checks, and `reciprocity` emits only its own clearly scoped report.
 The historical scorecard below predates the vertical runtime and this participation revision;
 do not use its old percentage as a current completion estimate.
 
@@ -49,6 +68,24 @@ During this phase use compilation and focused functional checks; defer additiona
 hardening, exhaustive repeated regression runs, optimization and polish. Real datapaths,
 route-specific privacy/policy enforcement and disposable-network cleanup remain functional
 requirements, never labels that can be satisfied by mocks or configuration alone.
+
+## Direct-link network extension (agreed 2026-09-05)
+
+The functional-development target now includes direct Ethernet and Wi-Fi peer links alongside
+Internet underlays, Internet access for a node without its own uplink through reachable
+contributors, and parallel use of independently useful local and Internet paths. Contribution
+is mandatory according to available capabilities. Owner traffic takes priority over contributed
+traffic; spare capacity must be measured and enforced, not inferred from configured limits alone.
+
+- [ ] Local on-link authenticated discovery and two-leg datapaths without a client default route.
+- [ ] Per-path underlay/interface binding for simultaneous local and Internet paths.
+- [ ] Driver-supported direct Wi-Fi link setup, teardown and real-radio transfer proof.
+- [ ] Measured spare-capacity sharing with owner-priority enforcement under competing traffic.
+- [ ] Offline participation, uplink arrival/loss and no recursive overlay-as-exit egress.
+
+mDNS discovery exists, but current public-endpoint, default-route and origin-provenance checks
+do not yet yield a working local-only datapath. No direct-radio or phone-without-SIM support is
+claimed by the existing Debian KVM evidence. See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
 

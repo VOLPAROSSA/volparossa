@@ -11,11 +11,19 @@ GUEST=$HERE/kvm-alpha-topology.sh
 HOST=$HERE/run-alpha-topology-vm.sh
 GENERATOR=$HERE/generate-alpha-acceptance-report.sh
 WORKFLOW=$HERE/../../.github/workflows/alpha-topology.yml
+RECIPROCITY=$HERE/reciprocity-smoke.sh
+RECIPROCITY_PY=$HERE/reciprocity-smoke.py
 
 for script in "$GUEST" "$HOST"; do
     [ -f "$script" ] && [ -x "$script" ] && [ ! -L "$script" ]
     sh -n "$script"
     "$script" --preview | grep -F 'PREVIEW ONLY:' >/dev/null
+    "$script" --preview --scenario reciprocity | grep -Fi 'recipro' >/dev/null
+    set +e
+    "$script" --preview --scenario unsupported >/dev/null 2>&1
+    invalid_scenario_status=$?
+    set -e
+    [ "$invalid_scenario_status" -eq 64 ]
     set +e
     "$script" --execute >/dev/null 2>&1
     invalid_status=$?
@@ -83,7 +91,8 @@ grep -F 'launch_mpquic client "$CLIENT" client' "$GUEST" >/dev/null
 grep -F 'launch_mpquic exit "$EXIT_NODE" exit' "$GUEST" >/dev/null
 grep -F 'launch_mpquic exit2 "$EXIT2_NODE" exit' "$GUEST" >/dev/null
 if grep -Eq 'launch_mpquic relay[012]' "$GUEST"; then exit 1; fi
-grep -F -- '--socket /run/volparossa/native/mpquic.sock' "$GUEST" >/dev/null
+grep -F 'native_socket=/run/volparossa/native/mpquic.sock' "$GUEST" >/dev/null
+grep -F -- '--socket "$native_socket"' "$GUEST" >/dev/null
 grep -F 'native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records}' \
     "$GUEST" >/dev/null
 grep -F 'and ($destination.peer_completion_observed == true)' "$GUEST" >/dev/null
@@ -233,6 +242,14 @@ grep -F '"$WORK/tls-policy/tls-policy-cert.der"' "$GUEST" >/dev/null
 grep -F 'destination.volparossa.test' "$GUEST" >/dev/null
 grep -F '"$WORK/bin/dns-policy-client.py" udp "$RUN_ID"' "$GUEST" >/dev/null
 grep -F '"$WORK/bin/dns-policy-client.py" tcp "$RUN_ID"' "$GUEST" >/dev/null
+# setpriv executes this fixture directly: without a shebang it becomes shell input.
+awk '
+    /^cat >"\$WORK\/bin\/dns-policy-client\.py"/ {
+        if (getline <= 0 || $0 != "#!/usr/bin/python3") exit 1
+        found = 1
+    }
+    END { if (!found) exit 1 }
+' "$GUEST"
 grep -F 'event=INGRESS_DNS_QUERY_COMPLETED' "$GUEST" >/dev/null
 grep -F 'event=INGRESS_DNS_TCP_QUERY_COMPLETED' "$GUEST" >/dev/null
 grep -F 'and ($dns_udp.response_source == $dns_udp.resolver)' "$GUEST" >/dev/null
@@ -347,4 +364,113 @@ grep -F '"$output_directory/acceptance-report.json"' "$GUEST" >/dev/null
 grep -F 'Validate normative acceptance report before upload' "$WORKFLOW" >/dev/null
 grep -F 'tests/integration/validate-report.sh "$report"' "$WORKFLOW" >/dev/null
 
-printf '%s\n' 'KVM alpha topology static contract passed'
+[ -f "$RECIPROCITY" ] && [ ! -L "$RECIPROCITY" ]
+"$HOST" --preview --scenario datapath | grep -F 'full A01-A15 functional topology' >/dev/null
+grep -F 'default: datapath' "$WORKFLOW" >/dev/null
+[ -f "$RECIPROCITY_PY" ] && [ ! -L "$RECIPROCITY_PY" ]
+sh -n "$RECIPROCITY"
+grep -F 'for native_node in client relay0 relay2 exit; do' "$GUEST" >/dev/null
+grep -F 'launch_mpquic "$native_node" "$native_namespace" client' "$GUEST" >/dev/null
+grep -F 'launch_mpquic "$native_node" "$native_namespace" exit' "$GUEST" >/dev/null
+grep -F 'reciprocity_finalize_report "$original_status"' "$GUEST" >/dev/null
+grep -F 'report_kind:"volparossa-reciprocal-node-runtime"' "$RECIPROCITY" >/dev/null
+grep -F 'connect --transport single-path-udp' "$RECIPROCITY" >/dev/null
+grep -F 'reciprocity_agent_snapshot before' "$RECIPROCITY" >/dev/null
+grep -F 'reciprocity_agent_snapshot after' "$RECIPROCITY" >/dev/null
+grep -F 'Require real reciprocal runtime evidence' "$WORKFLOW" >/dev/null
+
+# Pure parser/report tests: synthetic evidence stays in a temporary directory and is not a live
+# datapath result. Corrupting each essential witness must fail the same production report gate.
+python3 - "$RECIPROCITY_PY" <<'PYTHON'
+import copy
+import hashlib
+import pathlib
+import socket
+import struct
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1])
+fixture = {"__name__": "reciprocity_contract"}
+exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), fixture)
+nodes = fixture["NODES"]
+run_id = "a" * 32
+peers = {node: "peer-" + node for node in nodes}
+records = {"a01-expected-peers.json": peers, "mpquic-units.json": [
+    {"node": node, "mode": mode, "main_pid": index + 100, "socket_verified": True}
+    for index, (node, mode) in enumerate((node, mode) for node in nodes for mode in ("client", "exit"))]}
+echoes = {}
+paths = {}
+for index, (node, metadata) in enumerate(nodes.items()):
+    for stage in ("before", "after"):
+        records[f"reciprocity-node-{node}-{stage}.json"] = {
+            "agent_pid": 1000 + index, "roles": {"client": True, "relay": True, "exit": True}}
+    records[f"reciprocity-capture-{node}.json"] = {
+        "truncated": False, "packet_socket_drops": 0, "direct_client_exit_packets": 0,
+        "plaintext_leaks": 0, "wireguard_edges": {
+            left["public"] + ">" + right["public"]: 4 for left in nodes.values() for right in nodes.values()},
+        "destination_requests": {name: 4 for name in nodes},
+        "destination_responses": {name: 4 for name in nodes}}
+    payload = fixture["payload_for"](run_id, node)
+    digest = hashlib.sha256(payload).hexdigest()
+    records[f"reciprocity-app/{node}.json"] = {
+        "success": True, "datagrams": 3, "destination": list(fixture["DESTINATION"]),
+        "sent_sha256": digest, "response_sha256": digest, "sent_bytes": len(payload),
+        "response_bytes": len(payload), "first_echo_ns": 100, "last_echo_ns": 3_000_000_100}
+    echoes[node] = {"datagrams": 3, "sha256": digest, "bytes": len(payload),
+                    "source_ips": [nodes[metadata["exit"]]["uplink"]]}
+    paths[node] = f'context={index + 1:032x} path=1 relay={peers[metadata["relays"][0]]} exit={peers[metadata["exit"]]} state=2 rtt_us=1 bytes=300\n'
+records["reciprocity-app/server.json"] = {"destination": list(fixture["DESTINATION"]), "flows": echoes}
+
+with tempfile.TemporaryDirectory(prefix="volparossa-reciprocity-contract-") as temporary:
+    root = pathlib.Path(temporary)
+    (root / "reciprocity-app").mkdir()
+    def evaluate(changed):
+        for name, record in changed.items():
+            fixture["write_json"](root / name, record)
+        for node, path in paths.items():
+            (root / f"reciprocity-paths-{node}.txt").write_text(path, encoding="ascii")
+        return fixture["build_evidence"](root, run_id)
+    result = evaluate(records)
+    assert result["success"] and len(result["flows"]) == 4 and result["reciprocal_witnesses"]
+    def rejected(name, mutate):
+        changed = copy.deepcopy(records)
+        mutate(changed)
+        try:
+            evaluate(changed)
+        except ValueError:
+            return
+        raise AssertionError("accepted missing reciprocal evidence: " + name)
+    rejected("PID replacement", lambda data: data["reciprocity-node-client-after.json"].update(agent_pid=99))
+    rejected("role removed", lambda data: data["reciprocity-node-client-after.json"]["roles"].update(exit=False))
+    rejected("echo substitution", lambda data: data["reciprocity-app/client.json"].update(response_sha256="bad"))
+    rejected("direct source", lambda data: data["reciprocity-app/server.json"]["flows"]["client"].update(source_ips=[nodes["client"]["uplink"]]))
+    rejected("native workers missing", lambda data: data["mpquic-units.json"].pop())
+    rejected("native worker reused", lambda data: data["mpquic-units.json"][0].update(main_pid=data["mpquic-units.json"][1]["main_pid"]))
+    rejected("one WireGuard leg missing", lambda data: data["reciprocity-capture-client.json"].update(wireguard_edges={}))
+    rejected("nonconcurrent flows", lambda data: data["reciprocity-app/client.json"].update(first_echo_ns=3_000_000_000))
+    for field in ("truncated", "packet_socket_drops", "direct_client_exit_packets", "plaintext_leaks"):
+        rejected(field, lambda data, key=field: data["reciprocity-capture-client.json"].update({key: 1}))
+
+assert fixture["parse_path"](paths["client"].replace("bytes=300", "bytes=0"))["native_reported_delivered_bytes"] == 0
+for bad in ("", "context=" + "0" * 32 + " path=1 relay=a exit=b state=2 rtt_us=1 bytes=1", paths["client"].replace("path=1", "path=9"), paths["client"] * 2):
+    try:
+        fixture["parse_path"](bad)
+    except ValueError:
+        continue
+    raise AssertionError("accepted invalid or ambiguous live path")
+
+def frame(payload):
+    udp = struct.pack("!HHHH", 50000, 50001, 8 + len(payload), 0) + payload
+    ipv4 = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
+                       socket.inet_aton("43.159.1.1"), socket.inet_aton("42.158.0.1"))
+    return bytes(12) + b"\x08\x00" + ipv4 + udp
+assert fixture["decode_frame"](frame(b"\x04\0\0\0" + bytes(40)))["wireguard_data"]
+assert not fixture["decode_frame"](frame(b"\x04\0\0\0" + bytes(28)))["wireguard_data"]
+assert not fixture["decode_frame"](frame(b"\x01\0\0\0" + bytes(40)))["wireguard_data"]
+assert fixture["decode_frame"](frame(bytes(48))[:-1]) is None
+assert fixture["decode_frame"](bytes(12)) is None
+print("Reciprocity pure evidence/parser contract passed; no live datapath claim")
+PYTHON
+
+printf '%s\n' 'KVM alpha and reciprocity topology static contract passed'

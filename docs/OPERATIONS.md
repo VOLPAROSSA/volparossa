@@ -108,10 +108,18 @@ The packaged example keeps all roles off, the kill switch on, direct-exit debug 
 plain-TCP fallback off, required MPQUIC paths at two or more, and policy fail-closed. An empty policy
 path means connections fail closed; it is not an allow-all policy.
 
-Production client participation requires `roles.client`, `roles.relay`, and `roles.exit` to be
-explicitly enabled together, with positive relay and exit capacity and a valid policy. Installing
-or initializing the package does not consent to Internet egress. Configure those responsibilities
-in `/etc/volparossa/config.yaml`, run `volparossa config validate`, then start the services or
+Production client participation always requires `roles.relay` and positive relay capacity. With
+`network.uplink: independent_internet` (the default), consumers must also explicitly enable
+`roles.exit`, with positive exit capacity and a valid policy. With `network.uplink: local_only`,
+consumers configure client + relay and must keep exit disabled in production and development:
+Internet access obtained through the overlay must never be offered back as an independent exit.
+The uplink setting is an operator declaration of available capability, not runtime connectivity
+proof, an uptime measurement, or automatic outage detection. Offline/local-mesh discovery and
+private-endpoint routing are not implemented yet; validation of a local-only configuration proves
+intent, not a working offline datapath.
+
+Installing or initializing the package does not consent to Internet egress. Configure those
+responsibilities in `/etc/volparossa/config.yaml`, run `volparossa config validate`, then start the services or
 restart them after changing an existing configuration. Role-isolated development fixtures are
 not a client-only production participation option.
 
@@ -123,9 +131,11 @@ manifest v2 or libp2p Circuit Relay v2, which remains control-plane connectivity
 
 The default dormant configuration may leave `network.operator_id: null`. Enabling relay or exit
 instead requires an explicit operator ID of 1..=128 ASCII letters, digits, `-`, `_`, `.`, or
-`:` plus a non-zero `advertised_asn` and at least one canonical
-`advertised_ipv4_prefix` (`/24`) or `advertised_ipv6_prefix` (`/48`). Region and two-letter country
-claims are explicit untrusted diversity hints. Unknown configuration fields remain rejected.
+`:`. An independent-Internet service node also needs a non-zero `advertised_asn` and at least one
+canonical `advertised_ipv4_prefix` (`/24`) or `advertised_ipv6_prefix` (`/48`). Local-only nodes may
+leave ASN at zero and prefixes unset; do not fabricate public origin information. Any supplied
+prefix must still be canonical. Region and two-letter country claims are explicit untrusted
+diversity hints. Unknown configuration fields remain rejected.
 
 Relay and exit runtimes publish those short-lived signed service claims and provider indexes while
 capacity and policy remain active. Publication does not claim helper preparation, Fresh evidence or
@@ -215,8 +225,9 @@ Role commands validate the proposed change but effective changes require editing
 and restarting the service: the current agent returns `ROLE_RESTART_REQUIRED`, without silently
 changing its active protocols or persisted roles. `role enable client` alone on a dormant
 production node returns `ROLE_PREREQUISITES`; it never silently enables relay or exit service.
-Exit enablement requires explicit valid policy and nonzero configured capacity. Relay enablement
-requires explicit capacity, and both service roles require the operator identity described above.
+Exit enablement requires an independent uplink, explicit valid policy, and nonzero configured
+capacity. Relay enablement requires explicit capacity, and both service roles require the operator
+identity described above.
 `status`,
 `paths`, and `sessions` distinguish configured, validated, active, and real data-carrying paths and
 separate user bytes from tunnel bytes. Output never contains private keys.

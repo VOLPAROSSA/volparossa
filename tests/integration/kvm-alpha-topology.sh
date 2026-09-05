@@ -11,6 +11,7 @@ export PATH
 umask 077
 
 mode=preview
+scenario=alpha
 approval=no
 source_directory=
 binary_directory=
@@ -23,10 +24,25 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity]'
 }
 
 print_plan() {
+    if [ "$scenario" = reciprocity ]; then
+        printf '%s\n' \
+            'VOLPAROSSA reciprocal-node runtime smoke plan:' \
+            '  require the same disposable Debian 13 KVM guest and exact source/native build;' \
+            '  retain twelve disposable namespaces and eleven isolated helper/agent instances;' \
+            '  enable Client, Relay and Exit together on client, relay0, relay2 and exit;' \
+            '  keep other peers dormant; bootstrap contacts have no authority;' \
+            '  add three destination-egress veth links inside the disposable guest namespaces;' \
+            '  launch separate Client and Exit native workers for each participating node;' \
+            '  carry four concurrent application UDP echoes through real one-relay native routes;' \
+            '  bind exact replies, selected contexts, packet counters and same-daemon role evidence;' \
+            '  stop every worker, remove owned networks and verify unchanged guest-root host state;' \
+            '  emit reciprocity-smoke.json; do not claim the full A01-A15 acceptance suite.'
+        return
+    fi
     printf '%s\n' \
         'VOLPAROSSA production-helper alpha topology plan:' \
         '  require one disposable Debian 13 amd64 KVM guest with systemd v257 as PID 1;' \
@@ -63,6 +79,11 @@ while [ "$#" -gt 0 ]; do
             ;;
         --yes)
             approval=yes
+            ;;
+        --scenario)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            case $2 in alpha|reciprocity) scenario=$2 ;; *) usage >&2; exit 64 ;; esac
+            shift
             ;;
         --source)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
@@ -150,6 +171,13 @@ for executable in volparossa volparossa-agent volparossa-helper; do
     [ -x "$binary_directory/$executable" ] \
         || { printf 'required product executable unavailable: %s\n' "$executable" >&2; exit 69; }
 done
+if [ "$scenario" = reciprocity ]; then
+    for reciprocity_fixture in reciprocity-smoke.sh reciprocity-smoke.py; do
+        [ -f "$source_directory/tests/integration/$reciprocity_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$reciprocity_fixture" ] \
+            || { printf 'reciprocity fixture unavailable: %s\n' "$reciprocity_fixture" >&2; exit 69; }
+    done
+fi
 [ -x "$binary_directory/examples/acceptance-policy-fixture" ] \
     || { printf '%s\n' 'acceptance policy fixture unavailable' >&2; exit 69; }
 [ -x "$binary_directory/examples/http3-acceptance-fixture" ] \
@@ -302,6 +330,7 @@ PRIVACY_RELAY1_PID=
 PRIVACY_RELAY2_PID=
 PRIVACY_EXIT_PID=
 FINALIZED=no
+RECIPROCITY_PIDS=
 
 capture_host_state() {
     host_state_output=$1
@@ -462,7 +491,9 @@ capture_worker_network_diagnostics() {
     diagnostic_label=${1:-cleanup}
     printf 'capture=%s\n' "$diagnostic_label" \
         >>"$WORK/worker-network-diagnostics.txt"
-    for diagnostic_node in client relay1 relay2 exit; do
+    diagnostic_nodes='client relay1 relay2 exit'
+    [ "$scenario" != reciprocity ] || diagnostic_nodes='client relay0 relay2 exit'
+    for diagnostic_node in $diagnostic_nodes; do
         diagnostic_unit=volparossa-alpha-helper@$diagnostic_node.service
         diagnostic_cgroup=$(systemctl show --property=ControlGroup --value \
             "$diagnostic_unit" 2>/dev/null || true)
@@ -784,6 +815,9 @@ cleanup() {
     [ "$FINALIZED" = no ] || exit "$original_status"
     FINALIZED=yes
     trap - EXIT HUP INT TERM
+    if [ "$scenario" = reciprocity ]; then
+        reciprocity_stop_processes
+    fi
 
     if [ -n "$TLS_POLICY_SERVER_PID" ]; then
         kill -TERM "$TLS_POLICY_SERVER_PID" 2>/dev/null || true
@@ -916,7 +950,8 @@ cleanup() {
         relay5 exit exit2; do
         rm -f -- "$WORK/runtime-$cleanup_node/helper.sock" \
             "$WORK/runtime-$cleanup_node/control/agent.sock" \
-            "$WORK/runtime-$cleanup_node/native/mpquic.sock"
+            "$WORK/runtime-$cleanup_node/native/mpquic.sock" \
+            "$WORK/runtime-$cleanup_node/native/mpquic.sock.exit"
     done
     remaining_runtime_sockets=$(find "$WORK"/runtime-* -type s -print \
         | awk 'END { print NR + 0 }')
@@ -1047,14 +1082,18 @@ cleanup() {
     fi
     copy_artifacts
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    write_report "$original_status"
-    if [ "$original_status" -eq 0 ]; then
-        if ! "$source_directory/tests/integration/generate-alpha-acceptance-report.sh" \
-            "$output_directory/report.json" \
-            "$output_directory/acceptance-report.json"; then
-            original_status=1
-            OBSERVED_BLOCKER=NORMATIVE_ACCEPTANCE_REPORT_INVALID
-            write_report "$original_status"
+    if [ "$scenario" = reciprocity ]; then
+        reciprocity_finalize_report "$original_status" || original_status=1
+    else
+        write_report "$original_status"
+        if [ "$original_status" -eq 0 ]; then
+            if ! "$source_directory/tests/integration/generate-alpha-acceptance-report.sh" \
+                "$output_directory/report.json" \
+                "$output_directory/acceptance-report.json"; then
+                original_status=1
+                OBSERVED_BLOCKER=NORMATIVE_ACCEPTANCE_REPORT_INVALID
+                write_report "$original_status"
+            fi
         fi
     fi
     exit "$original_status"
@@ -1069,6 +1108,11 @@ fail() {
     printf 'alpha KVM topology failed in %s: %s\n' "$PHASE" "$1" >&2
     exit 1
 }
+
+if [ "$scenario" = reciprocity ]; then
+    # shellcheck source=tests/integration/reciprocity-smoke.sh
+    . "$source_directory/tests/integration/reciprocity-smoke.sh"
+fi
 
 PHASE=host-state-before
 A15_REQUESTED=true
@@ -1271,6 +1315,9 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
+if [ "$scenario" = reciprocity ]; then
+    reciprocity_extend_network
+fi
 TOPOLOGY_READY=true
 
 PHASE=configuration
@@ -1341,6 +1388,34 @@ write_config() {
         exit) advertised_asn=64514; advertised_prefix=46.162.3.0/24 ;;
         exit2) exit_capacity=1; advertised_asn=64518; advertised_prefix=51.167.7.0/24 ;;
     esac
+    if [ "$scenario" = reciprocity ]; then
+        case $node in
+            client|relay0|relay2|exit)
+                client_role=true; relay_role=true; exit_role=true
+                relay_capacity=32; exit_capacity=32
+                if [ "$node" = client ]; then
+                    operator=acceptance-client; advertised_asn=64510
+                    advertised_prefix=43.159.1.0/24
+                fi
+                ;;
+            *) client_role=false; relay_role=false; exit_role=false
+               relay_capacity=0; exit_capacity=0 ;;
+        esac
+        # Replaceable authenticated neighbors, not forced Relay/Exit selections. The same square
+        # has two one-relay paths to each opposite participant and no direct opposite-peer link.
+        case $node in
+            client|exit)
+                bootstrap_one="/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER"
+                bootstrap_two="/ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER"
+                bootstrap_three=none
+                ;;
+            relay0|relay2)
+                bootstrap_one="/ip4/43.159.1.1/udp/41000/quic-v1/p2p/$CLIENT_PEER"
+                bootstrap_two="/ip4/46.162.3.1/udp/41000/quic-v1/p2p/$EXIT_PEER"
+                bootstrap_three=none
+                ;;
+        esac
+    fi
     {
         printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-alpha-%s\n' "$RUN_ID"
         printf '  protocol_version: 4\n  advertisement_ttl_seconds: 300\n'
@@ -1577,6 +1652,12 @@ launch_mpquic() {
     node=$1; namespace=$2; native_mode=$3
     mpquic_unit=volparossa-alpha-mpquic@$node.service
     mpquic_log=$WORK/mpquic-$node.log
+    native_socket=/run/volparossa/native/mpquic.sock
+    if [ "$scenario" = reciprocity ]; then
+        mpquic_unit=volparossa-alpha-mpquic@$node-$native_mode.service
+        mpquic_log=$WORK/mpquic-$node-$native_mode.log
+        [ "$native_mode" != exit ] || native_socket=$native_socket.exit
+    fi
     : >"$mpquic_log"
     chown "$AGENT_UID:$AGENT_GID" "$mpquic_log"
     chmod 0600 "$mpquic_log"
@@ -1629,12 +1710,19 @@ launch_mpquic() {
         --property="StandardOutput=append:$mpquic_log" \
         --property="StandardError=append:$mpquic_log" \
         "$mpquic_binary" --mode "$native_mode" \
-        --socket /run/volparossa/native/mpquic.sock >/dev/null
+        --socket "$native_socket" >/dev/null
 }
 
 verify_mpquic() {
     node=$1; namespace=$2; native_mode=$3
     mpquic_unit=volparossa-alpha-mpquic@$node.service
+    native_socket=$WORK/runtime-$node/native/mpquic.sock
+    native_record=$WORK/mpquic-record-$node.json
+    if [ "$scenario" = reciprocity ]; then
+        mpquic_unit=volparossa-alpha-mpquic@$node-$native_mode.service
+        native_record=$WORK/mpquic-record-$node-$native_mode.json
+        [ "$native_mode" != exit ] || native_socket=$native_socket.exit
+    fi
     attempt=0
     while [ "$attempt" -lt 300 ]; do
         mpquic_state=$(systemctl show --property=ActiveState --value \
@@ -1642,14 +1730,14 @@ verify_mpquic() {
         mpquic_substate=$(systemctl show --property=SubState --value \
             "$mpquic_unit" 2>/dev/null || true)
         [ "$mpquic_state:$mpquic_substate" = active:running ] \
-            && [ -S "$WORK/runtime-$node/native/mpquic.sock" ] && break
+            && [ -S "$native_socket" ] && break
         case $mpquic_state in failed|inactive) break ;; esac
         sleep 0.1
         attempt=$((attempt + 1))
     done
     [ "$mpquic_state:$mpquic_substate" = active:running ] \
         || fail "MPQUIC_SERVICE_UNAVAILABLE_$node"
-    [ -S "$WORK/runtime-$node/native/mpquic.sock" ] \
+    [ -S "$native_socket" ] \
         || fail "MPQUIC_SOCKET_UNAVAILABLE_$node"
     mpquic_pid=$(systemctl show --property=MainPID --value "$mpquic_unit")
     case $mpquic_pid in ''|0|*[!0-9]*) fail "MPQUIC_MAINPID_INVALID_$node" ;; esac
@@ -1660,7 +1748,7 @@ verify_mpquic() {
     [ "$(readlink -f -- "/proc/$mpquic_pid/exe")" = "$mpquic_binary" ] \
         || fail "MPQUIC_EXECUTABLE_MISMATCH_$node"
     socket_meta=$(stat -Lc '%F:%u:%g:%a' \
-        "$WORK/runtime-$node/native/mpquic.sock")
+        "$native_socket")
     [ "$socket_meta" = "socket:$AGENT_UID:$AGENT_GID:600" ] \
         || fail "MPQUIC_SOCKET_METADATA_$node"
     jq -S -c -n --arg node "$node" --arg unit "$mpquic_unit" \
@@ -1668,15 +1756,25 @@ verify_mpquic() {
         --arg namespace_identity "$process_net" --argjson pid "$mpquic_pid" \
         '{node:$node,unit:$unit,mode:$mode,main_pid:$pid,
           network_namespace:$namespace,network_namespace_identity:$namespace_identity,
-          api_version:6,socket_verified:true}' >"$WORK/mpquic-record-$node.json"
+          api_version:6,socket_verified:true}' >"$native_record"
 }
 
-launch_mpquic client "$CLIENT" client
-launch_mpquic exit "$EXIT_NODE" exit
-launch_mpquic exit2 "$EXIT2_NODE" exit
-verify_mpquic client "$CLIENT" client
-verify_mpquic exit "$EXIT_NODE" exit
-verify_mpquic exit2 "$EXIT2_NODE" exit
+if [ "$scenario" = reciprocity ]; then
+    for native_node in client relay0 relay2 exit; do
+        native_namespace=$(reciprocity_namespace "$native_node")
+        launch_mpquic "$native_node" "$native_namespace" client
+        launch_mpquic "$native_node" "$native_namespace" exit
+        verify_mpquic "$native_node" "$native_namespace" client
+        verify_mpquic "$native_node" "$native_namespace" exit
+    done
+else
+    launch_mpquic client "$CLIENT" client
+    launch_mpquic exit "$EXIT_NODE" exit
+    launch_mpquic exit2 "$EXIT2_NODE" exit
+    verify_mpquic client "$CLIENT" client
+    verify_mpquic exit "$EXIT_NODE" exit
+    verify_mpquic exit2 "$EXIT2_NODE" exit
+fi
 jq -S -c -s . "$WORK"/mpquic-record-*.json >"$WORK/mpquic-units.json"
 MPQUIC_READY=true
 
@@ -2883,6 +2981,11 @@ done
 [ "$agents_running" = yes ] || fail AGENT_OR_DESTINATION_NOT_READY
 AGENTS_READY=true
 DESTINATION_READY=true
+
+if [ "$scenario" = reciprocity ]; then
+    reciprocity_run
+    exit 0
+fi
 
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \

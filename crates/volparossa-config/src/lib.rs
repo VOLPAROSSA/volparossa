@@ -73,7 +73,7 @@ pub struct Config {
     pub runtime_mode: RuntimeMode,
     /// Overlay identity and discovery settings.
     pub network: NetworkConfig,
-    /// Explicit node roles; consuming the network requires offering relay and exit service.
+    /// Explicit node roles; consumers contribute relay service and any independent uplink.
     pub roles: RolesConfig,
     /// Exit and relay selection parameters.
     pub selection: SelectionConfig,
@@ -154,7 +154,7 @@ impl Config {
     /// Returns an error when a field or cross-field safety invariant is violated.
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_exact_version(self.network.protocol_version)?;
-        validate_roles(self.runtime_mode, self.roles)?;
+        validate_roles(self.runtime_mode, self.network.uplink, self.roles)?;
         if let Some(operator_id) = self.network.operator_id.as_deref() {
             OperatorId::new(operator_id).map_err(|_| {
                 validation(
@@ -200,6 +200,17 @@ impl Config {
     }
 }
 
+/// Operator-declared connectivity capability, not a runtime reachability or uptime proof.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkUplink {
+    /// Internet access independent of the overlay; consuming nodes must offer exit service.
+    #[default]
+    IndependentInternet,
+    /// Only local links are available; offering overlay-derived Internet egress is forbidden.
+    LocalOnly,
+}
+
 /// Overlay discovery configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -208,6 +219,8 @@ pub struct NetworkConfig {
     pub name: String,
     /// Strict wire protocol version.
     pub protocol_version: u16,
+    /// Declared uplink capability; local-only routing still requires a future runtime datapath.
+    pub uplink: NetworkUplink,
     /// Canonical operator identity; required only when relay or exit service is enabled.
     pub operator_id: Option<String>,
     /// libp2p listen multiaddresses; empty delegates to safe agent defaults.
@@ -222,7 +235,7 @@ pub struct NetworkConfig {
     pub advertised_region: String,
     /// Self-declared ISO-like country code used only as an untrusted diversity hint.
     pub advertised_country_code: String,
-    /// Self-declared non-zero origin ASN used only as an untrusted diversity hint.
+    /// Self-declared origin ASN hint; zero means unspecified for dormant or local-only nodes.
     pub advertised_asn: u32,
     /// Canonical IPv4 /24 origin hint for service-role selection.
     pub advertised_ipv4_prefix: Option<String>,
@@ -235,6 +248,7 @@ impl Default for NetworkConfig {
         Self {
             name: "VOLPAROSSA".into(),
             protocol_version: PROTOCOL_VERSION,
+            uplink: NetworkUplink::default(),
             operator_id: None,
             listen_addresses: Vec::new(),
             bootstrap_peers: Vec::new(),
@@ -251,12 +265,13 @@ impl Default for NetworkConfig {
 
 /// Explicit network participation roles. Installation is dormant by default.
 ///
-/// A production client must also offer relay and exit service. Service-only nodes are permitted.
+/// A production client must offer relay service and, with an independent uplink, exit service.
+/// Local-only nodes cannot enable exits. Service-only nodes are permitted.
 /// Development mode may isolate roles for disposable integration fixtures.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RolesConfig {
-    /// Permit local client sessions; production requires relay and exit service alongside them.
+    /// Permit local client sessions; production requires contribution matching uplink capability.
     pub client: bool,
     /// Permit authorised relay forwarding.
     pub relay: bool,
@@ -264,11 +279,24 @@ pub struct RolesConfig {
     pub exit: bool,
 }
 
-fn validate_roles(mode: RuntimeMode, roles: RolesConfig) -> Result<(), ConfigError> {
-    if mode == RuntimeMode::Production && roles.client && !(roles.relay && roles.exit) {
+fn validate_roles(
+    mode: RuntimeMode,
+    uplink: NetworkUplink,
+    roles: RolesConfig,
+) -> Result<(), ConfigError> {
+    if uplink == NetworkUplink::LocalOnly && roles.exit {
+        return Err(validation(
+            "roles.exit",
+            "local-only nodes cannot offer exit service; egress requires independent Internet access",
+        ));
+    }
+    if mode == RuntimeMode::Production
+        && roles.client
+        && (!roles.relay || (uplink == NetworkUplink::IndependentInternet && !roles.exit))
+    {
         return Err(validation(
             "roles.client",
-            "client participation requires both relay and exit roles; configure their capacity and policy explicitly",
+            "client participation requires relay service and, with independent Internet access, exit service; configure their capacity and policy explicitly",
         ));
     }
     Ok(())
@@ -627,7 +655,7 @@ fn validate_advertisement_origin(
             ));
         }
     }
-    if roles.relay || roles.exit {
+    if network.uplink == NetworkUplink::IndependentInternet && (roles.relay || roles.exit) {
         if network.advertised_asn == 0 {
             return Err(validation(
                 "network.advertised_asn",
@@ -963,6 +991,7 @@ mod tests {
         let config = Config::default();
         config.validate().expect("defaults must validate");
         assert_eq!(config.network.protocol_version, 4);
+        assert_eq!(config.network.uplink, NetworkUplink::IndependentInternet);
         assert_eq!(config.network.operator_id, None);
         assert!(!config.roles.client);
         assert!(!config.roles.relay);
@@ -1020,34 +1049,126 @@ mod tests {
     }
 
     #[test]
-    fn production_requires_reciprocity_while_disposable_fixtures_can_isolate_roles() {
-        for runtime_mode in [RuntimeMode::Production, RuntimeMode::Development] {
-            for bits in 0_u8..8 {
-                let mut config = explicit_participant_config();
-                config.runtime_mode = runtime_mode;
-                config.roles = RolesConfig {
-                    client: bits & 1 != 0,
-                    relay: bits & 2 != 0,
-                    exit: bits & 4 != 0,
-                };
-                if runtime_mode == RuntimeMode::Production
-                    && config.roles.client
-                    && !(config.roles.relay && config.roles.exit)
-                {
-                    assert!(matches!(
-                        config.validate(),
-                        Err(ConfigError::Validation {
-                            field: "roles.client",
-                            ..
-                        })
-                    ));
-                } else {
-                    config
-                        .validate()
-                        .expect("dormant, donating, or reciprocal node");
+    fn uplink_capability_determines_reciprocity_and_forbids_local_only_exits() {
+        for uplink in [NetworkUplink::IndependentInternet, NetworkUplink::LocalOnly] {
+            for runtime_mode in [RuntimeMode::Production, RuntimeMode::Development] {
+                for bits in 0_u8..8 {
+                    let mut config = explicit_participant_config();
+                    config.network.uplink = uplink;
+                    config.runtime_mode = runtime_mode;
+                    config.roles = RolesConfig {
+                        client: bits & 1 != 0,
+                        relay: bits & 2 != 0,
+                        exit: bits & 4 != 0,
+                    };
+                    let forbidden_field = if uplink == NetworkUplink::LocalOnly && config.roles.exit
+                    {
+                        Some("roles.exit")
+                    } else if runtime_mode == RuntimeMode::Production
+                        && config.roles.client
+                        && (!config.roles.relay
+                            || (uplink == NetworkUplink::IndependentInternet && !config.roles.exit))
+                    {
+                        Some("roles.client")
+                    } else {
+                        None
+                    };
+                    if let Some(expected_field) = forbidden_field {
+                        assert!(
+                            matches!(
+                                config.validate(),
+                                Err(ConfigError::Validation { field, .. }) if field == expected_field
+                            ),
+                            "uplink={uplink:?}, mode={runtime_mode:?}, roles={bits}"
+                        );
+                    } else {
+                        config
+                            .validate()
+                            .expect("dormant, contributing, or isolated development node");
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn local_only_uplink_needs_no_fabricated_origin_or_exit_capacity() {
+        let mut config = explicit_participant_config();
+        config.network.uplink = NetworkUplink::LocalOnly;
+        config.roles.exit = false;
+        config.network.advertised_asn = 0;
+        config.network.advertised_ipv4_prefix = None;
+        config.capacity.exit_upload_limit_mbps = 0;
+        config.capacity.exit_download_limit_mbps = 0;
+        config.capacity.maximum_exit_sessions = 0;
+        config.policy.manifest_path.clear();
+        config
+            .validate()
+            .expect("local contribution without a fake exit or origin");
+        assert_eq!(
+            Config::from_yaml(&config.to_yaml().expect("serialize")).expect("parse"),
+            config
+        );
+
+        for missing in 0..4 {
+            let mut missing_contribution = config.clone();
+            match missing {
+                0 => missing_contribution.capacity.relay_upload_limit_mbps = 0,
+                1 => missing_contribution.capacity.relay_download_limit_mbps = 0,
+                2 => missing_contribution.capacity.maximum_relay_sessions = 0,
+                _ => missing_contribution.network.operator_id = None,
+            }
+            assert!(missing_contribution.validate().is_err());
+        }
+
+        config.network.advertised_ipv4_prefix = Some("10.20.30.1/24".into());
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation {
+                field: "network.advertised_ipv4_prefix",
+                ..
+            })
+        ));
+        config.network.advertised_ipv4_prefix = Some("10.20.30.0/24".into());
+        config.network.advertised_ipv6_prefix = Some("fd00:1234:5678::1/48".into());
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation {
+                field: "network.advertised_ipv6_prefix",
+                ..
+            })
+        ));
+        config.network.advertised_ipv6_prefix = Some("fd00:1234:5678::/48".into());
+        config.network.advertised_asn = 64_512;
+        config
+            .validate()
+            .expect("optional supplied origins remain canonical");
+    }
+
+    #[test]
+    fn uplink_yaml_defaults_round_trips_and_rejects_unknown_capabilities() {
+        assert_eq!(
+            Config::from_yaml("{}")
+                .expect("legacy config")
+                .network
+                .uplink,
+            NetworkUplink::IndependentInternet
+        );
+        for (value, expected) in [
+            ("independent_internet", NetworkUplink::IndependentInternet),
+            ("local_only", NetworkUplink::LocalOnly),
+        ] {
+            let config =
+                Config::from_yaml(&format!("network:\n  uplink: {value}\n")).expect("known uplink");
+            assert_eq!(config.network.uplink, expected);
+            let serialized = config.to_yaml().expect("serialize");
+            assert!(serialized.contains(&format!("uplink: {value}\n")));
+            assert_eq!(Config::from_yaml(&serialized).expect("round trip"), config);
+        }
+        assert!(matches!(
+            Config::from_yaml("network:\n  uplink: automatic\n"),
+            Err(ConfigError::Yaml(_))
+        ));
     }
 
     #[test]
