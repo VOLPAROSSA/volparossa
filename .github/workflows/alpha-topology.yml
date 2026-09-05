@@ -688,7 +688,11 @@ jobs:
             .a14_forced_crash_cleanup.succeeded == true and
             .a14_forced_crash_cleanup.evidence.success == true and
             .a14_forced_crash_cleanup.evidence.owned_before.helper_worker_custody.worker_network_namespace_count >= 4 and
-            .a14_forced_crash_cleanup.evidence.owned_before.helper_worker_custody.helper_fdstore_descriptors >= 8 and
+            (.a14_forced_crash_cleanup.evidence.owned_before.helper_worker_custody |
+              .durable_route_namespace_count >= 4 and .live_ingress_namespace_count == 1 and
+              .worker_network_namespace_count == .durable_route_namespace_count + .live_ingress_namespace_count and
+              .helper_fdstore_descriptors >= (.durable_route_namespace_count * 2) and
+              all(.helper_custody_coverage[]; .fdstore_descriptors >= (.durable_route_namespace_count * 2))) and
             .a14_forced_crash_cleanup.evidence.cleanup.worker_custody_after.referenced_namespace_count == 0 and
             .a14_forced_crash_cleanup.evidence.cleanup.worker_custody_after.remaining_reference_count == 0 and
             .a14_forced_crash_cleanup.evidence.cleanup.remaining_worker_network_namespaces == 0 and

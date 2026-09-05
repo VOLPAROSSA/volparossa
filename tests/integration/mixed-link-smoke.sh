@@ -100,40 +100,9 @@ mixed_link_transient_connect_unavailable() {
 }
 
 mixed_link_select_paths() {
-    # Any of three genuine Relays can initially carry control. Exercise the complete set where
-    # R1/R2 carry data by ordinary bounded reconnects before sending application traffic. Keep
-    # every draw; neither bootstrap contacts nor this fixture force production selection IDs.
-    mixed_selection_deadline=$(($(date +%s) + 240))
-    mixed_selection_attempt=0
-    mixed_selection_draw=0
-    while [ "$mixed_selection_draw" -lt 8 ]; do
-        mixed_seconds=$((mixed_selection_deadline - $(date +%s)))
-        [ "$mixed_seconds" -gt 0 ] || return 1
-        mixed_prefix="$WORK/mixed-link-connect-$mixed_selection_attempt"
-        if timeout --signal=TERM --kill-after=5s "${mixed_seconds}s" \
-            "$binary_directory/volparossa" \
-            --control-socket "$WORK/runtime-client/control/agent.sock" connect \
-            --transport multipath-quic >"$mixed_prefix.out" 2>"$mixed_prefix.err"; then
-            mixed_draw_prefix="mixed-link-selection-$mixed_selection_draw"
-            if capture_native_mpquic_paths "$mixed_draw_prefix" both \
-                && jq -e --arg exit_peer "$EXIT_PEER" '
-                    (.paths | length) == 2 and all(.paths[]; .exit_peer_id == $exit_peer)
-                ' "$WORK/$mixed_draw_prefix.json" >/dev/null \
-                && wait_active_native_mpquic_paths a06-preconnect-native-paths; then
-                return 0
-            fi
-            mixed_selection_draw=$((mixed_selection_draw + 1))
-            "$binary_directory/volparossa" \
-                --control-socket "$WORK/runtime-client/control/agent.sock" disconnect \
-                >"$WORK/$mixed_draw_prefix-disconnect.out" \
-                2>"$WORK/$mixed_draw_prefix-disconnect.err" || return 1
-        else
-            mixed_link_transient_connect_unavailable "$mixed_prefix.err" || return 1
-        fi
-        mixed_selection_attempt=$((mixed_selection_attempt + 1))
-        sleep 1
-    done
-    return 1
+    # All three authenticated Relays remain eligible; draw before the application starts.
+    benchmark_select_route mixed-link multipath-quic \
+        && wait_active_native_mpquic_paths a06-preconnect-native-paths
 }
 
 mixed_link_validate_evidence() {

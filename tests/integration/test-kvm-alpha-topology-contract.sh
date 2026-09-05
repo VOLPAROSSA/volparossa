@@ -194,8 +194,10 @@ grep -F 'after_marker.relay2_wireguard_data_datagrams > 0' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A04",success:$success' "$GUEST" >/dev/null
 grep -F 'a04_mptcp_relay_failover:{requested:$a04_requested,succeeded:$a04_succeeded' "$GUEST" \
     >/dev/null
-grep -F 'a01_transient_connect_unavailable "$WORK/connect-client.err" || break' "$GUEST" \
-    >/dev/null
+grep -F 'benchmark_select_route a05 single-path-udp' "$GUEST" >/dev/null
+grep -F 'benchmark_select_route a02 mptcp' "$GUEST" >/dev/null
+grep -F 'DOWNLOAD_EXPECTED_CONTEXT=' "$GUEST" >/dev/null
+grep -F '"$DOWNLOAD_DESTINATION_CANCEL"' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" server' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" client a06' "$GUEST" >/dev/null
 grep -F 'http3-acceptance-fixture" client a07' "$GUEST" >/dev/null
@@ -205,7 +207,7 @@ grep -F '"$WORK/client-fixtures/http3-cert.der"' "$GUEST" >/dev/null
 grep -F 'connected: false' "$GUEST" >/dev/null
 grep -F 'active contexts: 0' "$GUEST" >/dev/null
 grep -F 'PHASE=a06-preconnect-multipath-route' "$GUEST" >/dev/null
-grep -F -- '--transport multipath-quic' "$GUEST" >/dev/null
+grep -F 'benchmark_select_route a06 multipath-quic' "$GUEST" >/dev/null
 grep -F 'wait_active_native_mpquic_paths a06-preconnect-native-paths' \
     "$GUEST" >/dev/null
 grep -F 'all(.paths[]; .state == 3)' "$GUEST" >/dev/null
@@ -466,6 +468,9 @@ grep -F 'scan_a14_worker_namespace_references()' "$GUEST" >/dev/null
 grep -F 'remaining_a14_helper_fdstore_descriptors()' "$GUEST" >/dev/null
 grep -F '.helper_worker_custody.worker_process_count >= 4' "$GUEST" >/dev/null
 grep -F '.helper_worker_custody.helper_fdstore_descriptors >=' "$GUEST" >/dev/null
+grep -F '(.helper_worker_custody.durable_route_namespace_count * 2)' "$GUEST" >/dev/null
+grep -F 'nsenter --net=/proc/self/fd/9 -- ip -j -details address show' "$GUEST" >/dev/null
+python3 -B "$HERE/test-a14-worker-inventory.py"
 grep -F 'cleanup:{worker_custody_after:$worker_after' "$GUEST" >/dev/null
 grep -F 'remaining_worker_network_namespaces:$worker_namespaces' "$GUEST" >/dev/null
 grep -F 'remaining_worker_namespace_references:$worker_references' "$GUEST" >/dev/null
@@ -688,5 +693,6 @@ sh -n "$HERE/mixed-link-smoke.sh"
 grep -F 'volparossa-mixed-link-runtime' "$WORKFLOW" >/dev/null
 grep -F 'mixed_link_validate_evidence' "$GUEST" >/dev/null
 python3 -B "$HERE/test-mixed-link-smoke.py"
+python3 -B "$HERE/test-benchmark-selection.py"
 python3 -B "$HERE/test-wifi-link-smoke.py"
 printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing and wifi-link topology static contract passed'

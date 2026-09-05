@@ -222,7 +222,7 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
     || { printf '%s\n' 'execution requires a KVM guest' >&2; exit 77; }
 
 for command_name in awk busctl cat chmod chown cut date find getent grep install ip jq kill \
-    mkdir mktemp nft python3 readlink rm runuser rustc sed setpriv sha256sum sleep sort \
+    mkdir mktemp nft nsenter python3 readlink rm runuser rustc sed setpriv sha256sum sleep sort \
     stat systemctl systemd-run systemd-sysusers tail tc timeout tr wg; do
     command -v "$command_name" >/dev/null 2>&1 \
         || { printf 'required guest tool unavailable: %s\n' "$command_name" >&2; exit 69; }
@@ -230,6 +230,11 @@ done
 for executable in volparossa volparossa-agent volparossa-helper; do
     [ -x "$binary_directory/$executable" ] \
         || { printf 'required product executable unavailable: %s\n' "$executable" >&2; exit 69; }
+done
+for benchmark_fixture in benchmark-selection.sh benchmark-paths.py; do
+    [ -f "$source_directory/tests/integration/$benchmark_fixture" ] \
+        && [ ! -L "$source_directory/tests/integration/$benchmark_fixture" ] \
+        || { printf 'benchmark fixture unavailable: %s\n' "$benchmark_fixture" >&2; exit 69; }
 done
 if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
     scenario_fixtures='reciprocity-smoke.sh reciprocity-smoke.py'
@@ -458,6 +463,9 @@ capture_host_state() {
 
 copy_artifacts() {
     for artifact in \
+        benchmark-selection-draws.jsonl a02-selected-paths.json \
+        a03-single-selected-paths.json a03-aggregate-selected-paths.json \
+        a04-selected-paths.json \
         connect-client.out connect-client.err \
         logs-client.txt logs-bootstrap1.txt logs-bootstrap2.txt \
         logs-relay0.txt logs-relay1.txt logs-relay2.txt logs-relay3.txt \
@@ -555,6 +563,8 @@ copy_artifacts() {
         a14-custody-exit-capture-0.json a14-custody-exit-capture.log \
         a14-live-flow.json \
         a14-owned-before.json a14-worker-custody-before.json \
+        a14-worker-custody-before.ndjson a14-helper-custody-before.ndjson \
+        a14-parent-network.json a14-worker-network.json \
         a14-worker-custody-after.json a14-owned-after-paths.txt a14-paths-before.txt \
         a14-crashes.json a14-helper-restarts.json a14-evidence.json \
         host-state-before.json host-state-after.json a15-evidence.json; do
@@ -564,6 +574,9 @@ copy_artifacts() {
         fi
     done
 }
+
+# shellcheck source=tests/integration/benchmark-selection.sh
+. "$source_directory/tests/integration/benchmark-selection.sh"
 
 # Retain the live anonymous worker namespaces on an early datapath failure. This contains only
 # public interface, route, WireGuard-counter and nftables state; private keys are never emitted.
@@ -3122,6 +3135,9 @@ while running:
                 release_path = os.path.join(
                     sys.argv[3], f"download-{case_name}-{attempt}.release"
                 )
+                cancel_path = os.path.join(
+                    sys.argv[3], f"download-{case_name}-{attempt}.cancel"
+                )
                 if case_name == "a14-custody":
                     # The Client remains blocked on this real MPTCP application until A14
                     # kills the product processes. No stale native probe owner is counted.
@@ -3138,12 +3154,16 @@ while running:
                 else:
                     open(ready_path, "x", encoding="ascii").write("ready\n")
                 release_deadline = time.monotonic() + 90
-                while running and not os.path.exists(release_path):
+                while running and not os.path.exists(release_path) and not os.path.exists(cancel_path):
                     if time.monotonic() >= release_deadline:
                         raise SystemExit("bounded download release was not observed")
                     time.sleep(0.05)
                 if not running:
                     break
+                if os.path.exists(cancel_path):
+                    # A pre-payload benchmark draw was superseded before release. Close this
+                    # unused connection; never release bulk bytes or count it as a transfer.
+                    continue
                 response_label = b"a03" if case_name.startswith("a03-") else b"a04"
                 response_seed = b"volparossa-download:" + response_label + b":" + run_id
                 response_hash = hashlib.sha256()
@@ -3431,121 +3451,8 @@ a01_transient_connect_unavailable() {
 
 a01_select_route() {
     selection_label=$1
-    selection_status=1
-    selection_attempt=0
-    selection_attempt_error="$WORK/a01-$selection_label-connect-attempt.err"
-    : >"$WORK/a01-$selection_label-connect.err"
-    # Route teardown leaves the preselection gate cooling for 30 s, while a refreshed provider
-    # advertisement can legitimately take up to 60 s. Keep a finite two-minute recovery horizon
-    # for exact transient unavailability; protocol/correlation failures still stop immediately.
-    while [ "$selection_attempt" -lt 120 ]; do
-        set +e
-        "$binary_directory/volparossa" \
-            --control-socket "$WORK/runtime-client/control/agent.sock" connect \
-            --transport multipath-quic \
-            >"$WORK/a01-$selection_label-connect.out" \
-            2>"$selection_attempt_error" &
-        selection_pid=$!
-        selection_diagnostic_attempt=0
-        while kill -0 "$selection_pid" 2>/dev/null \
-            && [ "$selection_diagnostic_attempt" -lt 100 ]; do
-            selection_interface_count=$(count_worker_wireguard_interfaces)
-            if [ "$selection_interface_count" -ge 8 ]; then
-                capture_worker_network_diagnostics \
-                    "a01-$selection_label-live-native-probe"
-                break
-            fi
-            sleep 0.1
-            selection_diagnostic_attempt=$((selection_diagnostic_attempt + 1))
-        done
-        wait "$selection_pid"
-        selection_status=$?
-        set -e
-        sed -n 'p' "$selection_attempt_error" \
-            >>"$WORK/a01-$selection_label-connect.err"
-        [ "$selection_status" -ne 0 ] || break
-        a01_transient_connect_unavailable "$selection_attempt_error" || break
-        sleep 1
-        selection_attempt=$((selection_attempt + 1))
-    done
-    if [ "$selection_status" -ne 0 ]; then
-        if grep -F 'NATIVE_PROBE_START_UNAVAILABLE' \
-            "$selection_attempt_error" >/dev/null; then
-            capture_worker_network_diagnostics "a01-$selection_label-native-probe-failure"
-        fi
-        return 1
-    fi
-
-    selection_path_attempt=0
-    while [ "$selection_path_attempt" -lt 300 ]; do
-        "$binary_directory/volparossa" \
-            --control-socket "$WORK/runtime-client/control/agent.sock" paths \
-            >"$WORK/a01-$selection_label-paths.txt" || true
-        if python3 - "$WORK/a01-$selection_label-paths.txt" \
-            "$WORK/a01-$selection_label-selection.json" "$R1_PEER" "$R2_PEER" \
-            "$EXIT_PEER" <<'PYTHON'
-import json
-import re
-import sys
-
-source, output, relay1, relay2, expected_exit = sys.argv[1:]
-pattern = re.compile(
-    r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
-    r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)"
-)
-paths = []
-for line in open(source, encoding="ascii"):
-    match = pattern.fullmatch(line.rstrip("\n"))
-    if match is None:
-        continue
-    context, path_id, relay, exit_peer, state, rtt, byte_count = match.groups()
-    paths.append(
-        {
-            "route_context_id": context,
-            "path_id": int(path_id),
-            "relay_peer_id": relay,
-            "exit_peer_id": exit_peer,
-            "state": int(state),
-            "smoothed_rtt_us": int(rtt),
-            "reported_bytes": int(byte_count),
-        }
-    )
-if len(paths) != 2:
-    raise SystemExit(1)
-if {path["relay_peer_id"] for path in paths} != {relay1, relay2}:
-    raise SystemExit(1)
-if {path["exit_peer_id"] for path in paths} != {expected_exit}:
-    raise SystemExit(1)
-if len({path["route_context_id"] for path in paths}) != 1:
-    raise SystemExit(1)
-if len({path["path_id"] for path in paths}) != 2:
-    raise SystemExit(1)
-paths.sort(key=lambda path: path["path_id"])
-with open(output, "w", encoding="ascii") as destination:
-    json.dump(
-        {
-            "exact_selected_relays": [relay1, relay2],
-            "exact_selected_exit": expected_exit,
-            "paths": paths,
-        },
-        destination,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    destination.write("\n")
-PYTHON
-        then
-            break
-        fi
-        sleep 0.1
-        selection_path_attempt=$((selection_path_attempt + 1))
-    done
-    [ "$selection_path_attempt" -lt 300 ] || return 1
-    "$binary_directory/volparossa" \
-        --control-socket "$WORK/runtime-client/control/agent.sock" disconnect \
-        >"$WORK/a01-$selection_label-disconnect.out" \
-        2>"$WORK/a01-$selection_label-disconnect.err" || return 1
-    wait_disconnected
+    benchmark_select_route "a01-$selection_label" multipath-quic || return 1
+    benchmark_disconnect_route "a01-$selection_label"
 }
 
 wait_bootstrap_mesh() {
@@ -4056,8 +3963,9 @@ refresh_a14_live_custody() {
 
 record_a14_worker_custody_inventory() {
     a14_worker_rows=$WORK/a14-worker-custody-before.ndjson
+    a14_helper_rows=$WORK/a14-helper-custody-before.ndjson
     : >"$a14_worker_rows"
-    a14_fdstore_descriptors=0
+    : >"$a14_helper_rows"
     for a14_node_namespace in client:"$CLIENT" bootstrap1:"$B1" bootstrap2:"$B2" \
         relay0:"$R0" relay1:"$R1" relay2:"$R2" relay3:"$R3" relay4:"$R4" \
         relay5:"$R5" exit:"$EXIT_NODE" exit2:"$EXIT2_NODE"; do
@@ -4072,42 +3980,46 @@ record_a14_worker_custody_inventory() {
         a14_fdstore=$(systemctl show --property=NFileDescriptorStore --value \
             "$a14_unit") || return 1
         case $a14_fdstore in ''|*[!0-9]*) return 1 ;; esac
-        a14_fdstore_descriptors=$((a14_fdstore_descriptors + a14_fdstore))
+        jq -cn --arg unit "$a14_unit" --argjson descriptors "$a14_fdstore" \
+            '{helper_unit:$unit,fdstore_descriptors:$descriptors}' >>"$a14_helper_rows" || return 1
         a14_outer_identity=$(stat -Lc '%d:%i' "/run/netns/$a14_outer_namespace") \
             || return 1
+        timeout 3 ip -n "$a14_outer_namespace" -j -details address show \
+            >"$WORK/a14-parent-network.json" || return 1
         a14_worker_pids=$(find "$a14_cgroup_root" -type f -name cgroup.procs \
             -exec cat {} \; 2>/dev/null | sort -nu | tr '\n' ' ')
         for a14_worker_pid in $a14_worker_pids; do
             [ -r "/proc/$a14_worker_pid/cmdline" ] || continue
             a14_command=$(tr '\000' ' ' <"/proc/$a14_worker_pid/cmdline")
             case $a14_command in *'--internal-worker-v3'*) ;; *) continue ;; esac
-            a14_worker_identity=$(stat -Lc '%d:%i' "/proc/$a14_worker_pid/ns/net") \
+            [ "$(readlink -f "/proc/$a14_worker_pid/exe")" = "$binary_directory/volparossa-helper" ] \
                 || return 1
-            [ "$a14_worker_identity" != "$a14_outer_identity" ] || return 1
+            # Pin the exact namespace across the read-only kernel snapshot. Never enter a
+            # replacement PID's namespace or classify a worker by process-name/count alone.
+            exec 9<"/proc/$a14_worker_pid/ns/net" || return 1
+            a14_worker_identity=$(stat -Lc '%d:%i' /proc/self/fd/9) || { exec 9<&-; return 1; }
+            if [ "$a14_worker_identity" = "$a14_outer_identity" ] \
+                || ! timeout 3 nsenter --net=/proc/self/fd/9 -- ip -j -details address show \
+                    >"$WORK/a14-worker-network.json"; then
+                exec 9<&-
+                return 1
+            fi
+            exec 9<&-
             a14_worker_device=${a14_worker_identity%%:*}
             a14_worker_inode=${a14_worker_identity#*:}
             case $a14_worker_device:$a14_worker_inode in
                 :*|*:|*[!0-9:]*) return 1 ;;
             esac
-            jq -S -c -n --arg node "$a14_node" \
-                --arg unit "$a14_unit" --argjson pid "$a14_worker_pid" \
-                --argjson device "$a14_worker_device" \
-                --argjson inode "$a14_worker_inode" \
-                '{node:$node,helper_unit:$unit,worker_pid_before:$pid,
-                  network_namespace_device:$device,network_namespace_inode:$inode}' \
+            python3 "$source_directory/tests/integration/a14-worker-inventory.py" classify \
+                "$a14_node" "$a14_unit" "$a14_worker_pid" "$a14_worker_device" "$a14_worker_inode" \
+                "$WORK/a14-parent-network.json" "$WORK/a14-worker-network.json" \
                 >>"$a14_worker_rows" || return 1
         done
     done
-    jq -S -c -s --argjson fdstore "$a14_fdstore_descriptors" '
-      . as $workers
-      | ($workers | unique_by([.network_namespace_device,
-          .network_namespace_inode])) as $namespaces
-      | {schema_version:1,worker_process_count:($workers | length),
-         worker_network_namespace_count:($namespaces | length),
-         helper_fdstore_descriptors:$fdstore,
-         worker_network_namespaces:$namespaces}' "$a14_worker_rows" \
+    python3 "$source_directory/tests/integration/a14-worker-inventory.py" summarize \
+        "$a14_worker_rows" "$a14_helper_rows" \
         >"$WORK/a14-worker-custody-before.json" || return 1
-    rm -f -- "$a14_worker_rows"
+    rm -f -- "$a14_worker_rows" "$a14_helper_rows" "$WORK/a14-parent-network.json" "$WORK/a14-worker-network.json"
 }
 
 scan_a14_worker_namespace_references() {
@@ -4413,6 +4325,16 @@ start_mptcp_download() {
     DOWNLOAD_PREFIX=$2
     DOWNLOAD_ATTEMPT=$3
     DOWNLOAD_MARKER=$4
+    DOWNLOAD_EXPECTED_CONTEXT=
+    case $DOWNLOAD_CASE in
+        a03-single|a03-aggregate|a04-failover)
+            benchmark_select_route "$DOWNLOAD_PREFIX-preconnect-$DOWNLOAD_ATTEMPT" mptcp \
+                || return 1
+            DOWNLOAD_EXPECTED_CONTEXT=$(jq -er '.route_context_id' \
+                "$WORK/$DOWNLOAD_PREFIX-preconnect-$DOWNLOAD_ATTEMPT-selection.json") \
+                || return 1
+            ;;
+    esac
     DOWNLOAD_CLIENT_OUTPUT="$WORK/$DOWNLOAD_PREFIX-client-$DOWNLOAD_ATTEMPT.json"
     DOWNLOAD_CLIENT_ERROR="$WORK/$DOWNLOAD_PREFIX-client.err"
     DOWNLOAD_CLIENT_CAPTURE="$WORK/$DOWNLOAD_PREFIX-client-capture-$DOWNLOAD_ATTEMPT.json"
@@ -4421,6 +4343,7 @@ start_mptcp_download() {
     DOWNLOAD_EXIT_CAPTURE_READY="$WORK/$DOWNLOAD_PREFIX-exit-capture-$DOWNLOAD_ATTEMPT.ready"
     DOWNLOAD_DESTINATION_READY="$WORK/destination/download-$DOWNLOAD_CASE-$DOWNLOAD_ATTEMPT.ready"
     DOWNLOAD_DESTINATION_RELEASE="$WORK/destination/download-$DOWNLOAD_CASE-$DOWNLOAD_ATTEMPT.release"
+    DOWNLOAD_DESTINATION_CANCEL="$WORK/destination/download-$DOWNLOAD_CASE-$DOWNLOAD_ATTEMPT.cancel"
     DOWNLOAD_DESTINATION_EVIDENCE="$WORK/destination/download-$DOWNLOAD_CASE-$DOWNLOAD_ATTEMPT.json"
 
     ip netns exec "$CLIENT" python3 "$WORK/bin/a02-observer.py" \
@@ -4451,7 +4374,27 @@ start_mptcp_download() {
 
     download_ready_attempt=0
     while [ "$download_ready_attempt" -lt 600 ]; do
-        [ ! -s "$DOWNLOAD_DESTINATION_READY" ] || return 0
+        if [ -s "$DOWNLOAD_DESTINATION_READY" ]; then
+            if [ -n "$DOWNLOAD_EXPECTED_CONTEXT" ]; then
+                if ! benchmark_capture_paths "$DOWNLOAD_PREFIX-live-$DOWNLOAD_ATTEMPT" mptcp \
+                    || ! jq -e --arg context "$DOWNLOAD_EXPECTED_CONTEXT" \
+                        '.route_context_id == $context' \
+                        "$WORK/$DOWNLOAD_PREFIX-live-$DOWNLOAD_ATTEMPT-selection.json" >/dev/null; then
+                    install -o "$AGENT_UID" -g "$AGENT_GID" -m 0600 /dev/null \
+                        "$DOWNLOAD_DESTINATION_CANCEL"
+                    kill -TERM "$DOWNLOAD_CLIENT_PID" 2>/dev/null || true
+                    wait "$DOWNLOAD_CLIENT_PID" 2>/dev/null || true
+                    DOWNLOAD_CLIENT_PID=
+                    stop_observers || true
+                    benchmark_disconnect_route "$DOWNLOAD_PREFIX-unused-$DOWNLOAD_ATTEMPT" || return 1
+                    return 1
+                fi
+                install -o root -g root -m 0600 \
+                    "$WORK/$DOWNLOAD_PREFIX-live-$DOWNLOAD_ATTEMPT-selection.json" \
+                    "$WORK/$DOWNLOAD_PREFIX-selected-paths.json"
+            fi
+            return 0
+        fi
         kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null || break
         sleep 0.1
         download_ready_attempt=$((download_ready_attempt + 1))
@@ -4523,6 +4466,9 @@ attempt=0
 # A01's successful preselection deliberately retains its affine gate for a 30-second cooldown.
 # Leave bounded scheduling margin so A02 always gets attempts after that gate becomes reusable.
 while [ "$attempt" -lt 45 ]; do
+    benchmark_select_route a02 mptcp || fail A02_MPTCP_SELECTION_UNAVAILABLE
+    a02_expected_context=$(jq -er '.route_context_id' "$WORK/a02-selection.json") \
+        || fail A02_MPTCP_SELECTION_UNAVAILABLE
     attempt_label=$(printf '%02d' "$attempt")
     client_capture="$WORK/a02-client-capture-$attempt_label.json"
     client_capture_ready="$WORK/a02-client-capture-$attempt_label.ready"
@@ -4593,6 +4539,18 @@ sys.stdout.write("\n")
 PYTHON
     A02_STATUS=$?
     set -e
+    if [ "$A02_STATUS" -eq 0 ]; then
+        if benchmark_capture_paths a02-live mptcp \
+            && jq -e --arg context "$a02_expected_context" '.route_context_id == $context' \
+                "$WORK/a02-live-selection.json" >/dev/null; then
+            install -o root -g root -m 0600 "$WORK/a02-live-selection.json" \
+                "$WORK/a02-selected-paths.json"
+        else
+            # The application is already closed; no established stream is moved to another route.
+            A02_STATUS=1
+            benchmark_disconnect_route a02-unused || fail A02_MPTCP_CONTEXT_NOT_RETIRED
+        fi
+    fi
     evidence_attempt=0
     while [ "$A02_STATUS" -eq 0 ] && [ "$evidence_attempt" -lt 100 ] \
         && [ ! -s "$destination_evidence" ]; do
@@ -4675,6 +4633,7 @@ if [ "$A02_STATUS" -eq 0 ]; then
         --slurpfile destination "$WORK/destination-tcp-evidence.json" \
         --slurpfile client_capture "$WORK/a02-client-capture.json" \
         --slurpfile exit_capture "$WORK/a02-exit-capture.json" \
+        --slurpfile selected "$WORK/a02-selected-paths.json" \
         --arg fallback_route "$A02_FALLBACK_ROUTE" \
         --arg exit_source "$A02_EXIT_SOURCE" \
         --argjson route_absent "$CLIENT_EXIT_ROUTE_ABSENT" \
@@ -4687,6 +4646,7 @@ if [ "$A02_STATUS" -eq 0 ]; then
         | ($client_capture[0]) as $client
         | ($exit_capture[0]) as $exit
         | (($app.destination == {ip:"47.163.4.2",port:18080})
+            and ($selected[0].transport == "mptcp") and ($selected[0].paths | length == 2)
             and ($app.attempt == $destination.attempt)
             and ($app.response_source == $app.destination)
             and ($app.sent_bytes == $app.response_bytes)
@@ -4708,7 +4668,7 @@ if [ "$A02_STATUS" -eq 0 ]; then
             and $ingress_event and $relay1_event and $relay2_event and $exit_event) as $success
         | {schema_version:1,acceptance_id:"A02",success:$success,
            transport:"IPPROTO_MPTCP over two Relay WireGuard paths, TLS 1.3",
-           application:$app,destination_echo:$destination,
+           application:$app,destination_echo:$destination,selected_route:$selected[0],
            path_evidence:{client_capture:$client,exit_capture:$exit,
              relay_only_path_count:2,relay1_session_completed:$relay1_event,
              relay2_session_completed:$relay2_event},
@@ -4858,6 +4818,8 @@ jq -S -c -n \
     --slurpfile aggregate_destination "$WORK/destination-a03-aggregate-evidence.json" \
     --slurpfile aggregate_client_capture "$WORK/a03-aggregate-client-capture.json" \
     --slurpfile aggregate_exit_capture "$WORK/a03-aggregate-exit-capture.json" \
+    --slurpfile single_selected "$WORK/a03-single-selected-paths.json" \
+    --slurpfile aggregate_selected "$WORK/a03-aggregate-selected-paths.json" \
     --slurpfile before "$WORK/a03-tc-before.json" \
     --slurpfile after "$WORK/a03-tc-after.json" \
     '($single[0]) as $one | ($aggregate[0]) as $both
@@ -4877,6 +4839,10 @@ jq -S -c -n \
     | ($tc_after.aggregate.relay2_bytes
         - $tc_before.aggregate.relay2_bytes) as $both_relay2_bytes
     | (($one.case == "a03-single") and ($both.case == "a03-aggregate")
+        and ($single_selected[0].transport == "mptcp")
+        and ($aggregate_selected[0].transport == "mptcp")
+        and ($single_selected[0].paths | length == 2)
+        and ($aggregate_selected[0].paths | length == 2)
         and ($one.response_bytes == 33554432)
         and ($both.response_bytes == $one.response_bytes)
         and ($both.response_sha256 == $one.response_sha256)
@@ -4901,10 +4867,10 @@ jq -S -c -n \
     | {schema_version:1,acceptance_id:"A03",success:$success,
        transport:"IPPROTO_MPTCP over two individually constrained Relay WireGuard paths",
        payload:{bytes:$one.response_bytes,sha256:$one.response_sha256},
-       single_path:{application:$one,destination:$one_destination,
+       single_path:{application:$one,destination:$one_destination,selected_route:$single_selected[0],
          client_capture:$one_client,exit_capture:$one_exit,
          relay1_outer_bytes:$one_relay1_bytes,relay2_outer_bytes:$one_relay2_bytes},
-       aggregate:{application:$both,destination:$both_destination,
+       aggregate:{application:$both,destination:$both_destination,selected_route:$aggregate_selected[0],
          client_capture:$both_client,exit_capture:$both_exit,
          kernel_mptcp_readiness:{source:"production MPTCP_INFO gate before payload",
            negotiated_remote_key:true,ordinary_tcp_fallback:false,
@@ -5025,10 +4991,12 @@ jq -S -c -n \
     --slurpfile client_capture "$WORK/a04-client-capture.json" \
     --slurpfile exit_capture "$WORK/a04-exit-capture.json" \
     --slurpfile removal "$WORK/a04-removal.json" \
+    --slurpfile selected "$WORK/a04-selected-paths.json" \
     '($application[0]) as $app | ($destination[0]) as $destination
     | ($client_capture[0]) as $client | ($exit_capture[0]) as $exit
     | ($removal[0]) as $removal
     | (($app.case == "a04-failover") and ($app.response_bytes == 33554432)
+        and ($selected[0].transport == "mptcp") and ($selected[0].paths | length == 2)
         and ($app.response_sha256 == $destination.response_sha256)
         and ($app.request_sha256 == $destination.request_sha256)
         and ($destination.source.ip == "47.163.4.1")
@@ -5049,7 +5017,7 @@ jq -S -c -n \
         and ($client.truncated == false) and ($exit.truncated == false)) as $success
     | {schema_version:1,acceptance_id:"A04",success:$success,
        transport:"uninterrupted IPPROTO_MPTCP/TLS download after active Relay removal",
-       application:$app,destination:$destination,relay_removal:$removal,
+       application:$app,destination:$destination,relay_removal:$removal,selected_route:$selected[0],
        path_evidence:{client_capture:$client,exit_capture:$exit},
        application_flow_completed:true,ordinary_tcp_fallback_allowed:false,
        direct_client_exit_packets:$client.direct_client_exit_packets}' \
@@ -5070,20 +5038,12 @@ PHASE=a04-complete
 
 PHASE=client-connect
 CONNECT_REQUESTED=true
-attempt=0
-while [ "$attempt" -lt 120 ]; do
-    set +e
-    "$binary_directory/volparossa" \
-        --control-socket "$WORK/runtime-client/control/agent.sock" connect \
-        --transport single-path-udp \
-        >"$WORK/connect-client.out" 2>"$WORK/connect-client.err"
-    CONNECT_STATUS=$?
-    set -e
-    [ "$CONNECT_STATUS" -ne 0 ] || break
-    a01_transient_connect_unavailable "$WORK/connect-client.err" || break
-    sleep 1
-    attempt=$((attempt + 1))
-done
+CONNECT_STATUS=1
+if benchmark_select_route a05 single-path-udp; then
+    CONNECT_STATUS=0
+fi
+install -o root -g root -m 0600 "$WORK/a05-connect.out" "$WORK/connect-client.out"
+install -o root -g root -m 0600 "$WORK/a05-connect.err" "$WORK/connect-client.err"
 capture_product_logs
 
 if [ "$CONNECT_STATUS" -ne 0 ]; then
@@ -5271,22 +5231,7 @@ A06_REQUESTED=true
 if [ "$scenario" = mixed-link ]; then
     mixed_link_select_paths || fail MIXED_LINK_COMPLETE_PATH_SET_UNAVAILABLE
 else
-a06_connect_status=1
-attempt=0
-while [ "$attempt" -lt 120 ]; do
-    set +e
-    "$binary_directory/volparossa" \
-        --control-socket "$WORK/runtime-client/control/agent.sock" connect \
-        --transport multipath-quic \
-        >"$WORK/a06-connect.out" 2>"$WORK/a06-connect.err"
-    a06_connect_status=$?
-    set -e
-    [ "$a06_connect_status" -ne 0 ] || break
-    a01_transient_connect_unavailable "$WORK/a06-connect.err" || break
-    sleep 1
-    attempt=$((attempt + 1))
-done
-[ "$a06_connect_status" -eq 0 ] || fail A06_MULTIPATH_ROUTE_CONNECT_FAILED
+benchmark_select_route a06 multipath-quic || fail A06_MULTIPATH_ROUTE_CONNECT_FAILED
 wait_active_native_mpquic_paths a06-preconnect-native-paths \
     || fail A06_MULTIPATH_ROUTE_NOT_ACTIVE
 fi
@@ -6193,8 +6138,15 @@ jq -e '
   .helper_worker_custody.worker_process_count >= 4 and
   .helper_worker_custody.worker_network_namespace_count ==
     .helper_worker_custody.worker_process_count and
+  .helper_worker_custody.durable_route_namespace_count >= 4 and
+  .helper_worker_custody.live_ingress_namespace_count == 1 and
+  .helper_worker_custody.worker_network_namespace_count ==
+    (.helper_worker_custody.durable_route_namespace_count +
+      .helper_worker_custody.live_ingress_namespace_count) and
   .helper_worker_custody.helper_fdstore_descriptors >=
-    (.helper_worker_custody.worker_network_namespace_count * 2) and
+    (.helper_worker_custody.durable_route_namespace_count * 2) and
+  all(.helper_worker_custody.helper_custody_coverage[];
+    .fdstore_descriptors >= (.durable_route_namespace_count * 2)) and
   ([.namespaces[] | select(.nftables_rules > 0)] | length) >= 1
 ' "$WORK/a14-owned-before.json" >/dev/null \
     || fail A14_OWNED_INVENTORY_INCOMPLETE
