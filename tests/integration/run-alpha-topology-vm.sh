@@ -23,8 +23,8 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing]' \
-        '       --package is required only for alpha; functional scenarios skip packaging.'
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh]' \
+        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh.'
 }
 
 print_plan() {
@@ -32,10 +32,10 @@ print_plan() {
         'VOLPAROSSA disposable alpha topology VM plan:' \
         '  verify the reviewed Debian 13 amd64 image by its pinned SHA-512;' \
         '  archive only the exact clean checked-out Git revision;' \
-        '  verify and copy the locally built pinned mqvpn/xquic daemon;' \
+        '  verify/copy pinned mqvpn/xquic when the selected scenario uses it;' \
         '  boot one temporary KVM-only qcow2 overlay with QEMU user networking;' \
         '  install Debian build/runtime packages and build only required test binaries;' \
-        '  run the twelve-node production-helper topology as guest root;' \
+        '  run the selected production-helper proof as guest root;' \
         '  retrieve bounded non-secret logs and its machine-readable result;' \
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'
@@ -43,6 +43,10 @@ print_plan() {
         printf '%s\n' \
             'Alpha scenario: verify/copy the exact candidate Debian package and prove' \
             '  install, doctor, start, upgrade and removal inside the guest first.'
+    elif [ "$scenario" = wifi-mesh ]; then
+        printf '%s\n' \
+            'Wi-Fi mesh scenario: install one exact hash-verified official generic guest kernel and reboot once;' \
+            '  real MeshOwner hwsim association, UDP/counters and cleanup, not physical Wi-Fi or full overlay proof.'
     elif [ "$scenario" = mixed-link ]; then
         printf '%s\n' \
             'Mixed-link scenario: real HTTP/3 over genuine two-path MPQUIC through LAN/public Relays;' \
@@ -74,7 +78,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -125,16 +129,18 @@ if [ "$mode" = preview ]; then
     exit 0
 fi
 
-if [ "$approval" != yes ] || [ -z "$image_path" ] || [ -z "$mpquic_path" ] \
+if [ "$approval" != yes ] || [ -z "$image_path" ] \
     || [ -z "$output_directory" ] || [ -z "$expected_commit" ]; then
     usage >&2
     exit 64
 fi
-case $image_path:$mpquic_path:$output_directory in
-    /*:/*:/*) ;;
+case $image_path:$output_directory in
+    /*:/*) ;;
     *) exit 64 ;;
 esac
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
+if [ "$scenario" != wifi-mesh ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
+case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
 case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
@@ -180,6 +186,8 @@ jq -e --arg filename "$IMAGE_FILENAME" --arg sha512 "$IMAGE_SHA512" \
 [ "${image_path##*/}" = "$IMAGE_FILENAME" ] || exit 64
 [ -f "$image_path" ] && [ ! -L "$image_path" ] || exit 64
 printf '%s  %s\n' "$IMAGE_SHA512" "$image_path" | sha512sum --check --strict -
+MPQUIC_SHA256=none
+if [ -n "$mpquic_path" ]; then
 [ "$(readlink -f -- "$mpquic_path")" = "$mpquic_path" ] || exit 64
 [ -f "$mpquic_path" ] && [ -x "$mpquic_path" ] && [ ! -L "$mpquic_path" ] || exit 64
 MPQUIC_SIZE=$(stat -Lc '%s' "$mpquic_path")
@@ -187,6 +195,7 @@ case $MPQUIC_SIZE in ''|0|*[!0-9]*) exit 64 ;; esac
 [ "$MPQUIC_SIZE" -le 67108864 ] || exit 64
 [ "$("$mpquic_path" --api-version)" = 6 ] || exit 64
 MPQUIC_SHA256=$(sha256sum "$mpquic_path" | awk '{ print $1 }')
+fi
 PACKAGE_SHA256=none
 if [ -n "$package_path" ]; then
 [ "$(readlink -f -- "$package_path")" = "$package_path" ] || exit 64
@@ -303,9 +312,16 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh) ;; *) exit 64 ;; esac
 cd /home/vpci
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
+if [ "$scenario" = wifi-mesh ]; then
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt)" = kvm
+    tar -xzf source.tar.gz
+    cd source
+    exec sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit"
+fi
 printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
 [ "$(stat -Lc '%s' volparossa-mpquic)" -le 67108864 ]
 if [ "$scenario" = alpha ]; then
@@ -389,6 +405,8 @@ exit "$topology_status"
 GUEST_DRIVER_SCRIPT
 chmod 0700 "$GUEST_DRIVER"
 
+set -- -no-reboot
+if [ "$scenario" = wifi-mesh ]; then set --; fi
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
@@ -399,7 +417,7 @@ qemu-system-x86_64 \
     -device virtio-rng-pci \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22223-:22 \
-    -display none -monitor none -serial "file:$CONSOLE" -no-reboot \
+    -display none -monitor none -serial "file:$CONSOLE" "$@" \
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
     </dev/null >/dev/null 2>&1 &
 QEMU_PID=$!
@@ -453,7 +471,7 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
-scp_to "$mpquic_path" /home/vpci/volparossa-mpquic
+if [ -n "$mpquic_path" ]; then scp_to "$mpquic_path" /home/vpci/volparossa-mpquic; fi
 if [ -n "$package_path" ]; then scp_to "$package_path" /home/vpci/volparossa.deb; fi
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
 ssh_base chmod 0700 /home/vpci/guest-driver.sh
@@ -463,6 +481,26 @@ ssh_base /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
     "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
 GUEST_STATUS=$?
 set -e
+if [ "$scenario" = wifi-mesh ] && [ "$GUEST_STATUS" -eq 194 ]; then
+    # Only the wifi-mesh guest stage may request this one exact-kernel reboot.
+    old_boot=$(ssh_base cat /proc/sys/kernel/random/boot_id)
+    ssh_base sudo -n systemctl reboot >/dev/null 2>&1 || true
+    reboot_attempt=0
+    while [ "$reboot_attempt" -lt 120 ]; do
+        kill -0 "$QEMU_PID" 2>/dev/null || exit 1
+        new_boot=$(ssh_base cat /proc/sys/kernel/random/boot_id 2>/dev/null) || new_boot=
+        if [ -n "$new_boot" ] && [ "$new_boot" != "$old_boot" ]; then break; fi
+        sleep 1
+        reboot_attempt=$((reboot_attempt + 1))
+    done
+    [ "$reboot_attempt" -lt 120 ] || exit 1
+    [ "$(ssh_base uname -r)" = 6.12.107+deb13-amd64 ] || exit 1
+    set +e
+    ssh_base /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+        "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
+    GUEST_STATUS=$?
+    set -e
+fi
 if ! scp_from /home/vpci/alpha-output.tar.gz "$RUN_DIRECTORY/alpha-output.tar.gz"; then
     tail -c 131072 "$CONSOLE" >&2
     exit 1

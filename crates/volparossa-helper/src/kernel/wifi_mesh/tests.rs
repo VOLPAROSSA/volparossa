@@ -7,6 +7,8 @@ use super::netlink::{
 };
 use super::*;
 
+mod hwsim;
+
 pub(super) fn config() -> WifiMeshConfig {
     WifiMeshConfig {
         parent_interface: "wlan0".into(),

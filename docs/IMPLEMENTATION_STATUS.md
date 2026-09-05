@@ -295,6 +295,13 @@ after route shutdown. Kernel link-layer forwarding and automatic address/default
 are disabled on the new interface. Nine focused kernel/engine tests and four wire/config/agent
 tests pass; strict helper and agent Clippy pass. This is not SAE, LAN host-service isolation, physical-radio
 coexistence, mobile support, airtime management or a speed-increase claim.
+The disposable `wifi-mesh` scenario now builds the real helper backend harness and creates two
+`mac80211_hwsim` radios. The pinned cloud guest kernel omits wireless support, so this scenario
+alone installs the exact hash-verified Debian generic kernel `6.12.107+deb13-amd64` and reboots
+its disposable overlay once. The harness requires real mesh peering, bidirectional 128-KiB hashes,
+station byte/packet counters, explicit removal and socket-loss cleanup. Parser/preview checks,
+ShellCheck and helper Clippy pass; live execution is pending. Its report explicitly does not
+claim physical-radio or full-agent-overlay operation.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

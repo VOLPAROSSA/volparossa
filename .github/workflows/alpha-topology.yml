@@ -1,10 +1,11 @@
 name: Alpha production-helper topology
+run-name: ${{ inputs.scenario || 'datapath' }} — production-helper proof
 
 on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Functional datapath/reciprocity/local-link/mixed-link/sharing; alpha also verifies packaging
+        description: Functional overlay/sharing or wifi-mesh backend proof; alpha also verifies packaging
         required: true
         default: datapath
         type: choice
@@ -15,6 +16,7 @@ on:
           - local-link
           - mixed-link
           - sharing
+          - wifi-mesh
   pull_request:
     branches:
       - main
@@ -59,6 +61,7 @@ jobs:
           test -x tests/integration/run-alpha-topology-vm.sh
           sh -n tests/integration/kvm-alpha-topology.sh
           sh -n tests/integration/run-alpha-topology-vm.sh
+          python3 tests/integration/test-wifi-mesh-smoke.py
 
       - name: Install official Ubuntu VM tools
         run: |
@@ -77,6 +80,7 @@ jobs:
           printf 'VOLPAROSSA_ALPHA_OUTPUT=%s\n' "$output" >>"$GITHUB_ENV"
 
       - name: Build exact pinned mqvpn/xquic runtime
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh'
         run: |
           set -euo pipefail
           native_binary="$(pwd -P)/native/volparossa-mpquic/build/volparossa-mpquic"
@@ -170,6 +174,10 @@ jobs:
           runner_uid=$(id -u)
           case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
           package_args=()
+          native_args=()
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" != wifi-mesh; then
+            native_args=(--mpquic "$VOLPAROSSA_ALPHA_MPQUIC")
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = alpha; then
             package_args=(--package "$VOLPAROSSA_ALPHA_PACKAGE")
           fi
@@ -187,7 +195,7 @@ jobs:
             "$(pwd -P)/tests/integration/run-alpha-topology-vm.sh" \
             --execute --yes \
             --image "$VOLPAROSSA_ALPHA_IMAGE" \
-            --mpquic "$VOLPAROSSA_ALPHA_MPQUIC" \
+            "${native_args[@]}" \
             "${package_args[@]}" \
             --scenario "$VOLPAROSSA_ALPHA_SCENARIO" \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" \
@@ -200,6 +208,21 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = wifi-mesh; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/wifi-mesh-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "hwsim MeshOwner backend succeeded: \(.success)",
+                "actual joined/peered radios: \(.nodes | length)/2",
+                "socket-loss cleanup: \(.socket_loss_cleanup)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "physical radio and full agent overlay remain unproven"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish mesh backend evidence.' | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = mixed-link; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-smoke.json"
             if test -f "$report"; then
@@ -317,7 +340,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -498,6 +521,32 @@ jobs:
             .cleanup.baseline_restored == true and .host_state.unchanged == true
           ' "$VOLPAROSSA_ALPHA_OUTPUT/sharing-smoke.json" >/dev/null
 
+      - name: Require real simulated-radio mesh backend evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'wifi-mesh'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-wifi-mesh-kernel-backend" and
+            .source_revision == $revision and .success == true and
+            .simulation == "mac80211_hwsim" and .kernel == "6.12.107+deb13-amd64" and
+            .frequency_mhz == 2412 and .open_layer2 == true and .sae_claimed == false and
+            .physical_radio_proven == false and .bandwidth_claimed == false and
+            .full_agent_overlay_proven == false and
+            (.nodes | length) == 2 and ([.nodes[].wiphy] | unique | length) == 2 and
+            all(.nodes[]; .joined == true and .established == true and
+              .sent_bytes == 131072 and .received_bytes == 131072 and
+              .rx_bytes_delta > 0 and .tx_bytes_delta > 0 and
+              .rx_packets_delta > 0 and .tx_packets_delta > 0) and
+            .nodes[0].sent_sha256 == .nodes[1].received_sha256 and
+            .nodes[1].sent_sha256 == .nodes[0].received_sha256 and
+            .socket_loss_cleanup == true and .cleanup.namespace_baseline_restored == true and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/wifi-mesh-smoke.json" >/dev/null
+
       - name: Upload bounded topology diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -508,7 +557,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
