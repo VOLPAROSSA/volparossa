@@ -359,6 +359,7 @@ impl AgentState {
     }
 
     /// Clears state only after the helper confirms network teardown.
+    #[cfg(test)]
     pub fn clear_after_helper_cleanup(&mut self, config: &Config) -> Result<(), StateError> {
         self.route_contexts = RouteContextCache::new(
             config.routing.maximum_active_contexts,

@@ -54,7 +54,7 @@ use volparossa_discovery::{
     MptcpSessionStartRequest, UdpExitSessionSignal as DiscoveryUdpExitSessionSignal,
     UdpSessionStartRequest,
 };
-use volparossa_local_control::{PathState, PathSummary};
+use volparossa_local_control::{LogLevel, PathState, PathSummary};
 use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{
     MAX_CONTROL_MESSAGE_SIZE, ProbeAddressFamily, ProbeLegEvidence, ReplayCache, SignedEnvelope,
@@ -162,6 +162,42 @@ enum ClientRouteControlState {
     Idle,
     Connecting,
     Established(Box<EstablishedClientRoute>),
+    CleanupPending(ClientRouteRetirement),
+}
+
+/// A Client-only Disconnect never claims that another local service's routes were removed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientRouteDisconnectError {
+    Busy,
+    CleanupPending,
+}
+
+struct ClientRouteRetirement {
+    task: tokio::task::JoinHandle<Result<(), ClientRouteDisconnectError>>,
+    completed: Option<Result<(), ClientRouteDisconnectError>>,
+}
+
+impl ClientRouteRetirement {
+    fn new(task: tokio::task::JoinHandle<Result<(), ClientRouteDisconnectError>>) -> Self {
+        Self {
+            task,
+            completed: None,
+        }
+    }
+
+    async fn confirm(&mut self, wait: Duration) -> Result<(), ClientRouteDisconnectError> {
+        if let Some(result) = self.completed {
+            return result;
+        }
+        let result = timeout(wait, &mut self.task)
+            .await
+            .map_err(|_| ClientRouteDisconnectError::CleanupPending)?
+            .unwrap_or(Err(ClientRouteDisconnectError::CleanupPending));
+        // Do not poll a consumed JoinHandle again. A failed owner remains fail-closed rather
+        // than being replaced by Idle or by an unscoped helper cleanup request.
+        self.completed = Some(result);
+        result
+    }
 }
 
 struct EstablishedClientRoute {
@@ -322,6 +358,21 @@ impl EstablishedClientRoute {
     }
 
     async fn shutdown(self, agent_state: Option<&Arc<tokio::sync::RwLock<AgentState>>>) {
+        let _ = Box::pin(self.shutdown_inner(agent_state, false)).await;
+    }
+
+    async fn shutdown_confirmed(
+        self,
+        agent_state: Option<&Arc<tokio::sync::RwLock<AgentState>>>,
+    ) -> Result<(), ClientRouteDisconnectError> {
+        Box::pin(self.shutdown_inner(agent_state, true)).await
+    }
+
+    async fn shutdown_inner(
+        self,
+        agent_state: Option<&Arc<tokio::sync::RwLock<AgentState>>>,
+        retry_native: bool,
+    ) -> Result<(), ClientRouteDisconnectError> {
         // Capture the retired context before consuming its affine owner. A newer context's
         // display must survive any delayed completion of this teardown.
         let retired_context_id = self
@@ -342,22 +393,44 @@ impl EstablishedClientRoute {
                 let _ = route.shutdown().await;
             }
             ClientTransportState::NativeUdp(active) => {
-                let _ = active.session.shutdown().await;
+                if retry_native {
+                    stop_native_client_session_retained(&active.session).await;
+                } else {
+                    let _ = active.session.shutdown().await;
+                }
             }
             ClientTransportState::Mpquic(active) => {
-                let _ = active.session.shutdown().await;
+                if retry_native {
+                    stop_native_client_session_retained(&active.session).await;
+                } else {
+                    let _ = active.session.shutdown().await;
+                }
             }
         }
         if let Some(route) = self.route {
             let _ = Box::pin(route.disconnect()).await;
         }
-        let _ = self.orchestrator.shutdown().await;
+        // A first exact Destroy may be quarantined. The existing supervisor keeps its affine
+        // owner and retries; completion here means those route owners have actually settled.
+        self.orchestrator
+            .shutdown()
+            .await
+            .map_err(|_| ClientRouteDisconnectError::CleanupPending)?;
         if let (Some(state), Some(context_id)) = (agent_state, retired_context_id) {
             state
                 .write()
                 .await
                 .clear_committed_path_context(&context_id);
         }
+        Ok(())
+    }
+}
+
+async fn stop_native_client_session_retained(session: &ProductionMpquicSession) {
+    while session.stop_retained().await.is_err() {
+        // The caller retains this exact session and the helper owner. The public Disconnect
+        // waits only its bounded horizon, then reports CleanupPending without cancelling us.
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -1029,6 +1102,7 @@ impl ClientRouteControl {
                     }
                     ClientRouteControlState::Idle => true,
                     ClientRouteControlState::Connecting
+                    | ClientRouteControlState::CleanupPending(_)
                     | ClientRouteControlState::Established(_) => false,
                 }
             };
@@ -1083,7 +1157,9 @@ impl ClientRouteControl {
                     return Ok(ClientRouteProgress::TransportActive);
                 }
                 ClientRouteControlState::Idle => {}
-                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
+                ClientRouteControlState::Connecting
+                | ClientRouteControlState::CleanupPending(_)
+                | ClientRouteControlState::Established(_) => {
                     return Err(ClientRouteConnectError::Busy);
                 }
             }
@@ -1120,6 +1196,7 @@ impl ClientRouteControl {
                     }
                     ClientRouteControlState::Idle => true,
                     ClientRouteControlState::Connecting
+                    | ClientRouteControlState::CleanupPending(_)
                     | ClientRouteControlState::Established(_) => false,
                 }
             };
@@ -1195,6 +1272,10 @@ impl ClientRouteControl {
                     return Ok(progress);
                 }
                 ClientRouteControlState::Established(previous) => Some(previous),
+                ClientRouteControlState::CleanupPending(retirement) => {
+                    *state = ClientRouteControlState::CleanupPending(retirement);
+                    return Err(ClientRouteConnectError::Busy);
+                }
                 ClientRouteControlState::Connecting => {
                     return Err(ClientRouteConnectError::Busy);
                 }
@@ -2169,15 +2250,52 @@ impl ClientRouteControl {
         Ok(outcome)
     }
 
-    /// Cancels any pre-route affine ownership; helper cleanup remains a separate fail-closed step.
+    /// Request exact Client retirement for internal ingress/maintenance callers.
     pub(crate) async fn disconnect(&self) {
-        let previous = {
-            let mut state = self.state.lock().await;
-            std::mem::replace(&mut *state, ClientRouteControlState::Idle)
-        };
-        if let ClientRouteControlState::Established(established) = previous {
-            Box::pin(established.shutdown(self.agent_state.as_ref())).await;
+        if let (Err(error), Some(state)) = (self.disconnect_confirmed().await, &self.agent_state) {
+            let code = match error {
+                ClientRouteDisconnectError::Busy => "CLIENT_ROUTE_BUSY",
+                ClientRouteDisconnectError::CleanupPending => "CLIENT_CLEANUP_PENDING",
+            };
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, code, crate::unix_millis());
         }
+    }
+
+    /// Confirm only this controller's exact Client ownership, never other local roles.
+    pub(crate) async fn disconnect_confirmed(&self) -> Result<(), ClientRouteDisconnectError> {
+        self.disconnect_with_wait(MAXIMUM_CALL_DURATION).await
+    }
+
+    async fn disconnect_with_wait(&self, wait: Duration) -> Result<(), ClientRouteDisconnectError> {
+        let mut state = self.state.lock().await;
+        match &*state {
+            ClientRouteControlState::Idle => return Ok(()),
+            // Do not replace Connecting with Idle: its affine operation may still complete.
+            // Returning Busy makes no false cancellation/cleanup acknowledgement.
+            ClientRouteControlState::Connecting => return Err(ClientRouteDisconnectError::Busy),
+            ClientRouteControlState::CleanupPending(_) => {}
+            ClientRouteControlState::Established(_) => {
+                let ClientRouteControlState::Established(established) =
+                    std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
+                else {
+                    unreachable!("validated established owner")
+                };
+                let agent_state = self.agent_state.clone();
+                let task = tokio::spawn(async move {
+                    Box::pin(established.shutdown_confirmed(agent_state.as_ref())).await
+                });
+                *state = ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task));
+            }
+        }
+        let ClientRouteControlState::CleanupPending(retirement) = &mut *state else {
+            unreachable!("exact retirement owner retained")
+        };
+        retirement.confirm(wait).await?;
+        *state = ClientRouteControlState::Idle;
+        Ok(())
     }
 }
 
@@ -9836,6 +9954,132 @@ mod tests {
             .await
             .expect("established fake route");
         (established, manager, shared)
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_keeps_quarantined_owner_and_rejects_new_connect_until_confirmed() {
+        let (route, manager, shared) = established_fake_route().await;
+        let (other_route, other_manager, other_shared) = established_fake_route().await;
+        let other_before = other_shared.events();
+        let retirement = Arc::clone(manager.retirement_state());
+        shared.state.lock().expect("fake state").fail_destroy = true;
+        let control = ClientRouteControl::default();
+        let task = tokio::spawn(async move {
+            let _ = route.teardown().await;
+            manager
+                .shutdown()
+                .await
+                .map_err(|_| ClientRouteDisconnectError::CleanupPending)
+        });
+        *control.state.lock().await =
+            ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task));
+        assert_eq!(
+            control
+                .disconnect_with_wait(Duration::from_millis(20))
+                .await,
+            Err(ClientRouteDisconnectError::CleanupPending)
+        );
+        assert_eq!(retirement.outstanding(), 1);
+        assert_eq!(retirement.quarantined(), 1);
+        let (discovery, unused_actor) = DiscoveryControlHandle::native_ready_barrier_for_test(1);
+        let helper = HelperClient::new(
+            PathBuf::from("/unused-helper.sock"),
+            PathBuf::from("/unused-token"),
+        );
+        assert_eq!(
+            control
+                .connect(&Config::default(), &discovery, &helper)
+                .await,
+            Err(ClientRouteConnectError::Busy)
+        );
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::CleanupPending(_)
+        ));
+        unused_actor.abort();
+        let _ = unused_actor.await;
+        assert_eq!(
+            other_shared.events(),
+            other_before,
+            "disjoint owner never received cleanup"
+        );
+        shared.state.lock().expect("fake state").fail_destroy = false;
+        control
+            .disconnect_with_wait(TEST_TIMEOUT)
+            .await
+            .expect("same exact owner confirmed after retry");
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Idle
+        ));
+        assert_eq!(retirement.outstanding(), 0);
+        assert_eq!(other_shared.events(), other_before);
+        drop(other_route);
+        other_manager
+            .shutdown()
+            .await
+            .expect("separate explicit other-owner cleanup");
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_cancellation_keeps_retirement_task_and_never_cancels_connecting() {
+        let control = ClientRouteControl::default();
+        *control.state.lock().await = ClientRouteControlState::Connecting;
+        assert_eq!(
+            control.disconnect_confirmed().await,
+            Err(ClientRouteDisconnectError::Busy)
+        );
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Connecting
+        ));
+        let (ready, completion) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            completion
+                .await
+                .map_err(|_| ClientRouteDisconnectError::CleanupPending)
+        });
+        *control.state.lock().await =
+            ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task));
+        let mut request = Box::pin(control.disconnect_with_wait(TEST_TIMEOUT));
+        tokio::select! {
+            result = &mut request => panic!("unconfirmed cleanup returned {result:?}"),
+            () = sleep(Duration::from_millis(10)) => {}
+        }
+        drop(request);
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::CleanupPending(_)
+        ));
+        ready
+            .send(())
+            .expect("cancelled caller did not cancel retained owner");
+        control
+            .disconnect_confirmed()
+            .await
+            .expect("same retained cleanup result");
+        control
+            .disconnect_confirmed()
+            .await
+            .expect("confirmed Idle is idempotent");
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_failed_retirement_cannot_be_acknowledged_or_repolled_as_success() {
+        let control = ClientRouteControl::default();
+        let task = tokio::spawn(async { Err(ClientRouteDisconnectError::CleanupPending) });
+        *control.state.lock().await =
+            ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task));
+        for _ in 0..2 {
+            assert_eq!(
+                control.disconnect_confirmed().await,
+                Err(ClientRouteDisconnectError::CleanupPending)
+            );
+            assert!(matches!(
+                *control.state.lock().await,
+                ClientRouteControlState::CleanupPending(_)
+            ));
+        }
     }
 
     #[tokio::test]

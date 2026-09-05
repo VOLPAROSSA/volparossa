@@ -2370,6 +2370,17 @@ impl ProductionMpquicSession {
         drop(authorization);
         result.map_err(Into::into)
     }
+
+    /// Stop this exact session without consuming its authority on an unconfirmed result.
+    /// The Client retirement owner may retry while blocking a replacement route.
+    pub(crate) async fn stop_retained(&self) -> Result<(), ProductionMpquicError> {
+        self.client
+            .stop_session(StopSession {
+                route_context_id: self.route_context_id.to_vec(),
+            })
+            .await
+            .map_err(Into::into)
+    }
 }
 
 fn validate_reconfiguration_wait(ready_wait: Duration) -> Result<(), ProductionMpquicError> {

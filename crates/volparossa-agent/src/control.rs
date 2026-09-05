@@ -26,7 +26,10 @@ use volparossa_local_control::{
 use crate::{
     discovery::{DiscoveryControlError, DiscoveryControlHandle, RoleApplyError},
     helper::HelperClient,
-    route_setup::{ClientRouteConnectError, ClientRouteControl, ClientRouteProgress},
+    route_setup::{
+        ClientRouteConnectError, ClientRouteControl, ClientRouteDisconnectError,
+        ClientRouteProgress,
+    },
     state::AgentState,
     unix_millis,
 };
@@ -190,7 +193,12 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
             Box::pin(connect_response(request_id, connect, context)).await
         }
         control_request::Operation::Disconnect(_) => {
-            Box::pin(disconnect_response(request_id, context)).await
+            Box::pin(disconnect_response(
+                request_id,
+                &context.routes,
+                &context.state,
+            ))
+            .await
         }
         control_request::Operation::Peers(_) => {
             let peers = context.state.read().await.peer_list();
@@ -469,39 +477,43 @@ fn requested_connect_profile(config: &Config, transport: Option<i32>) -> Option<
     Some(profile)
 }
 
-async fn disconnect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
-    Box::pin(context.routes.disconnect()).await;
-    if context.helper.cleanup_route_contexts().await.is_ok() {
-        let mut state = context.state.write().await;
-        if state.clear_after_helper_cleanup(&context.config).is_err() {
-            state.log(LogLevel::Error, "STATE_RESET_FAILED", unix_millis());
-            return response(
-                request_id,
-                ControlResult::Unavailable,
-                "STATE_RESET_FAILED",
-                control_response::Payload::Ack(Empty {}),
-            );
-        }
-        state.log(LogLevel::Info, "HELPER_CLEANUP_COMPLETE", unix_millis());
-        response(
-            request_id,
-            ControlResult::Ok,
-            "OK",
-            control_response::Payload::Ack(Empty {}),
-        )
-    } else {
-        context
-            .state
+// Client Disconnect deliberately has no whole-helper authority: the same daemon may be
+// forwarding unrelated Relay/Exit sessions and owning mesh/sharing resources at this moment.
+async fn disconnect_response(
+    request_id: Vec<u8>,
+    routes: &ClientRouteControl,
+    state: &Arc<RwLock<AgentState>>,
+) -> ControlResponse {
+    if let Err(error) = Box::pin(routes.disconnect_confirmed()).await {
+        let (result, diagnostic) = match error {
+            ClientRouteDisconnectError::Busy => (ControlResult::Unavailable, "CLIENT_ROUTE_BUSY"),
+            ClientRouteDisconnectError::CleanupPending => {
+                (ControlResult::Helper, "CLIENT_CLEANUP_PENDING")
+            }
+        };
+        state
             .write()
             .await
-            .log(LogLevel::Error, "HELPER_CLEANUP_FAILED", unix_millis());
-        response(
+            .log(LogLevel::Warn, diagnostic, unix_millis());
+        return response(
             request_id,
-            ControlResult::Helper,
-            "HELPER_UNAVAILABLE",
+            result,
+            diagnostic,
             control_response::Payload::Ack(Empty {}),
-        )
+        );
     }
+    // The controller clears the exact retired context before releasing its gate. A global
+    // projection reset here could instead erase a newer concurrently established Client route.
+    state
+        .write()
+        .await
+        .log(LogLevel::Info, "CLIENT_CLEANUP_COMPLETE", unix_millis());
+    response(
+        request_id,
+        ControlResult::Ok,
+        "OK",
+        control_response::Payload::Ack(Empty {}),
+    )
 }
 
 async fn set_role_response(
@@ -690,6 +702,53 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn idle_client_disconnect_needs_no_helper_and_preserves_contribution_roles() {
+        let config = Config {
+            roles: RolesConfig {
+                client: true,
+                relay: true,
+                exit: true,
+            },
+            ..Config::default()
+        };
+        let state = Arc::new(RwLock::new(
+            AgentState::new(
+                &config,
+                config.roles,
+                None,
+                volparossa_metrics::MetricsRegistry::new(),
+            )
+            .expect("bounded state"),
+        ));
+        let routes = ClientRouteControl::default();
+        // No helper, discovery actor or native runtime is started or supplied to this operation.
+        // Repeated idle Disconnect must not issue an all-role Cleanup on somebody else's behalf.
+        for _ in 0..2 {
+            let result = disconnect_response(vec![1; 16], &routes, &state).await;
+            assert_eq!(result.result, ControlResult::Ok as i32);
+            let state = state.read().await;
+            assert_eq!(state.roles(), config.roles);
+            assert!(!state.status().connected);
+        }
+        let newer_path = volparossa_local_control::PathSummary {
+            route_context_id: vec![2; 16],
+            path_id: 1,
+            relay_peer_id: "new-relay".to_owned(),
+            exit_peer_id: "new-exit".to_owned(),
+            state: volparossa_local_control::PathState::Active as i32,
+            ..Default::default()
+        };
+        state
+            .write()
+            .await
+            .replace_single_udp_path(newer_path.clone())
+            .expect("newer context projection");
+        let result = disconnect_response(vec![3; 16], &routes, &state).await;
+        assert_eq!(result.result, ControlResult::Ok as i32);
+        assert_eq!(state.read().await.path_list().paths, vec![newer_path]);
+    }
 
     #[tokio::test]
     async fn bound_socket_is_exactly_0660_and_guard_removes_only_its_inode() {
