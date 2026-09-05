@@ -4612,6 +4612,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "libp2p",
+ "nix",
  "percent-encoding",
  "prost",
  "rand_core 0.6.4",

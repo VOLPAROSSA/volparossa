@@ -50,8 +50,13 @@ veth packet-socket down/up check passes. The
 at `88460c29` retained both Relay reports through the intentional failure, but stopped at A11.
 Its bounded header-only tuple diagnostics identify the unexpected packets as discovery UDP
 port 41000 attempts to non-neighbor private fixture addresses, not Internet-destination
-payloads. Private discovery dial admission still needs correction; the zero-unexpected-packet
-acceptance rule is unchanged.
+payloads. Private-literal discovery admission and a behaviour-wide pre-dial gate now require
+an address on an active directly attached local subnet, including Kademlia/mDNS-supplied
+alternatives. Four focused scope checks (real disposable IPv4/ULA veth and link-down included),
+five existing Identify/lineage checks and strict discovery Clippy pass. Mixed explicit dial
+lists containing an ineligible private address are rejected as a whole. This is dial eligibility,
+not a substitute for exact authenticated/helper route provenance. The zero-unexpected-packet
+acceptance rule is unchanged; its live rerun remains pending.
 `0075033e` also passed
 [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972360525) and
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972358060).

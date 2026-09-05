@@ -1,5 +1,6 @@
 //! Decentralised libp2p discovery for VOLPAROSSA.
 
+mod address_scope;
 mod advertisement_budget;
 #[cfg(test)]
 mod advertisement_tests;
@@ -35,6 +36,7 @@ use libp2p::{
 };
 use thiserror::Error;
 
+use address_scope::{ScopedBehaviour, private_address_is_local};
 use advertisement_budget::AdvertisementBudgets;
 pub use advertisements::{
     ADVERTISEMENT_PROTOCOL, ADVERTISEMENT_RPC_VERSION, AdvertisementRequest, AdvertisementResponse,
@@ -889,7 +891,7 @@ impl AddressAdmissions {
 
 /// Running decentralised discovery service.
 pub struct DiscoveryService {
-    swarm: Swarm<DiscoveryBehaviour>,
+    swarm: Swarm<ScopedBehaviour>,
     local_advertisement: Option<Vec<u8>>,
     advertisement_budgets: AdvertisementBudgets,
     address_admissions: AddressAdmissions,
@@ -951,7 +953,12 @@ impl DiscoveryService {
             .with_relay_client(noise::Config::new, yamux::Config::default)
             .map_err(|error| DiscoveryError::Build(error.to_string()))?
             .with_behaviour(move |keypair, relay_client| {
-                DiscoveryBehaviour::new(keypair, relay_client, mdns, protocol_roles)
+                ScopedBehaviour(DiscoveryBehaviour::new(
+                    keypair,
+                    relay_client,
+                    mdns,
+                    protocol_roles,
+                ))
             })
             .map_err(|error| DiscoveryError::Build(error.to_string()))?
             .with_swarm_config(|config| {
@@ -1017,6 +1024,9 @@ impl DiscoveryService {
     ///
     /// Returns an error when libp2p rejects the peer-bound dial address.
     pub fn dial_peerlink(&mut self, peerlink: &PeerLink) -> Result<(), DiscoveryError> {
+        if !private_address_is_local(&peerlink.dial_address()) {
+            return Err(DiscoveryError::PeerAddress);
+        }
         self.swarm
             .dial(peerlink.dial_address())
             .map_err(|error| DiscoveryError::Swarm(error.to_string()))
@@ -1052,6 +1062,9 @@ impl DiscoveryService {
         canonical: Multiaddr,
         source: AddressSource,
     ) -> Result<Multiaddr, DiscoveryError> {
+        if !private_address_is_local(&canonical) {
+            return Err(DiscoveryError::PeerAddress);
+        }
         let is_new = self
             .address_admissions
             .admit_prepared(peer_id, canonical.clone(), source)?;
@@ -1131,7 +1144,7 @@ impl DiscoveryService {
             if let Ok(canonical) =
                 prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
             {
-                if !retained.contains(&canonical) {
+                if private_address_is_local(&canonical) && !retained.contains(&canonical) {
                     retained.push(canonical);
                 }
             }
@@ -1161,6 +1174,7 @@ impl DiscoveryService {
         let mut rejected = Vec::new();
         for address in addresses.iter() {
             let valid = valid_count < MAX_DISCOVERY_ADDRESSES_PER_PEER
+                && private_address_is_local(address)
                 && prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
                     .is_ok_and(|canonical| canonical == *address);
             if valid {
