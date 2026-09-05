@@ -12,11 +12,13 @@ use rcgen::generate_simple_self_signed;
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::watch;
 use volparossa_discovery::UdpExitSessionSignal;
 use volparossa_exit::{
     ExitNativeRouteAuthorization, ExitNativeRouteIdentityError, ExitNativeRouteIdentityOwner,
     ExitNativeRouteIdentityProvider, ExitNativeRouteIdentityRequest,
 };
+use volparossa_linux_uapi::IndependentEgress;
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::NativeRouteIdentity;
 use volparossa_protocol::{ReplayCache, TimePolicy};
@@ -162,33 +164,41 @@ pub(crate) struct ActiveProductionUdpExitRoute {
     policy: VerifiedManifest,
     authorization_timeout: Duration,
     limits: DatagramLimits,
+    independent_egress: Option<IndependentEgress>,
 }
 
 impl ActiveProductionUdpExitRoute {
-    pub(crate) async fn run(self, now_ms: u64) -> Result<UdpBridgeStats, ProductionUdpExitFailure> {
+    pub(crate) async fn run_until_shutdown(
+        self,
+        mut shutdown: watch::Receiver<bool>,
+        now_ms: u64,
+    ) -> Result<UdpBridgeStats, ProductionUdpExitFailure> {
         let Self {
             listener,
             cleanup,
             policy,
             authorization_timeout,
             limits,
+            independent_egress,
         } = self;
         let Ok(mut replay) = ReplayCache::new(EXIT_FLOW_REPLAY_CAPACITY) else {
             listener.shutdown().await;
             return Err(failed_after_cleanup(cleanup, ProductionUdpExitError::Association).await);
         };
         let association = listener
-            .accept(
+            .accept_with_egress_until_shutdown(
                 &policy,
                 &mut replay,
                 TimePolicy::default(),
                 authorization_timeout,
                 limits,
                 now_ms,
+                independent_egress.as_ref(),
+                &mut shutdown,
             )
             .await;
         let result = match association {
-            Ok(accepted) => accepted.run().await,
+            Ok(accepted) => accepted.run_until_shutdown(&mut shutdown).await,
             Err(_) => Err(volparossa_udp::UdpError::InvalidBinding(
                 "authorized Exit association",
             )),
@@ -230,6 +240,7 @@ pub(crate) async fn start_production_udp_exit(
     policy: VerifiedManifest,
     authorization_timeout: Duration,
     limits: DatagramLimits,
+    independent_egress: Option<IndependentEgress>,
     now_ms: u64,
 ) -> Result<(ActiveProductionUdpExitRoute, UdpExitSessionSignal), ProductionUdpExitFailure> {
     let scope = authorization.scope();
@@ -345,6 +356,7 @@ pub(crate) async fn start_production_udp_exit(
             policy,
             authorization_timeout,
             limits,
+            independent_egress,
         },
         signal,
     ))

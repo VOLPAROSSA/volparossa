@@ -32,6 +32,9 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod egress;
+pub use egress::{EgressObservation, IndependentEgress};
+
 use std::{
     env,
     ffi::{OsStr, OsString},

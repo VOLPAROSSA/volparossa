@@ -19,6 +19,7 @@ thiserror.workspace = true
 tokio.workspace = true
 volparossa-core = { path = "../volparossa-core", version = "=0.1.0" }
 volparossa-inspection = { path = "../volparossa-inspection", version = "=0.1.0" }
+volparossa-linux-uapi = { path = "../volparossa-linux-uapi", version = "=0.1.0" }
 volparossa-metrics = { path = "../volparossa-metrics", version = "=0.1.0" }
 volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
 volparossa-protocol = { path = "../volparossa-protocol", version = "=0.1.0" }

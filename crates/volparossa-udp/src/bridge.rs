@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use socket2::SockRef;
 use tokio::net::UdpSocket;
 use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
+use volparossa_linux_uapi::IndependentEgress;
 
 use crate::{PinnedUdpFlow, QuicUdpAssociation, UdpError};
 
@@ -82,6 +83,22 @@ impl ExitUdpBridge {
         now_ms: u64,
         limits: DatagramLimits,
     ) -> Result<Self, UdpError> {
+        Self::connect_with_egress(association, pinned, now_ms, limits, None).await
+    }
+
+    /// Connect the exact policy-pinned destination through a selected independent uplink.
+    ///
+    /// # Errors
+    ///
+    /// In addition to normal binding checks, an unavailable or unbindable selected uplink fails
+    /// closed without trying another interface. The system DNS resolver is unchanged.
+    pub async fn connect_with_egress(
+        association: QuicUdpAssociation,
+        pinned: PinnedUdpFlow,
+        now_ms: u64,
+        limits: DatagramLimits,
+        independent_egress: Option<&IndependentEgress>,
+    ) -> Result<Self, UdpError> {
         if now_ms >= pinned.expires_at_ms() {
             return Err(UdpError::Expired);
         }
@@ -94,6 +111,9 @@ impl ExitUdpBridge {
         };
         let socket = UdpSocket::bind(bind_address).await?;
         SockRef::from(&socket).set_priority(CONTRIBUTION_SOCKET_PRIORITY)?;
+        if let Some(egress) = independent_egress {
+            egress.bind_new_socket(&socket)?;
+        }
         socket.connect(pinned.destination()).await?;
         Ok(Self {
             association,

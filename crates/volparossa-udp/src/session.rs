@@ -8,6 +8,8 @@ use std::{
 
 use bytes::Bytes;
 use quinn::{ClientConfig, ServerConfig};
+use tokio::sync::watch;
+use volparossa_linux_uapi::IndependentEgress;
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{ReplayCache, TimePolicy};
 use volparossa_routing::{
@@ -396,6 +398,38 @@ impl SingleRelayUdpExitListener {
         limits: DatagramLimits,
         now_ms: u64,
     ) -> Result<SingleRelayUdpExit, UdpError> {
+        let (_keep_alive, mut shutdown) = watch::channel(false);
+        self.accept_with_egress_until_shutdown(
+            policy,
+            replay_cache,
+            time_policy,
+            authorization_timeout,
+            limits,
+            now_ms,
+            None,
+            &mut shutdown,
+        )
+        .await
+    }
+
+    /// Accept using the selected destination uplink and an explicit contribution lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Authorization and binding failures remain closed. A true or closed shutdown channel
+    /// cancels acceptance and fully shuts down the owned endpoint before returning.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_with_egress_until_shutdown(
+        self,
+        policy: &VerifiedManifest,
+        replay_cache: &mut ReplayCache,
+        time_policy: TimePolicy,
+        authorization_timeout: Duration,
+        limits: DatagramLimits,
+        now_ms: u64,
+        independent_egress: Option<&IndependentEgress>,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<SingleRelayUdpExit, UdpError> {
         let Self { endpoint, path } = self;
         let attempt = async {
             let connection = endpoint.accept().await?;
@@ -424,12 +458,24 @@ impl SingleRelayUdpExitListener {
                     .map(SingleRelayExitBridge::Dns)
             } else {
                 let pinned = flow.resolve_and_pin(now_ms).await?;
-                ExitUdpBridge::connect(association, pinned, now_ms, limits)
-                    .await
-                    .map(SingleRelayExitBridge::Datagram)
+                ExitUdpBridge::connect_with_egress(
+                    association,
+                    pinned,
+                    now_ms,
+                    limits,
+                    independent_egress,
+                )
+                .await
+                .map(SingleRelayExitBridge::Datagram)
             }
-        }
-        .await;
+        };
+        let attempt = tokio::select! {
+            biased;
+            () = wait_for_exit_shutdown(shutdown) => {
+                Err(UdpError::InvalidBinding("Exit contribution unavailable"))
+            }
+            result = attempt => result,
+        };
         match attempt {
             Ok(bridge) => Ok(SingleRelayUdpExit { endpoint, bridge }),
             Err(error) => {
@@ -489,13 +535,45 @@ impl SingleRelayUdpExit {
     ///
     /// Returns the first association, socket, size, or resource-limit error.
     pub async fn run(self) -> Result<UdpBridgeStats, UdpError> {
+        let (_keep_alive, mut shutdown) = watch::channel(false);
+        self.run_until_shutdown(&mut shutdown).await
+    }
+
+    /// Run until the flow ends or contribution is withdrawn, then release the endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns forwarding errors or an explicit contribution-withdrawal error. Cancellation
+    /// waits for endpoint shutdown rather than dropping its asynchronous socket owner.
+    pub async fn run_until_shutdown(
+        self,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<UdpBridgeStats, UdpError> {
         let Self { endpoint, bridge } = self;
-        let result = match bridge {
-            SingleRelayExitBridge::Datagram(bridge) => bridge.run().await,
-            SingleRelayExitBridge::Dns(bridge) => bridge.run().await,
+        let forwarding = async {
+            match bridge {
+                SingleRelayExitBridge::Datagram(bridge) => bridge.run().await,
+                SingleRelayExitBridge::Dns(bridge) => bridge.run().await,
+            }
+        };
+        let result = tokio::select! {
+            biased;
+            () = wait_for_exit_shutdown(shutdown) => {
+                Err(UdpError::InvalidBinding("Exit contribution unavailable"))
+            }
+            result = forwarding => result,
         };
         endpoint.shutdown().await;
         result
+    }
+}
+
+async fn wait_for_exit_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    loop {
+        let stopping = *shutdown.borrow_and_update();
+        if stopping || shutdown.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -585,6 +663,19 @@ mod tests {
 
     #[tokio::test]
     async fn adopted_client_and_exit_descriptors_carry_one_udp_echo() {
+        real_udp_echo_retirement(false).await;
+    }
+
+    #[tokio::test]
+    async fn uplink_withdrawal_retires_a_live_udp_echo_and_releases_its_exact_listener() {
+        real_udp_echo_retirement(true).await;
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real QUIC echo compares normal and withdrawn endpoint lifetimes"
+    )]
+    async fn real_udp_echo_retirement(withdraw_uplink: bool) {
         let _installation = rustls::crypto::ring::default_provider().install_default();
         let certified = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
         let certificate = certified.cert.der().clone();
@@ -663,7 +754,12 @@ mod tests {
             exit_association,
             pinned,
             now_ms,
-            DatagramLimits::new(1_200, 1, 1).unwrap(),
+            DatagramLimits::new(
+                1_200,
+                if withdraw_uplink { 1_000 } else { 1 },
+                if withdraw_uplink { 1_000 } else { 1 },
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -675,17 +771,43 @@ mod tests {
         client_association
             .send_payload(b"single-relay-udp-echo")
             .unwrap();
-        let bridge_task = tokio::spawn(bridge.run());
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let active = super::SingleRelayUdpExit {
+            endpoint: exit_endpoint,
+            bridge: super::SingleRelayExitBridge::Datagram(bridge),
+        };
+        let bridge_task =
+            tokio::spawn(async move { active.run_until_shutdown(&mut shutdown_rx).await });
         let received = client_association.receive_payload().await.unwrap();
         assert_eq!(received, b"single-relay-udp-echo"[..]);
-        client_association.close();
-        let statistics = bridge_task.await.unwrap().unwrap();
-        assert_eq!(statistics.tunnel_to_destination_datagrams, 1);
-        assert_eq!(statistics.destination_to_tunnel_datagrams, 1);
+        if withdraw_uplink {
+            assert!(
+                !bridge_task.is_finished(),
+                "real flow is still active before withdrawal"
+            );
+            shutdown.send(true).unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), bridge_task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                result,
+                Err(crate::UdpError::InvalidBinding(
+                    "Exit contribution unavailable"
+                ))
+            ));
+        } else {
+            client_association.close();
+            let statistics = bridge_task.await.unwrap().unwrap();
+            assert_eq!(statistics.tunnel_to_destination_datagrams, 1);
+            assert_eq!(statistics.destination_to_tunnel_datagrams, 1);
+        }
 
         echo.await.unwrap();
         drop(client_association);
-        tokio::join!(client_endpoint.shutdown(), exit_endpoint.shutdown());
+        client_endpoint.shutdown().await;
+        let reclaimed = StdUdpSocket::bind(exit_local).expect("exact Exit listener released");
+        drop(reclaimed);
     }
 
     #[test]

@@ -14,12 +14,14 @@ use socket2::SockRef;
 use thiserror::Error;
 use tokio::{
     net::UdpSocket,
+    sync::watch,
     time::{Instant, MissedTickBehavior, interval, sleep_until},
 };
 use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
 use volparossa_discovery::{ExitMpquicSessionSignal, UdpExitSessionSignal};
 use volparossa_exit::{ExitNativeRouteAuthorization, ExitNativeRouteCredentialAuthorization};
 use volparossa_inspection::{InspectionProgress, QuicInitialInspector};
+use volparossa_linux_uapi::IndependentEgress;
 use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{ReplayCache, TimePolicy};
 use volparossa_quic::{
@@ -272,6 +274,7 @@ pub(crate) struct ActiveProductionMpquicExitRoute {
     client_session_id: [u8; 32],
     transport_mode: TransportMode,
     single_path_udp: Option<VerifiedSingleRelayPath>,
+    independent_egress: Option<IndependentEgress>,
 }
 
 impl ActiveProductionMpquicExitRoute {
@@ -279,8 +282,16 @@ impl ActiveProductionMpquicExitRoute {
     ///
     /// Every destination gets one connected, route-local UDP socket. Its reverse traffic is
     /// reconstructed only toward the exact tunnel-assigned Client address and application port.
-    pub(crate) async fn run(mut self, now_ms: u64) -> Result<(), ProductionMpquicError> {
-        let forwarding = self.forward_datagrams(now_ms).await;
+    pub(crate) async fn run_until_shutdown(
+        mut self,
+        mut shutdown: watch::Receiver<bool>,
+        now_ms: u64,
+    ) -> Result<(), ProductionMpquicError> {
+        let forwarding = tokio::select! {
+            biased;
+            () = wait_for_exit_shutdown(&mut shutdown) => Ok(()),
+            result = self.forward_datagrams(now_ms) => result,
+        };
         let cleanup = self.shutdown().await;
         match (forwarding, cleanup) {
             (Err(error), _) => Err(error),
@@ -392,6 +403,7 @@ impl ActiveProductionMpquicExitRoute {
                                 control.key,
                                 &pending.payload,
                                 current_ms,
+                                self.independent_egress.as_ref(),
                             )
                             .await?;
                         }
@@ -459,6 +471,7 @@ impl ActiveProductionMpquicExitRoute {
                         key,
                         datagram.payload,
                         current_ms,
+                        self.independent_egress.as_ref(),
                     )
                     .await?;
                     continue;
@@ -493,8 +506,12 @@ impl ActiveProductionMpquicExitRoute {
                     if flows.len() >= MAXIMUM_EXIT_UDP_FLOWS {
                         return Err(ProductionMpquicError::Invalid("MPQUIC Exit UDP flow bound"));
                     }
-                    let mut flow =
-                        ExitUdpFlow::connect(key.destination, Some(pending.authorization)).await?;
+                    let mut flow = ExitUdpFlow::connect(
+                        key.destination,
+                        Some(pending.authorization),
+                        self.independent_egress.as_ref(),
+                    )
+                    .await?;
                     for payload in pending.datagrams {
                         flow.send(&payload).await?;
                     }
@@ -516,7 +533,9 @@ impl ActiveProductionMpquicExitRoute {
                 if flows.len() >= MAXIMUM_EXIT_UDP_FLOWS {
                     return Err(ProductionMpquicError::Invalid("MPQUIC Exit UDP flow bound"));
                 }
-                let mut flow = ExitUdpFlow::connect(key.destination, None).await?;
+                let mut flow =
+                    ExitUdpFlow::connect(key.destination, None, self.independent_egress.as_ref())
+                        .await?;
                 flow.send(datagram.payload).await?;
                 flows.insert(key, flow);
             }
@@ -578,6 +597,15 @@ fn complete_exit_udp_payload(buffer: &[u8], length: usize) -> Option<&[u8]> {
         return None;
     }
     buffer.get(..length)
+}
+
+async fn wait_for_exit_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    loop {
+        let stopping = *shutdown.borrow_and_update();
+        if stopping || shutdown.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -644,9 +672,13 @@ impl ExitUdpFlow {
     async fn connect(
         destination: SocketAddrV4,
         browser_authorization: Option<AuthorizedUdpFlow>,
+        independent_egress: Option<&IndependentEgress>,
     ) -> Result<Self, ProductionMpquicError> {
         let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).await?;
         SockRef::from(&socket).set_priority(CONTRIBUTION_SOCKET_PRIORITY)?;
+        if let Some(egress) = independent_egress {
+            egress.bind_new_socket(&socket)?;
+        }
         socket.connect(destination).await?;
         Ok(Self {
             socket,
@@ -710,6 +742,7 @@ async fn forward_authorized_general_udp(
     key: ExitUdpFlowKey,
     payload: &[u8],
     now_ms: u64,
+    independent_egress: Option<&IndependentEgress>,
 ) -> Result<(), ProductionMpquicError> {
     authorization.ensure_active_at(now_ms)?;
     if key.destination.port() == BROWSER_QUIC_PORT
@@ -734,7 +767,7 @@ async fn forward_authorized_general_udp(
     if flows.len() >= MAXIMUM_EXIT_UDP_FLOWS {
         return Err(ProductionMpquicError::Invalid("native UDP flow bound"));
     }
-    let mut flow = ExitUdpFlow::connect(key.destination, None).await?;
+    let mut flow = ExitUdpFlow::connect(key.destination, None, independent_egress).await?;
     flow.send(payload).await?;
     flows.insert(key, flow);
     Ok(())
@@ -1048,6 +1081,7 @@ pub(crate) async fn start_production_mpquic_exit(
     policy: VerifiedManifest,
     signed_policy_hash: [u8; 32],
     flow_idle_timeout: Duration,
+    independent_egress: Option<IndependentEgress>,
     now_ms: u64,
 ) -> Result<(ActiveProductionMpquicExitRoute, ExitMpquicSessionSignal), ProductionMpquicError> {
     let (active, ready) = start_production_native_exit(
@@ -1062,6 +1096,7 @@ pub(crate) async fn start_production_mpquic_exit(
         flow_idle_timeout,
         TransportMode::MultipathQuic,
         None,
+        independent_egress,
         now_ms,
     )
     .await?;
@@ -1092,6 +1127,7 @@ pub(crate) async fn start_production_single_path_udp_exit(
     signed_policy_hash: [u8; 32],
     flow_idle_timeout: Duration,
     certificate_der: Vec<u8>,
+    independent_egress: Option<IndependentEgress>,
     now_ms: u64,
 ) -> Result<(ActiveProductionMpquicExitRoute, UdpExitSessionSignal), ProductionMpquicError> {
     let path_id = path.path_id;
@@ -1107,6 +1143,7 @@ pub(crate) async fn start_production_single_path_udp_exit(
         flow_idle_timeout,
         TransportMode::SinglePathGeneralUdp,
         Some(verified_path),
+        independent_egress,
         now_ms,
     )
     .await?;
@@ -1145,6 +1182,7 @@ async fn start_production_native_exit(
     flow_idle_timeout: Duration,
     transport_mode: TransportMode,
     single_path_udp: Option<VerifiedSingleRelayPath>,
+    independent_egress: Option<IndependentEgress>,
     now_ms: u64,
 ) -> Result<(ActiveProductionMpquicExitRoute, NativeExitReady), ProductionMpquicError> {
     let authorization = match NativeExitAuthorizationParts::from_credential(credential) {
@@ -1291,6 +1329,7 @@ async fn start_production_native_exit(
             client_session_id: authorization.client_session_id,
             transport_mode,
             single_path_udp,
+            independent_egress,
         },
         ready,
     ))
@@ -3179,6 +3218,7 @@ mod tests {
             key,
             &retained.payload,
             NOW_MS,
+            None,
         )
         .await
         .expect("authorized egress");
@@ -3629,7 +3669,7 @@ mod tests {
             };
             let issued_at = if id == 1 { NOW_MS } else { NOW_MS + 1_000 };
             let authorization = browser_flow(&fixture, &policy, destination_address, id, issued_at);
-            let mut flow = ExitUdpFlow::connect(destination_address, Some(authorization))
+            let mut flow = ExitUdpFlow::connect(destination_address, Some(authorization), None)
                 .await
                 .unwrap();
             // Flow 1 expires by signature, flow 3 by its signed 30-second idle timeout.
@@ -3682,7 +3722,7 @@ mod tests {
         let SocketAddr::V4(destination_address) = destination.local_addr().unwrap() else {
             panic!("IPv4 test destination");
         };
-        let flow = ExitUdpFlow::connect(destination_address, None)
+        let flow = ExitUdpFlow::connect(destination_address, None, None)
             .await
             .unwrap();
         let local = flow.socket.local_addr().unwrap();
@@ -3698,6 +3738,29 @@ mod tests {
         let (_, second_peer) = destination.recv_from(&mut request).await.unwrap();
         assert_eq!(peer, second_peer);
         assert_eq!(flow.socket.local_addr().unwrap(), local);
+    }
+
+    #[tokio::test]
+    async fn independent_egress_native_udp_never_uses_an_unbound_fallback() {
+        let egress = IndependentEgress::new("vpnosuchuplink").unwrap();
+        assert_eq!(egress.observe().unwrap(), None);
+        let destination = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let SocketAddr::V4(address) = destination.local_addr().unwrap() else {
+            panic!("IPv4 fixture");
+        };
+        assert!(
+            ExitUdpFlow::connect(address, None, Some(&egress))
+                .await
+                .is_err()
+        );
+        let mut bytes = [0_u8; 16];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), destination.recv(&mut bytes))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

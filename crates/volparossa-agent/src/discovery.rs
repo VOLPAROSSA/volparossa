@@ -75,6 +75,7 @@ use volparossa_exit::{
     ProbeEvidence, ProbeEvidenceError, ProbeEvidenceVerifier,
 };
 use volparossa_identity::Identity;
+use volparossa_linux_uapi::{EgressObservation, IndependentEgress};
 use volparossa_local_control::{
     LogLevel, PeerSummary, PolicySnapshot as AgentPolicySnapshot, Reachability,
 };
@@ -121,7 +122,8 @@ use crate::{
     },
     helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
     mpquic_runtime::{
-        ExitMpquicPathAuthorization, ProductionMpquicExitPreflight, start_production_mpquic_exit,
+        ActiveProductionMpquicExitRoute, ExitMpquicPathAuthorization,
+        ProductionMpquicExitPreflight, start_production_mpquic_exit,
         start_production_single_path_udp_exit,
     },
     mptcp_flow_runtime::{
@@ -903,6 +905,14 @@ struct PendingMpquicExitSession {
     expires_at_ms: u64,
 }
 
+/// Cancellation never drops an affine runtime; completion precedes exact helper cleanup retry.
+struct ExitRuntimeRetirement {
+    shutdown: watch::Sender<bool>,
+    completed: oneshot::Receiver<()>,
+    cleanup: crate::helper::RuntimeBoundContextCleanup,
+    cleanup_not_before_ms: u64,
+}
+
 /// Exit-owned helper context and finalized grant awaiting exact Relay confirmations.
 ///
 /// The helper leases are prepared before their public endpoints are signed. Activation happens
@@ -1676,6 +1686,11 @@ pub struct DiscoveryRuntime {
     mpquic_socket: PathBuf,
     relay_service: Option<RelayService>,
     exit_service: Option<ExitService>,
+    independent_egress: Option<IndependentEgress>,
+    independent_egress_available: bool,
+    independent_egress_observation: Option<EgressObservation>,
+    independent_exit_retiring: bool,
+    exit_runtime_retirements: HashMap<[u8; FORWARD_ID_BYTES], ExitRuntimeRetirement>,
     metrics: MetricsRegistry,
     role_commands: mpsc::Receiver<DiscoveryCommand>,
     client_preselection: ClientPreselectionOwner,
@@ -1818,7 +1833,18 @@ impl DiscoveryRuntime {
         } else {
             None
         };
-        let exit_service = if roles.exit {
+        let independent_egress = config
+            .network
+            .independent_egress_interface
+            .as_deref()
+            .map(IndependentEgress::new)
+            .transpose()
+            .map_err(|_| DiscoveryRuntimeError::RolePrerequisites)?;
+        let independent_egress_available = independent_egress.is_none();
+        if roles.exit && policy.is_none() {
+            return Err(DiscoveryRuntimeError::PolicyUnavailable);
+        }
+        let exit_service = if roles.exit && independent_egress_available {
             let policy = policy.ok_or(DiscoveryRuntimeError::PolicyUnavailable)?;
             Some(
                 build_exit_service(local_node_id, config, policy, &metrics)
@@ -1853,6 +1879,11 @@ impl DiscoveryRuntime {
             mpquic_socket,
             relay_service,
             exit_service,
+            independent_egress,
+            independent_egress_available,
+            independent_egress_observation: None,
+            independent_exit_retiring: false,
+            exit_runtime_retirements: HashMap::new(),
             metrics,
             role_commands,
             client_preselection,
@@ -2062,6 +2093,7 @@ impl DiscoveryRuntime {
                 }
             }
         }
+        self.drain_exit_runtimes_for_shutdown(&state).await;
         self.destroy_expired_exit_native_attempts(u64::MAX).await;
         Box::pin(self.fail_all_pending_route_sessions()).await;
         self.destroy_expired_production_relay_routes(u64::MAX).await;
@@ -4053,9 +4085,210 @@ impl DiscoveryRuntime {
         self.revoke_forwarded_keys(&stale_forwarded, false);
     }
 
-    async fn synchronize_exit_policy(&mut self, state: &Arc<RwLock<AgentState>>) {
-        self.revoke_capabilities_outside_active_policy(state).await;
+    fn exit_uplink_unavailable(&self) -> bool {
+        self.roles.exit
+            && self.independent_egress.is_some()
+            && (!self.independent_egress_available || self.independent_exit_retiring)
+    }
+
+    fn exit_authority_enabled(&self) -> bool {
+        self.roles.exit && !self.exit_uplink_unavailable() && self.exit_service.is_some()
+    }
+
+    fn can_start_exit_runtime(&self, context_id: &[u8; FORWARD_ID_BYTES]) -> bool {
+        self.exit_authority_enabled()
+            && self.exit_runtime_retirements.len() < MAX_LEDGER_ENTRIES
+            && !self.exit_runtime_retirements.contains_key(context_id)
+    }
+
+    async fn observe_independent_egress(&mut self, state: &Arc<RwLock<AgentState>>) -> bool {
+        self.reap_exit_runtime_retirements(unix_millis()).await;
         if !self.roles.exit {
+            return false;
+        }
+        let Some(egress) = self.independent_egress.clone() else {
+            return false;
+        };
+        let observation = tokio::task::spawn_blocking(move || egress.observe())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
+        self.apply_independent_egress_observation(observation, state)
+            .await
+    }
+
+    async fn apply_independent_egress_observation(
+        &mut self,
+        observation: Option<EgressObservation>,
+        state: &Arc<RwLock<AgentState>>,
+    ) -> bool {
+        let was_unavailable = self.exit_uplink_unavailable();
+        // A recreated interface or lost address family invalidates existing socket pins too.
+        let lost =
+            self.independent_egress_available && self.independent_egress_observation != observation;
+        self.independent_egress_available = observation.is_some();
+        self.independent_egress_observation = observation;
+        if lost {
+            self.independent_exit_retiring = true;
+            self.exit_service = None;
+            clear_exit_metric(&self.metrics);
+            // Historical Exit advertisements must stop authorizing new signed replies too.
+            self.withdraw_local();
+            self.publish_local(state).await;
+            state.write().await.log(
+                LogLevel::Warn,
+                "INDEPENDENT_EGRESS_WITHDRAWN",
+                unix_millis(),
+            );
+        }
+        if self.independent_exit_retiring {
+            self.retire_independent_exit_contexts().await;
+            self.independent_exit_retiring = !self.exit_runtime_retirements.is_empty()
+                || !self.exit_native_ready_attempts.is_empty()
+                || !self.prepared_production_exit_routes.is_empty()
+                || !self.active_production_mptcp_exit_routes.is_empty();
+        }
+        lost || was_unavailable != self.exit_uplink_unavailable()
+    }
+
+    async fn retire_independent_exit_contexts(&mut self) {
+        for runtime in self.exit_runtime_retirements.values() {
+            let _ = runtime.shutdown.send(true);
+        }
+        for attempt in self.exit_native_ready_attempts.values_mut() {
+            attempt.expires_at_ms = 0;
+            for task in attempt.probe_tasks.values() {
+                task.abort();
+            }
+        }
+        for route in self.prepared_production_exit_routes.values_mut() {
+            route.expires_at_ms = 0;
+        }
+        for route in self.active_production_mptcp_exit_routes.values_mut() {
+            route.expires_at_ms = 0;
+        }
+        self.expire_pending_exit_native_ready(u64::MAX);
+        self.expire_pending_mptcp_exit_sessions(u64::MAX).await;
+        self.expire_pending_mpquic_exit_sessions(u64::MAX).await;
+        let now_ms = unix_millis();
+        self.destroy_expired_exit_native_attempts(now_ms).await;
+        self.destroy_expired_production_exit_routes(now_ms).await;
+        self.destroy_expired_active_mptcp_exit_routes(now_ms).await;
+        self.recent_native_exit_evidence.clear();
+        self.exit_control_relays.clear();
+        self.exit_data_relays.clear();
+    }
+
+    fn retain_exit_runtime(
+        &mut self,
+        context_id: [u8; FORWARD_ID_BYTES],
+        cleanup: crate::helper::RuntimeBoundContextCleanup,
+    ) -> (watch::Receiver<bool>, oneshot::Sender<()>) {
+        let (shutdown, receiver) = watch::channel(false);
+        let (completion, completed) = oneshot::channel();
+        let previous = self.exit_runtime_retirements.insert(
+            context_id,
+            ExitRuntimeRetirement {
+                shutdown,
+                completed,
+                cleanup,
+                cleanup_not_before_ms: 0,
+            },
+        );
+        debug_assert!(previous.is_none(), "checked exact Exit runtime owner");
+        (receiver, completion)
+    }
+
+    async fn reap_exit_runtime_retirements(&mut self, now_ms: u64) {
+        let completed = self
+            .exit_runtime_retirements
+            .iter_mut()
+            .filter_map(|(id, runtime)| {
+                if runtime.cleanup_not_before_ms > now_ms {
+                    return None;
+                }
+                match runtime.completed.try_recv() {
+                    Err(oneshot::error::TryRecvError::Empty) => None,
+                    Ok(()) | Err(oneshot::error::TryRecvError::Closed) => Some(*id),
+                }
+            })
+            .collect::<Vec<_>>();
+        for context_id in completed {
+            let runtime = self
+                .exit_runtime_retirements
+                .get(&context_id)
+                .expect("checked");
+            if self
+                .helper
+                .destroy_context_after_join(&runtime.cleanup)
+                .await
+                .is_err()
+            {
+                let runtime = self
+                    .exit_runtime_retirements
+                    .get_mut(&context_id)
+                    .expect("checked");
+                runtime.cleanup_not_before_ms =
+                    unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+            } else {
+                self.exit_runtime_retirements.remove(&context_id);
+            }
+        }
+    }
+
+    async fn drain_exit_runtimes_for_shutdown(&mut self, state: &Arc<RwLock<AgentState>>) {
+        for runtime in self.exit_runtime_retirements.values() {
+            let _ = runtime.shutdown.send(true);
+        }
+        // The parent actor join has a five-second deadline. Keep a destruction-only guard in
+        // the map even if a stalled helper call is canceled; global helper shutdown remains
+        // responsible for unconfirmed owners, never a successful-cleanup claim.
+        let drained = timeout(Duration::from_secs(3), async {
+            while !self.exit_runtime_retirements.is_empty() {
+                self.reap_exit_runtime_retirements(unix_millis()).await;
+                if self.exit_runtime_retirements.is_empty() {
+                    break;
+                }
+                tokio::select! {
+                    event = self.mptcp_exit_runtime_completions.recv() => {
+                        if let Some(MptcpExitRuntimeEvent::RuntimeCompleted(completion)) = event {
+                            self.finish_mptcp_exit_runtime(completion, state).await;
+                        }
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(25)) => {}
+                }
+            }
+        })
+        .await
+        .is_ok();
+        if !drained {
+            state.write().await.log(
+                LogLevel::Error,
+                "EXIT_RUNTIME_SHUTDOWN_CLEANUP_PENDING",
+                unix_millis(),
+            );
+        }
+    }
+
+    async fn synchronize_exit_policy(&mut self, state: &Arc<RwLock<AgentState>>) {
+        let uplink_changed = self.observe_independent_egress(state).await;
+        self.synchronize_exit_policy_after_observation(state, uplink_changed)
+            .await;
+    }
+
+    async fn synchronize_exit_policy_after_observation(
+        &mut self,
+        state: &Arc<RwLock<AgentState>>,
+        uplink_changed: bool,
+    ) {
+        self.revoke_capabilities_outside_active_policy(state).await;
+        if !self.roles.exit || self.exit_uplink_unavailable() {
+            if self.exit_uplink_unavailable() {
+                self.exit_service = None;
+                clear_exit_metric(&self.metrics);
+                return;
+            }
             self.destroy_expired_production_exit_routes(u64::MAX).await;
             if self.exit_service.take().is_some() {
                 clear_exit_metric(&self.metrics);
@@ -4070,6 +4303,9 @@ impl DiscoveryRuntime {
                 .is_some_and(|service| service.policy_hash() == policy.policy_hash())
         });
         if unchanged {
+            if uplink_changed {
+                self.publish_local(state).await;
+            }
             return;
         }
 
@@ -4104,6 +4340,9 @@ impl DiscoveryRuntime {
                     .log(LogLevel::Warn, "EXIT_POLICY_SERVICE_WITHDRAWN", now_ms);
             }
             None => {}
+        }
+        if uplink_changed {
+            self.publish_local(state).await;
         }
     }
 
@@ -4170,10 +4409,13 @@ impl DiscoveryRuntime {
             self.withdraw_local();
             return;
         };
-        let (roles, policy) = {
+        let (mut roles, policy) = {
             let state = state.read().await;
             (state.roles(), state.policy_snapshot(now_ms))
         };
+        if self.exit_uplink_unavailable() {
+            roles.exit = false;
+        }
         let Ok(policy_hash) = <[u8; 32]>::try_from(policy.policy_hash.as_slice()) else {
             self.withdraw_local();
             return;
@@ -4283,6 +4525,17 @@ impl DiscoveryRuntime {
     }
 
     fn local_advertisement_origin(&self) -> AdvertisementNetwork {
+        if self.exit_uplink_unavailable() {
+            return AdvertisementNetwork {
+                uplink: volparossa_protocol::AdvertisementUplink::LocalOnly as i32,
+                region: self.config.network.advertised_region.clone(),
+                country_code: self.config.network.advertised_country_code.clone(),
+                asn: 0,
+                ipv4_prefix_hint: String::new(),
+                ipv6_prefix_hint: String::new(),
+                operator_id: String::new(),
+            };
+        }
         AdvertisementNetwork {
             uplink: match self.config.network.uplink {
                 volparossa_config::NetworkUplink::IndependentInternet => {
@@ -9001,7 +9254,7 @@ impl DiscoveryRuntime {
             });
         if request.validate().is_err()
             || !forward_request_scope_matches(&request, operation, now_ms)
-            || !self.roles.exit
+            || !self.exit_authority_enabled()
             || self.exit_service.is_none()
             || control_relay_peer != authenticated_control_relay
             || !valid_control_relay
@@ -9439,6 +9692,9 @@ impl DiscoveryRuntime {
         .ok()?;
         let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)?;
         let signed_policy_hash = fixed_bytes::<32>(&scope.exit.policy_hash)?;
+        if !self.can_start_exit_runtime(&route_context_id) {
+            return None;
+        }
         let policy = state.read().await.active_policy(now_ms)?;
         if policy.policy_hash() != &signed_policy_hash {
             return None;
@@ -9468,6 +9724,10 @@ impl DiscoveryRuntime {
         let mut route = self
             .prepared_production_exit_routes
             .remove(&route_context_id)?;
+        let (shutdown, completed) = self.retain_exit_runtime(
+            route_context_id,
+            route.helper_owner.retain_cleanup_authority(),
+        );
         let native_scope = route.bundle.accepted().native_route_authorization_scope();
         let activated = self
             .exit_service
@@ -9507,6 +9767,7 @@ impl DiscoveryRuntime {
                 signed_policy_hash,
                 Duration::from_secs(self.config.udp.idle_timeout_seconds),
                 certificate_der,
+                self.independent_egress.clone(),
                 now_ms,
             )
             .await;
@@ -9523,7 +9784,8 @@ impl DiscoveryRuntime {
             )
             .ok()?;
             tokio::spawn(async move {
-                let _ = active.run(now_ms).await;
+                let _ = active.run_until_shutdown(shutdown, now_ms).await;
+                let _ = completed.send(());
             });
             Some(encoded)
         } else {
@@ -9550,6 +9812,7 @@ impl DiscoveryRuntime {
                 policy,
                 authorization_timeout,
                 limits,
+                self.independent_egress.clone(),
                 now_ms,
             )
             .await;
@@ -9574,7 +9837,8 @@ impl DiscoveryRuntime {
             )
             .ok()?;
             tokio::spawn(async move {
-                let _ = active.run(now_ms).await;
+                let _ = active.run_until_shutdown(shutdown, now_ms).await;
+                let _ = completed.send(());
             });
             Some(encoded)
         }
@@ -9760,6 +10024,10 @@ impl DiscoveryRuntime {
 
     /// Consume one exact Client-session-signed opaque bearer at the Exit, commit every confirmed
     /// helper path and return readiness only after the preflighted native Exit owns all listeners.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine native Exit startup retains exact cancellation and cleanup authority"
+    )]
     async fn start_production_mpquic_exit_session(
         &mut self,
         encoded_start: &[u8],
@@ -9774,6 +10042,9 @@ impl DiscoveryRuntime {
         .ok()?;
         let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)?;
         let signed_policy_hash = fixed_bytes::<32>(&scope.exit.policy_hash)?;
+        if !self.can_start_exit_runtime(&route_context_id) {
+            return None;
+        }
         let policy = state.read().await.active_policy(now_ms)?;
         if policy.policy_hash() != &signed_policy_hash {
             return None;
@@ -9819,6 +10090,10 @@ impl DiscoveryRuntime {
         let mut route = self
             .prepared_production_exit_routes
             .remove(&route_context_id)?;
+        let (shutdown, completed) = self.retain_exit_runtime(
+            route_context_id,
+            route.helper_owner.retain_cleanup_authority(),
+        );
         let paths = scope
             .paths
             .into_iter()
@@ -9826,7 +10101,7 @@ impl DiscoveryRuntime {
                 ExitMpquicPathAuthorization::new(path.path_id, path.signed_relay_reservation)
             })
             .collect::<Option<Vec<_>>>()?;
-        let result = start_production_mpquic_exit(
+        let (active, signal) = match start_production_mpquic_exit(
             route.mpquic_preflight.take()?,
             self.helper.clone(),
             route.helper_owner,
@@ -9836,10 +10111,11 @@ impl DiscoveryRuntime {
             policy,
             signed_policy_hash,
             Duration::from_secs(self.config.udp.idle_timeout_seconds),
+            self.independent_egress.clone(),
             now_ms,
         )
-        .await;
-        let (active, signal) = match result {
+        .await
+        {
             Ok(started) => started,
             Err(error) => {
                 // The error contains only fixed local validation text or the native process's
@@ -9857,9 +10133,7 @@ impl DiscoveryRuntime {
             usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
         )
         .ok()?;
-        tokio::spawn(async move {
-            let _ = active.run(now_ms).await;
-        });
+        spawn_exit_mpquic_runtime(active, shutdown, completed, now_ms);
         Some(encoded)
     }
 
@@ -9887,6 +10161,9 @@ impl DiscoveryRuntime {
             }};
         }
         let now_ms = unix_millis();
+        if !self.exit_authority_enabled() {
+            reject!("MPTCP_SESSION_EXIT_SCOPE_REJECTED", channel);
+        }
         let Some(scope) = verified_mptcp_session_start_scope(request.canonical_request(), now_ms)
         else {
             reject!("MPTCP_SESSION_EXIT_SCOPE_REJECTED", channel);
@@ -9901,6 +10178,13 @@ impl DiscoveryRuntime {
         else {
             reject!("MPTCP_SESSION_EXIT_FRAME_REJECTED", channel);
         };
+        if self.exit_runtime_retirements.len() >= MAX_LEDGER_ENTRIES
+            && !self
+                .active_production_mptcp_exit_routes
+                .contains_key(&route_context_id)
+        {
+            reject!("MPTCP_SESSION_EXIT_SCOPE_REJECTED", channel);
+        }
         let Some(forward_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.forward_id()) else {
             reject!("MPTCP_SESSION_EXIT_FRAME_REJECTED", channel);
         };
@@ -10390,9 +10674,11 @@ impl DiscoveryRuntime {
         active.runtime_started = true;
         let events = self.mptcp_exit_runtime_events.clone();
         let reservation_id = active.reservation_id;
+        let (shutdown, completed) =
+            self.retain_exit_runtime(route_context_id, runtime.retain_cleanup_authority());
         tokio::spawn(async move {
             let completion = runtime
-                .run(|succeeded| {
+                .run_until_shutdown(shutdown, |succeeded| {
                     let events = events.clone();
                     async move {
                         let _ = events
@@ -10417,6 +10703,7 @@ impl DiscoveryRuntime {
                     let _ = cleanup.destroy().await;
                 }
             }
+            let _ = completed.send(());
         });
     }
 
@@ -10652,7 +10939,7 @@ impl DiscoveryRuntime {
         UpstreamExitForwardResponse,
     )> {
         let now_ms = unix_millis();
-        if request.validate().is_err() || !self.roles.exit {
+        if request.validate().is_err() || !self.exit_authority_enabled() {
             return None;
         }
         let scope = verified_native_probe_forward_scope(request, now_ms)?;
@@ -10830,7 +11117,7 @@ impl DiscoveryRuntime {
         UpstreamExitForwardResponse,
     )> {
         let now_ms = unix_millis();
-        if request.validate().is_err() || !self.roles.exit {
+        if request.validate().is_err() || !self.exit_authority_enabled() {
             return None;
         }
         let scope = verified_native_probe_authorization_forward_scope(request, now_ms)?;
@@ -11069,7 +11356,7 @@ impl DiscoveryRuntime {
             }};
         }
         let now_ms = unix_millis();
-        if request.validate().is_err() || !self.roles.exit {
+        if request.validate().is_err() || !self.exit_authority_enabled() {
             reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
         }
         let Some(scope) = verified_native_probe_result_forward_scope(request, now_ms) else {
@@ -11362,7 +11649,7 @@ impl DiscoveryRuntime {
         let now_ms = unix_millis();
         if request.validate().is_err()
             || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
-            || !self.roles.exit
+            || !self.exit_authority_enabled()
         {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         }
@@ -13156,6 +13443,18 @@ impl DiscoveryRuntime {
             .await
             .replace_candidates(summaries, usable_candidates);
     }
+}
+
+fn spawn_exit_mpquic_runtime(
+    active: ActiveProductionMpquicExitRoute,
+    shutdown: watch::Receiver<bool>,
+    completed: oneshot::Sender<()>,
+    now_ms: u64,
+) {
+    tokio::spawn(async move {
+        let _ = active.run_until_shutdown(shutdown, now_ms).await;
+        let _ = completed.send(());
+    });
 }
 
 fn preselection_responder_policy(
@@ -15749,19 +16048,19 @@ fn build_exit_service(
         config.capacity.exit_download_limit_mbps,
     )
     .map_err(|_| ())?;
-    ExitService::new(
-        ExitServiceConfig::enabled(
-            node_id,
-            bandwidth,
-            config.capacity.maximum_exit_sessions,
-            MAXIMUM_RESERVATION_TTL_SECONDS,
-            TUNNEL_SETUP_TIMEOUT_SECONDS,
-            SERVICE_REPLAY_CAPACITY,
-        ),
-        policy,
-        Some(metrics.clone()),
-    )
-    .map_err(|_| ())
+    let mut service_config = ExitServiceConfig::enabled(
+        node_id,
+        bandwidth,
+        config.capacity.maximum_exit_sessions,
+        MAXIMUM_RESERVATION_TTL_SECONDS,
+        TUNNEL_SETUP_TIMEOUT_SECONDS,
+        SERVICE_REPLAY_CAPACITY,
+    );
+    if let Some(interface) = config.network.independent_egress_interface.as_deref() {
+        service_config = service_config
+            .with_independent_egress(IndependentEgress::new(interface).map_err(|_| ())?);
+    }
+    ExitService::new(service_config, policy, Some(metrics.clone())).map_err(|_| ())
 }
 
 fn clear_relay_metric(metrics: &MetricsRegistry) {
@@ -19314,6 +19613,162 @@ mod tests {
             signed_permit,
             control_public_key,
         }
+    }
+
+    fn independent_egress_fixture() -> RuntimeFixture {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        });
+        fixture.runtime.config.network.independent_egress_interface = Some("wan-test".to_owned());
+        fixture.runtime.independent_egress = Some(IndependentEgress::new("wan-test").unwrap());
+        fixture.runtime.independent_egress_observation = Some(EgressObservation {
+            ifindex: 7,
+            ipv4: true,
+            ipv6: false,
+        });
+        fixture.runtime.control_addresses =
+            BTreeSet::from(["/ip4/10.241.1.1/udp/42100/quic-v1".to_owned()]);
+        fixture
+    }
+
+    fn verified_served_advertisement(runtime: &DiscoveryRuntime) -> WireAdvertisement {
+        let mut replay = ReplayCache::new(1).unwrap();
+        verify_control_message::<WireAdvertisement>(
+            runtime
+                .served_local_advertisement
+                .as_ref()
+                .expect("served advertisement"),
+            unix_millis(),
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("actual locally signed advertisement")
+        .message()
+        .clone()
+    }
+
+    #[tokio::test]
+    async fn independent_egress_loss_and_recovery_preserve_other_roles_and_signed_policy() {
+        let mut fixture = independent_egress_fixture();
+        let roles = fixture.runtime.roles;
+        let observation = fixture.runtime.independent_egress_observation;
+        fixture.runtime.publish_local(&fixture.state).await;
+        let before = verified_served_advertisement(&fixture.runtime);
+        assert!(before.roles.as_ref().unwrap().exit);
+        assert!(fixture.runtime.exit_authority_enabled());
+
+        let changed = fixture
+            .runtime
+            .apply_independent_egress_observation(None, &fixture.state)
+            .await;
+        fixture
+            .runtime
+            .synchronize_exit_policy_after_observation(&fixture.state, changed)
+            .await;
+        assert!(!fixture.runtime.exit_authority_enabled());
+        assert!(fixture.runtime.exit_service.is_none());
+        assert!(fixture.runtime.relay_service.is_some());
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
+        ));
+        assert_eq!(fixture.runtime.roles, roles);
+        assert_eq!(fixture.runtime.config.roles, roles);
+        assert_eq!(fixture.state.read().await.roles(), roles);
+        let withdrawn = verified_served_advertisement(&fixture.runtime);
+        assert!(withdrawn.roles.as_ref().unwrap().relay);
+        assert!(!withdrawn.roles.as_ref().unwrap().exit);
+        let origin = withdrawn.network.as_ref().unwrap();
+        assert_eq!(
+            origin.uplink,
+            volparossa_protocol::AdvertisementUplink::LocalOnly as i32
+        );
+        assert_eq!(origin.asn, 0);
+        assert!(origin.ipv4_prefix_hint.is_empty() && origin.ipv6_prefix_hint.is_empty());
+        assert!(
+            fixture
+                .runtime
+                .active_provider_keys
+                .contains(capability::RELAY)
+        );
+        assert!(
+            !fixture
+                .runtime
+                .active_provider_keys
+                .contains(capability::EXIT)
+        );
+
+        let changed = fixture
+            .runtime
+            .apply_independent_egress_observation(observation, &fixture.state)
+            .await;
+        fixture
+            .runtime
+            .synchronize_exit_policy_after_observation(&fixture.state, changed)
+            .await;
+        assert!(fixture.runtime.exit_authority_enabled());
+        let recovered = verified_served_advertisement(&fixture.runtime);
+        assert!(recovered.roles.as_ref().unwrap().exit);
+        assert_eq!(recovered.network, before.network);
+        assert_eq!(recovered.policy, before.policy);
+        assert!(before.sequence_number < withdrawn.sequence_number);
+        assert!(withdrawn.sequence_number < recovered.sequence_number);
+    }
+
+    #[tokio::test]
+    async fn independent_egress_replacement_waits_for_exact_runtime_cleanup() {
+        let mut fixture = independent_egress_fixture();
+        let context = [9; FORWARD_ID_BYTES];
+        let owner = RuntimeBoundPreparedLeaseBatch::for_test(
+            PrepareLeaseBatch {
+                route_context_id: context.to_vec(),
+                ..Default::default()
+            },
+            volparossa_routing::PreparedLeaseBatch {
+                context_handle: vec![4; 32],
+                leases: Vec::new(),
+            },
+        );
+        let (shutdown, completed) = fixture
+            .runtime
+            .retain_exit_runtime(context, owner.retain_cleanup_authority());
+        let replacement = Some(EgressObservation {
+            ifindex: 8,
+            ipv4: true,
+            ipv6: false,
+        });
+        fixture
+            .runtime
+            .apply_independent_egress_observation(replacement, &fixture.state)
+            .await;
+        assert!(*shutdown.borrow());
+        assert!(fixture.runtime.independent_exit_retiring);
+        assert!(!fixture.runtime.exit_authority_enabled());
+        assert!(fixture.runtime.relay_service.is_some());
+        fixture
+            .runtime
+            .apply_independent_egress_observation(replacement, &fixture.state)
+            .await;
+        assert!(
+            !fixture.runtime.exit_authority_enabled(),
+            "new uplink cannot outrun old cleanup"
+        );
+        assert_eq!(fixture.runtime.exit_runtime_retirements.len(), 1);
+        completed.send(()).unwrap();
+        // No helper exists in this pure fixture: completion alone is not a Destroy receipt.
+        fixture
+            .runtime
+            .reap_exit_runtime_retirements(unix_millis())
+            .await;
+        assert!(
+            fixture
+                .runtime
+                .exit_runtime_retirements
+                .contains_key(&context)
+        );
+        assert!(!fixture.runtime.exit_authority_enabled());
     }
 
     #[tokio::test]

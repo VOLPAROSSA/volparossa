@@ -6,7 +6,7 @@ Last updated: 2026-09-05
 
 ## Current live integration checkpoint
 
-The latest [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989949727)
+The retained [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989949727)
 at `dbb89962` has finalized **passing A01--A13 and A15 evidence on one unchanged build**.
 It stopped before A14's forced crashes: the inventory counted 18 durable route-worker namespaces
 plus the separate live ingress namespace, but demanded two durable descriptors for all 19.
@@ -17,10 +17,15 @@ All measured remaining objects, worker namespace references and FD-store descrip
 and guest-root state hashes matched. `cleanup.complete` is nevertheless false because the A14
 proof did not complete. This is not an all-A01--A15 alpha pass, nor proof of the newer extensions.
 The exact route-versus-ingress worker classifier is now integrated, including real disposable
-veth/WireGuard inventory checks. The [new complete attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33991871530)
-at `590378a9` is pending. Its benchmark selects and records an actual suitable route before
-starting payloads; committed MPTCP paths are reported as Reachable, not fictitious active
-subflows. Kernel subflow and packet evidence remain independently required.
+veth/WireGuard inventory checks. The [next complete attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33991871530)
+at `590378a9` passed A01--A07 and A15, but stopped at `A08_ALLOWED_DNS_UDP_NOT_PROVEN`;
+A09--A14 were not executed. Its MPTCP aggregation measured 14.113 Mbps against a 7.046-Mbps
+single-path baseline (2.003x), with exact 32-MiB hashes and independent path evidence. This is
+the bounded v1 benchmark, not a LAN/Wi-Fi speed-gain claim. Cleanup left zero owned objects and
+unchanged host-state hashes. The DNS failure is under diagnosis, so A14's actual crash sequence
+still has no pass. Benchmarks now select and record a suitable real route before starting
+payloads; committed MPTCP paths are Reachable metadata, never a substitute for kernel subflow
+and packet evidence.
 
 ### Earlier integration evidence and corrections
 
@@ -174,6 +179,22 @@ traffic; spare capacity must be measured and enforced, not inferred from configu
 - [ ] Driver-supported direct Wi-Fi link setup, teardown and real-radio transfer proof.
 - [ ] Measured spare-capacity sharing with owner-priority enforcement under competing traffic.
 - [ ] Offline participation, uplink arrival/loss and no recursive overlay-as-exit egress.
+
+The next uplink-transition runtime uses optional `network.independent_egress_interface` for an
+already authorized IndependentInternet Exit. Bounded read-only netlink observations track that
+interface's carrier, address and main-table default route. New TCP/general-UDP/browser-QUIC
+destination sockets bind to the exact interface before connecting, without an unbound fallback.
+Loss or interface replacement withdraws Exit authority and stops its exact runtimes; separate
+Client/Relay owners and configured role consent remain. Recovery waits for exact old-route
+cleanup and republishes under the active policy. A LocalOnly configuration cannot enable Exit
+through this option. It does not probe Internet uptime, change system DNS, discover a new ISP,
+or promise independent resolver routing.
+Focused checks passed: actual capabilities-free socket binding in a disposable network,
+link/default loss and return with an alternate default left unused, a real protected UDP echo
+followed by cancellation and exact listener release, signed-role/policy withdrawal and recovery,
+and interface-replacement cleanup gating. Strict Clippy for the changed packages passes.
+The complete multi-node consume/contribute transition fixture is still being integrated; this
+does not check the full transition requirement above or change unconfigured legacy behavior.
 
 The first implementation now carries explicitly signed RFC1918/ULA endpoint scope through
 authenticated connection provenance, selection, endpoint leases, reservations and helper
@@ -400,6 +421,8 @@ The corrected ordering requires exact authenticated PeerID/mesh-IP events, mDNS 
 peering first, then preserves the full signed-role check after the remaining agents start.
 Six focused fixture checks pass; the real application run still needs to pass. All mesh/radio
 objects were removed and guest-state hashes matched; the backend-only radio pass is unchanged.
+The [next full-agent mesh attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33993298958)
+at `48c1fb6a` is pending.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

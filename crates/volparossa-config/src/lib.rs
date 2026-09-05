@@ -230,8 +230,11 @@ pub struct NetworkConfig {
     pub name: String,
     /// Strict wire protocol version.
     pub protocol_version: u16,
-    /// Declared uplink capability; local-only routing still requires a future runtime datapath.
+    /// Declared uplink capability; local-only routes use authenticated direct-link underlays.
     pub uplink: NetworkUplink,
+    /// Optional explicit independent Exit uplink. Availability is observed at runtime; this
+    /// setting neither enables Exit consent nor proves end-to-end Internet reachability.
+    pub independent_egress_interface: Option<String>,
     /// Canonical operator identity; required only when relay or exit service is enabled.
     pub operator_id: Option<String>,
     /// libp2p listen multiaddresses; empty delegates to safe agent defaults.
@@ -260,6 +263,7 @@ impl Default for NetworkConfig {
             name: "VOLPAROSSA".into(),
             protocol_version: PROTOCOL_VERSION,
             uplink: NetworkUplink::default(),
+            independent_egress_interface: None,
             operator_id: None,
             listen_addresses: Vec::new(),
             bootstrap_peers: Vec::new(),
@@ -629,6 +633,21 @@ fn validate_exact_version(version: u16) -> Result<(), ConfigError> {
 }
 
 fn validate_network_addresses(network: &NetworkConfig) -> Result<(), ConfigError> {
+    if let Some(interface) = &network.independent_egress_interface {
+        if network.uplink == NetworkUplink::LocalOnly
+            || interface.is_empty()
+            || interface.len() > 15
+            || matches!(interface.as_str(), "." | ".." | "lo")
+            || !interface
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        {
+            return Err(validation(
+                "network.independent_egress_interface",
+                "requires independent_internet and one non-loopback interface name of 1..=15 ASCII letters, digits, '_', '.' or '-'",
+            ));
+        }
+    }
     validate_address_list(
         "network.listen_addresses",
         &network.listen_addresses,
@@ -1348,6 +1367,36 @@ mod tests {
         assert!(matches!(
             Config::from_yaml("network:\n  uplink: automatic\n"),
             Err(ConfigError::Yaml(_))
+        ));
+    }
+
+    #[test]
+    fn independent_egress_interface_is_optional_and_never_enables_roles() {
+        assert_eq!(Config::default().network.independent_egress_interface, None);
+        let configured = Config::from_yaml("network:\n  independent_egress_interface: enp3s0.10\n")
+            .expect("operator-selected interface does not activate participation");
+        assert_eq!(configured.roles, RolesConfig::default());
+        assert_eq!(
+            configured.network.independent_egress_interface.as_deref(),
+            Some("enp3s0.10")
+        );
+        assert_eq!(
+            Config::from_yaml(&configured.to_yaml().expect("serialize")).expect("round trip"),
+            configured
+        );
+        for invalid in ["", ".", "..", "lo", "../wan", "wan 1", "1234567890123456"] {
+            let mut config = configured.clone();
+            config.network.independent_egress_interface = Some(invalid.into());
+            assert!(config.validate().is_err());
+        }
+        let mut local = configured;
+        local.network.uplink = NetworkUplink::LocalOnly;
+        assert!(matches!(
+            local.validate(),
+            Err(ConfigError::Validation {
+                field: "network.independent_egress_interface",
+                ..
+            })
         ));
     }
 

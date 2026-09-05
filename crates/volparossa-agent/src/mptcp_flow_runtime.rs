@@ -7,7 +7,7 @@ use rustls::RootCertStore;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{io::AsyncWrite, net::TcpStream, task::JoinSet, time};
+use tokio::{io::AsyncWrite, net::TcpStream, sync::watch, task::JoinSet, time};
 use volparossa_exit::{
     ActiveTcpEgressRoute, ActiveTcpRoute, ExitNativeRouteAuthorization, ExitService,
     TcpEgressLimits,
@@ -34,6 +34,24 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_BUFFER_BYTES: usize = 64 * 1_024;
 const MAXIMUM_DIRECTIONAL_BYTES: u64 = 512 * 1_024 * 1_024;
 const MAXIMUM_CONCURRENT_MPTCP_FLOWS: usize = 64;
+
+async fn until_exit_shutdown<T>(
+    mut shutdown: watch::Receiver<bool>,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    let stopped = async {
+        while !*shutdown.borrow_and_update() {
+            if shutdown.changed().await.is_err() {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        () = stopped => None,
+        result = work => Some(result),
+    }
+}
 
 async fn report_exit_flow_result<T, E, F, Fut>(
     result: Result<Result<T, E>, tokio::task::JoinError>,
@@ -88,6 +106,10 @@ pub(crate) struct ProductionMptcpExitRuntime {
 }
 
 impl ProductionMptcpExitRuntime {
+    pub(crate) fn retain_cleanup_authority(&self) -> crate::helper::RuntimeBoundContextCleanup {
+        self.helper_owner.retain_cleanup_authority()
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "affine production route ownership transfer"
@@ -154,7 +176,11 @@ impl ProductionMptcpExitRuntime {
     /// `flow_completed` reports each independently settled flow while this reusable listener
     /// remains active. Route completion alone cannot represent flow completion because a valid
     /// route commonly outlives its first stream by several minutes.
-    pub(crate) async fn run<F, Fut>(self, mut flow_completed: F) -> ProductionMptcpExitCompletion
+    pub(crate) async fn run_until_shutdown<F, Fut>(
+        self,
+        shutdown: watch::Receiver<bool>,
+        mut flow_completed: F,
+    ) -> ProductionMptcpExitCompletion
     where
         F: FnMut(bool) -> Fut,
         Fut: Future<Output = ()>,
@@ -179,35 +205,47 @@ impl ProductionMptcpExitRuntime {
                 break;
             }
             let accepting = flows.len() < MAXIMUM_CONCURRENT_MPTCP_FLOWS;
-            match next_exit_runtime_event(
-                Duration::from_millis(remaining),
-                accepting,
-                transport.listener().accept(),
-                &mut flows,
+            let event = until_exit_shutdown(
+                shutdown.clone(),
+                next_exit_runtime_event(
+                    Duration::from_millis(remaining),
+                    accepting,
+                    transport.listener().accept(),
+                    &mut flows,
+                ),
             )
-            .await
-            {
+            .await;
+            let Some(event) = event else {
+                failed = true;
+                break;
+            };
+            match event {
                 ExitRuntimeEvent::Accepted(Ok((mptcp, _peer))) => {
                     accepted_any = true;
                     let tls = tls.clone();
                     let egress = Arc::clone(&egress);
+                    let flow_shutdown = shutdown.clone();
                     flows.spawn(async move {
-                        let mut protected = tls
-                            .accept(mptcp, TLS_HANDSHAKE_TIMEOUT)
-                            .await
-                            .map_err(|_| ProductionMptcpExitError::TlsHandshake)?;
-                        let authorized = egress
-                            .read_authorized_open_tcp(
-                                &mut protected,
-                                unix_millis(),
-                                OPEN_TCP_TIMEOUT,
-                            )
-                            .await
-                            .map_err(|_| ProductionMptcpExitError::Authorization)?;
-                        egress
-                            .run_tcp_egress(&authorized, protected, unix_millis(), limits)
-                            .await
-                            .map_err(|_| ProductionMptcpExitError::Egress)
+                        Box::pin(until_exit_shutdown(flow_shutdown, async move {
+                            let mut protected = tls
+                                .accept(mptcp, TLS_HANDSHAKE_TIMEOUT)
+                                .await
+                                .map_err(|_| ProductionMptcpExitError::TlsHandshake)?;
+                            let authorized = egress
+                                .read_authorized_open_tcp(
+                                    &mut protected,
+                                    unix_millis(),
+                                    OPEN_TCP_TIMEOUT,
+                                )
+                                .await
+                                .map_err(|_| ProductionMptcpExitError::Authorization)?;
+                            egress
+                                .run_tcp_egress(&authorized, protected, unix_millis(), limits)
+                                .await
+                                .map_err(|_| ProductionMptcpExitError::Egress)
+                        }))
+                        .await
+                        .unwrap_or(Err(ProductionMptcpExitError::Accept))
                     });
                 }
                 ExitRuntimeEvent::Accepted(Err(_)) => {
@@ -223,11 +261,9 @@ impl ProductionMptcpExitRuntime {
         while let Some(result) = flows.join_next().await {
             report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
         }
-        let flow_result = if accepted_any && !failed {
-            Ok(())
-        } else {
-            Err(ProductionMptcpExitError::Accept)
-        };
+        let flow_result = (accepted_any && !failed)
+            .then_some(())
+            .ok_or(ProductionMptcpExitError::Accept);
 
         let _ = transport.shutdown(&helper).await;
         let cleanup = ProductionMptcpExitCleanup {
@@ -508,6 +544,34 @@ fn production_tcp_limits() -> Result<TcpEgressLimits, volparossa_exit::ExitError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn independent_egress_withdrawal_cancels_pending_exit_work() {
+        let (shutdown, receiver) = watch::channel(false);
+        let work = tokio::spawn(until_exit_shutdown(receiver, std::future::pending::<()>()));
+        tokio::task::yield_now().await;
+        assert!(!work.is_finished());
+        shutdown.send(true).expect("live owner");
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), work)
+                .await
+                .unwrap()
+                .unwrap(),
+            None
+        );
+
+        let (shutdown, receiver) = watch::channel(false);
+        drop(shutdown);
+        assert_eq!(
+            until_exit_shutdown(receiver, std::future::ready(7)).await,
+            None
+        );
+        let (_shutdown, receiver) = watch::channel(false);
+        assert_eq!(
+            until_exit_shutdown(receiver, std::future::ready(7)).await,
+            Some(7)
+        );
+    }
 
     #[tokio::test]
     async fn open_tcp_primes_the_connection_before_the_multipath_barrier() {

@@ -51,6 +51,7 @@ use volparossa_core::{
 use volparossa_inspection::{
     InspectionError, InspectionProgress, QuicInitialInspector, TlsClientHelloInspector,
 };
+use volparossa_linux_uapi::IndependentEgress;
 use volparossa_metrics::MetricsRegistry;
 use volparossa_policy::{PolicyError, VerifiedManifest, normalize_domain};
 use volparossa_protocol::{
@@ -467,6 +468,7 @@ pub struct ExitServiceConfig {
     maximum_reservation_ttl_seconds: u64,
     tunnel_setup_timeout_seconds: u64,
     replay_capacity: usize,
+    independent_egress: Option<IndependentEgress>,
 }
 
 impl ExitServiceConfig {
@@ -484,6 +486,7 @@ impl ExitServiceConfig {
             maximum_reservation_ttl_seconds: MAX_TTL_SECONDS,
             tunnel_setup_timeout_seconds: 30,
             replay_capacity: 65_536,
+            independent_egress: None,
         }
     }
 
@@ -505,7 +508,18 @@ impl ExitServiceConfig {
             maximum_reservation_ttl_seconds,
             tunnel_setup_timeout_seconds,
             replay_capacity,
+            independent_egress: None,
         }
+    }
+
+    /// Restrict newly opened destination sockets to the explicitly selected independent uplink.
+    ///
+    /// Availability is checked at socket creation; an unavailable uplink never falls back to
+    /// another interface. This does not change operator consent or the system DNS resolver.
+    #[must_use]
+    pub fn with_independent_egress(mut self, egress: IndependentEgress) -> Self {
+        self.independent_egress = Some(egress);
+        self
     }
 
     /// Return whether the operator explicitly enabled exit service.
@@ -838,6 +852,7 @@ impl ExitService {
             policy: self.policy.clone(),
             flow_replay: Mutex::new(ReplayCache::new(self.config.replay_capacity)?),
             metrics: self.metrics.clone(),
+            independent_egress: self.config.independent_egress.clone(),
         })
     }
 
@@ -934,7 +949,14 @@ impl ExitService {
         let pinned = prepared.flow.resolve_and_pin(now_ms).await?;
         let association =
             QuicUdpAssociation::new(connection, prepared.path, &prepared.flow, now_ms)?;
-        Ok(ExitUdpBridge::connect(association, pinned, now_ms, limits).await?)
+        Ok(ExitUdpBridge::connect_with_egress(
+            association,
+            pinned,
+            now_ms,
+            limits,
+            self.config.independent_egress.as_ref(),
+        )
+        .await?)
     }
 
     /// Run one authorized ordinary-TCP egress stream with bounded buffering.
@@ -963,6 +985,7 @@ impl ExitService {
         run_tcp_egress_with_policy(
             &self.policy,
             self.metrics.as_ref(),
+            self.config.independent_egress.as_ref(),
             flow,
             protected_client,
             now_ms,
@@ -1595,6 +1618,7 @@ pub struct ActiveTcpEgressRoute {
     policy: VerifiedManifest,
     flow_replay: Mutex<ReplayCache>,
     metrics: Option<MetricsRegistry>,
+    independent_egress: Option<IndependentEgress>,
 }
 
 impl ActiveTcpEgressRoute {
@@ -1658,6 +1682,7 @@ impl ActiveTcpEgressRoute {
         run_tcp_egress_with_policy(
             &self.policy,
             self.metrics.as_ref(),
+            self.independent_egress.as_ref(),
             flow,
             protected_client,
             now_ms,
@@ -2028,6 +2053,7 @@ async fn resolve_and_connect(
     port: u16,
     dns_timeout: Duration,
     connect_timeout: Duration,
+    independent_egress: Option<&IndependentEgress>,
 ) -> Result<TcpStream, ExitError> {
     let addresses = if let Some(hostname) = hostname {
         let resolved = time::timeout(dns_timeout, lookup_host((hostname, port)))
@@ -2057,7 +2083,7 @@ async fn resolve_and_connect(
     time::timeout(connect_timeout, async move {
         let mut last_error = None;
         for address in addresses {
-            let socket = contribution_tcp_socket(address)?;
+            let socket = contribution_tcp_socket(address, independent_egress)?;
             match socket.connect(address).await {
                 Ok(stream) => return Ok(stream),
                 Err(error) => last_error = Some(error),
@@ -2072,7 +2098,10 @@ async fn resolve_and_connect(
     .map_err(ExitError::Io)
 }
 
-fn contribution_tcp_socket(address: SocketAddr) -> std::io::Result<TcpSocket> {
+fn contribution_tcp_socket(
+    address: SocketAddr,
+    independent_egress: Option<&IndependentEgress>,
+) -> std::io::Result<TcpSocket> {
     let socket = match address {
         SocketAddr::V4(_) => TcpSocket::new_v4()?,
         SocketAddr::V6(_) => TcpSocket::new_v6()?,
@@ -2080,12 +2109,16 @@ fn contribution_tcp_socket(address: SocketAddr) -> std::io::Result<TcpSocket> {
     // Set before connect so SYNs and every subsequent payload use the contribution band.
     // Failure must not open an unclassified connection or try an unclassified fallback.
     SockRef::from(&socket).set_priority(CONTRIBUTION_SOCKET_PRIORITY)?;
+    if let Some(egress) = independent_egress {
+        egress.bind_new_socket(&socket)?;
+    }
     Ok(socket)
 }
 
 async fn run_tcp_egress_with_policy<C>(
     policy: &VerifiedManifest,
     metrics: Option<&MetricsRegistry>,
+    independent_egress: Option<&IndependentEgress>,
     flow: &AuthorizedTcpFlow,
     mut protected_client: C,
     now_ms: u64,
@@ -2129,6 +2162,7 @@ where
         flow.port(),
         limits.dns_timeout,
         limits.connect_timeout,
+        independent_egress,
     )
     .await?;
     if !initial.is_empty() {
@@ -2465,9 +2499,21 @@ pub enum ExitError {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn independent_egress_tcp_never_falls_back_when_the_selected_interface_is_absent() {
+        let egress = volparossa_linux_uapi::IndependentEgress::new("vpnosuchuplink")
+            .expect("valid absent interface name");
+        assert_eq!(egress.observe().unwrap(), None);
+        for address in ["127.0.0.1:443", "[::1]:443"] {
+            assert!(
+                super::contribution_tcp_socket(address.parse().unwrap(), Some(&egress)).is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn contribution_tcp_sockets_are_classified_before_connect() {
         for address in ["127.0.0.1:443", "[::1]:443"] {
-            let socket = super::contribution_tcp_socket(address.parse().expect("test tuple"))
+            let socket = super::contribution_tcp_socket(address.parse().expect("test tuple"), None)
                 .expect("unconnected contribution socket");
             let descriptor = socket2::SockRef::from(&socket);
             assert_eq!(
