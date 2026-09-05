@@ -3420,6 +3420,7 @@ dependencies = [
  "async-trait",
  "futures",
  "libp2p",
+ "nix",
  "percent-encoding",
  "prost",
  "rand_core 0.6.4",
