@@ -1,6 +1,6 @@
 //! One bounded, shared upload scheduler in the actual egress namespace.
 //!
-//! TBF(total) -> PRIO(owner, contribution) -> bounded owner FIFO / contribution TBF+FIFO.
+//! TBF(total) -> PRIO(owner, contribution) -> bounded owner FIFO / contribution TBF+FQ-CoDel.
 //! No route is inferred from an address-bearing interface: the caller supplies the already
 //! kernel-proven output ifindex. This is local upload scheduling, not download/airtime control.
 //! A partially installed tree remains owned in `InstallFailure::cleanup`; dropping an owner is
@@ -393,6 +393,9 @@ enum QdiscKind {
     },
     Prio,
     Fifo(u32),
+    FairContribution {
+        quantum: u32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -458,7 +461,13 @@ fn specifications(config: SharingConfig, mtu: u32) -> Vec<QdiscSpec> {
         QdiscSpec {
             handle: handles[4],
             parent: handles[3] | 1,
-            kind: QdiscKind::Fifo(limit(&contribution)),
+            // Exit payload sockets and encrypted tunnel feedback share this one capped band.
+            // A single tail-drop FIFO lets a busy unresponsive datagram flow starve the other
+            // flows needed for recovery. Kernel flow queuing does not promote any contribution
+            // above the owner, and neither physical nor aggregate contribution ceilings change.
+            kind: QdiscKind::FairContribution {
+                quantum: (mtu + 14).min(65_535),
+            },
         },
     ]
 }
@@ -476,6 +485,7 @@ impl QdiscSpec {
             QdiscKind::Tbf { .. } => "tbf",
             QdiscKind::Prio => "prio",
             QdiscKind::Fifo(_) => "bfifo",
+            QdiscKind::FairContribution { .. } => "fq_codel",
         }
     }
 
@@ -485,6 +495,7 @@ impl QdiscSpec {
         let options = match self.kind {
             QdiscKind::Prio => prio_options(),
             QdiscKind::Fifo(limit) => limit.to_ne_bytes().to_vec(),
+            QdiscKind::FairContribution { quantum } => fair_contribution_options(quantum)?,
             QdiscKind::Tbf {
                 bytes_per_second,
                 burst,
@@ -520,6 +531,9 @@ impl QdiscSpec {
         let correct = match self.kind {
             QdiscKind::Prio => record.options == prio_options(),
             QdiscKind::Fifo(limit) => record.options == limit.to_ne_bytes(),
+            QdiscKind::FairContribution { quantum } => {
+                verify_fair_contribution(&record.options, quantum)?
+            }
             QdiscKind::Tbf {
                 bytes_per_second,
                 burst,
@@ -553,6 +567,47 @@ impl QdiscSpec {
             Err(KernelError::Invalid)
         }
     }
+}
+
+// Linux v6.12 net/sched/sch_fq_codel.c and include/uapi/linux/pkt_sched.h.
+// Bounded real kernel flow queuing/AQM, not path equalization, duplication or extra cover traffic.
+fn fair_contribution_fields(quantum: u32) -> [(u16, u32); 8] {
+    [
+        (1, 5_000),
+        (2, 64),
+        (3, 100_000),
+        (4, 1),
+        (5, 64),
+        (6, quantum),
+        (8, 1),
+        (9, 256 * 1024),
+    ]
+}
+
+fn fair_contribution_options(quantum: u32) -> Result<Vec<u8>, KernelError> {
+    let mut result = Vec::new();
+    for (kind, value) in fair_contribution_fields(quantum) {
+        push_attribute(&mut result, kind, &value.to_ne_bytes())?;
+    }
+    Ok(result)
+}
+
+fn verify_fair_contribution(options: &[u8], quantum: u32) -> Result<bool, KernelError> {
+    let fields = attributes(options)?;
+    let expected = fair_contribution_fields(quantum);
+    if fields.len() != expected.len() {
+        return Ok(false);
+    }
+    for (kind, mut value) in expected {
+        if kind == 1 || kind == 3 {
+            // CoDel stores 1024ns ticks and truncates to microseconds on dump.
+            value = (((value * 1000) >> 10) << 10) / 1000;
+        }
+        if exact_u32(&fields, kind)? != value {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn filter_request(ifindex: u32, prio: u32) -> Result<Vec<u8>, KernelError> {

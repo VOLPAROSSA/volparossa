@@ -207,8 +207,11 @@ def queue_snapshot(records):
                        record.get("parent") == prio["handle"] + "2")
     if prio.get("parent") != total["handle"] + "1":
         raise ValueError("owner priority tree is not below the physical upload cap")
-    one(lambda record: record["kind"] == "bfifo" and
+    leaf = one(lambda record: record["kind"] == "fq_codel" and
         record.get("parent") == contribution["handle"] + "1")
+    options = leaf.get("options", {})
+    if options.get("limit") != 64 or options.get("flows") != 64 or options.get("memory_limit") != 256 * 1024:
+        raise ValueError("bounded contribution flow queue absent")
     return {name: {key: int(record[key]) for key in ("bytes", "packets", "drops", "overlimits")}
             for name, record in (("total", total), ("owner", owner), ("contribution", contribution))}
 

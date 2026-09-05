@@ -165,7 +165,13 @@ def capture(directory, run_id, node):
     sockets = {}
     for interface in metadata["interfaces"]:
         observer = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
-        observer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+        # The root-only observer runs exclusively inside the disposable node namespace. Request
+        # a real bounded 4MiB buffer; SO_RCVBUF alone silently clamps to the system default and
+        # lost frames under the new sustained sharing load. No global rmem sysctl is changed.
+        observer.setsockopt(socket.SOL_SOCKET, 33, 4 * 1024 * 1024)  # Linux SO_RCVBUFFORCE.
+        actual_buffer = observer.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        if not 4 * 1024 * 1024 <= actual_buffer <= 8 * 1024 * 1024:
+            raise ValueError("bounded packet-observer buffer unavailable")
         observer.bind((interface, 0))
         observer.setblocking(False)
         sockets[observer] = interface

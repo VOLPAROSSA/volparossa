@@ -280,7 +280,15 @@ backpressure drops one continuation without destroying the route. Startup author
 the separate DNS association retain their original bounded semantics. Four focused pipeline
 tests, the exact ingress tuple test and strict agent Clippy pass. The
 [new live sharing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33988084401)
-also requires two actual requests before the first echo. Throughput checks remain unchanged.
+proved two actual requests before the first echo and increased idle contribution to 9.764 Mbps.
+Owner traffic retained 12.002 Mbps while contribution yielded to zero. Recovery was only
+3.685 Mbps, below the unchanged 60%-of-idle/4-Mbps floor, and the Exit observer lost 28 frames:
+the run still failed. The contribution band now uses bounded kernel FQ-CoDel flow queuing under
+the same priority and rate caps, instead of one tail-drop FIFO shared by Exit UDP and encrypted
+feedback. Six focused sharing tests, including real veth and single/multiqueue TAP restoration,
+and strict helper Clippy pass. Recovery improvement remains to be measured. The disposable packet
+observer also requests a verified bounded 4-MiB socket buffer without changing a global sysctl;
+zero capture drops remain mandatory. Throughput checks are not weakened.
 The fixture's Exit-side Disconnect was on an idle local Client route, so its result does not
 prove retirement of an active same-node route while sharing; exact scheduler teardown is proven.
 Download control, automatic available-bandwidth estimation and radio airtime remain unfinished.

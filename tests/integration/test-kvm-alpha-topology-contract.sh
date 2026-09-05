@@ -617,7 +617,8 @@ records = [
     {"kind":"prio", "handle":"7001:", "parent":"7000:1"},
     {"kind":"bfifo", "handle":"7002:", "parent":"7001:1"},
     {"kind":"tbf", "handle":"7003:", "parent":"7001:2"},
-    {"kind":"bfifo", "handle":"7004:", "parent":"7003:1"}]
+    {"kind":"fq_codel", "handle":"7004:", "parent":"7003:1",
+     "options":{"limit":64, "flows":64, "memory_limit":262144}}]
 for record in records:
     record.update(bytes=10, packets=1, drops=0, overlimits=0)
 assert fixture["queue_snapshot"](records)["contribution"]["bytes"] == 10
