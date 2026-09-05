@@ -20,6 +20,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview | grep -F 'PREVIEW ONLY:' >/dev/null
     "$script" --preview --scenario reciprocity | grep -Fi 'recipro' >/dev/null
     "$script" --preview --scenario local-link | grep -Fi 'local-link' >/dev/null
+    "$script" --preview --scenario mixed-link | grep -Fi 'mixed-link' >/dev/null
     "$script" --preview --scenario sharing | grep -Fi 'sharing' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
@@ -614,4 +615,8 @@ for wrong in (records[:-1], records + records[:1]):
 assert fixture["baseline_shape"]([{"kind":"noqueue", "handle":"0:", "root":True, "bytes":0}]) == fixture["baseline_shape"]([{"kind":"noqueue", "handle":"0:", "root":True, "bytes":100}])
 print("Sharing pure evidence contract passed; no live datapath claim")
 PYTHON
-printf '%s\n' 'KVM alpha, reciprocity, local-link and sharing topology static contract passed'
+sh -n "$HERE/mixed-link-smoke.sh"
+grep -F 'volparossa-mixed-link-runtime' "$WORKFLOW" >/dev/null
+grep -F 'mixed_link_validate_evidence' "$GUEST" >/dev/null
+python3 -B "$HERE/test-mixed-link-smoke.py"
+printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link and sharing topology static contract passed'

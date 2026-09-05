@@ -213,6 +213,12 @@ the complete authenticated ordinal/endpoint set before one shared helper Prepare
 exact local traversal hints for each LAN path. Partial sets expire without helper allocation.
 Nine focused tests, the mixed-plan real helper encoder check and strict agent Clippy pass;
 mixed-path application traffic remains unproven.
+The disposable `mixed-link` scenario now reuses the real A06 HTTP/3 transfer with one
+LocalOnly LAN Relay and one public Relay to the same Exit. It retains bounded ordinary
+selection draws and requires matching 4/8-MiB payload hashes, two genuine native paths,
+more than 1 MiB on each WireGuard leg, scoped privacy captures and full cleanup. Its five
+focused report/observer checks and shell/workflow contract pass; live execution is pending.
+It makes no aggregate-bandwidth or real-radio claim.
 Direct radio setup, simultaneous WAN+LAN aggregation and owner-priority sharing remain
 unfinished. No direct-radio or phone-without-SIM support is claimed by Debian KVM evidence.
 The first owner-priority **upload** runtime is now implemented behind explicit `sharing`
@@ -235,6 +241,13 @@ confirmed helper destruction, before the real route's next CapacityHold. The sig
 regression demonstrates a full-capacity hold failing while the probe is live and succeeding
 immediately afterward, without waiting for TTL; stale probe authorization cannot reacquire
 that capacity. The configured sharing/advertisement limits are unchanged.
+The [next sharing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33986599058)
+at `63918006` reached all three real traffic windows and restored the original scheduler.
+Under owner load it measured 11.999 Mbps owner upload and zero contributed upload, within the
+12-Mbps physical cap. Idle/recovery contribution was only 3.446/3.504 Mbps, below the required
+4 Mbps, so the scenario still failed. General UDP currently waits for each response before
+reading the next request; bounded independent response draining is being implemented to
+remove that actual stop-and-wait bottleneck. The throughput checks are not weakened.
 Download control, automatic available-bandwidth estimation and radio airtime remain unfinished.
 These narrower results do not check the full sharing item above.
 See [local-link scope](LOCAL_LINK_NETWORK.md).

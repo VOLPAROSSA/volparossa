@@ -24,10 +24,23 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|sharing]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing]'
 }
 
 print_plan() {
+    if [ "$scenario" = mixed-link ]; then
+        printf '%s\n' \
+            'VOLPAROSSA mixed-link genuine Multipath QUIC smoke plan:' \
+            '  require the same exact-build disposable Debian 13 KVM guest and owned namespaces;' \
+            '  retain one public Client, a public control Relay, LAN Relay, public Relay and WAN Exit;' \
+            '  remove the LAN Relay public interface/default and advertise no ASN/public prefix;' \
+            '  reuse the real HTTP/3 4-MiB request / 8-MiB response and matching payload hashes;' \
+            '  require two native MPQUIC paths through distinct LAN/public Relays to the same Exit;' \
+            '  capture actual payload on both WireGuard legs per path and reject direct/privacy leaks;' \
+            '  remove every owned object and verify unchanged guest-root host state;' \
+            '  emit mixed-link-smoke.json; no bandwidth aggregation, radio or A01-A15 claim.'
+        return
+    fi
     if [ "$scenario" = sharing ]; then
         printf '%s\n' \
             'VOLPAROSSA owner-priority upload-sharing smoke plan:' \
@@ -110,7 +123,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
-            case $2 in alpha|reciprocity|local-link|sharing) scenario=$2 ;; *) usage >&2; exit 64 ;; esac
+            case $2 in alpha|reciprocity|local-link|mixed-link|sharing) scenario=$2 ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --source)
@@ -208,6 +221,11 @@ if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario
             && [ ! -L "$source_directory/tests/integration/$reciprocity_fixture" ] \
             || { printf 'reciprocity fixture unavailable: %s\n' "$reciprocity_fixture" >&2; exit 69; }
     done
+fi
+if [ "$scenario" = mixed-link ]; then
+    [ -f "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
+        && [ ! -L "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
+        || { printf '%s\n' 'mixed-link fixture unavailable' >&2; exit 69; }
 fi
 [ -x "$binary_directory/examples/acceptance-policy-fixture" ] \
     || { printf '%s\n' 'acceptance policy fixture unavailable' >&2; exit 69; }
@@ -1123,7 +1141,9 @@ cleanup() {
     fi
     copy_artifacts
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = sharing ]; then
+    if [ "$scenario" = mixed-link ]; then
+        mixed_link_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = sharing ]; then
         sharing_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = local-link ]; then
         local_link_finalize_report "$original_status" || original_status=1
@@ -1165,6 +1185,10 @@ fi
 if [ "$scenario" = sharing ]; then
     # shellcheck source=tests/integration/sharing-smoke.sh
     . "$source_directory/tests/integration/sharing-smoke.sh"
+fi
+if [ "$scenario" = mixed-link ]; then
+    # shellcheck source=tests/integration/mixed-link-smoke.sh
+    . "$source_directory/tests/integration/mixed-link-smoke.sh"
 fi
 
 PHASE=host-state-before
@@ -1369,7 +1393,9 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
-if [ "$scenario" = sharing ]; then
+if [ "$scenario" = mixed-link ]; then
+    mixed_link_extend_network
+elif [ "$scenario" = sharing ]; then
     sharing_extend_network
 elif [ "$scenario" = local-link ]; then
     local_link_extend_network
@@ -1499,6 +1525,7 @@ write_config() {
     if [ "$scenario" = sharing ] && [ "$node" = exit ]; then
         relay_capacity=10; exit_capacity=10
     fi
+    [ "$scenario" != mixed-link ] || mixed_link_configure_node
     {
         printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-alpha-%s\n' "$RUN_ID"
         printf '  protocol_version: 4\n  advertisement_ttl_seconds: 300\n'
@@ -2249,8 +2276,19 @@ import sys
 import time
 
 role, output_path, ready_path, marker_path, *interfaces = sys.argv[1:]
+direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
+if direct_lan_relay1:
+    interfaces.pop(0)
 if role not in {"client", "exit"} or not interfaces:
     raise SystemExit("invalid bounded A06 observer arguments")
+relay1_client_pair = (
+    {"10.241.11.1", "10.241.11.2"}
+    if direct_lan_relay1 else {"43.159.1.1", "44.160.1.1"}
+)
+relay1_exit_pair = (
+    {"10.241.21.1", "10.241.21.2"}
+    if direct_lan_relay1 else {"44.160.1.1", "46.162.3.1"}
+)
 
 counters = (
     {
@@ -2365,10 +2403,7 @@ while running and time.monotonic() < deadline:
                 }:
                     counters["direct_client_exit_packets"] += 1
                 if protocol == socket.IPPROTO_UDP and is_wireguard_data:
-                    if interface == "cr1" and {source, destination} == {
-                        "43.159.1.1",
-                        "44.160.1.1",
-                    }:
+                    if interface == "cr1" and {source, destination} == relay1_client_pair:
                         counters["relay1_wireguard_data_datagrams"] += 1
                         counters["relay1_wireguard_data_bytes"] += udp_length - 8
                     if interface == "cr2" and {source, destination} == {
@@ -2390,10 +2425,7 @@ while running and time.monotonic() < deadline:
                         )
             else:
                 if protocol == socket.IPPROTO_UDP and is_wireguard_data:
-                    if interface == "xr1" and {source, destination} == {
-                        "44.160.1.1",
-                        "46.162.3.1",
-                    }:
+                    if interface == "xr1" and {source, destination} == relay1_exit_pair:
                         counters["relay1_wireguard_data_datagrams"] += 1
                         counters["relay1_wireguard_data_bytes"] += udp_length - 8
                     if interface == "xr2" and {source, destination} == {
@@ -2451,8 +2483,22 @@ import sys
 import time
 
 role, output_path, ready_path, *interfaces = sys.argv[1:]
+direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
+if direct_lan_relay1:
+    interfaces.pop(0)
 if role not in {"client", "relay1", "relay2", "exit"} or not interfaces:
     raise SystemExit("invalid privacy observer arguments")
+client_addresses = {"43.159.1.1"}
+if direct_lan_relay1:
+    client_addresses.add("10.241.11.1")
+relay1_client_pair = (
+    {"10.241.11.1", "10.241.11.2"}
+    if direct_lan_relay1 else {"43.159.1.1", "44.160.1.1"}
+)
+relay1_exit_pair = (
+    {"10.241.21.1", "10.241.21.2"}
+    if direct_lan_relay1 else {"44.160.1.1", "46.162.3.1"}
+)
 
 counters = {
     "ipv4_frames": 0,
@@ -2585,7 +2631,7 @@ while running and time.monotonic() < deadline:
                 counters["routed_transport_packets"] += 1
             if source == "47.163.4.2" or destination == "47.163.4.2":
                 counters["internet_destination_outer_packets"] += 1
-            if source == "43.159.1.1" or destination == "43.159.1.1":
+            if source in client_addresses or destination in client_addresses:
                 counters["client_public_packets"] += 1
 
             udp_length = 0
@@ -2619,8 +2665,8 @@ while running and time.monotonic() < deadline:
                     "52.168.8.1",
                     "52.168.8.2",
                 }
-                if (source == "43.159.1.1" and destination in forbidden_exit) or (
-                    destination == "43.159.1.1" and source in forbidden_exit
+                if (source in client_addresses and destination in forbidden_exit) or (
+                    destination in client_addresses and source in forbidden_exit
                 ):
                     counters["direct_client_exit_packets"] += 1
                 if interface == "cr0":
@@ -2628,7 +2674,7 @@ while running and time.monotonic() < deadline:
                 if is_wireguard_data and interface == "cr1" and {
                     source,
                     destination,
-                } == {"43.159.1.1", "44.160.1.1"}:
+                } == relay1_client_pair:
                     counters["relay1_wireguard_data_datagrams"] += 1
                 if is_wireguard_data and interface == "cr2" and {
                     source,
@@ -2685,27 +2731,27 @@ while running and time.monotonic() < deadline:
                     record_unexpected_outer_tuple(
                         interface, protocol, source, source_port, destination, destination_port
                     )
-                if is_wireguard_data and {source, destination} == {
-                    "43.159.1.1",
-                    relay_public,
-                }:
+                client_pair = relay1_client_pair if role == "relay1" else {
+                    "43.159.1.1", relay_public
+                }
+                exit_pair = relay1_exit_pair if role == "relay1" else {
+                    relay_public, "46.162.3.1"
+                }
+                if is_wireguard_data and {source, destination} == client_pair:
                     counters[f"{role}_wireguard_data_datagrams"] += 1
                     if interface == client_interface:
                         counters["client_leg_wireguard_data_datagrams"] += 1
-                if is_wireguard_data and {source, destination} == {
-                    relay_public,
-                    "46.162.3.1",
-                }:
+                if is_wireguard_data and {source, destination} == exit_pair:
                     counters[f"{role}_wireguard_data_datagrams"] += 1
                     if interface == exit_interface:
                         counters["exit_leg_wireguard_data_datagrams"] += 1
             else:
-                if source == "43.159.1.1" or destination == "43.159.1.1":
+                if source in client_addresses or destination in client_addresses:
                     counters["direct_client_exit_packets"] += 1
                 if is_wireguard_data and interface == "xr1" and {
                     source,
                     destination,
-                } == {"44.160.1.1", "46.162.3.1"}:
+                } == relay1_exit_pair:
                     counters["relay1_wireguard_data_datagrams"] += 1
                 if is_wireguard_data and interface == "xr2" and {
                     source,
@@ -3138,6 +3184,7 @@ elif [ "$scenario" = reciprocity ]; then
     exit 0
 fi
 
+if [ "$scenario" != mixed-link ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -3641,6 +3688,7 @@ A01_STATUS=0
 A01_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a01-complete
+fi
 
 capture_product_logs() {
     for log_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 \
@@ -3826,20 +3874,22 @@ wait_active_native_mpquic_paths() {
 start_http3_observers() {
     http3_prefix=$1
     http3_marker=$2
+    set --
+    [ "$scenario" != mixed-link ] || set -- --direct-lan-relay1
     client_ingress_interface=$(ip -n "$CLIENT" -o link show \
         | awk -F': ' '$2 ~ /^vpih/ {sub(/@.*/, "", $2); print $2; exit}')
     [ -n "$client_ingress_interface" ] || return 1
     ip netns exec "$CLIENT" python3 "$WORK/bin/a06-observer.py" \
         client "$WORK/$http3_prefix-client-capture.json" \
         "$WORK/$http3_prefix-client-capture.ready" "$http3_marker" \
-        cr1 cr2 underlay "$client_ingress_interface" \
+        "$@" cr1 cr2 underlay "$client_ingress_interface" \
         >"$WORK/$http3_prefix-client-capture.log" \
         2>"$WORK/$http3_prefix-client-capture.err" &
     CLIENT_OBSERVER_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a06-observer.py" \
         exit "$WORK/$http3_prefix-exit-capture.json" \
         "$WORK/$http3_prefix-exit-capture.ready" "$http3_marker" \
-        xr1 xr2 xd >"$WORK/$http3_prefix-exit-capture.log" \
+        "$@" xr1 xr2 xd >"$WORK/$http3_prefix-exit-capture.log" \
         2>"$WORK/$http3_prefix-exit-capture.err" &
     EXIT_OBSERVER_PID=$!
     if ! wait_observer "$CLIENT_OBSERVER_PID" \
@@ -3852,6 +3902,12 @@ start_http3_observers() {
 }
 
 start_privacy_observers() {
+    set --
+    privacy_relay1_underlay=underlay
+    if [ "$scenario" = mixed-link ]; then
+        set -- --direct-lan-relay1
+        privacy_relay1_underlay=
+    fi
     ip -n "$CLIENT" -j route show table all | jq -S . \
         >"$WORK/a13-client-routes-before.json" || return 1
     set +e
@@ -3870,20 +3926,21 @@ start_privacy_observers() {
 
     ip netns exec "$CLIENT" python3 "$WORK/bin/privacy-observer.py" \
         client "$WORK/privacy-client.json" "$WORK/privacy-client.ready" \
-        cr0 cr1 cr2 cr3 cr4 cr5 cb1 cb2 underlay \
+        "$@" cr0 cr1 cr2 cr3 cr4 cr5 cb1 cb2 underlay \
         >"$WORK/privacy-client.log" 2>&1 &
     PRIVACY_CLIENT_PID=$!
     ip netns exec "$R1" python3 "$WORK/bin/privacy-observer.py" \
         relay1 "$WORK/privacy-relay1.json" "$WORK/privacy-relay1.ready" \
-        r1c r1x underlay >"$WORK/privacy-relay1.log" 2>&1 &
+        "$@" r1c r1x ${privacy_relay1_underlay:+"$privacy_relay1_underlay"} \
+        >"$WORK/privacy-relay1.log" 2>&1 &
     PRIVACY_RELAY1_PID=$!
     ip netns exec "$R2" python3 "$WORK/bin/privacy-observer.py" \
         relay2 "$WORK/privacy-relay2.json" "$WORK/privacy-relay2.ready" \
-        r2c r2x underlay >"$WORK/privacy-relay2.log" 2>&1 &
+        "$@" r2c r2x underlay >"$WORK/privacy-relay2.log" 2>&1 &
     PRIVACY_RELAY2_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/privacy-observer.py" \
         exit "$WORK/privacy-exit.json" "$WORK/privacy-exit.ready" \
-        xr0 xr1 xr2 xr3 xr4 xr5 xd underlay >"$WORK/privacy-exit.log" 2>&1 &
+        "$@" xr0 xr1 xr2 xr3 xr4 xr5 xd underlay >"$WORK/privacy-exit.log" 2>&1 &
     PRIVACY_EXIT_PID=$!
 
     wait_observer "$PRIVACY_CLIENT_PID" "$WORK/privacy-client.ready" \
@@ -4396,6 +4453,7 @@ finish_mptcp_download() {
     return "$download_status"
 }
 
+if [ "$scenario" != mixed-link ]; then
 PHASE=a02-capture
 A02_REQUESTED=true
 A02_FALLBACK_ROUTE=$(ip -n "$CLIENT" -o route get "$A02_DESTINATION_IP" | sed -n '1p')
@@ -5151,9 +5209,15 @@ while [ "$attempt" -lt 300 ]; do
     attempt=$((attempt + 1))
 done
 [ "$attempt" -lt 300 ] || fail A06_SINGLE_PATH_ROUTE_NOT_IDLE
+else
+    mixed_link_wait_discovery || fail MIXED_LINK_NEIGHBOR_DISCOVERY_UNAVAILABLE
+fi
 
 PHASE=a06-preconnect-multipath-route
 A06_REQUESTED=true
+if [ "$scenario" = mixed-link ]; then
+    mixed_link_select_paths || fail MIXED_LINK_COMPLETE_PATH_SET_UNAVAILABLE
+else
 a06_connect_status=1
 attempt=0
 while [ "$attempt" -lt 120 ]; do
@@ -5172,6 +5236,7 @@ done
 [ "$a06_connect_status" -eq 0 ] || fail A06_MULTIPATH_ROUTE_CONNECT_FAILED
 wait_active_native_mpquic_paths a06-preconnect-native-paths \
     || fail A06_MULTIPATH_ROUTE_NOT_ACTIVE
+fi
 
 timeout --signal=TERM --kill-after=5s 420s \
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
@@ -5203,9 +5268,11 @@ printf '%s\n' "$A06_FALLBACK_ROUTE" | grep -Eq '(^| )dev underlay( |$)' \
 if printf '%s\n' "$A06_FALLBACK_ROUTE" | grep -Eq '(^| )dev (cr1|cr2)( |$)'; then
     fail DIRECT_CLIENT_EXIT_REACHABLE
 fi
-A11_REQUESTED=true
-A12_REQUESTED=true
-A13_REQUESTED=true
+if [ "$scenario" != mixed-link ]; then
+    A11_REQUESTED=true
+    A12_REQUESTED=true
+    A13_REQUESTED=true
+fi
 start_privacy_observers || fail PRIVACY_CAPTURE_UNAVAILABLE
 start_http3_observers a06 - || fail A06_CAPTURE_UNAVAILABLE
 set +e
@@ -5324,6 +5391,13 @@ fi
 A06_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a06-complete
+if [ "$scenario" = mixed-link ]; then
+    stop_privacy_observers || fail MIXED_LINK_PRIVACY_CAPTURE_FAILED
+    mixed_link_validate_evidence || fail MIXED_LINK_DATAPATH_NOT_PROVEN
+    PHASE=mixed-link-complete
+    OBSERVED_BLOCKER=
+    exit 0
+fi
 
 PHASE=a07-active-http3-relay-removal
 A07_REQUESTED=true

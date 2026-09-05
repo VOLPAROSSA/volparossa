@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Functional datapath/reciprocity/local-link/sharing; alpha also verifies packaging
+        description: Functional datapath/reciprocity/local-link/mixed-link/sharing; alpha also verifies packaging
         required: true
         default: datapath
         type: choice
@@ -13,6 +13,7 @@ on:
           - alpha
           - reciprocity
           - local-link
+          - mixed-link
           - sharing
   pull_request:
     branches:
@@ -199,6 +200,22 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = mixed-link; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "mixed LAN/public MPQUIC succeeded: \(.success)",
+                "payload-carrying Relay paths: \(.paths | length)/2",
+                "observed blocker: \(.observed_blocker // "none")",
+                "cleanup complete: \(.cleanup.complete)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish mixed-link runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = sharing; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/sharing-smoke.json"
             if test -f "$report"; then
@@ -300,7 +317,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -414,6 +431,46 @@ jobs:
             .host_state.unchanged == true
           ' "$report" >/dev/null
 
+      - name: Require real mixed LAN/public MPQUIC evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'mixed-link'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-mixed-link-runtime" and
+            .source_revision == $revision and .success == true and
+            .transfer.success == true and
+            .transfer.application.request_bytes == 4194304 and
+            .transfer.application.response_bytes == 8388608 and
+            .transfer.application.request_sha256 == .transfer.destination.request_sha256 and
+            .transfer.application.response_sha256 == .transfer.destination.response_sha256 and
+            .transfer.destination.source.ip == "47.163.4.1" and
+            .transfer.native_mpquic.required_path_count == 2 and
+            (.transfer.native_mpquic.paths | length) == 2 and
+            ([.transfer.native_mpquic.paths[].exit_peer_id] | unique | length) == 1 and
+            all(.transfer.native_mpquic.paths[]; .state == 3) and
+            all(.transfer.path_evidence[];
+              .relay1_wireguard_data_bytes > 1048576 and .relay2_wireguard_data_bytes > 1048576) and
+            (.paths | length) == 2 and
+            ([.paths[].client_relay_scope] | sort) == ["DirectLocalLan","PublicInternet"] and
+            all(.paths[]; .client_relay_scope == .relay_exit_scope and
+              all(.wireguard_both_legs[]; . > 0)) and
+            .local_only_relay.independent_internet == false and
+            .local_only_relay.exit_enabled == false and .local_only_relay.asn == null and
+            .local_only_relay.public_prefix == null and .local_only_relay.physical_default_routes == 0 and
+            .privacy.client.direct_client_exit_packets == 0 and
+            .privacy.client.internet_destination_outer_packets == 0 and
+            .privacy.exit.client_public_packets == 0 and
+            .privacy.local_relay.internet_destination_outer_packets == 0 and
+            .privacy.public_relay.internet_destination_outer_packets == 0 and
+            all(.privacy[]; .truncated == false and .unexpected_outer_packets == 0) and
+            .ordinary_quic_fallback_allowed == false and .bandwidth_aggregation_claimed == false and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-smoke.json" >/dev/null
+
       - name: Require real shared-uplink owner-priority evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'sharing'
         env:
@@ -451,7 +508,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
