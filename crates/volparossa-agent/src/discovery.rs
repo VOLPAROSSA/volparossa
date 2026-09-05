@@ -159,6 +159,7 @@ const MAX_LEDGER_ENTRIES: usize = 256;
 const MAX_LEDGER_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LEDGER_BYTES_PER_PEER: usize = 16 * 1024 * 1024;
 const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
+const MAX_CURRENT_EXIT_CONTROL_CANDIDATES: usize = 3;
 const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
 pub(crate) const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
 const AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS: u64 = 1_000;
@@ -4896,7 +4897,7 @@ impl DiscoveryRuntime {
         }
     }
 
-    /// Fetch provider-only Exit advertisements through one authenticated control Relay.
+    /// Fetch provider-only Exit advertisements through at most three current control Relays.
     ///
     /// A client never dials the Exit here. The actor sends the existing bounded fetch RPC to one
     /// current direct Relay, and only the normal forwarded-provenance commit can make the response
@@ -4931,7 +4932,6 @@ impl DiscoveryRuntime {
         for (exit_peer, provider_expiry_ms) in exits {
             if self.automatic_exit_fetch_attempts.len() >= self.candidate_limit.max(1)
                 || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
-                || self.has_current_forwarded_exit(exit_peer, now_ms.saturating_add(1_000))
                 || self
                     .automatic_exit_fetch_attempts
                     .iter()
@@ -4939,7 +4939,8 @@ impl DiscoveryRuntime {
             {
                 continue;
             }
-            let Some(control) = self.next_untried_exit_control(&controls, exit_peer, now_ms) else {
+            let Some(control) = self.next_automatic_exit_control(&controls, exit_peer, now_ms)
+            else {
                 continue;
             };
             let key = ForwardedExitKey {
@@ -4983,32 +4984,79 @@ impl DiscoveryRuntime {
         }
     }
 
-    /// A retained affine forwarding capability may outlive the exact advertisement snapshot that
-    /// created it. It remains valid for already-authorized operations, but it must not suppress a
-    /// refresh needed by a new preselection snapshot.
-    fn has_current_forwarded_exit(&self, exit_peer: Libp2pPeerId, required_until_ms: u64) -> bool {
-        self.forwarded_exits.iter().any(|(key, capability)| {
-            key.exit_peer == exit_peer
-                && self
-                    .direct_relays
-                    .get(&key.control_relay_peer)
-                    .is_some_and(|control| {
-                        forwarded_exit_capability_matches(
-                            capability,
-                            control,
-                            control.node_id,
-                            control.peer_id,
-                            control.public_key,
-                            capability.exit_node_id,
-                            exit_peer,
-                            required_until_ms,
-                        ) && forwarded_control_projection_lineage_matches(
-                            capability,
-                            control,
-                            required_until_ms,
-                        )
-                    })
-        })
+    fn next_automatic_exit_control(
+        &self,
+        controls: &[DirectRelayCapability],
+        exit_peer: Libp2pPeerId,
+        now_ms: u64,
+    ) -> Option<DirectRelayCapability> {
+        let mut current = 0;
+        // Count all currently live pairs, including a control whose own advertisement is too
+        // near expiry to start another RPC. It still occupies a snapshot slot until expiry.
+        let live_controls = self
+            .direct_relays
+            .values()
+            .filter(|control| self.has_current_forwarded_exit_control(control, exit_peer, now_ms))
+            .map(|control| control.peer_id)
+            .collect::<Vec<_>>();
+        let mut missing = Vec::new();
+        for control in controls
+            .iter()
+            .filter(|control| control.peer_id != exit_peer)
+        {
+            if self.has_current_forwarded_exit_control(
+                control,
+                exit_peer,
+                now_ms.saturating_add(1_000),
+            ) {
+                current += 1;
+                if current >= MAX_CURRENT_EXIT_CONTROL_CANDIDATES {
+                    return None;
+                }
+            } else {
+                missing.push(control.clone());
+            }
+        }
+        // A still-live slot with less than the refresh margin must be refreshed in place;
+        // replacing it now could briefly publish a fourth valid lineage in the next snapshot.
+        if live_controls.len() >= MAX_CURRENT_EXIT_CONTROL_CANDIDATES {
+            missing.retain(|control| live_controls.contains(&control.peer_id));
+        }
+        // Retain the preferred lineage and its existing refresh/cooldown semantics. Once it is
+        // current, enroll at most two authenticated alternatives so normal selection can vary
+        // control/data roles. Existing affine capabilities and in-flight requests never migrate.
+        self.next_untried_exit_control(&missing, exit_peer, now_ms)
+    }
+
+    /// An older affine capability remains valid for its owner, but cannot suppress an exact
+    /// signed-advertisement refresh needed by a new preselection snapshot on this control pair.
+    fn has_current_forwarded_exit_control(
+        &self,
+        control: &DirectRelayCapability,
+        exit_peer: Libp2pPeerId,
+        required_until_ms: u64,
+    ) -> bool {
+        self.forwarded_exits
+            .get(&ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            })
+            .is_some_and(|capability| {
+                forwarded_exit_capability_matches(
+                    capability,
+                    control,
+                    control.node_id,
+                    control.peer_id,
+                    control.public_key,
+                    capability.exit_node_id,
+                    exit_peer,
+                    required_until_ms,
+                ) && forwarded_control_projection_lineage_matches(
+                    capability,
+                    control,
+                    required_until_ms,
+                )
+            })
     }
 
     fn next_untried_exit_control(
@@ -12714,6 +12762,7 @@ impl DiscoveryRuntime {
             &mut direct_relays,
             &mut forwarded_exits,
             maximum_candidates,
+            Self::random_exit_control_index,
         );
         let preselection_subjects = preselection_observation::PreselectionSubjectSet::from_snapshot(
             &revalidated,
@@ -12964,10 +13013,55 @@ impl DiscoveryRuntime {
             && capability.control_relay_public_key != capability.exit_public_key
     }
 
+    /// Draw once per Exit, before affine observation subjects are built. Alternative forwarding
+    /// lineages do not turn the same Exit into multiple weighted selection candidates.
+    fn random_exit_control_index(count: usize) -> Option<usize> {
+        if count == 0 || count > MAX_CURRENT_EXIT_CONTROL_CANDIDATES {
+            return None;
+        }
+        if count == 1 {
+            return Some(0);
+        }
+        let count = u16::try_from(count).ok()?;
+        let ceiling = 256 - (256 % count);
+        // Bounded rejection sampling, without modulo bias or an entropy-failure fallback.
+        for _ in 0..16 {
+            let mut byte = [0_u8];
+            OsRng.try_fill_bytes(&mut byte).ok()?;
+            let value = u16::from(byte[0]);
+            if value < ceiling {
+                return Some(usize::from(value % count));
+            }
+        }
+        None
+    }
+
+    fn same_forwarded_exit_snapshot(
+        left: &ForwardedExitCandidateSnapshot,
+        right: &ForwardedExitCandidateSnapshot,
+    ) -> bool {
+        let left_cap = &left.capability;
+        let right_cap = &right.capability;
+        left.advertisement == right.advertisement
+            && left_cap.exit_node_id == right_cap.exit_node_id
+            && left_cap.exit_peer_id == right_cap.exit_peer_id
+            && left_cap.exit_public_key == right_cap.exit_public_key
+            && left_cap.exit_advertisement_sequence == right_cap.exit_advertisement_sequence
+            && left_cap.exit_advertisement_expires_at_ms
+                == right_cap.exit_advertisement_expires_at_ms
+            && left_cap.exit_advertisement_payload_hash == right_cap.exit_advertisement_payload_hash
+            && left_cap.policy_version == right_cap.policy_version
+            && left_cap.policy_hash == right_cap.policy_hash
+            && left_cap.policy_expires_at_ms == right_cap.policy_expires_at_ms
+        // The capability expiry is intentionally lineage-specific: each current control can
+        // authorize the exact same signed Exit for a different remaining bounded lifetime.
+    }
+
     fn finalize_route_candidate_projection(
         direct_relays: &mut [DirectRelayCandidateSnapshot],
         forwarded_exits: &mut Vec<ForwardedExitCandidateSnapshot>,
         maximum_candidates: usize,
+        mut choose_control: impl FnMut(usize) -> Option<usize>,
     ) {
         direct_relays.sort_by(|left, right| {
             (left.capability.node_id, left.capability.peer_id.to_bytes()).cmp(&(
@@ -12989,20 +13083,35 @@ impl DiscoveryRuntime {
                     right.capability.control_relay_peer_id.to_bytes(),
                 ))
         });
-        let mut forwarded_node_counts = HashMap::<[u8; 32], usize>::new();
-        let mut forwarded_peer_counts = HashMap::<Libp2pPeerId, usize>::new();
-        for candidate in forwarded_exits.iter() {
-            *forwarded_node_counts
-                .entry(candidate.capability.exit_node_id)
-                .or_default() += 1;
-            *forwarded_peer_counts
-                .entry(candidate.capability.exit_peer_id)
-                .or_default() += 1;
+        let mut selected = Vec::with_capacity(forwarded_exits.len());
+        for group in forwarded_exits
+            .chunk_by(|left, right| left.capability.exit_node_id == right.capability.exit_node_id)
+        {
+            let first = &group[0];
+            let mut control_nodes = HashSet::new();
+            let mut control_peers = HashSet::new();
+            let mut control_keys = HashSet::new();
+            if group.len() > MAX_CURRENT_EXIT_CONTROL_CANDIDATES
+                || group.iter().any(|candidate| {
+                    !Self::same_forwarded_exit_snapshot(first, candidate)
+                        || !control_nodes.insert(candidate.capability.control_relay_node_id)
+                        || !control_peers.insert(candidate.capability.control_relay_peer_id)
+                        || !control_keys.insert(candidate.capability.control_relay_public_key)
+                })
+                || forwarded_exits.iter().any(|other| {
+                    other.capability.exit_node_id != first.capability.exit_node_id
+                        && (other.capability.exit_peer_id == first.capability.exit_peer_id
+                            || other.capability.exit_public_key == first.capability.exit_public_key)
+                })
+            {
+                continue;
+            }
+            if let Some(index) = choose_control(group.len()).filter(|index| *index < group.len()) {
+                selected.push(group[index].clone());
+            }
         }
-        forwarded_exits.retain(|candidate| {
-            forwarded_node_counts.get(&candidate.capability.exit_node_id) == Some(&1)
-                && forwarded_peer_counts.get(&candidate.capability.exit_peer_id) == Some(&1)
-        });
+        selected.truncate(maximum_candidates.saturating_sub(direct_relays.len()));
+        *forwarded_exits = selected;
 
         debug_assert!(
             direct_relays.len().saturating_add(forwarded_exits.len()) <= maximum_candidates
@@ -19644,13 +19753,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_exit_fetch_stops_after_one_control_binds_the_exit() {
+    async fn automatic_exit_fetch_enrolls_an_alternate_without_moving_the_first_owner() {
         let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let exit = Identity::generate();
         let exit_peer = exit.peer_id().to_owned();
         let first_control = install_control(&mut fixture, &Identity::generate(), now_ms);
-        let _second_control = install_control(&mut fixture, &Identity::generate(), now_ms);
+        let second_control = install_control(&mut fixture, &Identity::generate(), now_ms);
+        fixture
+            .runtime
+            .preferred_exit_controls
+            .insert(exit_peer, first_control.peer_id);
         fixture
             .runtime
             .exit_provider_peers
@@ -19670,8 +19783,35 @@ mod tests {
 
         fixture.runtime.schedule_exit_advertisement_fetches();
 
-        assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
-        assert!(fixture.runtime.pending_client_forwards.is_empty());
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        let attempt = &fixture.runtime.automatic_exit_fetch_attempts[0];
+        assert_eq!(
+            attempt.key,
+            ForwardedExitKey {
+                control_relay_peer: second_control.peer_id,
+                exit_peer,
+            }
+        );
+        assert_eq!(
+            attempt.request.control_relay_peer_id(),
+            second_control.peer_id.to_bytes()
+        );
+        assert_eq!(
+            fixture.runtime.preferred_exit_controls.get(&exit_peer),
+            Some(&first_control.peer_id)
+        );
+        assert!(
+            fixture
+                .runtime
+                .forwarded_exits
+                .contains_key(&ForwardedExitKey {
+                    control_relay_peer: first_control.peer_id,
+                    exit_peer,
+                })
+        );
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
     }
 
     #[tokio::test]
@@ -19685,23 +19825,35 @@ mod tests {
         let deadline = now_ms.saturating_add(25_000);
         let exit = Identity::generate();
         let exit_peer = exit.peer_id().to_owned();
-        let mut controls = (1_u64..=3)
-            .map(|sequence| {
-                direct_capability(
-                    &Identity::generate(),
-                    &fixture.policy,
+        let mut controls = Vec::new();
+        for sequence in 1..=3 {
+            let identity = Identity::generate();
+            assert!(
+                ingest_direct_snapshot_advertisement(
+                    &mut fixture,
+                    &identity,
+                    RolesConfig {
+                        client: false,
+                        relay: true,
+                        exit: false
+                    },
                     sequence,
-                    now_ms.saturating_add(60_000),
+                    generate_nonce(),
+                    now_ms
                 )
-            })
-            .collect::<Vec<_>>();
-        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
-        for control in &controls {
-            fixture
-                .runtime
-                .direct_relays
-                .insert(control.peer_id, control.clone());
+                .await
+                .is_some()
+            );
+            controls.push(
+                fixture
+                    .runtime
+                    .direct_relays
+                    .get(identity.peer_id())
+                    .unwrap()
+                    .clone(),
+            );
         }
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
         let preferred = controls[2].clone();
         fixture
             .runtime
@@ -19728,13 +19880,16 @@ mod tests {
         assert!(
             fixture
                 .runtime
-                .ingest_advertisement(
-                    exit_peer,
-                    advertisement.clone(),
-                    forwarded_provenance(&preferred, &exit, deadline),
+                .stage_advertisement_commit(
+                    PreparedAdvertisementCommit {
+                        peer: exit_peer,
+                        provenance: forwarded_provenance(&preferred, &exit, deadline),
+                        envelope: advertisement.signed_envelope().to_vec(),
+                    },
                     &fixture.state,
                 )
                 .await
+                .accepted_advertisement()
                 .is_some()
         );
         assert_eq!(
@@ -19743,17 +19898,112 @@ mod tests {
         );
 
         let alternate = controls[0].clone();
+        assert!(fixture.runtime.has_current_forwarded_exit_control(
+            &preferred,
+            exit_peer,
+            now_ms + 1_000
+        ));
+        assert_eq!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, now_ms)
+                .expect("first success leaves an alternate eligible")
+                .peer_id,
+            alternate.peer_id
+        );
         assert!(
             fixture
                 .runtime
-                .ingest_advertisement(
-                    exit_peer,
-                    advertisement,
-                    forwarded_provenance(&alternate, &exit, deadline),
+                .stage_advertisement_commit(
+                    PreparedAdvertisementCommit {
+                        peer: exit_peer,
+                        provenance: forwarded_provenance(&alternate, &exit, deadline),
+                        envelope: advertisement.signed_envelope().to_vec(),
+                    },
                     &fixture.state,
                 )
                 .await
+                .accepted_advertisement()
                 .is_some()
+        );
+        assert_eq!(
+            fixture.runtime.preferred_exit_controls.get(&exit_peer),
+            Some(&preferred.peer_id)
+        );
+
+        let third = controls[1].clone();
+        assert_eq!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, now_ms)
+                .expect("one remaining bounded alternate")
+                .peer_id,
+            third.peer_id
+        );
+        assert!(
+            fixture
+                .runtime
+                .stage_advertisement_commit(
+                    PreparedAdvertisementCommit {
+                        peer: exit_peer,
+                        provenance: forwarded_provenance(&third, &exit, deadline),
+                        envelope: advertisement.signed_envelope().to_vec(),
+                    },
+                    &fixture.state
+                )
+                .await
+                .accepted_advertisement()
+                .is_some()
+        );
+        let fourth = direct_capability(
+            &Identity::generate(),
+            &fixture.policy,
+            4,
+            now_ms.saturating_add(60_000),
+        );
+        fixture
+            .runtime
+            .direct_relays
+            .insert(fourth.peer_id, fourth.clone());
+        controls.push(fourth);
+        assert!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, now_ms)
+                .is_none()
+        );
+
+        // Rolling expiry refreshes only the missing slot; three valid pairs never enroll a
+        // fourth. Already-authorized owners and the first preferred control remain unchanged.
+        let alternate_key = ForwardedExitKey {
+            control_relay_peer: alternate.peer_id,
+            exit_peer,
+        };
+        fixture
+            .runtime
+            .forwarded_exits
+            .get_mut(&alternate_key)
+            .unwrap()
+            .expires_at_ms = now_ms + 2_000;
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(alternate_key, now_ms);
+        assert_eq!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, now_ms + 1_100)
+                .expect("900ms live slot refreshes instead of enrolling fourth")
+                .peer_id,
+            alternate.peer_id
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls[..3], exit_peer, now_ms + 2_001)
+                .expect("expired alternate becomes refreshable")
+                .peer_id,
+            alternate.peer_id
         );
         assert_eq!(
             fixture.runtime.preferred_exit_controls.get(&exit_peer),
@@ -23407,7 +23657,7 @@ mod tests {
         fixture.runtime.direct_relays.remove(&control.peer_id);
     }
 
-    async fn install_ambiguous_snapshot_exit(
+    async fn install_alternative_control_snapshot_exit(
         fixture: &mut RuntimeFixture,
         first_control: &DirectRelayCapability,
         now_ms: u64,
@@ -23435,14 +23685,14 @@ mod tests {
             .get(second_identity.peer_id())
             .expect("second control")
             .clone();
-        let ambiguous_exit = Identity::generate();
-        let ambiguous_peer = ambiguous_exit.peer_id().to_owned();
+        let shared_exit = Identity::generate();
+        let shared_peer = shared_exit.peer_id().to_owned();
         let deadline = now_ms.saturating_add(20_000);
         fixture
             .runtime
-            .mark_forwarded_exit_target(ambiguous_peer, deadline);
+            .mark_forwarded_exit_target(shared_peer, deadline);
         let advertisement = service_advertisement(
-            &ambiguous_exit,
+            &shared_exit,
             RolesConfig {
                 client: false,
                 relay: false,
@@ -23459,16 +23709,225 @@ mod tests {
                 fixture
                     .runtime
                     .ingest_advertisement(
-                        ambiguous_peer,
+                        shared_peer,
                         advertisement.clone(),
-                        forwarded_provenance(control, &ambiguous_exit, deadline),
+                        forwarded_provenance(control, &shared_exit, deadline),
                         &fixture.state,
                     )
                     .await
                     .is_some()
             );
         }
-        (second_control, ambiguous_peer)
+        (second_control, shared_peer)
+    }
+
+    async fn signed_alternative_exit_controls_fixture() -> (Box<RuntimeFixture>, u64) {
+        let mut fixture = Box::new(fixture(test_client_roles()));
+        let now_ms = unix_millis();
+        let exit = Identity::generate();
+        let exit_peer = *exit.peer_id();
+        let deadline = now_ms.saturating_add(20_000);
+        fixture
+            .runtime
+            .mark_forwarded_exit_target(exit_peer, deadline);
+        let advertisement = service_advertisement_with_capabilities(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            1,
+            [60; 32],
+            now_ms,
+            &fixture.directory,
+            PreselectionTestCapabilities::all(),
+        );
+        for discriminator in 40..43 {
+            let identity = Identity::generate();
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    &identity,
+                    RolesConfig {
+                        client: false,
+                        relay: true,
+                        exit: false
+                    },
+                    1,
+                    [discriminator; 32],
+                    now_ms,
+                    PreselectionTestCapabilities::all(),
+                )
+                .await
+                .is_some()
+            );
+            let control = fixture.runtime.direct_relays[identity.peer_id()].clone();
+            assert!(
+                fixture
+                    .runtime
+                    .ingest_advertisement(
+                        exit_peer,
+                        advertisement.clone(),
+                        forwarded_provenance(&control, &exit, deadline),
+                        &fixture.state,
+                    )
+                    .await
+                    .is_some()
+            );
+        }
+        assert_eq!(fixture.runtime.forwarded_exits.len(), 3);
+        (fixture, now_ms)
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_alternative_controls_keep_one_exact_signed_exit_and_affine_subjects() {
+        let (fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let policy = DiscoveryRuntime::validated_route_candidate_policy(&active, now_ms).unwrap();
+        let revalidated = fixture
+            .runtime
+            .load_revalidated_route_candidates(10, now_ms, policy)
+            .expect("every persisted advertisement is reverified");
+        let mut selected_controls = HashSet::new();
+        for choice in 0..3 {
+            let mut direct =
+                fixture
+                    .runtime
+                    .project_direct_route_candidates(&revalidated, now_ms, policy);
+            let mut exits = fixture.runtime.project_forwarded_route_candidates(
+                &revalidated,
+                &direct,
+                now_ms,
+                policy,
+            );
+            assert_eq!(exits.len(), 3);
+            let originals = exits.clone();
+            DiscoveryRuntime::finalize_route_candidate_projection(
+                &mut direct,
+                &mut exits,
+                10,
+                |count| {
+                    assert_eq!(count, 3);
+                    Some(choice)
+                },
+            );
+            assert_eq!(exits.len(), 1, "one Exit gets one selection weight");
+            assert!(
+                originals.contains(&exits[0]),
+                "selected lineage is not rewritten"
+            );
+            selected_controls.insert(exits[0].capability.control_relay_peer_id);
+            let subjects = preselection_observation::PreselectionSubjectSet::from_snapshot(
+                &revalidated,
+                &direct,
+                &exits,
+            );
+            assert!(subjects.available);
+            let snapshot = RouteCandidateSnapshot {
+                captured_at_ms: now_ms,
+                policy,
+                direct_relays: direct,
+                forwarded_exits: exits,
+                preselection_subjects: subjects,
+            };
+            let narrowed = narrow_route_candidate_snapshot(
+                snapshot,
+                PreselectionSamplingScope::new(
+                    Transport::MultipathQuic,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth {
+                        up_mbps: 10,
+                        down_mbps: 10,
+                    },
+                    2,
+                    2,
+                ),
+            )
+            .unwrap_or_else(|failure| panic!("exact narrowed snapshot: {:?}", failure.error));
+            assert_eq!(narrowed.forwarded_exits.len(), 1);
+            assert_eq!(narrowed.direct_relays.len(), 3);
+            assert!(
+                PreselectionAttemptGate::new()
+                    .unwrap()
+                    .begin(
+                        narrowed,
+                        Transport::MultipathQuic,
+                        ObservationAddressFamily::Ipv4,
+                        Bandwidth {
+                            up_mbps: 10,
+                            down_mbps: 10
+                        },
+                        Bandwidth {
+                            up_mbps: 100,
+                            down_mbps: 100
+                        },
+                        Bandwidth {
+                            up_mbps: 80,
+                            down_mbps: 80
+                        },
+                    )
+                    .is_ok(),
+                "affine request still has exactly one Exit/control pair"
+            );
+        }
+        assert_eq!(
+            selected_controls.len(),
+            3,
+            "every current lineage is reachable by a bounded draw"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_alternative_controls_reject_conflicts_duplicates_and_invalid_choice() {
+        let (fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let policy = DiscoveryRuntime::validated_route_candidate_policy(&active, now_ms).unwrap();
+        let revalidated = fixture
+            .runtime
+            .load_revalidated_route_candidates(10, now_ms, policy)
+            .unwrap();
+        let direct = fixture
+            .runtime
+            .project_direct_route_candidates(&revalidated, now_ms, policy);
+        let original = fixture.runtime.project_forwarded_route_candidates(
+            &revalidated,
+            &direct,
+            now_ms,
+            policy,
+        );
+        for mutation in 0..9 {
+            let mut direct = direct.clone();
+            let mut exits = original.clone();
+            match mutation {
+                0 => exits[1].capability.exit_advertisement_sequence += 1,
+                1 => {
+                    exits[1].capability.exit_advertisement_payload_hash = exits[1]
+                        .capability
+                        .exit_advertisement_payload_hash
+                        .xor_for_test();
+                }
+                2 => exits[1].capability.policy_version += 1,
+                3 => exits[1] = exits[0].clone(),
+                4 => exits.push(exits[0].clone()),
+                5 => exits[1].capability.exit_node_id[0] ^= 1,
+                6 => exits[1].capability.exit_peer_id = *Identity::generate().peer_id(),
+                7 | 8 => {}
+                _ => unreachable!(),
+            }
+            DiscoveryRuntime::finalize_route_candidate_projection(
+                &mut direct,
+                &mut exits,
+                10,
+                |count| match mutation {
+                    7 => None,
+                    8 => Some(count),
+                    _ => Some(0),
+                },
+            );
+            assert!(exits.is_empty(), "ambiguous lineage mutation {mutation}");
+        }
     }
 
     async fn install_pending_direct_snapshot_exit(
@@ -23508,8 +23967,8 @@ mod tests {
         let self_peer = install_self_snapshot_relay(&mut fixture, now_ms).await;
 
         install_orphan_snapshot_exit(&mut fixture, now_ms).await;
-        let (second_control, ambiguous_peer) =
-            install_ambiguous_snapshot_exit(&mut fixture, &control, now_ms).await;
+        let (second_control, alternative_peer) =
+            install_alternative_control_snapshot_exit(&mut fixture, &control, now_ms).await;
         let pending_peer =
             install_pending_direct_snapshot_exit(&mut fixture, &control, now_ms).await;
 
@@ -23528,16 +23987,14 @@ mod tests {
         assert!(!direct_peers.contains(&self_peer));
         assert!(!direct_peers.contains(&direct_exit_peer));
 
-        assert_eq!(snapshot.forwarded_exits().len(), 1);
+        assert_eq!(snapshot.forwarded_exits().len(), 2);
         assert_eq!(
-            snapshot.forwarded_exits()[0].capability().exit_peer_id,
-            valid_exit_peer
-        );
-        assert!(
             snapshot
                 .forwarded_exits()
                 .iter()
-                .all(|candidate| candidate.capability().exit_peer_id != ambiguous_peer)
+                .map(|candidate| candidate.capability().exit_peer_id)
+                .collect::<HashSet<_>>(),
+            HashSet::from([valid_exit_peer, alternative_peer])
         );
         assert!(
             snapshot
