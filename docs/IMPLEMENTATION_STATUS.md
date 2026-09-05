@@ -433,9 +433,12 @@ at `48c1fb6a` passed that association stage: eight exact remote mDNS records and
 authenticated mesh PeerID/endpoints were observed before the other agents started. Later
 signed roles were present as well. It then failed at `LOCAL_LINK_NATIVE_ROUTE_UNAVAILABLE`:
 both mesh nodes' Client and Relay Prepare operations failed before application traffic, while
-the other nodes could prepare. Kernel link-attribute decoding is under investigation. All
-mesh/radio objects were removed and guest-state hashes matched. Full-agent application traffic
-over the mesh is still unproven.
+the other nodes could prepare. The helper rejected a legitimate nested `IFLA_PROP_LIST` holding
+the parent WLAN's alternative name. The observed Linux attribute shape reproduces the decoder
+failure; bounded recognition of that exact property structure now passes all 18 focused decoder
+checks without changing primary interface, source or ownership validation. All mesh/radio
+objects were removed and guest-state hashes matched. Full-agent application traffic over the
+mesh still needs a corrected live run.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

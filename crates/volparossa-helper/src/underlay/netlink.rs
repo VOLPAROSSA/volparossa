@@ -54,6 +54,10 @@ const NLA_TYPE_MASK: u16 = !(NLA_F_NESTED | NLA_F_NET_BYTEORDER);
 
 const IFLA_IFNAME: u16 = 3;
 const IFLA_IFALIAS: u16 = 20;
+const IFLA_PROP_LIST: u16 = 52;
+const IFLA_ALT_IFNAME: u16 = 53;
+const MAX_ALT_IFNAME_BYTES: usize = 127;
+const MAX_LINK_ALT_NAMES: usize = 32;
 
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
@@ -792,6 +796,7 @@ fn decode_link(frame: &[u8]) -> Result<UnderlayLink, UnderlayNetlinkError> {
     let attributes = parse_attributes(&payload[IFINFO_LEN..])?;
     let mut ifname = None;
     let mut alias = None;
+    let mut properties_seen = false;
     for attribute in attributes {
         match attribute.kind {
             IFLA_IFNAME => set_once(
@@ -804,6 +809,13 @@ fn decode_link(frame: &[u8]) -> Result<UnderlayLink, UnderlayNetlinkError> {
                 parse_nul_string(attribute.value, true, MAX_IFALIAS_BYTES)?,
                 attribute.flags,
             )?,
+            IFLA_PROP_LIST => {
+                if properties_seen || attribute.flags != NLA_F_NESTED {
+                    return Err(UnderlayNetlinkError::Ambiguous);
+                }
+                validate_link_properties(attribute.value)?;
+                properties_seen = true;
+            }
             // Current kernels emit empty nested capability markers in link dumps. They carry no
             // selectable fact; non-empty nested or differently flagged critical unknowns fail.
             _ if attribute.flags == NLA_F_NESTED && attribute.value.is_empty() => {}
@@ -825,6 +837,36 @@ fn decode_link(frame: &[u8]) -> Result<UnderlayLink, UnderlayNetlinkError> {
         loopback: flags & u32::try_from(libc::IFF_LOOPBACK).unwrap_or(8) != 0,
         helper_owned,
     })
+}
+
+// Linux reports alternative names in a nested property list, including on a down parent WLAN.
+// They are not source, interface-identity or ownership evidence; validate and discard only this
+// known structure. Other non-empty nested link attributes still fail closed.
+fn validate_link_properties(value: &[u8]) -> Result<(), UnderlayNetlinkError> {
+    if value.len() > MAX_LINK_ALT_NAMES * (ATTRIBUTE_HEADER_LEN + MAX_ALT_IFNAME_BYTES + 1) {
+        return Err(UnderlayNetlinkError::Limit);
+    }
+    let properties = parse_attributes(value)?;
+    if properties.len() > MAX_LINK_ALT_NAMES {
+        return Err(UnderlayNetlinkError::Limit);
+    }
+    let mut names = Vec::with_capacity(properties.len());
+    for property in properties {
+        if property.kind != IFLA_ALT_IFNAME || property.flags != 0 {
+            return Err(UnderlayNetlinkError::Ambiguous);
+        }
+        let name = parse_nul_string(property.value, false, MAX_ALT_IFNAME_BYTES)?;
+        if matches!(name.as_slice(), b"." | b"..")
+            || name
+                .iter()
+                .any(|byte| byte.is_ascii_whitespace() || *byte == b':')
+            || names.contains(&name)
+        {
+            return Err(UnderlayNetlinkError::Malformed);
+        }
+        names.push(name);
+    }
+    Ok(())
 }
 
 fn decode_address(frame: &[u8]) -> Result<Option<UnderlayAddress>, UnderlayNetlinkError> {
@@ -1833,6 +1875,75 @@ mod tests {
             ),
             Err(UnderlayNetlinkError::Malformed)
         ));
+    }
+
+    #[test]
+    fn wifi_link_nested_altname_is_irrelevant_to_underlay_identity() {
+        // Actual RTM_GETLINK shape: IFLA_PROP_LIST|NLA_F_NESTED containing IFLA_ALT_IFNAME.
+        let original = link(7, b"wlan0", None);
+        let mut payload = original[NLMSG_HEADER_LEN..].to_vec();
+        payload.extend_from_slice(&attr(
+            IFLA_PROP_LIST | NLA_F_NESTED,
+            &attr(IFLA_ALT_IFNAME, b"wlx020000000000\0"),
+        ));
+        let observed = parse(
+            DumpKind::Link,
+            &[msg(RTM_NEWLINK, NLM_F_MULTI, SEQ, &payload), done()],
+        )
+        .expect("a real Linux alternative name must not invalidate the entire link dump");
+        assert_eq!(
+            observed.links,
+            parse(DumpKind::Link, &[original, done()])
+                .expect("same primary interface")
+                .links
+        );
+    }
+
+    #[test]
+    fn wifi_link_nested_altname_keeps_unknown_and_malformed_properties_closed() {
+        let valid = attr(IFLA_ALT_IFNAME, b"wlx020000000000\0");
+        let maximum = attr(IFLA_ALT_IFNAME, &nul(&[b'a'; MAX_ALT_IFNAME_BYTES]));
+        assert!(validate_link_properties(&maximum).is_ok());
+        assert!(validate_link_properties(&[]).is_ok());
+        for invalid in [
+            attr(IFLA_ALT_IFNAME | NLA_F_NESTED, b"alt0\0"),
+            attr(IFLA_ALT_IFNAME | NLA_F_NET_BYTEORDER, b"alt0\0"),
+            attr(IFLA_ALT_IFNAME + 1, b"alt0\0"),
+            attr(IFLA_ALT_IFNAME, b"alt0"),
+            attr(IFLA_ALT_IFNAME, b"\0"),
+            attr(IFLA_ALT_IFNAME, b"alt\0name\0"),
+            attr(IFLA_ALT_IFNAME, b"../alt0\0"),
+            attr(IFLA_ALT_IFNAME, b"alt:0\0"),
+            attr(IFLA_ALT_IFNAME, b"alt 0\0"),
+            attr(IFLA_ALT_IFNAME, &nul(&[b'a'; MAX_ALT_IFNAME_BYTES + 1])),
+            [valid.as_slice(), valid.as_slice()].concat(),
+            maximum.repeat(MAX_LINK_ALT_NAMES + 1),
+            vec![3, 0, 53, 0],
+        ] {
+            assert!(validate_link_properties(&invalid).is_err());
+        }
+        let original = link(7, b"wlan0", None);
+        for extra in [
+            attr(IFLA_PROP_LIST, &valid),
+            attr(IFLA_PROP_LIST | NLA_F_NESTED | NLA_F_NET_BYTEORDER, &valid),
+            attr(IFLA_PROP_LIST | NLA_F_NESTED, &valid).repeat(2),
+            attr(63 | NLA_F_NESTED, &valid),
+            [
+                attr(IFLA_PROP_LIST | NLA_F_NESTED, &valid),
+                attr(IFLA_IFNAME, b"other0\0"),
+            ]
+            .concat(),
+        ] {
+            let mut payload = original[NLMSG_HEADER_LEN..].to_vec();
+            payload.extend_from_slice(&extra);
+            assert!(
+                parse(
+                    DumpKind::Link,
+                    &[msg(RTM_NEWLINK, NLM_F_MULTI, SEQ, &payload), done()]
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
