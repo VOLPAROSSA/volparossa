@@ -37,7 +37,14 @@ Client's Relay, with a private Exit-facing link to an independently connected Ex
 may connect its Client directly to its Exit. LocalOnly selection uses an absent ASN and a real
 authenticated LAN prefix; two unknown origins do not count as independent paths. The Exit's
 signed observation preserves the local scope instead of pretending the address is public.
-Focused checks and the evidence parser pass, but this two-flow fixture has not yet passed live.
+The [live two-flow run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33990931726) at
+`f1881887` passed: the same offline daemon consumed and relayed concurrently, with 16 correct
+echoes per stream, matching hashes, 3.115 seconds of overlap, packet evidence on both WireGuard
+legs, no direct-exit/plaintext leaks, and exact cleanup. It had no physical default route or Exit
+role. A separate [mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33990931649)
+on the same build passed a real HTTP/3 4-MiB request and 8-MiB response on two genuine MPQUIC
+paths, one LAN and one public, to the same Exit. Both paths carried independently observed
+WireGuard data. This proves the underlay composition, not higher aggregate bandwidth.
 ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
 evidence. Automatic radio setup also remains unfinished; no hidden public-IP fallback is used.
 

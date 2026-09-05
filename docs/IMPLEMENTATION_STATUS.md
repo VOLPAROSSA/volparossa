@@ -164,8 +164,8 @@ contributors, and parallel use of independently useful local and Internet paths.
 is mandatory according to available capabilities. Owner traffic takes priority over contributed
 traffic; spare capacity must be measured and enforced, not inferred from configured limits alone.
 
-- [ ] Local on-link authenticated discovery and two-leg datapaths without a client default route.
-- [ ] Per-path underlay/interface binding for simultaneous local and Internet paths.
+- [x] Local on-link authenticated discovery and two-leg datapaths without a client default route (IPv4 disposable live proof below).
+- [x] Per-path underlay/interface binding for simultaneous local and Internet paths (genuine MPQUIC transfer below; not a bandwidth-gain claim).
 - [ ] Driver-supported direct Wi-Fi link setup, teardown and real-radio transfer proof.
 - [ ] Measured spare-capacity sharing with owner-priority enforcement under competing traffic.
 - [ ] Offline participation, uplink arrival/loss and no recursive overlay-as-exit egress.
@@ -248,7 +248,21 @@ existing operations do not migrate. Four fetch checks, seven signed/projection c
 and strict agent Clippy pass. Runs
 [local-link](https://github.com/VOLPAROSSA/volparossa/actions/runs/33990931726) and
 [mixed-link](https://github.com/VOLPAROSSA/volparossa/actions/runs/33990931649) at `f1881887`
-are pending. Their application, path-count, privacy and cleanup requirements are unchanged.
+both **passed**. The offline node consumed through `C -> R2 -> X` while contributing the actual
+`A -> C -> R2` Relay path: both streams received 16 exact 319-byte echoes with matching hashes,
+3.115 seconds of overlap and positive packet evidence on both WireGuard legs. The same offline
+daemon retained Client+Relay/no-Exit roles and no physical default route. All four observers
+reported zero drops/direct Client--Exit packets/plaintext leaks. Cleanup left zero owned objects
+and identical host-state hashes. This is real simultaneous IPv4 Ethernet/LAN give-and-take,
+not physical-radio, IPv6, automatic uplink-loss recovery or bandwidth-aggregation evidence.
+
+The mixed run transferred a real HTTP/3 4-MiB request and 8-MiB response with matching client/
+destination hashes through one LocalOnly LAN Relay and one public Relay to the same Exit. Both
+native paths were Active; the independent Client and Exit captures each recorded 9,089,824
+WireGuard data bytes on the LAN path and 9,534,080 on the public path. The LAN Relay retained
+no ASN, public prefix, default route or Exit role. Privacy captures passed and exact cleanup
+left zero objects with unchanged guest state. No single-path QUIC fallback or aggregate-speed
+claim is made. Application, path-count, privacy and cleanup requirements were not relaxed.
 Client native preselection and single-path Exit Ready also carry exact observer-bound local
 interface hints into their helper Prepare operations. They cannot rely on a public default route
 on a LocalOnly node. Multi-path Ready now collects all signed Permits, dispatches Relay Ready
@@ -364,7 +378,11 @@ the mesh, with per-interface WireGuard transport counts and station counter grow
 is attributed only to its observed selected underlay. Mesh survives route-only Disconnect and
 must disappear on agent shutdown before helpers stop. Four parser/report/preview checks and the
 existing shell/workflow contract pass; [its first live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33990931641)
-at `f1881887` is pending, not a completed full-agent radio claim.
+at `f1881887` stopped during fixture configuration, before agent startup: the non-mesh
+configuration branch returned the previous shell condition's nonzero status. A direct shell
+regression fails on the old code and passes with explicit success for non-mesh nodes; all five
+Wi-Fi fixture checks pass. Simulated radios were removed and guest-state hashes matched.
+The corrected full-agent mesh run still needs to execute; the backend-only radio pass is unchanged.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
