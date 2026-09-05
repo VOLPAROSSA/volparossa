@@ -294,7 +294,8 @@ prove retirement of an active same-node route while sharing; exact scheduler tea
 Download control, automatic available-bandwidth estimation and radio airtime remain unfinished.
 These narrower results do not check the full sharing item above.
 
-The first explicit Debian `wifi_mesh` runtime is implemented but has no live radio result yet.
+The first explicit Debian `wifi_mesh` runtime is implemented and its kernel backend has passed
+the disposable simulated-radio proof below. Full-agent mesh routing and physical radios remain open.
 The helper creates one separately owned open-L2 802.11s interface using nl80211, with a bounded
 private connected subnet and no default route. Existing active radio interfaces are not retuned;
 unsupported/regulatory/coexistence conditions are rejected. The agent creates the interface
@@ -308,8 +309,14 @@ The disposable `wifi-mesh` scenario now builds the real helper backend harness a
 alone installs the exact hash-verified Debian generic kernel `6.12.107+deb13-amd64` and reboots
 its disposable overlay once. The harness requires real mesh peering, bidirectional 128-KiB hashes,
 station byte/packet counters, explicit removal and socket-loss cleanup. Parser/preview checks,
-ShellCheck and helper Clippy pass; live execution is pending. Its report explicitly does not
-claim physical-radio or full-agent-overlay operation.
+ShellCheck and helper Clippy pass. The
+[live hwsim run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989125353)
+at `21aa8f21` **passed**: two different wiphys reached kernel ESTABLISHED peering, each direction
+transferred exactly 131072 bytes with matching crossed hashes, and real station byte/packet
+counters increased. Both normal removals were idempotent, closing the crashed owner's socket
+removed its exact interface, and namespace/guest-network baselines were restored with zero owned
+objects remaining. This is real kernel 802.11s behavior on simulated radios, not physical-radio,
+phone, capacity-gain or full-agent-overlay evidence.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
@@ -374,8 +381,9 @@ proof; the newly required reciprocal datapath must also be demonstrated.
   CVSS 4.0 support; pinned Cargo-audit 0.22.1 independently checks both graphs for unremediated
   vulnerabilities. Mark this complete only from the accepted exact-revision Quality run.
 - [x] `justfile` exposes every required build, test, fuzz, benchmark, doctor, demo, package,
-  and cleanup entrypoint; privileged integration and package execution still report `BLOCKED`
-  until their real drivers exist.
+  and cleanup entrypoint. Real execution drivers exist in `tests/integration/run.sh`,
+  `tests/integration/run-alpha-topology-vm.sh` and `packaging/build-deb.sh`; preview remains
+  non-mutating, and the integration preview reports `BLOCKED` because execution was not requested.
 - [ ] No essential production datapath contains a mock, stub, `TODO`, or `unimplemented!()`.
 - [ ] Clean Debian 13 amd64 build is reproduced.
 
@@ -383,7 +391,9 @@ proof; the newly required reciprocal datapath must also be demonstrated.
 
 - [x] The shipped `config/examples/default.yaml` is parsed and validated in a regression test and
   is exactly equal to the fully validated `Config::default()` snapshot.
-- [x] Client defaults enabled; relay and exit default disabled.
+- [x] Client, relay and exit all default disabled in `RolesConfig` and the shipped YAML.
+  Production consumption requires relay contribution, plus exit contribution when the operator
+  declares an independent Internet uplink; local-only nodes cannot enable exit service.
 - [x] Unsafe combinations, invalid bounds, and unknown safety-sensitive fields fail closed.
 - [ ] `routing.direct_exit_debug` defaults off and production rejects it; explicit development
   configuration accepts it, but no debug datapath or prominent runtime warning is implemented.
@@ -391,7 +401,10 @@ proof; the newly required reciprocal datapath must also be demonstrated.
   immutable after process start; runtime changes return restart-required without mutation or
   persistence. No controlled apply/restart workflow or live service-readiness proof exists.
 - [ ] Route-context TTL, flow pinning, maximum contexts, and LRU cleanup exist as tested cache
-  primitives, but no production session caller inserts, binds, expires, or retires route contexts.
+  primitives. Production `ClientRouteControl` in `volparossa-agent/src/route_setup.rs` now owns
+  established transport contexts, binds policy-authorized flows and retires signed/idle-expired
+  owners through helper cleanup. This does not complete the generic multi-origin context-cache
+  and LRU integration; that broader requirement remains unchecked.
 
 ## Processes and privilege separation
 

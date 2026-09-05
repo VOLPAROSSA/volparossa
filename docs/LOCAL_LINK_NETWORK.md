@@ -85,7 +85,11 @@ connected address. No Internet default route, DNS setting, mesh forwarding or po
 The exact socket-owned interface is inspected throughout the daemon lifetime and removed at
 shutdown. Route-only cleanup does not remove it. Listeners and local bootstrap dials start after
 the mesh address exists. Compatible physical radios still need a real association/transfer test;
-pure validation and ownership tests are not that evidence.
+pure validation and ownership tests are not that evidence. The
+[disposable hwsim backend run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989125353)
+has now passed real kernel peering, 128-KiB transfers in both directions with matching hashes,
+station counters and normal/crash cleanup on two simulated radios. Full agent/discovery/overlay
+composition on that radio underlay still needs its own functional proof.
 
 The shipped configuration keeps `wifi_mesh.enabled` false. An operator configuring a disposable
 pair can select the same `mesh_id` and `frequency_mhz` on both peers, distinct `local_address`
