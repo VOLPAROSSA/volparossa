@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Functional datapath/reciprocity/local-link; alpha also verifies packaging
+        description: Functional datapath/reciprocity/local-link/sharing; alpha also verifies packaging
         required: true
         default: datapath
         type: choice
@@ -13,6 +13,7 @@ on:
           - alpha
           - reciprocity
           - local-link
+          - sharing
   pull_request:
     branches:
       - main
@@ -198,6 +199,21 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = sharing; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/sharing-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "owner-priority upload runtime succeeded: \(.success)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "qdisc baseline restored: \(.cleanup.baseline_restored)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish upload-sharing runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = local-link; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/local-link-smoke.json"
             if test -f "$report"; then
@@ -284,7 +300,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -398,6 +414,33 @@ jobs:
             .host_state.unchanged == true
           ' "$report" >/dev/null
 
+      - name: Require real shared-uplink owner-priority evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'sharing'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-owner-priority-uplink" and
+            .source_revision == $revision and .success == true and
+            .scheduler.interface == "sharing0" and
+            .scheduler.total_upload_mbps == 12 and
+            .scheduler.contribution_upload_ceiling_mbps == 10 and
+            .scheduler.survived_route_context_cleanup == true and
+            .windows.idle.queue_mbps.contribution >= 4 and
+            .windows.owner.queue_mbps.owner >= 8 and
+            .windows.owner.queue_mbps.contribution < .windows.idle.queue_mbps.contribution * 0.5 and
+            .windows.recovery.queue_mbps.contribution >= 4 and
+            .flow.client_node == "client" and .flow.exit_node == "exit" and
+            .flow.relay_peer_id != .flow.exit_peer_id and
+            all(.flow.wireguard_both_legs[]; . > 0) and
+            .flow.selected_exit_source_ip == "10.241.36.1" and
+            (.nodes | length) == 4 and all(.nodes[]; .same_agent_pid and .roles.client and .roles.relay and .roles.exit) and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .cleanup.baseline_restored == true and .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/sharing-smoke.json" >/dev/null
+
       - name: Upload bounded topology diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -408,7 +451,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

@@ -1,6 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use socket2::SockRef;
 use tokio::net::UdpSocket;
+use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
 
 use crate::{PinnedUdpFlow, QuicUdpAssociation, UdpError};
 
@@ -73,7 +75,7 @@ impl ExitUdpBridge {
     ///
     /// # Errors
     ///
-    /// Fails for a flow-ID mismatch, stale pin, or socket bind/connect error.
+    /// Fails for a flow-ID mismatch, stale pin, or socket bind/priority/connect error.
     pub async fn connect(
         association: QuicUdpAssociation,
         pinned: PinnedUdpFlow,
@@ -91,12 +93,18 @@ impl ExitUdpBridge {
             IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         };
         let socket = UdpSocket::bind(bind_address).await?;
+        SockRef::from(&socket).set_priority(CONTRIBUTION_SOCKET_PRIORITY)?;
         socket.connect(pinned.destination()).await?;
         Ok(Self {
             association,
             destination_socket: socket,
             limits,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn destination_socket_priority(&self) -> std::io::Result<u32> {
+        SockRef::from(&self.destination_socket).priority()
     }
 
     /// Forward complete datagrams in both directions until QUIC closes, the

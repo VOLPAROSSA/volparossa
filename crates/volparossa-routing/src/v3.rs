@@ -1,8 +1,9 @@
 //! Strict version-3 protocol for VOLPAROSSA's minimal privileged network helper.
 //!
 //! The unprivileged agent can describe a route context, peer public endpoints and bounded policy
-//! limits. It cannot provide private keys, interface names, local overlay addresses, allowed
-//! prefixes, listen ports, filesystem paths or free-form privileged input.
+//! limits. It cannot provide private keys, local overlay addresses, allowed prefixes, listen
+//! ports, filesystem paths or free-form privileged input. The independent upload-sharing owner
+//! accepts one bounded physical interface name, resolved and revalidated by the helper.
 
 use std::{
     collections::BTreeSet,
@@ -55,7 +56,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -67,8 +68,9 @@ pub mod helper_request {
     use super::{
         AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
         ActivateClientIngress, ActivateLeaseBatch, AddMptcpEndpoint, BindHelperRuntime,
-        CleanupOwned, CommitLeaseBatch, DestroyClientIngress, DestroyContext, PrepareClientIngress,
-        PrepareLeaseBatch, ReconcileExpiredPrepare, RemoveMptcpEndpoint,
+        CleanupOwned, CommitLeaseBatch, DestroyClientIngress, DestroyContext, DestroyUplinkSharing,
+        InspectUplinkSharing, InstallUplinkSharing, PrepareClientIngress, PrepareLeaseBatch,
+        ReconcileExpiredPrepare, RemoveMptcpEndpoint,
     };
 
     /// Exactly one typed operation.
@@ -119,6 +121,15 @@ pub mod helper_request {
         /// Acquire one exact connected family-matched reply socket for an active ingress flow.
         #[prost(message, tag = "36")]
         AcquireIngressReplySocket(AcquireIngressReplySocket),
+        /// Install one independent runtime-long upload-sharing owner.
+        #[prost(message, tag = "37")]
+        InstallUplinkSharing(InstallUplinkSharing),
+        /// Read the exact owner's aggregate kernel queue counters.
+        #[prost(message, tag = "38")]
+        InspectUplinkSharing(InspectUplinkSharing),
+        /// Retire only the exact owned upload-sharing tree.
+        #[prost(message, tag = "39")]
+        DestroyUplinkSharing(DestroyUplinkSharing),
     }
 }
 
@@ -139,15 +150,15 @@ pub enum ContextRole {
 /// Exact resource class selected by an authenticated cleanup request.
 ///
 /// Route-only cleanup deliberately preserves the independently owned, runtime-long Client ingress
-/// capability so a disconnected agent can establish another route without restarting.
+/// and upload-sharing capabilities so disconnecting a route does not stop node participation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
 pub enum CleanupScope {
     /// Invalid protobuf default.
     Unspecified = 0,
-    /// Every resource owned by this helper runtime, including Client ingress.
+    /// Every resource owned by this helper runtime, including Client ingress and upload sharing.
     AllOwnedResources = 1,
-    /// Route contexts and their transport state, preserving Client ingress.
+    /// Route contexts and their transport state, preserving Client ingress and upload sharing.
     RouteContextsOnly = 2,
 }
 
@@ -680,6 +691,48 @@ pub struct CleanupOwned {
     pub scope: i32,
 }
 
+/// Request one runtime-long upload scheduler, independent of every route context.
+///
+/// Rates are operator-known decimal Mbps, not NIC speed or discovered spare capacity. The helper
+/// resolves the bounded interface name and checks ownership before any kernel mutation.
+#[derive(Clone, PartialEq, Message)]
+pub struct InstallUplinkSharing {
+    /// Non-zero random 16-byte node-sharing runtime identity, not a route context.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// One 1..=15 byte ASCII netdevice name; paths and free-form input are forbidden.
+    #[prost(string, tag = "2")]
+    pub interface: String,
+    /// Positive bounded operator-known total usable upload in decimal Mbps.
+    #[prost(uint32, tag = "3")]
+    pub total_upload_mbps: u32,
+    /// Positive aggregate Relay+Exit upload ceiling, no greater than total upload.
+    #[prost(uint32, tag = "4")]
+    pub contribution_upload_ceiling_mbps: u32,
+}
+
+/// Inspect one exact sharing owner without changing queue state.
+#[derive(Clone, PartialEq, Message)]
+pub struct InspectUplinkSharing {
+    /// Exact ephemeral sharing runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// Exact opaque helper-issued sharing handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub sharing_handle: Vec<u8>,
+}
+
+/// Idempotently retire one exact sharing owner, never unrelated interface state.
+#[derive(Clone, PartialEq, Message)]
+pub struct DestroyUplinkSharing {
+    /// Exact ephemeral sharing runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// Exact opaque helper-issued sharing handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub sharing_handle: Vec<u8>,
+}
+
 /// Stable helper result. Zero is never a valid response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
@@ -729,7 +782,7 @@ pub struct HelperResponse {
     /// Operation-specific success output; absent on failure.
     #[prost(
         oneof = "helper_response::Outcome",
-        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36"
+        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39"
     )]
     pub outcome: Option<helper_response::Outcome>,
 }
@@ -740,8 +793,9 @@ pub mod helper_response {
 
     use super::{
         ActivatedClientIngress, ActivatedLeaseBatch, CommittedLeaseBatch, DestroyedClientIngress,
-        DestroyedContext, Empty, HelperRuntime, IngressReplySocketReady, IngressSocketReady,
-        PreparedClientIngress, PreparedLeaseBatch, ReconciledExpiredPrepare, TransportSocketReady,
+        DestroyedContext, DestroyedSharing, Empty, HelperRuntime, IngressReplySocketReady,
+        IngressSocketReady, InstalledUplinkSharing, PreparedClientIngress, PreparedLeaseBatch,
+        ReconciledExpiredPrepare, SharingCounters, TransportSocketReady,
     };
 
     /// Exactly one successful outcome.
@@ -786,6 +840,15 @@ pub mod helper_response {
         /// Exact endpoints of one connected transparent IPv4 reply descriptor.
         #[prost(message, tag = "36")]
         IngressReplySocketReady(IngressReplySocketReady),
+        /// Exact runtime-long sharing owner and kernel-resolved physical egress.
+        #[prost(message, tag = "37")]
+        InstalledUplinkSharing(InstalledUplinkSharing),
+        /// Kernel counters for one exact sharing owner.
+        #[prost(message, tag = "38")]
+        SharingCounters(SharingCounters),
+        /// Idempotent sharing retirement result.
+        #[prost(message, tag = "39")]
+        DestroyedSharing(DestroyedSharing),
     }
 }
 
@@ -897,6 +960,68 @@ pub struct CommittedLeaseBatch {
 #[derive(Clone, PartialEq, Message)]
 pub struct DestroyedContext {
     /// True when a live context was removed; false when already absent.
+    #[prost(bool, tag = "1")]
+    pub existed: bool,
+}
+
+/// Helper-owned upload scheduler installed before active node participation.
+#[derive(Clone, PartialEq, Message)]
+pub struct InstalledUplinkSharing {
+    /// Echoed ephemeral sharing runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// Opaque non-zero 32-byte helper-issued owner handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub sharing_handle: Vec<u8>,
+    /// Kernel-resolved non-zero egress ifindex; never an agent-selected index.
+    #[prost(uint32, tag = "3")]
+    pub egress_ifindex: u32,
+}
+
+/// Raw kernel queue counters, without derived rates, sampling time or capacity claims.
+#[derive(Clone, Copy, PartialEq, Message)]
+pub struct SharingQueueCounters {
+    /// Kernel-reported byte counter.
+    #[prost(uint64, tag = "1")]
+    pub bytes: u64,
+    /// Kernel-reported packet counter.
+    #[prost(uint64, tag = "2")]
+    pub packets: u64,
+    /// Kernel-reported drop counter.
+    #[prost(uint64, tag = "3")]
+    pub drops: u64,
+    /// Kernel-reported overlimit counter.
+    #[prost(uint64, tag = "4")]
+    pub overlimits: u64,
+    /// Kernel-reported instantaneous byte backlog, not a monotone counter.
+    #[prost(uint64, tag = "5")]
+    pub backlog_bytes: u64,
+}
+
+/// Complete aggregate/owner/contribution queue snapshot for one exact runtime owner.
+#[derive(Clone, PartialEq, Message)]
+pub struct SharingCounters {
+    /// Echoed ephemeral sharing runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// Echoed exact helper-issued sharing handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub sharing_handle: Vec<u8>,
+    /// Mandatory total-underlay queue counters.
+    #[prost(message, optional, tag = "3")]
+    pub total: Option<SharingQueueCounters>,
+    /// Mandatory owner's queue counters.
+    #[prost(message, optional, tag = "4")]
+    pub owner: Option<SharingQueueCounters>,
+    /// Mandatory aggregate Relay+Exit contribution queue counters.
+    #[prost(message, optional, tag = "5")]
+    pub contribution: Option<SharingQueueCounters>,
+}
+
+/// Sharing retirement result, correlated by the full request digest and request ID.
+#[derive(Clone, Copy, PartialEq, Message)]
+pub struct DestroyedSharing {
+    /// True when this owner was removed; false when already absent.
     #[prost(bool, tag = "1")]
     pub existed: bool,
 }
@@ -1116,6 +1241,60 @@ pub fn operation_digest(value: &HelperRequest) -> Result<[u8; 32], HelperProtoco
     Ok(*blake3::hash(&bytes).as_bytes())
 }
 
+/// Validate a sharing response against the exact canonical request and owner lineage.
+///
+/// This does not replace authenticating and binding the helper process on the same connection.
+/// No sharing operation transfers a file descriptor. A valid failure remains a failure result for
+/// the caller to handle; this function proves correlation, not successful kernel installation.
+///
+/// # Errors
+///
+/// Rejects malformed requests/responses, non-sharing operations, altered correlation fields,
+/// mismatched success variants, or substituted sharing identities/handles.
+pub fn validate_uplink_sharing_response(
+    request: &HelperRequest,
+    response: &HelperResponse,
+) -> Result<(), HelperProtocolError> {
+    use helper_request::Operation;
+    use helper_response::Outcome;
+
+    validate_request(request)?;
+    validate_response(response)?;
+    let operation = request
+        .operation
+        .as_ref()
+        .ok_or(HelperProtocolError::Invalid("missing operation"))?;
+    if !matches!(
+        operation,
+        Operation::InstallUplinkSharing(_)
+            | Operation::InspectUplinkSharing(_)
+            | Operation::DestroyUplinkSharing(_)
+    ) || request.request_id != response.request_id
+        || response.operation_digest.as_slice() != operation_digest(request)?
+    {
+        return Err(HelperProtocolError::Invalid("sharing response correlation"));
+    }
+    if response.result != HelperResult::Ok as i32 {
+        return Ok(());
+    }
+    let matches = match (operation, response.outcome.as_ref()) {
+        (
+            Operation::InstallUplinkSharing(request),
+            Some(Outcome::InstalledUplinkSharing(value)),
+        ) => request.sharing_runtime_id == value.sharing_runtime_id,
+        (Operation::InspectUplinkSharing(request), Some(Outcome::SharingCounters(value))) => {
+            request.sharing_runtime_id == value.sharing_runtime_id
+                && request.sharing_handle == value.sharing_handle
+        }
+        (Operation::DestroyUplinkSharing(_), Some(Outcome::DestroyedSharing(_))) => true,
+        _ => false,
+    };
+    if !matches {
+        return Err(HelperProtocolError::Invalid("sharing response owner"));
+    }
+    Ok(())
+}
+
 /// Derive the exact 32-byte binding sent in the same `SCM_RIGHTS` message as a transport FD.
 ///
 /// The domain-separated BLAKE3 value commits the protocol version, request ID, canonical request
@@ -1288,12 +1467,16 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
             "bind helper runtime and pre-register one Prepare intent".to_owned()
         }
         Operation::BindHelperRuntime(_) => "read helper runtime identity".to_owned(),
+        Operation::InstallUplinkSharing(_) => "install one owned upload-sharing runtime".to_owned(),
+        Operation::InspectUplinkSharing(_) => "inspect one owned upload-sharing runtime".to_owned(),
+        Operation::DestroyUplinkSharing(_) => "destroy one owned upload-sharing runtime".to_owned(),
         Operation::CleanupOwned(value) => match CleanupScope::try_from(value.scope)
             .map_err(|_| HelperProtocolError::Invalid("cleanup scope"))?
         {
             CleanupScope::AllOwnedResources => "destroy all helper-owned resources".to_owned(),
             CleanupScope::RouteContextsOnly => {
-                "destroy helper-owned route contexts; preserve client ingress".to_owned()
+                "destroy helper-owned route contexts; preserve client ingress and upload sharing"
+                    .to_owned()
             }
             CleanupScope::Unspecified => {
                 return Err(HelperProtocolError::Invalid("cleanup scope"));
@@ -1553,7 +1736,42 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 Err(HelperProtocolError::Invalid("cleanup scope"))
             }
         },
+        Operation::InstallUplinkSharing(operation) => validate_install_sharing(operation),
+        Operation::InspectUplinkSharing(operation) => {
+            sharing_runtime(&operation.sharing_runtime_id)?;
+            handle(&operation.sharing_handle)
+        }
+        Operation::DestroyUplinkSharing(operation) => {
+            sharing_runtime(&operation.sharing_runtime_id)?;
+            handle(&operation.sharing_handle)
+        }
     }
+}
+
+fn validate_install_sharing(value: &InstallUplinkSharing) -> Result<(), HelperProtocolError> {
+    sharing_runtime(&value.sharing_runtime_id)?;
+    let name = value.interface.as_str();
+    if !(1..=15).contains(&name.len())
+        || matches!(name, "." | "..")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(HelperProtocolError::Invalid("sharing interface"));
+    }
+    if !(1..=MAX_HELPER_RATE_MBPS).contains(&value.total_upload_mbps)
+        || !(1..=value.total_upload_mbps).contains(&value.contribution_upload_ceiling_mbps)
+    {
+        return Err(HelperProtocolError::Invalid("sharing rate bounds"));
+    }
+    Ok(())
+}
+
+fn sharing_runtime(value: &[u8]) -> Result<(), HelperProtocolError> {
+    if value.len() != 16 || value.iter().all(|byte| *byte == 0) {
+        return Err(HelperProtocolError::Invalid("sharing runtime"));
+    }
+    Ok(())
 }
 
 fn validate_prepare(value: &PrepareLeaseBatch) -> Result<(), HelperProtocolError> {
@@ -1803,11 +2021,32 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
             runtime(&value.client_runtime_id)?;
             handle(&value.ingress_handle)
         }
-        Outcome::DestroyedClientIngress(_) | Outcome::DestroyedContext(_) | Outcome::Empty(_) => {
-            Ok(())
-        }
+        Outcome::InstalledUplinkSharing(value) => validate_installed_sharing(value),
+        Outcome::SharingCounters(value) => validate_sharing_counters(value),
+        Outcome::DestroyedClientIngress(_)
+        | Outcome::DestroyedContext(_)
+        | Outcome::DestroyedSharing(_)
+        | Outcome::Empty(_) => Ok(()),
         Outcome::HelperRuntime(value) => helper_runtime(&value.helper_runtime_id),
     }
+}
+
+fn validate_installed_sharing(value: &InstalledUplinkSharing) -> Result<(), HelperProtocolError> {
+    sharing_runtime(&value.sharing_runtime_id)?;
+    handle(&value.sharing_handle)?;
+    if value.egress_ifindex == 0 {
+        return Err(HelperProtocolError::Invalid("sharing egress ifindex"));
+    }
+    Ok(())
+}
+
+fn validate_sharing_counters(value: &SharingCounters) -> Result<(), HelperProtocolError> {
+    sharing_runtime(&value.sharing_runtime_id)?;
+    handle(&value.sharing_handle)?;
+    if value.total.is_none() || value.owner.is_none() || value.contribution.is_none() {
+        return Err(HelperProtocolError::Invalid("sharing queue counters"));
+    }
+    Ok(())
 }
 
 fn validate_reconcile_scope(
@@ -2941,6 +3180,336 @@ mod tests {
             request_id: vec![id; 16],
             operation: Some(operation),
         }
+    }
+
+    fn sharing_requests() -> [HelperRequest; 3] {
+        use helper_request::Operation;
+        [
+            ingress_request(
+                37,
+                Operation::InstallUplinkSharing(InstallUplinkSharing {
+                    sharing_runtime_id: vec![7; 16],
+                    interface: "enp1s0".to_owned(),
+                    total_upload_mbps: 100,
+                    contribution_upload_ceiling_mbps: 60,
+                }),
+            ),
+            ingress_request(
+                38,
+                Operation::InspectUplinkSharing(InspectUplinkSharing {
+                    sharing_runtime_id: vec![7; 16],
+                    sharing_handle: vec![8; 32],
+                }),
+            ),
+            ingress_request(
+                39,
+                Operation::DestroyUplinkSharing(DestroyUplinkSharing {
+                    sharing_runtime_id: vec![7; 16],
+                    sharing_handle: vec![8; 32],
+                }),
+            ),
+        ]
+    }
+
+    fn sharing_response(request: &HelperRequest) -> HelperResponse {
+        use helper_request::Operation;
+        use helper_response::Outcome;
+        let outcome = match request.operation.as_ref().expect("operation") {
+            Operation::InstallUplinkSharing(value) => {
+                Outcome::InstalledUplinkSharing(InstalledUplinkSharing {
+                    sharing_runtime_id: value.sharing_runtime_id.clone(),
+                    sharing_handle: vec![8; 32],
+                    egress_ifindex: 2,
+                })
+            }
+            Operation::InspectUplinkSharing(value) => Outcome::SharingCounters(SharingCounters {
+                sharing_runtime_id: value.sharing_runtime_id.clone(),
+                sharing_handle: value.sharing_handle.clone(),
+                total: Some(SharingQueueCounters::default()),
+                owner: Some(SharingQueueCounters::default()),
+                contribution: Some(SharingQueueCounters::default()),
+            }),
+            Operation::DestroyUplinkSharing(_) => {
+                Outcome::DestroyedSharing(DestroyedSharing { existed: true })
+            }
+            _ => panic!("sharing operation required"),
+        };
+        HelperResponse {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: HelperResult::Ok as i32,
+            diagnostic_code: "SHARING_OK".to_owned(),
+            operation_digest: operation_digest(request).expect("digest").to_vec(),
+            outcome: Some(outcome),
+        }
+    }
+
+    #[test]
+    fn uplink_sharing_exact_tags_round_trip_and_safe_preview() {
+        for (request, tag, preview) in [
+            (sharing_requests()[0].clone(), [0xaa, 0x02], "install"),
+            (sharing_requests()[1].clone(), [0xb2, 0x02], "inspect"),
+            (sharing_requests()[2].clone(), [0xba, 0x02], "destroy"),
+        ] {
+            let framed = encode_request(&request).expect("request");
+            assert_eq!(&framed[24..26], &tag);
+            assert_eq!(decode_request(&framed[4..]).expect("canonical"), request);
+            let response = sharing_response(&request);
+            let framed = encode_response(&response).expect("response");
+            assert!(framed[4..].windows(2).any(|bytes| bytes == tag));
+            assert_eq!(decode_response(&framed[4..]).expect("canonical"), response);
+            validate_uplink_sharing_response(&request, &response).expect("exact correlation");
+            assert!(descriptor_fd_binding(&response).is_err());
+            let safe = safe_preview(&request).expect("preview");
+            assert!(safe.starts_with(&format!(
+                "{preview} one owned upload-sharing runtime; audit_digest="
+            )));
+            assert!(!safe.contains("enp1s0"));
+        }
+        let counters = SharingQueueCounters {
+            bytes: 1,
+            packets: 2,
+            drops: 3,
+            overlimits: 4,
+            backlog_bytes: 5,
+        };
+        assert_eq!(counters.encode_to_vec(), [8, 1, 16, 2, 24, 3, 32, 4, 40, 5]);
+        let destroyed = DestroyedSharing { existed: true };
+        assert_eq!(destroyed.encode_to_vec(), [8, 1]);
+        let mut expected_owner = vec![10, 16];
+        expected_owner.extend_from_slice(&[7; 16]);
+        expected_owner.extend_from_slice(&[18, 32]);
+        expected_owner.extend_from_slice(&[8; 32]);
+        let inspect = InspectUplinkSharing {
+            sharing_runtime_id: vec![7; 16],
+            sharing_handle: vec![8; 32],
+        };
+        assert_eq!(inspect.encode_to_vec(), expected_owner);
+        let installed = InstalledUplinkSharing {
+            sharing_runtime_id: vec![7; 16],
+            sharing_handle: vec![8; 32],
+            egress_ifindex: 2,
+        };
+        expected_owner.extend_from_slice(&[24, 2]);
+        assert_eq!(installed.encode_to_vec(), expected_owner);
+    }
+
+    #[test]
+    fn uplink_sharing_message_field_tags_are_exact() {
+        let install = InstallUplinkSharing {
+            sharing_runtime_id: vec![7; 16],
+            interface: "eth0".to_owned(),
+            total_upload_mbps: 100,
+            contribution_upload_ceiling_mbps: 60,
+        };
+        let mut expected = vec![10, 16];
+        expected.extend_from_slice(&[7; 16]);
+        expected.extend_from_slice(&[18, 4]);
+        expected.extend_from_slice(b"eth0");
+        expected.extend_from_slice(&[24, 100, 32, 60]);
+        assert_eq!(install.encode_to_vec(), expected);
+        let destroy = DestroyUplinkSharing {
+            sharing_runtime_id: vec![7; 16],
+            sharing_handle: vec![8; 32],
+        };
+        let mut expected = vec![10, 16];
+        expected.extend_from_slice(&[7; 16]);
+        expected.extend_from_slice(&[18, 32]);
+        expected.extend_from_slice(&[8; 32]);
+        assert_eq!(destroy.encode_to_vec(), expected);
+        let counters = SharingCounters {
+            sharing_runtime_id: vec![7; 16],
+            sharing_handle: vec![8; 32],
+            total: Some(SharingQueueCounters::default()),
+            owner: Some(SharingQueueCounters::default()),
+            contribution: Some(SharingQueueCounters::default()),
+        };
+        expected.extend_from_slice(&[26, 0, 34, 0, 42, 0]);
+        assert_eq!(counters.encode_to_vec(), expected);
+    }
+
+    #[test]
+    fn uplink_sharing_rejects_invalid_names_rates_and_owner_widths() {
+        let Some(helper_request::Operation::InstallUplinkSharing(base)) =
+            sharing_requests()[0].operation.clone()
+        else {
+            panic!("install");
+        };
+        for name in [
+            "",
+            ".",
+            "..",
+            "/sys/class/net",
+            "eth0/../x",
+            "eth 0",
+            "eth:0",
+            "éth0",
+            "abcdefghijklmnop",
+        ] {
+            let mut value = base.clone();
+            value.interface = name.to_owned();
+            assert!(
+                encode_request(&ingress_request(
+                    37,
+                    helper_request::Operation::InstallUplinkSharing(value)
+                ))
+                .is_err()
+            );
+        }
+        for (total, ceiling) in [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 2),
+            (MAX_HELPER_RATE_MBPS + 1, 1),
+        ] {
+            let mut value = base.clone();
+            value.total_upload_mbps = total;
+            value.contribution_upload_ceiling_mbps = ceiling;
+            assert!(
+                encode_request(&ingress_request(
+                    37,
+                    helper_request::Operation::InstallUplinkSharing(value)
+                ))
+                .is_err()
+            );
+        }
+        for invalid in [vec![], vec![0; 16], vec![1; 15], vec![1; 17]] {
+            for mut request in sharing_requests() {
+                match request.operation.as_mut().expect("operation") {
+                    helper_request::Operation::InstallUplinkSharing(value) => {
+                        value.sharing_runtime_id.clone_from(&invalid);
+                    }
+                    helper_request::Operation::InspectUplinkSharing(value) => {
+                        value.sharing_runtime_id.clone_from(&invalid);
+                    }
+                    helper_request::Operation::DestroyUplinkSharing(value) => {
+                        value.sharing_runtime_id.clone_from(&invalid);
+                    }
+                    _ => panic!("sharing"),
+                }
+                assert!(encode_request(&request).is_err());
+            }
+        }
+        for invalid in [vec![], vec![0; 32], vec![1; 31], vec![1; 33]] {
+            for mut request in sharing_requests().into_iter().skip(1) {
+                match request.operation.as_mut().expect("operation") {
+                    helper_request::Operation::InspectUplinkSharing(value) => {
+                        value.sharing_handle.clone_from(&invalid);
+                    }
+                    helper_request::Operation::DestroyUplinkSharing(value) => {
+                        value.sharing_handle.clone_from(&invalid);
+                    }
+                    _ => panic!("owned sharing"),
+                }
+                assert!(encode_request(&request).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn uplink_sharing_rejects_substituted_response_correlation() {
+        for request in sharing_requests() {
+            let response = sharing_response(&request);
+            let mut wrong = response.clone();
+            wrong.request_id[0] ^= 1;
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+            wrong = response.clone();
+            wrong.operation_digest[0] ^= 1;
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+            wrong = response.clone();
+            wrong.outcome = Some(helper_response::Outcome::Empty(Empty {}));
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+            wrong = response;
+            wrong.result = HelperResult::Kernel as i32;
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+            wrong.outcome = None;
+            validate_uplink_sharing_response(&request, &wrong)
+                .expect("correlated failure, not success");
+        }
+        for request in sharing_requests().into_iter().take(2) {
+            let mut wrong = sharing_response(&request);
+            match wrong.outcome.as_mut().expect("outcome") {
+                helper_response::Outcome::InstalledUplinkSharing(value) => {
+                    value.sharing_runtime_id[0] ^= 1;
+                }
+                helper_response::Outcome::SharingCounters(value) => value.sharing_handle[0] ^= 1,
+                _ => panic!("owner"),
+            }
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+        }
+    }
+
+    #[test]
+    fn uplink_sharing_counters_are_complete_unsigned_kernel_values() {
+        let request = &sharing_requests()[1];
+        let mut response = sharing_response(request);
+        let Some(helper_response::Outcome::SharingCounters(value)) = response.outcome.as_mut()
+        else {
+            panic!("counters");
+        };
+        value.total = Some(SharingQueueCounters {
+            bytes: u64::MAX,
+            packets: u64::MAX,
+            drops: u64::MAX,
+            overlimits: u64::MAX,
+            backlog_bytes: u64::MAX,
+        });
+        let frame = encode_response(&response).expect("full-width raw counters");
+        assert_eq!(
+            decode_response(&frame[4..]).expect("counter round trip"),
+            response
+        );
+        for missing in 0..3 {
+            let mut wrong = response.clone();
+            let Some(helper_response::Outcome::SharingCounters(value)) = wrong.outcome.as_mut()
+            else {
+                panic!("counters");
+            };
+            match missing {
+                0 => value.total = None,
+                1 => value.owner = None,
+                _ => value.contribution = None,
+            }
+            assert!(encode_response(&wrong).is_err());
+        }
+        let mut installed = sharing_response(&sharing_requests()[0]);
+        let Some(helper_response::Outcome::InstalledUplinkSharing(value)) =
+            installed.outcome.as_mut()
+        else {
+            panic!("installed");
+        };
+        value.egress_ifindex = 0;
+        assert!(encode_response(&installed).is_err());
+    }
+
+    #[test]
+    fn uplink_sharing_rejects_unknown_duplicate_and_noncanonical_wire() {
+        for request in sharing_requests() {
+            let bytes = request.encode_to_vec();
+            let mut unknown = bytes.clone();
+            unknown.extend_from_slice(&[0xc2, 0x02, 0]); // Unassigned tag40.
+            assert!(decode_request(&unknown).is_err());
+            let mut duplicate = bytes.clone();
+            duplicate.extend_from_slice(&bytes[20..]);
+            assert!(decode_request(&duplicate).is_err());
+            let response = sharing_response(&request);
+            let mut unknown = response.encode_to_vec();
+            unknown.extend_from_slice(&[0xc2, 0x02, 0]);
+            assert!(decode_response(&unknown).is_err());
+        }
+        let request = &sharing_requests()[0];
+        let mut changed = request.clone();
+        let Some(helper_request::Operation::InstallUplinkSharing(value)) =
+            changed.operation.as_mut()
+        else {
+            panic!("install");
+        };
+        value.total_upload_mbps += 1;
+        assert_ne!(
+            operation_digest(request).expect("digest"),
+            operation_digest(&changed).expect("changed digest")
+        );
     }
 
     #[test]

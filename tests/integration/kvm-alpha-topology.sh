@@ -24,10 +24,23 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|sharing]'
 }
 
 print_plan() {
+    if [ "$scenario" = sharing ]; then
+        printf '%s\n' \
+            'VOLPAROSSA owner-priority upload-sharing smoke plan:' \
+            '  require the same exact-build disposable Debian 13 KVM guest and owned namespaces;' \
+            '  enable combined roles on four nodes, with real signed one-relay Client-to-Exit UDP;' \
+            '  move three exact Exit veth endpoints into dormant B1 as a filtered fanout router;' \
+            '  give Exit one real sharing0 TX uplink, with helper-installed 12/10 Mbps upload sharing;' \
+            '  measure idle Exit contribution, owner priority0 upload contention, then recovery;' \
+            '  verify actual echoes, both WireGuard legs, physical TX, unchanged daemon PIDs;' \
+            '  stop agents and prove exact qdisc baseline before deleting disposable namespaces;' \
+            '  emit sharing-smoke.json; no synthetic priority1, download, radio or A01-A15 claim.'
+        return
+    fi
     if [ "$scenario" = local-link ]; then
         printf '%s\n' \
             'VOLPAROSSA local-link runtime smoke plan:' \
@@ -97,7 +110,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
-            case $2 in alpha|reciprocity|local-link) scenario=$2 ;; *) usage >&2; exit 64 ;; esac
+            case $2 in alpha|reciprocity|local-link|sharing) scenario=$2 ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --source)
@@ -186,9 +199,10 @@ for executable in volparossa volparossa-agent volparossa-helper; do
     [ -x "$binary_directory/$executable" ] \
         || { printf 'required product executable unavailable: %s\n' "$executable" >&2; exit 69; }
 done
-if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
+if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
     scenario_fixtures='reciprocity-smoke.sh reciprocity-smoke.py'
     [ "$scenario" != local-link ] || scenario_fixtures="$scenario_fixtures local-link-smoke.sh local-link-smoke.py"
+    [ "$scenario" != sharing ] || scenario_fixtures="$scenario_fixtures sharing-smoke.sh sharing-smoke.py"
     for reciprocity_fixture in $scenario_fixtures; do
         [ -f "$source_directory/tests/integration/$reciprocity_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$reciprocity_fixture" ] \
@@ -477,6 +491,8 @@ copy_artifacts() {
         tls-policy-server.log a08-exit-host-lookup.txt \
         a08-dns-udp.json a08-dns-udp.err a08-dns-tcp.json a08-dns-tcp.err \
         a08-client.json a08-client.err a08-destination.json a08-evidence.json \
+        a08-dns-udp-completion-events.txt a08-dns-tcp-completion-events.txt \
+        a08-tls-completion-events.txt \
         a09-unlisted-domain.json a09-unlisted-domain.err \
         a09-raw-ip-server-name.json a09-raw-ip-server-name.err \
         a09-missing-server-name.json a09-missing-server-name.err \
@@ -484,6 +500,10 @@ copy_artifacts() {
         a09-forbidden-port.json a09-forbidden-port.err a09-evidence.json \
         a10-ech.json a10-ech.err a10-unverifiable.json a10-unverifiable.err \
         a10-evidence.json tls-policy-destination-final.json \
+        a09-unlisted-domain-rejection-events.txt a09-raw-ip-server-name-rejection-events.txt \
+        a09-missing-server-name-rejection-events.txt a09-mismatched-destination-rejection-events.txt \
+        a09-forbidden-port-rejection-events.txt a10-ech-rejection-events.txt \
+        a10-unverifiable-rejection-events.txt \
         privacy-client.json privacy-relay1.json privacy-relay2.json privacy-exit.json \
         privacy-client.log privacy-relay1.log privacy-relay2.log privacy-exit.log \
         a11-evidence.json a12-evidence.json a13-evidence.json \
@@ -510,7 +530,7 @@ capture_worker_network_diagnostics() {
     printf 'capture=%s\n' "$diagnostic_label" \
         >>"$WORK/worker-network-diagnostics.txt"
     diagnostic_nodes='client relay1 relay2 exit'
-    case $scenario in reciprocity|local-link) diagnostic_nodes='client relay0 relay2 exit' ;; esac
+    case $scenario in reciprocity|local-link|sharing) diagnostic_nodes='client relay0 relay2 exit' ;; esac
     for diagnostic_node in $diagnostic_nodes; do
         diagnostic_unit=volparossa-alpha-helper@$diagnostic_node.service
         diagnostic_cgroup=$(systemctl show --property=ControlGroup --value \
@@ -833,7 +853,7 @@ cleanup() {
     [ "$FINALIZED" = no ] || exit "$original_status"
     FINALIZED=yes
     trap - EXIT HUP INT TERM
-    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
+    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
         reciprocity_stop_processes
     fi
 
@@ -914,6 +934,9 @@ cleanup() {
         done
     fi
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
+    if [ "$scenario" = sharing ]; then
+        sharing_verify_cleanup || original_status=1
+    fi
     for cleanup_unit in $MPQUIC_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_unit in $HELPER_UNITS; do retire_unit "$cleanup_unit" || true; done
     for cleanup_ns in "$DEST" "$EXIT2_NODE" "$EXIT_NODE" "$R5" "$R4" "$R3" \
@@ -1100,7 +1123,9 @@ cleanup() {
     fi
     copy_artifacts
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = local-link ]; then
+    if [ "$scenario" = sharing ]; then
+        sharing_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = local-link ]; then
         local_link_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = reciprocity ]; then
         reciprocity_finalize_report "$original_status" || original_status=1
@@ -1129,13 +1154,17 @@ fail() {
     exit 1
 }
 
-if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
+if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
     # shellcheck source=tests/integration/reciprocity-smoke.sh
     . "$source_directory/tests/integration/reciprocity-smoke.sh"
 fi
 if [ "$scenario" = local-link ]; then
     # shellcheck source=tests/integration/local-link-smoke.sh
     . "$source_directory/tests/integration/local-link-smoke.sh"
+fi
+if [ "$scenario" = sharing ]; then
+    # shellcheck source=tests/integration/sharing-smoke.sh
+    . "$source_directory/tests/integration/sharing-smoke.sh"
 fi
 
 PHASE=host-state-before
@@ -1340,7 +1369,9 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
-if [ "$scenario" = local-link ]; then
+if [ "$scenario" = sharing ]; then
+    sharing_extend_network
+elif [ "$scenario" = local-link ]; then
     local_link_extend_network
 elif [ "$scenario" = reciprocity ]; then
     reciprocity_extend_network
@@ -1416,7 +1447,7 @@ write_config() {
         exit) advertised_asn=64514; advertised_prefix=46.162.3.0/24 ;;
         exit2) exit_capacity=1; advertised_asn=64518; advertised_prefix=51.167.7.0/24 ;;
     esac
-    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
+    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
         case $node in
             client|relay0|relay2|exit)
                 client_role=true; relay_role=true; exit_role=true
@@ -1465,6 +1496,9 @@ write_config() {
             *) bootstrap_one=none; bootstrap_two=none; bootstrap_three=none ;;
         esac
     fi
+    if [ "$scenario" = sharing ] && [ "$node" = exit ]; then
+        relay_capacity=10; exit_capacity=10
+    fi
     {
         printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-alpha-%s\n' "$RUN_ID"
         printf '  protocol_version: 4\n  advertisement_ttl_seconds: 300\n'
@@ -1493,6 +1527,10 @@ write_config() {
         printf '  exit_download_limit_mbps: %s\n' "$exit_capacity"
         printf '  maximum_relay_sessions: %s\n' "$relay_capacity"
         printf '  maximum_exit_sessions: %s\n' "$exit_capacity"
+        if [ "$scenario" = sharing ] && [ "$node" = exit ]; then
+            printf 'sharing:\n  enabled: true\n  interface: sharing0\n'
+            printf '  total_upload_mbps: 12\n  contribution_upload_ceiling_mbps: 10\n'
+        fi
         # Request an actual per-path reservation below every signed 32-Mbps Relay/Exit
         # advertisement. The native authorization chain binds this value to both service ledgers.
         printf 'routing:\n  client_minimum_upload_mbps: 8\n'
@@ -1705,7 +1743,7 @@ launch_mpquic() {
     mpquic_unit=volparossa-alpha-mpquic@$node.service
     mpquic_log=$WORK/mpquic-$node.log
     native_socket=/run/volparossa/native/mpquic.sock
-    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
+    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
         mpquic_unit=volparossa-alpha-mpquic@$node-$native_mode.service
         mpquic_log=$WORK/mpquic-$node-$native_mode.log
         [ "$native_mode" != exit ] || native_socket=$native_socket.exit
@@ -1770,7 +1808,7 @@ verify_mpquic() {
     mpquic_unit=volparossa-alpha-mpquic@$node.service
     native_socket=$WORK/runtime-$node/native/mpquic.sock
     native_record=$WORK/mpquic-record-$node.json
-    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
+    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
         mpquic_unit=volparossa-alpha-mpquic@$node-$native_mode.service
         native_record=$WORK/mpquic-record-$node-$native_mode.json
         [ "$native_mode" != exit ] || native_socket=$native_socket.exit
@@ -1811,7 +1849,7 @@ verify_mpquic() {
           api_version:6,socket_verified:true}' >"$native_record"
 }
 
-if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
+if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
     for native_node in client relay0 relay2 exit; do
         native_namespace=$(reciprocity_namespace "$native_node")
         launch_mpquic "$native_node" "$native_namespace" client
@@ -3036,7 +3074,10 @@ done
 AGENTS_READY=true
 DESTINATION_READY=true
 
-if [ "$scenario" = local-link ]; then
+if [ "$scenario" = sharing ]; then
+    sharing_run
+    exit 0
+elif [ "$scenario" = local-link ]; then
     local_link_run
     exit 0
 elif [ "$scenario" = reciprocity ]; then

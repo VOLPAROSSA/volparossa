@@ -13,7 +13,7 @@ use crate::{
     deadline::HardDeadline,
     kernel::{
         CLIENT_INGRESS_IPV4_MARK, CLIENT_INGRESS_IPV6_MARK, CLIENT_INGRESS_PARENT_IPV4_MARK,
-        CLIENT_INGRESS_PARENT_IPV6_MARK,
+        CLIENT_INGRESS_PARENT_IPV6_MARK, CONTRIBUTION_WIREGUARD_MARK,
     },
 };
 
@@ -331,6 +331,11 @@ fn install_transaction(
         rule(
             table,
             MANGLE_CHAIN,
+            mark_accept_expressions(CONTRIBUTION_WIREGUARD_MARK)?,
+        )?,
+        rule(
+            table,
+            MANGLE_CHAIN,
             mark_accept_expressions(CLIENT_INGRESS_IPV6_MARK)?,
         )?,
         rule(
@@ -422,7 +427,7 @@ fn install_transaction(
             rule,
         )?;
     }
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 18, &batch_nfgen())?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 19, &batch_nfgen())?;
     Ok(transaction)
 }
 
@@ -484,6 +489,11 @@ fn parent_install_transaction(
         rule(
             table,
             OUTPUT_CHAIN,
+            mark_accept_expressions(CONTRIBUTION_WIREGUARD_MARK)?,
+        )?,
+        rule(
+            table,
+            OUTPUT_CHAIN,
             mark_accept_expressions(CLIENT_INGRESS_IPV6_MARK)?,
         )?,
         rule(
@@ -520,7 +530,7 @@ fn parent_install_transaction(
             rule,
         )?;
     }
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 13, &batch_nfgen())?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 14, &batch_nfgen())?;
     Ok(transaction)
 }
 
@@ -1224,7 +1234,7 @@ mod tests {
             },
         )
         .expect("transaction");
-        assert_eq!(transaction.requests.len(), 18);
+        assert_eq!(transaction.requests.len(), 19);
         assert!(transaction.bytes.len() <= MAX_BATCH_BYTES);
         assert_eq!(
             transaction
@@ -1232,7 +1242,7 @@ mod tests {
                 .iter()
                 .filter(|request| request.ack)
                 .count(),
-            16
+            17
         );
     }
 
@@ -1314,7 +1324,7 @@ mod tests {
             1_001,
         )
         .expect("transaction");
-        assert_eq!(transaction.requests.len(), 13);
+        assert_eq!(transaction.requests.len(), 14);
         assert!(transaction.bytes.len() <= MAX_BATCH_BYTES);
         assert_eq!(
             transaction
@@ -1322,7 +1332,7 @@ mod tests {
                 .iter()
                 .filter(|request| request.ack)
                 .count(),
-            11
+            12
         );
     }
 

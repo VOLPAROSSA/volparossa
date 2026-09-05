@@ -10,11 +10,13 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
+use socket2::SockRef;
 use thiserror::Error;
 use tokio::{
     net::UdpSocket,
     time::{Instant, MissedTickBehavior, interval, sleep_until},
 };
+use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
 use volparossa_discovery::{ExitMpquicSessionSignal, UdpExitSessionSignal};
 use volparossa_exit::{ExitNativeRouteAuthorization, ExitNativeRouteCredentialAuthorization};
 use volparossa_inspection::{InspectionProgress, QuicInitialInspector};
@@ -644,6 +646,7 @@ impl ExitUdpFlow {
         browser_authorization: Option<AuthorizedUdpFlow>,
     ) -> Result<Self, ProductionMpquicError> {
         let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).await?;
+        SockRef::from(&socket).set_priority(CONTRIBUTION_SOCKET_PRIORITY)?;
         socket.connect(destination).await?;
         Ok(Self {
             socket,
@@ -3122,6 +3125,12 @@ mod tests {
         )
         .await
         .expect("authorized egress");
+        assert_eq!(
+            SockRef::from(&flows.get(&key).expect("retained authorized flow").socket)
+                .priority()
+                .expect("kernel contribution priority"),
+            CONTRIBUTION_SOCKET_PRIORITY,
+        );
         let received_bytes =
             tokio::time::timeout(Duration::from_secs(1), receiver.recv(&mut receive_buffer))
                 .await

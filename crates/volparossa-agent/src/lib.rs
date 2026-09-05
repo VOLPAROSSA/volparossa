@@ -24,6 +24,7 @@ mod route_setup;
 mod secret;
 mod state;
 mod udp_exit_provider;
+mod uplink_sharing;
 
 use std::{
     fs::{self, OpenOptions},
@@ -61,6 +62,7 @@ use roles::{RoleStore, ensure_private_state_directory};
 use route_setup::{ClientPathMaintenance, ClientRouteConnectError, ClientRouteControl};
 use secret::read_identity_credential;
 use state::AgentState;
+use uplink_sharing::UplinkSharingRuntime;
 
 pub use paths::{
     AgentPaths, DEFAULT_CONFIG, DEFAULT_CONTROL_SOCKET, DEFAULT_HELPER_SOCKET,
@@ -170,18 +172,49 @@ impl Agent {
     {
         let (listener, socket_guard) =
             bind_control_socket(&self.paths.control_socket)?.into_parts();
-        let client_ingress = if self.config.roles.client {
-            let ingress = ClientIngressRuntime::start(self.helper.clone())
+        let roles = self.state.read().await.roles();
+        let sharing =
+            match UplinkSharingRuntime::start(self.helper.clone(), &self.config.sharing, roles)
                 .await
-                .map_err(|error| {
+            {
+                Ok(sharing) => sharing,
+                Err(error) => {
+                    tracing::error!(error = ?error, "upload sharing startup failed");
+                    // No discovery/route actor has started. A lost installation reply may still
+                    // own a partial queue tree; the startup cleanup token retires that exact helper's
+                    // owned resources instead of leaving silent sharing without owner priority.
+                    self.helper
+                        .cleanup_owned()
+                        .await
+                        .map_err(|_| AgentError::ShutdownCleanup)?;
+                    return Err(AgentError::UplinkSharing);
+                }
+            };
+        let client_ingress = if roles.client {
+            let ingress = match ClientIngressRuntime::start(self.helper.clone()).await {
+                Ok(ingress) => ingress,
+                Err(error) => {
                     tracing::error!(error = ?error, "client ingress startup failed");
-                    AgentError::ClientIngress
-                })?;
+                    if let Some(sharing) = &sharing {
+                        if sharing.shutdown().await.is_err() {
+                            self.helper
+                                .cleanup_owned()
+                                .await
+                                .map_err(|_| AgentError::ShutdownCleanup)?;
+                        }
+                    }
+                    return Err(AgentError::ClientIngress);
+                }
+            };
             Some(Arc::new(ingress))
         } else {
             None
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut sharing_task = tokio::spawn(UplinkSharingRuntime::monitor(
+            sharing.as_ref().map(Arc::clone),
+            shutdown_rx.clone(),
+        ));
         let routes = production_client_routes(&self.paths, &self.state);
         let control_context = ControlContext {
             state: Arc::clone(&self.state),
@@ -251,6 +284,7 @@ impl Agent {
             _ = &mut tcp_ingress_task => Err(AgentError::Task),
             _ = &mut dns_ingress_task => Err(AgentError::Task),
             _ = &mut dns_tcp_ingress_task => Err(AgentError::Task),
+            _ = &mut sharing_task => Err(AgentError::UplinkSharing),
         };
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
@@ -261,8 +295,8 @@ impl Agent {
         stop_task(&mut tcp_ingress_task).await;
         stop_task(&mut dns_ingress_task).await;
         stop_task(&mut dns_tcp_ingress_task).await;
+        stop_task(&mut sharing_task).await;
         routes.disconnect().await;
-        drop(socket_guard);
         if let Some(client_ingress) = client_ingress {
             let Ok(client_ingress) = Arc::try_unwrap(client_ingress) else {
                 let _ = self.helper.cleanup_owned().await;
@@ -274,12 +308,24 @@ impl Agent {
             }
         }
 
+        if let Some(sharing) = sharing {
+            if sharing.shutdown().await.is_err() {
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::ShutdownCleanup);
+            }
+        }
         if self.state.read().await.has_network_state() {
             self.helper
                 .cleanup_owned()
                 .await
                 .map_err(|_| AgentError::ShutdownCleanup)?;
         }
+        // Retain the exclusive daemon socket through sharing/ingress retirement, so a new
+        // participant cannot start between teardown and the last owned-resource cleanup.
+        drop(socket_guard);
         run_result
     }
 }
@@ -1471,6 +1517,9 @@ pub enum AgentError {
     /// The process-owned client ingress could not be prepared or activated.
     #[error("client ingress runtime is unavailable")]
     ClientIngress,
+    /// The explicitly configured upload scheduler could not be installed or retained.
+    #[error("owner-priority upload sharing is unavailable")]
+    UplinkSharing,
     /// Loopback-only aggregate metrics endpoint failed.
     #[error("agent metrics endpoint failed")]
     Metrics(#[source] volparossa_metrics::MetricsError),
@@ -1498,6 +1547,7 @@ impl AgentError {
             Self::State(_) => "STATE_INVALID",
             Self::Control(_) => "CONTROL_FAILED",
             Self::ClientIngress => "CLIENT_INGRESS_FAILED",
+            Self::UplinkSharing => "UPLINK_SHARING_FAILED",
             Self::Metrics(_) => "METRICS_FAILED",
             Self::Task => "RUNTIME_TASK_FAILED",
             Self::ShutdownCleanup => "SHUTDOWN_CLEANUP_FAILED",

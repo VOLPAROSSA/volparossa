@@ -668,6 +668,10 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(
+            bridge.destination_socket_priority().unwrap(),
+            volparossa_core::CONTRIBUTION_SOCKET_PRIORITY,
+        );
         client_association
             .send_payload(b"single-relay-udp-echo")
             .unwrap();

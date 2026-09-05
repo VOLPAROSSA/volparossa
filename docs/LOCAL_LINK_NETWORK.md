@@ -51,6 +51,23 @@ create capacity. Scheduling must consider shared link/uplink origins as well as 
 Owner-priority enforcement needs a live competing-traffic demonstration; a reservation ledger
 or an advertised free-Mbps value alone is not completion evidence.
 
+The first upload implementation has an explicit `sharing` configuration: one actual egress
+interface, operator-known total usable upload, and one aggregate contribution ceiling. The
+unprivileged agent installs its daemon-long typed helper owner before advertising participation,
+checks the real queues, and retires them at shutdown. Disconnecting a Client route does not
+remove contribution scheduling. Relay/Exit WireGuard traffic and actual TCP/UDP Exit payload
+sockets use the contribution class; ordinary priority-zero owner traffic has queue precedence.
+These are scheduling hints, not a security identity for arbitrary local applications.
+
+Real disposable-veth traffic and engine-to-kernel lifecycle checks pass: two contribution
+sources share one cap, owner upload takes priority, contribution recovers, and exact cleanup
+restores the original queue. The new `sharing` KVM scenario exercises the production node
+with real protected Exit traffic and competing node-owned upload; its live result is pending.
+This first slice accepts only supported pristine queue roots with no options. Physical `mq`
+and ordinary nonempty `fq_codel` configurations are currently refused before mutation, not
+silently overwritten. It is not automatic bandwidth estimation, download-bottleneck control,
+Wi-Fi airtime management or local/WAN throughput aggregation.
+
 ## Practical boundaries and completion evidence
 
 Wi-Fi mesh/P2P modes and simultaneous association depend on hardware, driver, firmware and

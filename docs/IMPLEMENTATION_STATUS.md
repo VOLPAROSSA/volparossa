@@ -178,6 +178,16 @@ on a LocalOnly node. Multi-path Exit Ready still prepares its full lease batch b
 all Relay identities; mixed local Exit-facing batches need a later complete-set integration.
 Direct radio setup, simultaneous WAN+LAN aggregation and owner-priority sharing remain
 unfinished. No direct-radio or phone-without-SIM support is claimed by Debian KVM evidence.
+The first owner-priority **upload** runtime is now implemented behind explicit `sharing`
+configuration. One helper-owned netlink queue tree covers aggregate Relay/Exit contribution,
+with priority-zero owner traffic ahead of contribution and actual role-specific WireGuard/socket
+classification. It starts before participation, survives route-only cleanup and is retired at
+daemon shutdown; partial installation remains owned for cleanup. Real disposable-veth
+contention/recovery and engine-to-kernel lifecycle checks pass, as do focused wire/config/agent
+checks and strict helper/agent Clippy. The complete-node `sharing` scenario has no live pass yet.
+Only supported pristine queue roots without options are accepted in this slice; physical `mq`
+and nonempty `fq_codel` setups, download control, automatic available-bandwidth estimation and
+radio airtime remain unfinished. These narrower results do not check the full sharing item above.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

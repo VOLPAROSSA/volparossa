@@ -58,7 +58,7 @@ use crate::{
         BackendRuntimeCompletion, BackendRuntimeRequest, ConfirmedAbsent, ContextPhase,
         IngressBackendAction, IngressBackendBinding, IngressBackendCompletion,
         IngressBackendRequest, KernelCounters, OperationKind, PreparedKernelIngressSocket,
-        PreparedKernelLease,
+        PreparedKernelLease, SharingBackendCompletion, SharingBackendRequest,
     },
     internal_protocol::{
         AcquireClientIngressReplySocket as InternalAcquireClientIngressReplySocket,
@@ -126,6 +126,9 @@ const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 1;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
+mod uplink_sharing;
+use uplink_sharing::OpenSharingEntry;
+
 /// Install the deliberately narrow process-owned backend used only by the production server.
 pub(crate) fn functional_alpha_lease_backend(
     durable_ownership: DurableOwnershipPrepareHandle,
@@ -145,6 +148,7 @@ pub(crate) fn functional_alpha_lease_backend(
             DEFAULT_MAX_TTL,
         )),
         ingress_state: Mutex::new(None),
+        sharing_state: Mutex::new(None),
         trusted_agent_uid,
         durable_ownership: Some(durable_ownership),
         dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -164,6 +168,7 @@ struct FunctionalAlphaLeaseBackend {
     relay_replay: Mutex<ReplayCache>,
     state: Mutex<OpenLeaseState>,
     ingress_state: Mutex<Option<OpenIngressEntry>>,
+    sharing_state: Mutex<Option<OpenSharingEntry>>,
     trusted_agent_uid: u32,
     /// Always present in production. `None` exists only for narrow unit fixtures which never
     /// execute Prepare.
@@ -2676,6 +2681,28 @@ impl FunctionalAlphaLeaseBackend {
 }
 
 impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
+    fn install_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
+    ) -> BackendFuture<SharingBackendCompletion<u32>> {
+        Box::pin(self.install_sharing_backend(request))
+    }
+
+    fn inspect_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<()>,
+    ) -> BackendFuture<SharingBackendCompletion<crate::kernel::underlay_sharing::SharingCounters>>
+    {
+        Box::pin(self.inspect_sharing_backend(request))
+    }
+
+    fn destroy_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<()>,
+    ) -> BackendFuture<SharingBackendCompletion<ConfirmedAbsent>> {
+        Box::pin(self.destroy_sharing_backend(request))
+    }
+
     fn prepare(
         self: Arc<Self>,
         request: BackendRequest<PrepareLeaseBatch>,
@@ -2841,6 +2868,12 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
             let result = match deadline {
                 Err(error) => Err(error),
                 Ok(deadline) => {
+                    if let Err(error) = Arc::clone(&self)
+                        .shutdown_sharing_backend(request.binding().helper_runtime_id, deadline)
+                        .await
+                    {
+                        return request.complete(Err(error));
+                    }
                     let ingress = self
                         .ingress_state
                         .lock()
@@ -5755,7 +5788,7 @@ mod tests {
         ))
     }
 
-    fn backend_with_state(state: Option<OpenLeaseEntry>) -> FunctionalAlphaLeaseBackend {
+    pub(super) fn backend_with_state(state: Option<OpenLeaseEntry>) -> FunctionalAlphaLeaseBackend {
         FunctionalAlphaLeaseBackend {
             coordinator: WorkerCoordinator::new(WorkerRegistry::new(
                 MAX_FUNCTIONAL_ALPHA_CONTEXTS,
@@ -5766,6 +5799,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(state.into()),
             ingress_state: Mutex::new(None),
+            sharing_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -5828,6 +5862,7 @@ mod tests {
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
                 state: Mutex::new(Some(entry).into()),
                 ingress_state: Mutex::new(None),
+                sharing_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
                 dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -6146,6 +6181,7 @@ mod tests {
                 relay_replay: Mutex::new(functional_alpha_replay_cache()),
                 state: Mutex::new(Some(entry).into()),
                 ingress_state: Mutex::new(None),
+                sharing_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
                 dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -10922,6 +10958,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
+            sharing_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -11151,6 +11188,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
+            sharing_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -11423,6 +11461,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
+            sharing_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -11538,6 +11577,7 @@ mod tests {
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
+            sharing_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: Some(handle),
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),

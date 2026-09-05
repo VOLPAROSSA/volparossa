@@ -1,5 +1,9 @@
 //! Typed client for the privileged helper-v3 lease protocol.
 
+#[path = "helper_v3/uplink_sharing.rs"]
+mod uplink_sharing;
+pub(crate) use uplink_sharing::RuntimeBoundUplinkSharing;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},

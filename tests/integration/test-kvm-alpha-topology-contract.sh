@@ -20,6 +20,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview | grep -F 'PREVIEW ONLY:' >/dev/null
     "$script" --preview --scenario reciprocity | grep -Fi 'recipro' >/dev/null
     "$script" --preview --scenario local-link | grep -Fi 'local-link' >/dev/null
+    "$script" --preview --scenario sharing | grep -Fi 'sharing' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?
@@ -316,6 +317,15 @@ printf '%s\n' 'A08 bounded-log rollover and timestamp contract passed'
 grep -F 'denial_baseline_ms=$(client_log_baseline_ms) || return 1' "$GUEST" >/dev/null
 grep -F '"$denial_event" "$WORK/$denial_output-rejection-events.txt"' "$GUEST" >/dev/null
 if grep -F 'tls_policy_event_count' "$GUEST" >/dev/null; then exit 1; fi
+for evidence_file in a08-dns-udp-completion-events.txt a08-dns-tcp-completion-events.txt \
+    a08-tls-completion-events.txt a09-unlisted-domain-rejection-events.txt \
+    a09-raw-ip-server-name-rejection-events.txt a09-missing-server-name-rejection-events.txt \
+    a09-mismatched-destination-rejection-events.txt a09-forbidden-port-rejection-events.txt \
+    a10-ech-rejection-events.txt a10-unverifiable-rejection-events.txt; do
+    # The output is an explicit artifact allowlist, not every WORK file.
+    awk '/^copy_artifacts\(\)/ { copy = 1 } copy { print } copy && /^}/ { copy = 0 }' \
+        "$GUEST" | grep -F "$evidence_file" >/dev/null
+done
 grep -F 'and ($dns_udp.response_source == $dns_udp.resolver)' "$GUEST" >/dev/null
 grep -F 'and ($dns_tcp.response_source == $dns_tcp.resolver)' "$GUEST" >/dev/null
 grep -F 'and ($dns_udp.answer_addresses == ["47.163.4.2"])' "$GUEST" >/dev/null
@@ -542,4 +552,65 @@ grep -F 'uplink=local_only; exit_role=false; exit_capacity=0' "$GUEST" >/dev/nul
 grep -F 'volparossa-local-link-runtime' "$WORKFLOW" >/dev/null
 grep -F 'local_link_finalize_report' "$GUEST" >/dev/null
 python3 -B "$HERE/test-local-link-smoke.py"
-printf '%s\n' 'KVM alpha, reciprocity and local-link topology static contract passed'
+sh -n "$HERE/sharing-smoke.sh"
+grep -F 'sharing_verify_cleanup || original_status=1' "$GUEST" >/dev/null
+grep -F 'sharing_finalize_report "$original_status"' "$GUEST" >/dev/null
+grep -F 'volparossa-owner-priority-uplink' "$WORKFLOW" >/dev/null
+python3 -B - "$HERE/sharing-smoke.py" <<'PYTHON'
+import ast
+import copy
+from pathlib import Path
+import runpy
+import sys
+
+source = Path(sys.argv[1])
+tree = ast.parse(source.read_text(encoding="ascii"))
+fixture = runpy.run_path(str(source))
+assert len(fixture["payload_for"]("ab" * 16, "client")) == 1150
+# Contribution never sets a test-only priority1/mark; only owner priority0 is explicit.
+for node in ast.walk(tree):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "setsockopt":
+        assert len(node.args) == 3 and isinstance(node.args[2], ast.Constant) and node.args[2].value == 0
+snapshots = {}
+for phase, rates in {"idle": (9.2, .1, 9), "owner": (11.2, 10.8, .4), "recovery": (8.3, .1, 8)}.items():
+    for stage, scale in (("before", 0), ("after", 1)):
+        snapshots[phase + "-" + stage] = {
+            "monotonic_ns": (1 + 5 * scale) * 1_000_000_000, "egress_ifindex": 7,
+            "physical_tx_bytes": round(rates[0] * 125_000 * 5 * scale),
+            "queues": {name: {"bytes": round(rate * 125_000 * 5 * scale)}
+                       for name, rate in zip(("total", "owner", "contribution"), rates)}}
+assert fixture["evaluate_windows"](snapshots)["owner"]["queue_mbps"]["owner"] > 8
+for name, modify in (
+    ("no owner priority", lambda data: data["owner-after"]["queues"]["contribution"].update(bytes=5_625_000)),
+    ("no owner traffic", lambda data: data["owner-after"]["queues"]["owner"].update(bytes=1)),
+    ("no recovery", lambda data: data["recovery-after"]["queues"]["contribution"].update(bytes=0)),
+    ("physical TX absent", lambda data: data["idle-after"].update(physical_tx_bytes=0)),
+    ("counter reset", lambda data: data["idle-before"]["queues"]["total"].update(bytes=99_000_000)),
+    ("egress changed", lambda data: data["owner-after"].update(egress_ifindex=8)),
+):
+    wrong = copy.deepcopy(snapshots)
+    modify(wrong)
+    try:
+        fixture["evaluate_windows"](wrong)
+    except ValueError:
+        continue
+    raise AssertionError("accepted invalid sharing evidence: " + name)
+records = [
+    {"kind":"tbf", "handle":"7000:", "root":True},
+    {"kind":"prio", "handle":"7001:", "parent":"7000:1"},
+    {"kind":"bfifo", "handle":"7002:", "parent":"7001:1"},
+    {"kind":"tbf", "handle":"7003:", "parent":"7001:2"},
+    {"kind":"bfifo", "handle":"7004:", "parent":"7003:1"}]
+for record in records:
+    record.update(bytes=10, packets=1, drops=0, overlimits=0)
+assert fixture["queue_snapshot"](records)["contribution"]["bytes"] == 10
+for wrong in (records[:-1], records + records[:1]):
+    try:
+        fixture["queue_snapshot"](wrong)
+    except ValueError:
+        continue
+    raise AssertionError("accepted incomplete/nonunique queue tree")
+assert fixture["baseline_shape"]([{"kind":"noqueue", "handle":"0:", "root":True, "bytes":0}]) == fixture["baseline_shape"]([{"kind":"noqueue", "handle":"0:", "root":True, "bytes":100}])
+print("Sharing pure evidence contract passed; no live datapath claim")
+PYTHON
+printf '%s\n' 'KVM alpha, reciprocity, local-link and sharing topology static contract passed'

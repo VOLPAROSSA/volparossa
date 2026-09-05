@@ -79,6 +79,8 @@ pub struct Config {
     pub selection: SelectionConfig,
     /// Operator capacity limits.
     pub capacity: CapacityConfig,
+    /// Optional node-wide upload sharing; configuring it never starts participation.
+    pub sharing: SharingConfig,
     /// Route-context and interception safety settings.
     pub routing: RoutingConfig,
     /// TCP/MPTCP settings.
@@ -101,6 +103,7 @@ impl Default for Config {
             roles: RolesConfig::default(),
             selection: SelectionConfig::default(),
             capacity: CapacityConfig::default(),
+            sharing: SharingConfig::default(),
             routing: RoutingConfig::default(),
             tcp: TcpConfig::default(),
             udp: UdpConfig::default(),
@@ -184,6 +187,7 @@ impl Config {
         validate_advertisement_origin(self.roles, &self.network)?;
         validate_selection(&self.selection)?;
         validate_capacity(self.roles, &self.capacity)?;
+        validate_sharing(&self.sharing)?;
         validate_routing(self.runtime_mode, &self.routing)?;
         validate_tcp(self.tcp)?;
         validate_udp(&self.udp)?;
@@ -349,6 +353,23 @@ pub struct CapacityConfig {
     pub maximum_relay_sessions: u32,
     /// Maximum simultaneous exit sessions; zero disables serving.
     pub maximum_exit_sessions: u32,
+}
+
+/// Explicit operator-known upload bottleneck and aggregate contribution ceiling.
+///
+/// This is neither a NIC line-speed measurement nor automatic spare-capacity discovery. The
+/// disabled default is inert; runtime participation separately owns scheduler installation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SharingConfig {
+    /// Enable scheduler installation only when the node explicitly starts participating.
+    pub enabled: bool,
+    /// One physical underlay interface name, resolved and verified by the helper.
+    pub interface: String,
+    /// Operator-known total usable upload in decimal Mbps, not the NIC's reported link speed.
+    pub total_upload_mbps: u32,
+    /// Combined relay and exit upload ceiling on that one underlay, in decimal Mbps.
+    pub contribution_upload_ceiling_mbps: u32,
 }
 
 /// Route context and interception configuration.
@@ -812,6 +833,42 @@ fn validate_capacity(roles: RolesConfig, capacity: &CapacityConfig) -> Result<()
     Ok(())
 }
 
+fn validate_sharing(sharing: &SharingConfig) -> Result<(), ConfigError> {
+    let name = sharing.interface.as_str();
+    if (sharing.enabled || !name.is_empty())
+        && (!(1..=15).contains(&name.len())
+            || matches!(name, "." | "..")
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')))
+    {
+        return Err(validation(
+            "sharing.interface",
+            "must be a 1..=15 byte ASCII interface name using letters, digits, '_', '-' or '.', not a path or '.'/'..'",
+        ));
+    }
+    let minimum = u32::from(sharing.enabled);
+    validate_range(
+        "sharing.total_upload_mbps",
+        sharing.total_upload_mbps,
+        minimum,
+        MAX_BANDWIDTH_MBPS,
+    )?;
+    validate_range(
+        "sharing.contribution_upload_ceiling_mbps",
+        sharing.contribution_upload_ceiling_mbps,
+        minimum,
+        MAX_BANDWIDTH_MBPS,
+    )?;
+    if sharing.enabled && sharing.contribution_upload_ceiling_mbps > sharing.total_upload_mbps {
+        return Err(validation(
+            "sharing.contribution_upload_ceiling_mbps",
+            "must not exceed the operator-known total upload",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_routing(mode: RuntimeMode, routing: &RoutingConfig) -> Result<(), ConfigError> {
     validate_range(
         "routing.context_ttl_seconds",
@@ -993,6 +1050,8 @@ mod tests {
         assert_eq!(config.network.protocol_version, 4);
         assert_eq!(config.network.uplink, NetworkUplink::IndependentInternet);
         assert_eq!(config.network.operator_id, None);
+        assert_eq!(config.sharing, SharingConfig::default());
+        assert!(!config.sharing.enabled);
         assert!(!config.roles.client);
         assert!(!config.roles.relay);
         assert!(!config.roles.exit);
@@ -1022,6 +1081,120 @@ mod tests {
         let shipped = include_str!("../../../config/examples/default.yaml");
         let actual = Config::from_yaml(shipped).expect("shipped default YAML must validate");
         assert_eq!(actual, Config::default());
+    }
+
+    #[test]
+    fn sharing_is_optional_disabled_and_does_not_activate_roles() {
+        fn assert_copy<T: Copy>() {}
+
+        let absent = Config::from_yaml("{}").expect("optional sharing");
+        assert_eq!(absent.sharing, SharingConfig::default());
+        let configured = Config::from_yaml("sharing:\n  enabled: true\n  interface: enp1s0\n  total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: 60\n")
+            .expect("explicit operator-known upload settings");
+        assert!(configured.sharing.enabled);
+        assert_eq!(configured.roles, RolesConfig::default());
+        assert_eq!(
+            Config::from_yaml(&configured.to_yaml().expect("YAML")).expect("round trip"),
+            configured
+        );
+        assert_copy::<CapacityConfig>();
+    }
+
+    #[test]
+    fn sharing_rejects_unknown_fields_and_non_interface_names() {
+        assert!(Config::from_yaml("sharing:\n  download_mbps: 50\n").is_err());
+        for name in [
+            "",
+            ".",
+            "..",
+            "eth0/../eth1",
+            "/sys/class/net",
+            "veth0@if1",
+            "eth:0",
+            "eth 0",
+            "eth\n0",
+            "éth0",
+            "abcdefghijklmnop",
+        ] {
+            let config = Config {
+                sharing: SharingConfig {
+                    enabled: true,
+                    interface: name.to_owned(),
+                    total_upload_mbps: 100,
+                    contribution_upload_ceiling_mbps: 50,
+                },
+                ..Config::default()
+            };
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(ConfigError::Validation {
+                        field: "sharing.interface",
+                        ..
+                    })
+                ),
+                "invalid name must fail: {name:?}"
+            );
+        }
+        for name in [
+            "e",
+            "enp1s0",
+            "lan_1",
+            "uplink-1",
+            "enp1s0.100",
+            "abcdefghijklmno",
+        ] {
+            let config = Config {
+                sharing: SharingConfig {
+                    enabled: true,
+                    interface: name.to_owned(),
+                    total_upload_mbps: 100,
+                    contribution_upload_ceiling_mbps: 100,
+                },
+                ..Config::default()
+            };
+            config
+                .validate()
+                .expect("bounded interface name, no filesystem lookup");
+        }
+    }
+
+    #[test]
+    fn sharing_requires_positive_bounded_ordered_enabled_rates() {
+        for (total, contribution) in [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (100, 101),
+            (MAX_BANDWIDTH_MBPS + 1, 1),
+            (MAX_BANDWIDTH_MBPS, MAX_BANDWIDTH_MBPS + 1),
+        ] {
+            let config = Config {
+                sharing: SharingConfig {
+                    enabled: true,
+                    interface: "eth0".to_owned(),
+                    total_upload_mbps: total,
+                    contribution_upload_ceiling_mbps: contribution,
+                },
+                ..Config::default()
+            };
+            assert!(
+                config.validate().is_err(),
+                "unsafe enabled rates: {total}/{contribution}"
+            );
+        }
+        for (total, contribution) in [(1, 1), (100, 50), (MAX_BANDWIDTH_MBPS, MAX_BANDWIDTH_MBPS)] {
+            let config = Config {
+                sharing: SharingConfig {
+                    enabled: true,
+                    interface: "eth0".to_owned(),
+                    total_upload_mbps: total,
+                    contribution_upload_ceiling_mbps: contribution,
+                },
+                ..Config::default()
+            };
+            config.validate().expect("bounded ordered upload ceilings");
+        }
     }
 
     fn explicit_participant_config() -> Config {

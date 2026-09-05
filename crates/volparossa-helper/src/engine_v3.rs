@@ -35,6 +35,13 @@ use volparossa_routing::{
 };
 use zeroize::Zeroizing;
 
+#[path = "engine_v3/uplink_sharing.rs"]
+mod uplink_sharing;
+use uplink_sharing::SharingRecord;
+pub(crate) use uplink_sharing::{
+    SharingBackendAction, SharingBackendBinding, SharingBackendCompletion, SharingBackendRequest,
+};
+
 const MAX_CONTEXTS: usize = 64;
 const MAX_CACHED_REQUESTS: usize = 1_024;
 const MAX_TRANSPORT_ACQUIRE_REQUEST_IDS: usize = 1_024;
@@ -82,6 +89,7 @@ struct EngineState {
     ingress: Option<ClientIngressRecord>,
     ingress_acquire_request_ids: HashMap<[u8; 16], IngressAcquireRequestRecord>,
     next_ingress_generation: u64,
+    sharing: Option<SharingRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -640,6 +648,28 @@ pub(crate) enum BackendError {
 /// unavailable backend. A complete production adapter still requires integration tests for all of
 /// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
+    fn install_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
+    ) -> BackendFuture<SharingBackendCompletion<u32>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn inspect_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<()>,
+    ) -> BackendFuture<SharingBackendCompletion<crate::kernel::underlay_sharing::SharingCounters>>
+    {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn destroy_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<()>,
+    ) -> BackendFuture<SharingBackendCompletion<ConfirmedAbsent>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
     fn prepare(
         self: Arc<Self>,
         request: BackendRequest<PrepareLeaseBatch>,
@@ -1484,6 +1514,11 @@ impl HelperEngine {
                 self.destroy_client_ingress_async(request, request_id, digest, value, sender)
                     .await
             }
+            Some(
+                helper_request::Operation::InstallUplinkSharing(_)
+                | helper_request::Operation::InspectUplinkSharing(_)
+                | helper_request::Operation::DestroyUplinkSharing(_),
+            ) => Some(self.execute_sharing(request, sender).await),
             Some(
                 helper_request::Operation::ReconcileExpiredPrepare(_)
                 | helper_request::Operation::BindHelperRuntime(_),
@@ -4696,6 +4731,9 @@ impl HelperEngine {
             complete &= outcome.confirmed;
             response_sent |= outcome.response_sent;
         }
+        if scope == CleanupScope::AllOwnedResources {
+            complete &= self.cleanup_sharing().await;
+        }
         if response_sent {
             return None;
         }
@@ -5166,6 +5204,7 @@ impl HelperEngine {
             }
             complete &= confirmed;
         }
+        complete &= self.cleanup_sharing().await;
         let engine_cleanup_complete = {
             let state = self.inner.state.lock().await;
             cleanup_state_complete(&state)
@@ -5221,7 +5260,11 @@ impl HelperEngine {
                         && ingress.sockets.values().all(|socket| {
                             socket.socket_handle != handle && socket.receipt_handle != Some(handle)
                         })
-                });
+                })
+                && state
+                    .sharing
+                    .as_ref()
+                    .is_none_or(|sharing| sharing.handle != handle);
             if unused {
                 return Some(handle);
             }
@@ -5747,6 +5790,7 @@ fn cleanup_state_complete(state: &EngineState) -> bool {
     route_cleanup_state_complete(state)
         && state.ingress.is_none()
         && state.ingress_acquire_request_ids.is_empty()
+        && state.sharing.is_none()
 }
 
 fn route_cleanup_state_complete(state: &EngineState) -> bool {
@@ -5812,6 +5856,9 @@ fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
         | helper_request::Operation::AcquireIngressReplySocket(_)
         | helper_request::Operation::ActivateClientIngress(_)
         | helper_request::Operation::DestroyClientIngress(_)
+        | helper_request::Operation::InstallUplinkSharing(_)
+        | helper_request::Operation::InspectUplinkSharing(_)
+        | helper_request::Operation::DestroyUplinkSharing(_)
         | helper_request::Operation::CleanupOwned(_) => return None,
     };
     fixed(value)
@@ -6031,6 +6078,9 @@ mod tests {
         probe_requests: StdMutex<Vec<(BackendBinding, BackendProbe)>>,
         destroy_calls: StdMutex<Vec<(BackendBinding, BackendDestroy)>>,
         runtime_bindings: StdMutex<Vec<BackendRuntimeBinding>>,
+        sharing_bindings: StdMutex<Vec<SharingBackendBinding>>,
+        fail_sharing_install: AtomicBool,
+        fail_sharing_destroy: AtomicBool,
     }
 
     impl FakeBackend {
@@ -6051,6 +6101,75 @@ mod tests {
     }
 
     impl AsyncLeaseBackend for FakeBackend {
+        fn install_uplink_sharing(
+            self: Arc<Self>,
+            request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
+        ) -> BackendFuture<SharingBackendCompletion<u32>> {
+            let (binding, _) = request.into_parts();
+            self.sharing_bindings
+                .lock()
+                .expect("sharing bindings")
+                .push(binding);
+            Box::pin(async move {
+                SharingBackendCompletion {
+                    binding,
+                    result: if self.fail_sharing_install.load(Ordering::Acquire) {
+                        Err(BackendError::CleanupIncomplete)
+                    } else {
+                        Ok(2)
+                    },
+                }
+            })
+        }
+
+        fn inspect_uplink_sharing(
+            self: Arc<Self>,
+            request: SharingBackendRequest<()>,
+        ) -> BackendFuture<SharingBackendCompletion<crate::kernel::underlay_sharing::SharingCounters>>
+        {
+            let (binding, ()) = request.into_parts();
+            self.sharing_bindings
+                .lock()
+                .expect("sharing bindings")
+                .push(binding);
+            Box::pin(async move {
+                let value = crate::kernel::underlay_sharing::QueueCounters {
+                    bytes: 10,
+                    packets: 1,
+                    ..Default::default()
+                };
+                SharingBackendCompletion {
+                    binding,
+                    result: Ok(crate::kernel::underlay_sharing::SharingCounters {
+                        total: value,
+                        owner: value,
+                        contribution: value,
+                    }),
+                }
+            })
+        }
+
+        fn destroy_uplink_sharing(
+            self: Arc<Self>,
+            request: SharingBackendRequest<()>,
+        ) -> BackendFuture<SharingBackendCompletion<ConfirmedAbsent>> {
+            let (binding, ()) = request.into_parts();
+            self.sharing_bindings
+                .lock()
+                .expect("sharing bindings")
+                .push(binding);
+            Box::pin(async move {
+                SharingBackendCompletion {
+                    binding,
+                    result: if self.fail_sharing_destroy.load(Ordering::Acquire) {
+                        Err(BackendError::CleanupIncomplete)
+                    } else {
+                        Ok(ConfirmedAbsent)
+                    },
+                }
+            })
+        }
+
         fn prepare(
             self: Arc<Self>,
             request: BackendRequest<PrepareLeaseBatch>,
@@ -7613,6 +7732,143 @@ mod tests {
 
         let engine = HelperEngine::new([9; 32], 1_000);
         requires_zeroizing_array(&engine.inner.cleanup_token);
+    }
+
+    #[tokio::test]
+    async fn uplink_sharing_survives_route_cleanup_and_rejects_other_owner() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        let install = sharing_install_request(80);
+        let installed = engine.execute(install.clone()).await;
+        let Some(helper_response::Outcome::InstalledUplinkSharing(owner)) = installed.outcome
+        else {
+            panic!("installed sharing");
+        };
+        let _ = commit_client_context(&engine, &backend).await;
+        let cleanup = engine
+            .execute(request(
+                81,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::RouteContextsOnly as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert!(engine.inner.state.lock().await.sharing.is_some());
+        assert!(
+            backend
+                .sharing_bindings
+                .lock()
+                .expect("bindings")
+                .iter()
+                .all(|binding| binding.action == SharingBackendAction::Install)
+        );
+        for (id, runtime, handle) in [
+            (82, vec![3; 16], owner.sharing_handle.clone()),
+            (83, owner.sharing_runtime_id.clone(), vec![3; 32]),
+        ] {
+            let denied = engine
+                .execute(request(
+                    id,
+                    helper_request::Operation::DestroyUplinkSharing(
+                        volparossa_routing::DestroyUplinkSharing {
+                            sharing_runtime_id: runtime,
+                            sharing_handle: handle,
+                        },
+                    ),
+                ))
+                .await;
+            assert_eq!(denied.result, HelperResult::UnauthorisedPeer as i32);
+        }
+        let inspected = engine
+            .execute(request(
+                84,
+                helper_request::Operation::InspectUplinkSharing(
+                    volparossa_routing::InspectUplinkSharing {
+                        sharing_runtime_id: owner.sharing_runtime_id.clone(),
+                        sharing_handle: owner.sharing_handle.clone(),
+                    },
+                ),
+            ))
+            .await;
+        let Some(helper_response::Outcome::SharingCounters(counters)) = inspected.outcome else {
+            panic!("real counter projection");
+        };
+        assert_eq!(counters.total.expect("total").bytes, 10);
+        assert_eq!(counters.owner.expect("owner").bytes, 10);
+        assert_eq!(counters.contribution.expect("contribution").bytes, 10);
+        assert!(engine.shutdown_cleanup().await);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let replacement = engine.execute(install).await;
+        let Some(helper_response::Outcome::InstalledUplinkSharing(replacement)) =
+            replacement.outcome
+        else {
+            panic!("fresh sharing install after cleanup");
+        };
+        assert_ne!(
+            replacement.sharing_handle, owner.sharing_handle,
+            "cleanup purges stale cached Install"
+        );
+        assert!(engine.shutdown_cleanup().await);
+    }
+
+    #[tokio::test]
+    async fn uplink_sharing_partial_install_retains_owner_until_all_owned_cleanup() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.fail_sharing_install.store(true, Ordering::Release);
+        backend.fail_sharing_destroy.store(true, Ordering::Release);
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        assert_eq!(
+            engine.execute(sharing_install_request(80)).await.result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        let state = engine.inner.state.lock().await;
+        assert!(state.sharing.is_some());
+        assert!(!cleanup_state_complete(&state));
+        assert!(route_cleanup_state_complete(&state));
+        drop(state);
+        backend.fail_sharing_destroy.store(false, Ordering::Release);
+        let cleanup = engine
+            .execute(request(
+                81,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::AllOwnedResources as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let bindings = backend.sharing_bindings.lock().expect("bindings");
+        assert_eq!(bindings.len(), 3);
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| binding.helper_runtime_id == [0xa5; 32]
+                    && binding.sharing_runtime_id == [5; 16]
+                    && binding.sharing_handle == bindings[0].sharing_handle)
+        );
+    }
+
+    fn sharing_install_request(id: u8) -> HelperRequest {
+        request(
+            id,
+            helper_request::Operation::InstallUplinkSharing(
+                volparossa_routing::InstallUplinkSharing {
+                    sharing_runtime_id: vec![5; 16],
+                    interface: "eth0".to_owned(),
+                    total_upload_mbps: 20,
+                    contribution_upload_ceiling_mbps: 10,
+                },
+            ),
+        )
     }
 
     #[tokio::test]

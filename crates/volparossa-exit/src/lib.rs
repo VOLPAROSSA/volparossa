@@ -36,16 +36,17 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
+use socket2::SockRef;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpStream, lookup_host},
+    net::{TcpSocket, TcpStream, lookup_host},
     sync::Mutex,
     time,
 };
 use volparossa_core::{
-    Bandwidth, ClientEphemeralId, NodeId, ReservationId, RouteContextId, ServiceRole,
-    Transport as CoreTransport, UnixTime,
+    Bandwidth, CONTRIBUTION_SOCKET_PRIORITY, ClientEphemeralId, NodeId, ReservationId,
+    RouteContextId, ServiceRole, Transport as CoreTransport, UnixTime,
 };
 use volparossa_inspection::{
     InspectionError, InspectionProgress, QuicInitialInspector, TlsClientHelloInspector,
@@ -2056,7 +2057,8 @@ async fn resolve_and_connect(
     time::timeout(connect_timeout, async move {
         let mut last_error = None;
         for address in addresses {
-            match TcpStream::connect(address).await {
+            let socket = contribution_tcp_socket(address)?;
+            match socket.connect(address).await {
                 Ok(stream) => return Ok(stream),
                 Err(error) => last_error = Some(error),
             }
@@ -2068,6 +2070,17 @@ async fn resolve_and_connect(
     .await
     .map_err(|_| ExitError::EgressTimeout("TCP connect"))?
     .map_err(ExitError::Io)
+}
+
+fn contribution_tcp_socket(address: SocketAddr) -> std::io::Result<TcpSocket> {
+    let socket = match address {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    // Set before connect so SYNs and every subsequent payload use the contribution band.
+    // Failure must not open an unclassified connection or try an unclassified fallback.
+    SockRef::from(&socket).set_priority(CONTRIBUTION_SOCKET_PRIORITY)?;
+    Ok(socket)
 }
 
 async fn run_tcp_egress_with_policy<C>(
@@ -2451,6 +2464,22 @@ pub enum ExitError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn contribution_tcp_sockets_are_classified_before_connect() {
+        for address in ["127.0.0.1:443", "[::1]:443"] {
+            let socket = super::contribution_tcp_socket(address.parse().expect("test tuple"))
+                .expect("unconnected contribution socket");
+            let descriptor = socket2::SockRef::from(&socket);
+            assert_eq!(
+                descriptor.priority().expect("kernel contribution priority"),
+                volparossa_core::CONTRIBUTION_SOCKET_PRIORITY,
+            );
+            assert!(descriptor.peer_addr().is_err());
+        }
+        let owner = tokio::net::TcpSocket::new_v4().expect("unmodified owner socket");
+        assert_eq!(socket2::SockRef::from(&owner).priority().unwrap(), 0);
+    }
+
     #[test]
     fn local_endpoint_scope_survives_exit_wire_mapping() {
         use super::{public_endpoint, wire_endpoint};

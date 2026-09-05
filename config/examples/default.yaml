@@ -43,6 +43,14 @@ capacity:
   maximum_relay_sessions: 0
   maximum_exit_sessions: 0
 
+# Optional upload sharing, inert until enabled and participation starts. Set an exact
+# physical interface and operator-known usable upload, not NIC speed or an inferred rate.
+sharing:
+  enabled: false
+  interface: ""
+  total_upload_mbps: 0
+  contribution_upload_ceiling_mbps: 0
+
 routing:
   context_ttl_seconds: 600
   maximum_active_contexts: 64

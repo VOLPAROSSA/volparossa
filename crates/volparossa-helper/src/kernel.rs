@@ -28,6 +28,8 @@ use crate::{
 #[allow(dead_code)] // GET_DEVICE is wired into the v3 lease state machine in phase 2.
 mod wireguard_probe;
 
+pub(crate) mod underlay_sharing;
+
 use wireguard_probe::WireguardDeviceState;
 
 sockopt_impl!(
@@ -116,6 +118,8 @@ const RTMSG_LEN: usize = 12;
 const FIB_RULE_HDR_LEN: usize = 12;
 
 pub(crate) const CLIENT_INGRESS_IPV4_MARK: u32 = 0x5650_1001;
+pub(crate) const CONTRIBUTION_WIREGUARD_MARK: u32 =
+    CLIENT_INGRESS_IPV4_MARK | volparossa_core::CONTRIBUTION_MARK_BIT;
 pub(crate) const CLIENT_INGRESS_PARENT_IPV4_MARK: u32 = 0x5650_1002;
 pub(crate) const CLIENT_INGRESS_IPV6_MARK: u32 = 0x5650_1003;
 pub(crate) const CLIENT_INGRESS_PARENT_IPV6_MARK: u32 = 0x5650_1004;
@@ -2648,16 +2652,12 @@ fn encode_activate_device_v3(
 /// parent-to-ingress policy table. Relay/Exit packets need the same exemption when this node also
 /// consumes the network; otherwise its own Client ingress recursively captures contribution.
 fn wireguard_underlay_mark(resource: &DurableWireguardResource) -> u32 {
-    if matches!(
-        WireguardRole::try_from(resource.key().1),
-        Ok(WireguardRole::Client
-            | WireguardRole::RelayClient
-            | WireguardRole::RelayExit
-            | WireguardRole::Exit)
-    ) {
-        CLIENT_INGRESS_IPV4_MARK
-    } else {
-        0
+    match WireguardRole::try_from(resource.key().1) {
+        Ok(WireguardRole::Client) => CLIENT_INGRESS_IPV4_MARK,
+        Ok(WireguardRole::RelayClient | WireguardRole::RelayExit | WireguardRole::Exit) => {
+            CONTRIBUTION_WIREGUARD_MARK
+        }
+        Ok(WireguardRole::Unspecified) | Err(_) => 0,
     }
 }
 
@@ -3343,9 +3343,14 @@ mod tests {
             };
             let payload = encode_activate_device_v3(&resource, &peer).expect("activation encoding");
             let device = attributes(&payload[GENL_HEADER_LEN..]).expect("device attributes");
+            let expected_mark = if role == WireguardRole::Client {
+                CLIENT_INGRESS_IPV4_MARK
+            } else {
+                CONTRIBUTION_WIREGUARD_MARK
+            };
             assert!(
                 device.iter().any(|(kind, value)| {
-                    *kind == WGDEVICE_A_FWMARK && *value == CLIENT_INGRESS_IPV4_MARK.to_ne_bytes()
+                    *kind == WGDEVICE_A_FWMARK && *value == expected_mark.to_ne_bytes()
                 }),
                 "kernel WireGuard outer packets must bypass Client ingress in role {role:?}"
             );

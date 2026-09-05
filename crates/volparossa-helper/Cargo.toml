@@ -25,6 +25,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 volparossa-linux-uapi = { path = "../volparossa-linux-uapi", version = "=0.1.0" }
+volparossa-core = { path = "../volparossa-core", version = "=0.1.0" }
 volparossa-mptcp = { path = "../volparossa-mptcp", version = "=0.1.0" }
 volparossa-protocol = { path = "../volparossa-protocol", version = "=0.1.0" }
 volparossa-routing = { path = "../volparossa-routing", version = "=0.1.0" }
