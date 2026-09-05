@@ -58,11 +58,34 @@ def phase(directory):
     return value
 
 
+class FirstEchoGate:
+    """Hold exactly the first two same-flow echoes; never queue arbitrary payloads."""
+
+    def __init__(self):
+        self.source = None
+        self.requests_before_first_echo = 0
+        self.unlocked = False
+
+    def receive(self, source):
+        if self.unlocked:
+            return 1
+        if self.source is None:
+            self.source = source
+        elif source != self.source:
+            raise ValueError("pipeline probe changed its exact Exit flow tuple")
+        self.requests_before_first_echo += 1
+        if self.requests_before_first_echo < 2:
+            return 0
+        self.unlocked = True
+        return 2
+
+
 def serve(directory, run_id, owner=False):
     expected = b"owner:" + payload_for(run_id, "exit") if owner else payload_for(run_id, "client")
     destination = OWNER_DESTINATION if owner else BASE.DESTINATION
     name = "owner-sink" if owner else "server"
     records = {name: {"datagrams": 0, "bytes": 0, "source_ips": []} for name in PHASES}
+    pipeline = FirstEchoGate()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.bind(destination)
         udp.settimeout(0.1)
@@ -87,10 +110,15 @@ def serve(directory, run_id, owner=False):
                 if record["datagrams"] > 150_000 or len(record["source_ips"]) > 2:
                     raise ValueError("fixture receive resource bound")
             if not owner:
-                udp.sendto(payload, source)
+                # A stop-and-wait Client cannot deliver the second datagram here. The two
+                # responses correspond to two received requests, not transport duplication.
+                for _ in range(pipeline.receive(source)):
+                    udp.sendto(payload, source)
     BASE.write_json(directory / f"{name}.json", {
         "phases": records, "sha256": hashlib.sha256(expected).hexdigest(),
-        "destination": list(destination), "payload_bytes": len(expected)})
+        "destination": list(destination), "payload_bytes": len(expected),
+        "requests_before_first_echo": pipeline.requests_before_first_echo,
+        "pipeline_source": list(pipeline.source) if pipeline.source is not None else None})
 
 
 def pressure(directory, run_id, owner=False):
@@ -100,6 +128,7 @@ def pressure(directory, run_id, owner=False):
     offered_mbps = 24 if owner else 8
     records = {name: {"sent": 0, "echoes": 0} for name in PHASES}
     active_reported = False
+    sent_before_first_echo = None
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.bind(("10.241.36.1" if owner else BASE.NODES["client"]["public"], 0))
         # Owner is a normal, unprivileged non-intercepted fixture socket. Contribution NEVER
@@ -143,12 +172,14 @@ def pressure(directory, run_id, owner=False):
                 if current in PHASES:
                     records[current]["echoes"] += 1
                     if not active_reported:
+                        sent_before_first_echo = sum(record["sent"] for record in records.values())
                         (directory / "client.active").write_text("echo\n", encoding="ascii")
                         active_reported = True
         application = list(udp.getsockname())
     BASE.write_json(directory / f"{name}.json", {
         "phases": records, "application": application, "socket_priority": priority,
         "offered_mbps": offered_mbps, "payload_bytes": len(payload),
+        "sent_before_first_echo": sent_before_first_echo,
         "sha256": hashlib.sha256(payload).hexdigest(), "completed": phase(directory) == "done"})
 
 
@@ -265,6 +296,8 @@ def evidence(directory, run_id):
     digest = hashlib.sha256(payload_for(run_id, "client")).hexdigest()
     if not app["completed"] or not owner["completed"] or owner["socket_priority"] != 0 or app["sha256"] != digest or server["sha256"] != digest:
         raise ValueError("application/owner completion or echo hash mismatch")
+    if server.get("requests_before_first_echo") != 2 or not isinstance(app.get("sent_before_first_echo"), int) or app["sent_before_first_echo"] < 2 or server.get("pipeline_source", [None])[0] != "10.241.36.1":
+        raise ValueError("two real protected requests did not reach the exact Exit flow before its first echo")
     for name in ("idle", "recovery"):
         if app["phases"][name]["echoes"] < 8 or server["phases"][name]["source_ips"] != ["10.241.36.1"]:
             raise ValueError("protected echo or exact Exit source missing")
@@ -281,6 +314,10 @@ def evidence(directory, run_id):
         "success": True, "windows": windows, "nodes": nodes,
         "flow": {**path, "client_node": "client", "relay_node": relay, "exit_node": "exit",
                  "wireguard_both_legs": legs, "selected_exit_source_ip": "10.241.36.1",
+                 "pipelining": {"destination_requests_before_first_echo": server["requests_before_first_echo"],
+                                "application_sends_before_first_echo": app["sent_before_first_echo"],
+                                "exact_exit_flow_source": server["pipeline_source"],
+                                "every_echo_payload_and_source_checked": True},
                  "echo_sha256": digest, "application": app, "destination": server},
         "owner": {"traffic": "unprivileged node-owned underlay UDP, not protected browsing", "application": owner, "sink": sink},
         "scheduler": {"installed_by": "production node helper via sharing config", "interface": "sharing0",

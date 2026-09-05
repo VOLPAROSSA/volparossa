@@ -2187,22 +2187,8 @@ impl ProductionMpquicSession {
         payload: &[u8],
         now_ms: u64,
     ) -> Result<(), ProductionMpquicError> {
-        if self.transport_mode != TransportMode::SinglePathGeneralUdp
-            || application_port == 0
-            || !flow.matches_exact_ip_destination(SocketAddr::V4(destination))
-        {
-            return Err(ProductionMpquicError::Invalid(
-                "native general UDP exact destination",
-            ));
-        }
-        flow.ensure_active_at(now_ms)?;
-        if flow.route_context_id() != &self.route_context_id {
-            return Err(ProductionMpquicError::Invalid(
-                "native general UDP route context",
-            ));
-        }
-        let (client, server, maximum_packet_bytes) = tunnel_ipv4_scope(&self.assignment)?;
-        let source = SocketAddrV4::new(client, application_port);
+        let (source, server, maximum_packet_bytes) =
+            self.general_udp_scope(flow, application_port, destination, now_ms)?;
         if let Some(signed) = signed_authorization {
             let control = build_general_udp_authorization_packet(
                 source,
@@ -2227,6 +2213,57 @@ impl ProductionMpquicSession {
             packet,
         )
         .await
+    }
+
+    /// Submit one already-authorized UDP continuation without delaying the ingress actor.
+    ///
+    /// `false` means the exact native queue rejected this datagram with its explicit transient
+    /// backpressure code. No packet was accepted or retained; the healthy route remains usable.
+    /// Startup authorization deliberately retains its separate bounded-retry API.
+    pub(crate) async fn try_send_general_udp(
+        &self,
+        flow: &AuthorizedUdpFlow,
+        application_port: u16,
+        destination: SocketAddrV4,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, ProductionMpquicError> {
+        let (source, _, maximum_packet_bytes) =
+            self.general_udp_scope(flow, application_port, destination, now_ms)?;
+        let packet = build_ipv4_udp_packet(source, destination, payload, maximum_packet_bytes)?;
+        try_send_inner_ip(
+            &self.client,
+            self.route_context_id,
+            self.masque_context_id,
+            packet,
+        )
+        .await
+    }
+
+    fn general_udp_scope(
+        &self,
+        flow: &AuthorizedUdpFlow,
+        application_port: u16,
+        destination: SocketAddrV4,
+        now_ms: u64,
+    ) -> Result<(SocketAddrV4, Ipv4Addr, usize), ProductionMpquicError> {
+        if self.transport_mode != TransportMode::SinglePathGeneralUdp
+            || application_port == 0
+            || !flow.matches_exact_ip_destination(SocketAddr::V4(destination))
+        {
+            return Err(ProductionMpquicError::Invalid(
+                "native general UDP exact destination",
+            ));
+        }
+        flow.ensure_active_at(now_ms)?;
+        if flow.route_context_id() != &self.route_context_id {
+            return Err(ProductionMpquicError::Invalid(
+                "native general UDP route context",
+            ));
+        }
+        let (client, server, maximum_packet_bytes) = tunnel_ipv4_scope(&self.assignment)?;
+        let source = SocketAddrV4::new(client, application_port);
+        Ok((source, server, maximum_packet_bytes))
     }
 
     /// Poll and validate one native reverse packet for the same signed UDP destination.
@@ -2604,6 +2641,26 @@ async fn send_inner_ip<C: MultipathNativeControl>(
         }
     }
     unreachable!("the bounded native send loop always returns")
+}
+
+async fn try_send_inner_ip<C: MultipathNativeControl>(
+    control: &C,
+    route_context_id: [u8; 16],
+    masque_context_id: u64,
+    packet: Vec<u8>,
+) -> Result<bool, ProductionMpquicError> {
+    match control
+        .send(SendDatagram {
+            route_context_id: route_context_id.to_vec(),
+            inner_ip_packet: packet,
+            masque_context_id,
+        })
+        .await
+    {
+        Ok(()) => Ok(true),
+        Err(error) if is_native_send_backpressure(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn is_native_send_backpressure(error: &ProductionMpquicError) -> bool {
@@ -3673,6 +3730,67 @@ mod tests {
             receive_inner_ip(&native, [2; 16], 7).await.unwrap(),
             Some(packet)
         );
+    }
+
+    #[tokio::test]
+    async fn native_udp_pipeline_submits_two_datagrams_before_receiving() {
+        let native = FakeNative::default();
+        let source = SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 45_001);
+        let destination = SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 18_081);
+        let first = build_ipv4_udp_packet(source, destination, b"first", 1280).unwrap();
+        let second = build_ipv4_udp_packet(source, destination, b"second", 1280).unwrap();
+
+        assert!(
+            try_send_inner_ip(&native, [2; 16], 7, first.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            try_send_inner_ip(&native, [2; 16], 7, second.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(native.state.lock().unwrap().send_attempts, 2);
+        // The native-control test boundary really delivered both UDP packets before the first
+        // receive. The disposable sharing smoke separately requires this through real native/WG.
+        assert_eq!(
+            receive_inner_ip(&native, [2; 16], 7).await.unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            receive_inner_ip(&native, [2; 16], 7).await.unwrap(),
+            Some(second)
+        );
+        assert!(!native.state.lock().unwrap().stopped);
+    }
+
+    #[tokio::test]
+    async fn native_udp_pipeline_backpressure_drops_once_without_poisoning_next_send() {
+        let native = FakeNative::default();
+        native.state.lock().unwrap().send_backpressure_remaining = 1;
+        let packet = vec![0x45; 20];
+        assert!(
+            !try_send_inner_ip(&native, [2; 16], 7, packet.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(native.state.lock().unwrap().send_attempts, 1);
+        assert!(!native.state.lock().unwrap().stopped);
+        assert!(
+            try_send_inner_ip(&native, [2; 16], 7, packet.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(native.state.lock().unwrap().send_attempts, 2);
+        assert_eq!(
+            receive_inner_ip(&native, [2; 16], 7).await.unwrap(),
+            Some(packet)
+        );
+        let other_failure = ProductionMpquicError::Native(NativeClientError::Rejected {
+            result: NativeResultCode::Transport,
+            diagnostic_code: "invalid_scope".to_owned(),
+        });
+        assert!(!is_native_send_backpressure(&other_failure));
     }
 
     #[tokio::test]

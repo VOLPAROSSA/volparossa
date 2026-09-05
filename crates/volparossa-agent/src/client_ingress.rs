@@ -2053,6 +2053,23 @@ mod tests {
             b"second-datagram"
         );
 
+        // Both submissions remain bound before either response arrives. Pipelining may not
+        // weaken the final transparent-reply source or original application-port checks.
+        let remote = SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 443);
+        let tunnel_target = SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 52_000);
+        for payload in [b"alpha-datagram".as_slice(), b"second-datagram".as_slice()] {
+            let reply = build_ipv4_udp_packet(remote, tunnel_target, payload, 1280)
+                .expect("complete reverse packet");
+            assert_eq!(bound.accept_native_response(&reply).unwrap(), payload);
+        }
+        for (source, target) in [
+            (SocketAddrV4::new(*remote.ip(), 444), tunnel_target),
+            (remote, SocketAddrV4::new(*tunnel_target.ip(), 52_001)),
+        ] {
+            let wrong = build_ipv4_udp_packet(source, target, b"wrong-reply", 1280).unwrap();
+            assert!(bound.accept_native_response(&wrong).is_err());
+        }
+
         let changed_source = PolicyAuthorizedUdpIngress::authorize(
             SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 52_001)),
             destination,

@@ -74,6 +74,8 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 const INGRESS_POLICY_BACKOFF: Duration = Duration::from_millis(50);
 const BROWSER_QUIC_REVERSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAXIMUM_BROWSER_QUIC_RESPONSES_PER_TICK: usize = 64;
+const GENERAL_UDP_REVERSE_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const MAXIMUM_GENERAL_UDP_RESPONSES_PER_TICK: usize = 64;
 const DNS_TCP_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fully loaded unprivileged service.
@@ -598,6 +600,8 @@ async fn run_client_udp_ingress(
     let mut browser_gate = BrowserQuicIngressGate::new();
     let mut browser_reverse_poll = tokio::time::interval(BROWSER_QUIC_REVERSE_POLL_INTERVAL);
     browser_reverse_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut general_udp_reverse_poll = tokio::time::interval(GENERAL_UDP_REVERSE_POLL_INTERVAL);
+    general_udp_reverse_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let general_udp_retirement_deadline = routes.general_udp_retirement_deadline().await;
         let browser_flow_active = routes.browser_quic_flow_active().await;
@@ -650,6 +654,41 @@ async fn run_client_udp_ingress(
                                 LogLevel::Warn,
                                 "INGRESS_MPQUIC_RESPONSE_UNAVAILABLE",
                                 unix_millis(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            _ = general_udp_reverse_poll.tick(), if general_udp_retirement_deadline.is_some() => {
+                if state.read().await.active_policy(unix_millis()).is_none() {
+                    routes.disconnect().await;
+                    continue;
+                }
+                // General UDP is not a request/response protocol: a destination can receive
+                // many datagrams before replying, or never reply. Drain the bounded native
+                // receive queue independently, keeping only one exact-bound reply in memory.
+                for _ in 0..MAXIMUM_GENERAL_UDP_RESPONSES_PER_TICK {
+                    match routes.try_receive_native_udp_response().await {
+                        Ok(Some(response)) => {
+                            if runtime.send_udp_response(
+                                response.application(),
+                                response.remote(),
+                                response.payload(),
+                            ).await.is_err() {
+                                routes.disconnect().await;
+                                state.write().await.log(
+                                    LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis(),
+                                );
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            routes.disconnect().await;
+                            state.write().await.log(
+                                LogLevel::Warn, "INGRESS_UDP_RESPONSE_UNAVAILABLE", unix_millis(),
                             );
                             break;
                         }
@@ -878,42 +917,8 @@ async fn run_client_udp_ingress(
                 );
                 continue;
             }
-            let response = tokio::select! {
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
-                        routes.disconnect().await;
-                        return;
-                    }
-                    continue;
-                }
-                result = routes.receive_udp_response() => match result {
-                    Ok(response) => response,
-                    Err(_) => {
-                        routes.disconnect().await;
-                        state.write().await.log(
-                            LogLevel::Warn,
-                            "INGRESS_UDP_RESPONSE_UNAVAILABLE",
-                            unix_millis(),
-                        );
-                        continue;
-                    }
-                },
-            };
-            if runtime
-                .send_udp_response(
-                    response.application(),
-                    response.remote(),
-                    response.payload(),
-                )
-                .await
-                .is_err()
-            {
-                routes.disconnect().await;
-                state
-                    .write()
-                    .await
-                    .log(LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis());
-            }
+            // Submission is complete. The independent reverse-drain branch above owns replies;
+            // the next application datagram must not wait for this destination to answer.
         }
     }
 }
@@ -1569,6 +1574,23 @@ mod tests {
         assert_eq!((&mut task).await.expect("actor task"), 7);
 
         stop_task(&mut task).await;
+    }
+
+    #[test]
+    fn general_udp_pipeline_sends_without_waiting_for_a_reply() {
+        let source = include_str!("lib.rs");
+        let actor = source
+            .split_once("async fn run_client_udp_ingress(")
+            .unwrap()
+            .1
+            .split_once("async fn run_client_dns_ingress(")
+            .unwrap()
+            .0;
+        assert!(!actor.contains("routes.receive_udp_response()"));
+        assert!(actor.contains("routes.try_receive_native_udp_response().await"));
+        assert!(actor.contains("0..MAXIMUM_GENERAL_UDP_RESPONSES_PER_TICK"));
+        assert!(actor.contains("general_udp_retirement_deadline.is_some()"));
+        assert!(actor.contains("routes.activate_udp_ingress("));
     }
 
     #[test]

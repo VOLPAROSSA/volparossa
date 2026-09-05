@@ -1501,11 +1501,10 @@ impl ClientRouteControl {
                         let SocketAddr::V4(destination) = binding.destination() else {
                             return Err(ClientRouteConnectError::UdpIngressUnavailable);
                         };
-                        active
+                        let submitted = active
                             .session
-                            .send_general_udp(
+                            .try_send_general_udp(
                                 flow,
-                                None,
                                 binding.source().port(),
                                 destination,
                                 &payload,
@@ -1518,6 +1517,12 @@ impl ClientRouteControl {
                                 eprintln!("native general UDP activation failed: {error}");
                                 ClientRouteConnectError::TransportRuntimeUnavailable
                             })?;
+                        if !submitted {
+                            // UDP backpressure drops only this already-authorized datagram. It
+                            // is not a route failure or activity/delivery-counter increment.
+                            tracing::debug!("native general UDP continuation backpressured");
+                            return Ok(ClientRouteProgress::TransportActive);
+                        }
                         lifetime.record_activity(crate::unix_millis(), Instant::now())?;
                         self.replace_agent_single_udp_path(active.path_summary().await?)
                             .await?;
@@ -1774,7 +1779,59 @@ impl ClientRouteControl {
         }
     }
 
-    /// Receive one bounded Exit response with the exact local transparent-return binding.
+    /// Poll one native general-UDP response without waiting for a remote datagram to arrive.
+    ///
+    /// This performs one bounded native IPC receive and retains no pending request or packet
+    /// queue. Empty receive releases the route lock immediately, so another application
+    /// datagram can be submitted independently of destination response latency. DNS's separate
+    /// serialized association is deliberately not consumed by this normal-UDP drain.
+    pub(crate) async fn try_receive_native_udp_response(
+        &self,
+    ) -> Result<Option<ClientUdpResponse>, ClientRouteConnectError> {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Ok(None);
+        };
+        let ClientTransportState::NativeUdp(active) = &mut established.transport else {
+            return Ok(None);
+        };
+        let (Some(binding), Some(lifetime)) = (&active.binding, &mut active.lifetime) else {
+            return Ok(None);
+        };
+        let SocketAddr::V4(destination) = binding.destination() else {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        };
+        let packet = active
+            .session
+            .receive_general_udp(
+                binding.activation().0,
+                binding.source().port(),
+                destination,
+                crate::unix_millis(),
+            )
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let Some(packet) = packet else {
+            return Ok(None);
+        };
+        let payload = binding
+            .accept_native_response(&packet)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .to_vec();
+        lifetime.record_activity(crate::unix_millis(), Instant::now())?;
+        let response = ClientUdpResponse {
+            application: binding.source(),
+            remote: binding.destination(),
+            payload,
+        };
+        self.replace_agent_single_udp_path(active.path_summary().await?)
+            .await?;
+        Ok(Some(response))
+    }
+
+    /// Receive one bounded Exit response for the dedicated serialized DNS actor.
     pub(crate) async fn receive_udp_response(
         &self,
     ) -> Result<ClientUdpResponse, ClientRouteConnectError> {
@@ -7575,6 +7632,20 @@ mod tests {
     const NOW_MS: u64 = 1_700_000_000_000;
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
+
+    #[tokio::test]
+    async fn general_udp_pipeline_empty_route_drain_does_not_wait_or_retain_lock() {
+        let routes = ClientRouteControl::new(PathBuf::from("/unused-native-udp-test.sock"));
+        let response = timeout(
+            Duration::from_millis(50),
+            routes.try_receive_native_udp_response(),
+        )
+        .await
+        .expect("empty drain must not wait for a response")
+        .expect("idle route is an empty queue");
+        assert!(response.is_none());
+        assert!(routes.state.try_lock().is_ok(), "route owner lock released");
+    }
 
     #[test]
     fn general_udp_lifetime_retains_two_continuations_then_expires_idle() {

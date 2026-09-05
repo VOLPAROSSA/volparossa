@@ -569,6 +569,21 @@ source = Path(sys.argv[1])
 tree = ast.parse(source.read_text(encoding="ascii"))
 fixture = runpy.run_path(str(source))
 assert len(fixture["payload_for"]("ab" * 16, "client")) == 1150
+pipeline = fixture["FirstEchoGate"]()
+flow_source = ("10.241.36.1", 45001)
+assert pipeline.receive(flow_source) == 0
+assert pipeline.receive(flow_source) == 2
+assert pipeline.requests_before_first_echo == 2
+assert pipeline.receive(flow_source) == 1
+assert pipeline.requests_before_first_echo == 2
+wrong_pipeline = fixture["FirstEchoGate"]()
+assert wrong_pipeline.receive(flow_source) == 0
+try:
+    wrong_pipeline.receive(("10.241.36.1", 45002))
+except ValueError:
+    pass
+else:
+    raise AssertionError("pipeline gate accepted a substituted Exit source tuple")
 # Contribution never sets a test-only priority1/mark; only owner priority0 is explicit.
 for node in ast.walk(tree):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "setsockopt":
