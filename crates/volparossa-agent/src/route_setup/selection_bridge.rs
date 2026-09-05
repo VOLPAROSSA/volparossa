@@ -15,7 +15,7 @@ use crate::{
         AdvertisementPayloadHash, BoundPreselectionFreshnessProofBatch,
         CompletedPreselectionFreshnessAttempt, CoolingPreselectionAttemptGate,
         DirectRelayCandidateSnapshot, DirectRelayCapability, DiscoveryControlHandle,
-        ForwardedExitCandidateSnapshot, ForwardedExitCapability,
+        EndpointTraversalBinding, ForwardedExitCandidateSnapshot, ForwardedExitCapability,
         PreselectionTranscriptFreshnessFacts, PreselectionTransportFreshnessFacts,
         RouteCandidateAdvertisement, RouteCandidatePolicySnapshot, RouteCandidateSnapshot,
     },
@@ -51,7 +51,7 @@ use volparossa_routing::{
     CommittedLeaseBatch, ContextRole, DestroyContext, DestroyedContext, LeaseActivation,
     LeaseCommit, LeasePlan, NATIVE_PROBE_CLIENT_PORT, NATIVE_PROBE_DATAGRAM_BYTES,
     NATIVE_PROBE_EXIT_PORT, PrepareLeaseBatch, PublicUdpEndpoint, TransportSocketAddress,
-    TransportSocketKind, WireguardRole,
+    TransportSocketKind, TraversalEndpointHint, WireguardRole,
 };
 use volparossa_selection::{
     Candidate, CandidateEvidence, CompleteRelayPathMetrics, DiversityAnchor, FilterRequirements,
@@ -115,7 +115,7 @@ const MAX_NATIVE_PROBE_ROUND_TRIP_MICROS: u64 = 10_000_000;
 #[derive(Eq, PartialEq)]
 struct ActorRelayDiversity {
     operator_id: OperatorId,
-    asn: u32,
+    asn: Option<u32>,
     prefix: ObservedNetworkPrefix,
 }
 
@@ -126,8 +126,7 @@ impl ActorRelayDiversity {
         role: ServiceRole,
     ) -> Result<Self, RouteSetupError> {
         let prefix = diversity.observed_network_prefix;
-        if diversity.asn == 0
-            || !role_allows_observed_prefix(role, prefix)
+        if !scoped_origin_is_usable(role, diversity.asn, prefix)
             || address_family.is_some_and(|family| family != prefix.family())
         {
             return Err(RouteSetupError::Invalid("relay diversity"));
@@ -1270,13 +1269,17 @@ impl ClientNativeRelayReady {
     }
 
     /// Exact shared-context Client plan a lifecycle owner may dispatch to the helper.
-    pub(crate) fn prepare_request(&self) -> Result<PrepareLeaseBatch, ClientNativeProbeError> {
+    pub(crate) async fn prepare_request(
+        &self,
+        discovery: &DiscoveryControlHandle,
+    ) -> Result<PrepareLeaseBatch, ClientNativeProbeError> {
         let mut route_context_id = None;
         let mut path_ids = HashSet::with_capacity(self.ready_path_count());
         let mut expires_at_ms = u64::MAX;
         let mut leases = Vec::with_capacity(self.ready_path_count());
+        let mut traversal_paths = Vec::with_capacity(self.ready_path_count());
         for armed in self.batch.armed.iter().chain(std::iter::once(&self.armed)) {
-            let (context, path_id, _relay_endpoint, path_expires_at_ms) = armed.helper_scope()?;
+            let (context, path_id, relay_endpoint, path_expires_at_ms) = armed.helper_scope()?;
             if route_context_id.is_some_and(|expected| expected != context)
                 || !path_ids.insert(path_id)
             {
@@ -1288,9 +1291,44 @@ impl ClientNativeRelayReady {
                 path_id,
                 role: WireguardRole::Client as i32,
             });
+            let relay = armed
+                .path_scope()
+                .data_relay
+                .as_ref()
+                .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+            let binding = EndpointTraversalBinding {
+                path_id,
+                role: WireguardRole::Client,
+                observer_id: relay
+                    .node_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+                observer_peer_id: libp2p::PeerId::from_bytes(&relay.peer_id)
+                    .map_err(|_| ClientNativeProbeError::HelperCorrelation)?,
+            };
+            let endpoint = relay_endpoint
+                .endpoint
+                .as_ref()
+                .ok_or(ClientNativeProbeError::HelperCorrelation)?
+                .clone();
+            traversal_paths.push((binding, endpoint));
         }
         leases.sort_by_key(|lease| lease.path_id);
         let route_context_id = route_context_id.ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        // Sources come only from the actor's authenticated connection observations. A signed
+        // LAN Relay endpoint requires an exact on-link pair; the helper still proves that the
+        // source is assigned and the connected route belongs to its prepared lease.
+        let hints = discovery
+            .endpoint_traversal_hints(
+                traversal_paths
+                    .iter()
+                    .map(|(binding, _)| binding.clone())
+                    .collect(),
+            )
+            .await
+            .unwrap_or_default();
+        let traversal_hints = bind_native_client_traversal_hints(&traversal_paths, hints)?;
         let (setup_expires_at_unix, hard_expires_at_unix) =
             native_helper_prepare_deadlines(expires_at_ms, crate::unix_seconds())?;
         let path_count =
@@ -1303,7 +1341,7 @@ impl ClientNativeRelayReady {
             leases,
             setup_expires_at_unix,
             hard_expires_at_unix,
-            traversal_hints: Vec::new(),
+            traversal_hints,
         })
     }
 
@@ -1388,6 +1426,68 @@ impl ClientNativeRelayReady {
             hard_expires_at_unix: request.hard_expires_at_unix,
         })
     }
+}
+
+fn bind_native_client_traversal_hints(
+    paths: &[(EndpointTraversalBinding, WireguardEndpoint)],
+    hints: Vec<TraversalEndpointHint>,
+) -> Result<Vec<TraversalEndpointHint>, ClientNativeProbeError> {
+    if paths.is_empty() || paths.len() > 8 || hints.len() > paths.len() * 2 {
+        return Err(ClientNativeProbeError::HelperCorrelation);
+    }
+    for (binding, endpoint) in paths {
+        if binding.role != WireguardRole::Client {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        endpoint
+            .validate("native Relay traversal endpoint")
+            .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+    }
+    let mut bound = Vec::with_capacity(paths.len());
+    for hint in hints {
+        let (binding, endpoint) = paths
+            .iter()
+            .find(|(binding, _)| binding.path_id == hint.path_id)
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        if hint.role != WireguardRole::Client as i32
+            || binding.role != WireguardRole::Client
+            || hint.observer_id != binding.observer_id
+            || hint.observer_peer_id != binding.observer_peer_id.to_bytes()
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let matches = match volparossa_protocol::UnderlayScope::try_from(endpoint.underlay_scope) {
+            Ok(volparossa_protocol::UnderlayScope::DirectLocalLan) => {
+                hint.on_link.as_ref().is_some_and(|local| {
+                    hint.observed_address.is_empty()
+                        && local.peer_address == endpoint.underlay_ip
+                        && local.local_address.len() == endpoint.underlay_ip.len()
+                })
+            }
+            Ok(volparossa_protocol::UnderlayScope::PublicInternet) => {
+                hint.on_link.is_none() && hint.observed_address.len() == endpoint.underlay_ip.len()
+            }
+            Err(_) => return Err(ClientNativeProbeError::HelperCorrelation),
+        };
+        if matches {
+            if bound
+                .iter()
+                .any(|existing: &TraversalEndpointHint| existing.path_id == hint.path_id)
+            {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            bound.push(hint);
+        }
+    }
+    for (binding, endpoint) in paths {
+        if endpoint.underlay_scope == volparossa_protocol::UnderlayScope::DirectLocalLan as i32
+            && !bound.iter().any(|hint| hint.path_id == binding.path_id)
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+    }
+    bound.sort_by_key(|hint| hint.path_id);
+    Ok(bound)
 }
 
 fn native_helper_prepare_deadlines(
@@ -2191,7 +2291,7 @@ fn fresh_evidence_batch_from_preselection(
                 && relay_projections[control].is_none()
                 && exit_projection.is_none() =>
             {
-                validate_projection_prefix(upstream_network_prefix, family, ServiceRole::Exit)?;
+                validate_projection_prefix(upstream_network_prefix, family)?;
                 let control_projection = local_projection;
                 // The client observed one complete client-control-exit-control-client exchange.
                 // It is a conservative forwarded-path RTT, never a direct client-to-exit sample.
@@ -2294,7 +2394,7 @@ fn actor_projection(
     let prefix = transport.observed_network_prefix();
     // This transport observation always describes a directly authenticated Relay, including the
     // control Relay for a forwarded Exit receipt; it never describes the upstream Exit itself.
-    validate_projection_prefix(prefix, family, ServiceRole::Relay)?;
+    validate_projection_prefix(prefix, family)?;
     let observed_at_ms = transport.observed_at_ms();
     let round_trip = transport.round_trip();
     if observed_at_ms < attempt_started_at_ms
@@ -2317,16 +2417,28 @@ fn actor_projection(
 fn validate_projection_prefix(
     prefix: ObservedNetworkPrefix,
     family: IpFamily,
-    role: ServiceRole,
 ) -> Result<(), SelectionBridgeError> {
-    if prefix.family() != family || !role_allows_observed_prefix(role, prefix) {
+    if prefix.family() != family || !observed_prefix_has_valid_scope(prefix) {
         return Err(SelectionBridgeError::EvidenceBinding);
     }
     Ok(())
 }
 
-fn role_allows_observed_prefix(role: ServiceRole, prefix: ObservedNetworkPrefix) -> bool {
-    prefix.is_public_routable() || (role == ServiceRole::Relay && prefix.is_local_lan())
+fn observed_prefix_has_valid_scope(prefix: ObservedNetworkPrefix) -> bool {
+    // Role/uplink/ASN binding is checked against the authenticated advertisement. At the
+    // projection boundary both direct Relay and signed forwarded Exit may be explicitly local.
+    prefix.is_public_routable() || prefix.is_local_lan()
+}
+
+fn scoped_origin_is_usable(
+    role: ServiceRole,
+    asn: Option<u32>,
+    prefix: ObservedNetworkPrefix,
+) -> bool {
+    match asn {
+        Some(asn) => asn != 0 && observed_prefix_has_valid_scope(prefix),
+        None => role == ServiceRole::Relay && prefix.is_local_lan(),
+    }
 }
 
 #[allow(
@@ -2567,8 +2679,7 @@ fn validate_fresh_evidence_batch(
     let mut peer_ids = HashSet::with_capacity(evidence.len());
     for fresh in evidence {
         let prefix_is_exact = fresh.observed_network_prefix.is_some_and(|prefix| {
-            role_allows_observed_prefix(fresh.role, prefix)
-                && fresh.address_family == Some(prefix.family())
+            observed_prefix_has_valid_scope(prefix) && fresh.address_family == Some(prefix.family())
         });
         let role_shape_is_exact = matches!(
             (fresh.role, &fresh.forwarded_control),
@@ -2803,7 +2914,7 @@ fn prospective_diversity_anchors(
     let control_peer_id = PeerId::new(control_identity.peer_id.to_string())
         .map_err(|_| SelectionBridgeError::EvidenceBinding)?;
     Ok([
-        DiversityAnchor::from_direct_relay_prefix(
+        DiversityAnchor::from_scoped_prefix(
             control_node_id,
             control_peer_id,
             selected
@@ -2816,8 +2927,9 @@ fn prospective_diversity_anchors(
                 .forwarded_exit
                 .control_diversity
                 .observed_network_prefix,
+            ServiceRole::Relay,
         )?,
-        DiversityAnchor::from_observed_prefix(
+        DiversityAnchor::from_scoped_prefix(
             selected.selected.node_id.clone(),
             selected.selected.peer_id.clone(),
             selected.forwarded_exit.exit_diversity.operator_id.clone(),
@@ -2826,6 +2938,7 @@ fn prospective_diversity_anchors(
                 .forwarded_exit
                 .exit_diversity
                 .observed_network_prefix,
+            ServiceRole::Exit,
         )?,
     ])
 }
@@ -3154,8 +3267,7 @@ fn validate_preprobe_peer_evidence(
         || evidence.reserved_path_limit.down_mbps < scope.minimum_capacity.down_mbps
         || evidence.observed_network_origin.is_some()
         || !observed_family_matches
-        || diversity.asn == 0
-        || !role_allows_observed_prefix(role, prefix)
+        || !scoped_origin_is_usable(role, diversity.asn, prefix)
         || evidence
             .serious_protocol_fault_until
             .is_some_and(|until| !until.is_expired_at(UnixTime::from_secs(trusted_now_ms / 1_000)))
@@ -4375,7 +4487,7 @@ fn mint_actor_bound_relay_proof(
                 .min(identity.expires_at_ms)
                 .min(identity.policy_expires_at_ms)
         || advertisement.network.operator_id != record.diversity.operator_id
-        || advertisement.network.asn != Some(record.diversity.asn)
+        || advertisement.network.asn != record.diversity.asn
         || record.candidate.evidence.observed_network_origin.is_some()
     {
         return Err(SelectionBridgeError::EvidenceBinding);
@@ -4521,11 +4633,15 @@ fn verify_selection_metadata(
         .observed_at_ms
         .checked_add(MAXIMUM_EVIDENCE_AGE_MS)
         .ok_or(SelectionBridgeError::StaleEvidence)?;
-    let asn = advertisement
-        .network
-        .asn
-        .filter(|asn| *asn != 0)
-        .ok_or(SelectionBridgeError::EvidenceBinding)?;
+    let asn = advertisement.network.asn;
+    let uplink_matches = match advertisement.network.uplink {
+        volparossa_core::NetworkUplink::IndependentInternet => asn.is_some(),
+        volparossa_core::NetworkUplink::LocalOnly => {
+            expected_role == ServiceRole::Relay
+                && asn.is_none()
+                && observed_network_prefix.is_local_lan()
+        }
+    };
     let observed_family_matches = scope.address_family == Some(observed_network_prefix.family());
     if fresh.node_id != advertisement.node_id
         || fresh.peer_id != advertisement.peer_id
@@ -4541,10 +4657,8 @@ fn verify_selection_metadata(
         || !observed_family_matches
         || (fresh.reachable && fresh.rtt_ms.is_none())
         || (!fresh.reachable && fresh.rtt_ms.is_some())
-        || !role_allows_observed_prefix(expected_role, observed_network_prefix)
-        // Local-only Relay advertisements remain honest but need their own unknown-origin
-        // selection policy. Initial LAN consumers use a Relay with an independent WAN uplink.
-        || advertisement.network.uplink != volparossa_core::NetworkUplink::IndependentInternet
+        || !scoped_origin_is_usable(expected_role, asn, observed_network_prefix)
+        || !uplink_matches
         || authenticated.signed_measured_at_ms == 0
         || authenticated.signed_measured_at_ms > authenticated.signed_expires_at_ms
     {
@@ -4948,6 +5062,89 @@ mod tests {
         assert!(native_helper_prepare_deadlines(NOW_MS, now_unix).is_err());
     }
 
+    fn native_client_local_traversal_fixture() -> (
+        (EndpointTraversalBinding, WireguardEndpoint),
+        TraversalEndpointHint,
+    ) {
+        let identity = Identity::generate();
+        let binding = EndpointTraversalBinding {
+            path_id: 1,
+            role: WireguardRole::Client,
+            observer_id: node_id_from_public_key(
+                &identity.ed25519_public_key_bytes().expect("key"),
+            ),
+            observer_peer_id: *identity.peer_id(),
+        };
+        let endpoint = WireguardEndpoint {
+            public_key: vec![33; 32],
+            underlay_ip: vec![192, 168, 70, 2],
+            listen_port: 51820,
+            underlay_scope: volparossa_protocol::UnderlayScope::DirectLocalLan as i32,
+        };
+        let hint = TraversalEndpointHint {
+            path_id: binding.path_id,
+            role: WireguardRole::Client as i32,
+            observer_id: binding.observer_id.to_vec(),
+            observer_peer_id: binding.observer_peer_id.to_bytes(),
+            observed_address: Vec::new(),
+            on_link: Some(volparossa_routing::OnLinkUnderlayHint {
+                local_address: vec![192, 168, 70, 1],
+                peer_address: endpoint.underlay_ip.clone(),
+            }),
+        };
+        ((binding, endpoint), hint)
+    }
+
+    #[test]
+    fn native_client_prepare_hints_preserve_actor_observed_source_and_signed_local_peer() {
+        let (path, hint) = native_client_local_traversal_fixture();
+        assert_eq!(
+            bind_native_client_traversal_hints(&[path.clone()], vec![hint.clone()])
+                .expect("same observed source and signed local Relay endpoint"),
+            vec![hint.clone()]
+        );
+        assert!(bind_native_client_traversal_hints(&[path.clone()], Vec::new()).is_err());
+        for field in 0..6 {
+            let mut changed = hint.clone();
+            match field {
+                0 => changed.path_id = 2,
+                1 => changed.role = WireguardRole::Exit as i32,
+                2 => changed.observer_id[0] ^= 1,
+                3 => changed.observer_peer_id = Identity::generate().peer_id().to_bytes(),
+                4 => changed.on_link.as_mut().expect("local").peer_address[3] ^= 1,
+                _ => changed.on_link = None,
+            }
+            assert!(bind_native_client_traversal_hints(&[path.clone()], vec![changed]).is_err());
+        }
+        assert!(bind_native_client_traversal_hints(&[path], vec![hint.clone(), hint]).is_err());
+    }
+
+    #[test]
+    fn native_client_prepare_hints_keep_public_fallback_without_scope_downgrade() {
+        let (mut path, local) = native_client_local_traversal_fixture();
+        path.1.underlay_scope = volparossa_protocol::UnderlayScope::PublicInternet as i32;
+        assert!(bind_native_client_traversal_hints(&[path.clone()], Vec::new()).is_err());
+        path.1.underlay_ip = vec![44, 70, 1, 2];
+        assert!(
+            bind_native_client_traversal_hints(&[path.clone()], Vec::new())
+                .expect("existing direct public fallback")
+                .is_empty()
+        );
+        assert!(
+            bind_native_client_traversal_hints(&[path.clone()], vec![local.clone()])
+                .expect("local observation cannot select public endpoint underlay")
+                .is_empty()
+        );
+        let mut public = local;
+        public.on_link = None;
+        public.observed_address = vec![45, 70, 1, 1];
+        assert_eq!(
+            bind_native_client_traversal_hints(&[path], vec![public.clone()])
+                .expect("same-family public observation retained"),
+            vec![public]
+        );
+    }
+
     #[allow(
         clippy::too_many_arguments,
         clippy::too_many_lines,
@@ -4962,6 +5159,35 @@ mod tests {
         address: impl Into<IpAddr>,
         policy_hash: [u8; 32],
         expires_at_ms: u64,
+    ) -> StoredPeer {
+        signed_peer_with_uplink(
+            seed,
+            relay,
+            exit,
+            operator,
+            asn,
+            address,
+            policy_hash,
+            expires_at_ms,
+            volparossa_core::NetworkUplink::IndependentInternet,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "fixture signs the exact declared uplink and optional ASN, without forged hints"
+    )]
+    fn signed_peer_with_uplink(
+        seed: u8,
+        relay: bool,
+        exit: bool,
+        operator: &str,
+        asn: u32,
+        address: impl Into<IpAddr>,
+        policy_hash: [u8; 32],
+        expires_at_ms: u64,
+        uplink: volparossa_core::NetworkUplink,
     ) -> StoredPeer {
         let address = address.into();
         let (address_protocol, supports_ipv4, supports_ipv6) = match address {
@@ -5008,7 +5234,14 @@ mod tests {
                 sample_window_seconds: 30,
             }),
             network: Some(AdvertisementNetwork {
-                uplink: volparossa_protocol::AdvertisementUplink::IndependentInternet as i32,
+                uplink: match uplink {
+                    volparossa_core::NetworkUplink::IndependentInternet => {
+                        volparossa_protocol::AdvertisementUplink::IndependentInternet
+                    }
+                    volparossa_core::NetworkUplink::LocalOnly => {
+                        volparossa_protocol::AdvertisementUplink::LocalOnly
+                    }
+                } as i32,
                 region: "eu-west".to_owned(),
                 country_code: "NL".to_owned(),
                 asn,
@@ -5072,7 +5305,7 @@ mod tests {
                 sample_window_seconds: 30,
             },
             network: NetworkMetadata {
-                uplink: volparossa_core::NetworkUplink::IndependentInternet,
+                uplink,
                 operator_id: OperatorId::new(operator).expect("operator"),
                 region: "eu-west".to_owned(),
                 country_code: "NL".to_owned(),
@@ -6037,7 +6270,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_local_lan_relays_reach_preprobe_without_relaxing_exit_scope() {
+    fn scoped_local_lan_relays_and_known_exit_reach_preprobe() {
         let (snapshot, mut evidence) = snapshot_fixture();
         for (index, fresh) in evidence.iter_mut().enumerate() {
             if fresh.role == ServiceRole::Relay {
@@ -6082,14 +6315,121 @@ mod tests {
 
         evidence[1].observed_network_prefix =
             Some(ObservedNetworkPrefix::local_ipv4_24([192, 168, 100]));
-        assert!(matches!(
-            FreshEvidenceBatch::for_test(evidence, NOW_MS),
-            Err(SelectionBridgeError::EvidenceBinding)
-        ));
+        assert!(
+            snapshot_route_plan_at(
+                &snapshot,
+                snapshot_parameters(),
+                fresh_batch(evidence),
+                NOW_MS,
+                &mut OsRng,
+            )
+            .is_ok(),
+            "known independent Exit can have signed local upstream evidence"
+        );
     }
 
     #[test]
-    fn scoped_local_lan_projection_is_role_and_family_bound() {
+    fn local_only_signed_relay_reaches_udp_preprobe_without_an_internet_asn() {
+        let (baseline, evidence) = snapshot_fixture();
+        let control = baseline.direct_relays()[0].clone();
+        let local_address = Ipv4Addr::new(192, 168, 70, 2);
+        let stored = signed_peer_with_uplink(
+            70,
+            true,
+            false,
+            "local-only-contributor",
+            0,
+            local_address,
+            POLICY_BYTES,
+            NOW_MS + 120_000,
+            volparossa_core::NetworkUplink::LocalOnly,
+        );
+        let (local, mut local_fresh) = snapshot_direct_candidate(&stored, local_address);
+        local_fresh.observed_network_prefix =
+            Some(ObservedNetworkPrefix::local_ipv4_24([192, 168, 70]));
+        let snapshot = RouteCandidateSnapshot::for_test(
+            NOW_MS,
+            baseline.policy(),
+            vec![control, local],
+            baseline.forwarded_exits().to_vec(),
+        );
+        let mut evidence = vec![evidence[0].clone(), evidence[1].clone(), local_fresh];
+        for fresh in &mut evidence {
+            fresh.transport = SelectionTransport::UdpSinglePath;
+        }
+        evidence[1].observed_network_prefix =
+            Some(ObservedNetworkPrefix::local_ipv4_24([192, 168, 71]));
+        let mut parameters = snapshot_parameters();
+        parameters.transport = SelectionTransport::UdpSinglePath;
+        parameters.relay_policy.active_paths = 1;
+        parameters.relay_policy.minimum_paths = 1;
+        parameters.relay_policy.maximum_paths = 1;
+        let plan = snapshot_route_plan_at(
+            &snapshot,
+            parameters,
+            fresh_batch(evidence),
+            NOW_MS,
+            &mut OsRng,
+        )
+        .expect("signed LocalOnly data relay selected without invented ASN");
+        assert_eq!(plan.prospective_relays.len(), 1);
+        assert_eq!(plan.prospective_relays[0].diversity.asn, None);
+        assert!(
+            plan.prospective_relays[0]
+                .diversity
+                .observed_network_prefix
+                .is_local_lan()
+        );
+        let expected = expected_preprobe_continuation(&plan);
+        let continuation = consume_prospective_route_plan_with_minters(
+            plan,
+            preprobe_consume_context(Instant::now()),
+            RouteSessionAuthority::generate,
+            ReservationSession::generate,
+        )
+        .expect("one real signed unknown-origin relay survives reservation preparation");
+        assert_exact_preprobe_bindings(&continuation, &expected);
+        assert_eq!(continuation.paths.len(), 1);
+    }
+
+    #[test]
+    fn local_only_preprobe_diversity_does_not_treat_unknown_asns_as_independent() {
+        let unknown = |prefix| DiversitySnapshot {
+            operator_id: OperatorId::new(format!("local-{prefix}")).expect("operator"),
+            asn: None,
+            observed_network_prefix: ObservedNetworkPrefix::local_ipv4_24([192, 168, prefix]),
+        };
+        let first = unknown(1);
+        let second = unknown(2);
+        let first_actor =
+            ActorRelayDiversity::from_snapshot(&first, Some(IpFamily::Ipv4), ServiceRole::Relay)
+                .expect("scoped unknown relay");
+        let second_actor =
+            ActorRelayDiversity::from_snapshot(&second, Some(IpFamily::Ipv4), ServiceRole::Relay)
+                .expect("scoped unknown relay");
+        assert!(first.conflicts_with(&second));
+        assert!(first_actor.conflicts_with(&second_actor));
+        assert!(
+            ActorRelayDiversity::from_snapshot(&first, Some(IpFamily::Ipv4), ServiceRole::Exit)
+                .is_err()
+        );
+        let plan = prospective_plan();
+        let candidate_evidence = &plan.prospective_relays[0].peer_evidence;
+        assert!(
+            validate_preprobe_peer_evidence(
+                candidate_evidence,
+                &second,
+                ServiceRole::Relay,
+                &scope(),
+                NOW_MS,
+                &[&first],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn scoped_local_lan_projection_is_explicit_and_family_bound() {
         for (prefix, family) in [
             (
                 ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]),
@@ -6100,14 +6440,12 @@ mod tests {
                 IpFamily::Ipv6,
             ),
         ] {
-            assert!(validate_projection_prefix(prefix, family, ServiceRole::Relay).is_ok());
-            assert!(validate_projection_prefix(prefix, family, ServiceRole::Exit).is_err());
+            assert!(validate_projection_prefix(prefix, family).is_ok());
         }
         assert!(
             validate_projection_prefix(
                 ObservedNetworkPrefix::ipv4_24([192, 168, 1]),
                 IpFamily::Ipv4,
-                ServiceRole::Relay,
             )
             .is_err()
         );
@@ -6115,7 +6453,6 @@ mod tests {
             validate_projection_prefix(
                 ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]),
                 IpFamily::Ipv6,
-                ServiceRole::Relay,
             )
             .is_err()
         );
@@ -7189,8 +7526,8 @@ mod tests {
 
         async fn endpoint_traversal_hints(
             &mut self,
-            _bindings: Vec<crate::discovery::EndpointTraversalBinding>,
-        ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+            _bindings: Vec<EndpointTraversalBinding>,
+        ) -> Result<Vec<TraversalEndpointHint>, Self::Error> {
             Ok(Vec::new())
         }
 

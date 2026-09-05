@@ -244,7 +244,7 @@ impl DirectPreselectionFreshnessProof {
 /// Terminal forwarded-Exit transcript proof retained only for private freshness minting.
 ///
 /// The projection is affine and retains only the joint signed validity ceiling and the normalized
-/// public /24 or /48 observed by the authenticated control Relay. It exposes no actor identity,
+/// scope-tagged /24 or /48 observed by the authenticated control Relay. It exposes no actor identity,
 /// request, signature, nonce, full endpoint, or wire bytes.
 #[must_use = "a forwarded preselection freshness proof must be consumed by its private owner"]
 pub struct ForwardedPreselectionFreshnessProof {
@@ -259,7 +259,7 @@ impl ForwardedPreselectionFreshnessProof {
         self.valid_until_ms
     }
 
-    /// Return the endpoint-free public prefix cryptographically bound by the control Relay.
+    /// Return the endpoint-free scoped prefix cryptographically bound by the control Relay.
     #[must_use]
     pub const fn upstream_network_prefix(&self) -> ObservedNetworkPrefix {
         self.upstream_network_prefix
@@ -508,11 +508,6 @@ impl ControlPayload for ForwardedPreselectionAttestation {
                 "forwarded observation upstream_network_prefix",
             ))?;
         prefix.validate()?;
-        if prefix.scope != UnderlayScope::PublicInternet as i32 {
-            return Err(ProtocolError::InvalidField(
-                "forwarded Exit observation must be public",
-            ));
-        }
         if prefix.address_family != scope.address_family {
             return Err(ProtocolError::InvalidField(
                 "forwarded observation address_family",
@@ -659,7 +654,7 @@ pub fn verify_direct_preselection_transcript(
 /// Verify a control wrapper first, then its exact nested exit receipt.
 ///
 /// Both replay entries are committed only when the request, actor, scope,
-/// timestamps, nested bytes, and public prefix all cross-bind. A nested failure
+/// timestamps, nested bytes, and scope-tagged prefix all cross-bind. A nested failure
 /// rolls back only the already accepted outer entry.
 ///
 /// # Errors
@@ -840,7 +835,7 @@ pub fn consume_bound_direct_preselection_transcript_for_freshness(
 /// Purpose-consume one exact bound forwarded-Exit transcript for private freshness minting.
 ///
 /// The returned affine projection carries only the earlier signed validity ceiling and the
-/// endpoint-free public prefix in the authenticated control-Relay wrapper. It cannot recover any
+/// endpoint-free scoped prefix in the authenticated control-Relay wrapper. It cannot recover any
 /// identity, request, signature, nonce, full endpoint, response bytes, or dispatch capability.
 ///
 /// # Errors

@@ -35,8 +35,9 @@ print_plan() {
             '  retain twelve owned namespaces and eleven isolated helper/agent instances;' \
             '  give the local-only Client two RFC1918 LAN Relay contacts, no public address or default;' \
             '  enable its Client and Relay roles, keep Exit disabled and ASN/public prefix absent;' \
-            '  retain independent WAN Relay contacts and one remote Internet Exit;' \
-            '  prove actual signed selection and one application UDP echo over both WireGuard legs;' \
+            '  give relay2 its own destination uplink; the local-only Client receives none;' \
+            '  prove concurrent C→A|B→X consumption and A→C→B actual LAN relay contribution;' \
+            '  bind both application echoes and exact selected contexts to the same local-only daemon;' \
             '  capture LAN/WAN packets, exact Exit source, no direct-exit or plaintext leak;' \
             '  stop workers, remove owned networks and verify unchanged guest-root host state;' \
             '  emit local-link-smoke.json; no radio, multipath-capacity or A01-A15 claim.'
@@ -1146,8 +1147,9 @@ capture_host_state "$WORK/host-state-before.json" \
 # policy hostname to the one destination address, while cleanup restores the exact guest file.
 install -o root -g root -m 0600 /etc/hosts "$WORK/hosts.before"
 HOSTS_BACKUP=$WORK/hosts.before
-printf '%s\n' '47.163.4.2 destination.volparossa.test' >>/etc/hosts
-getent ahostsv4 destination.volparossa.test | awk '{print $1}' | sort -u \
+# The protected Exit resolver uses an absolute DNS name, avoiding search-domain substitution.
+printf '%s\n' '47.163.4.2 destination.volparossa.test destination.volparossa.test.' >>/etc/hosts
+getent ahostsv4 destination.volparossa.test. | awk '{print $1}' | sort -u \
     >"$WORK/a08-exit-host-lookup.txt"
 [ "$(cat "$WORK/a08-exit-host-lookup.txt")" = 47.163.4.2 ] \
     || fail A08_DESTINATION_LOOKUP_NOT_PINNED

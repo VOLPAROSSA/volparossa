@@ -2643,11 +2643,18 @@ fn encode_activate_device_v3(
     Ok(payload)
 }
 
-/// Client `WireGuard` outer packets originate in the kernel and therefore have no trusted agent
+/// All `WireGuard` outer packets originate in the kernel and therefore have no trusted agent
 /// socket UID. The existing ingress mark bypasses parent output steering without selecting the
-/// parent-to-ingress policy table. Non-client endpoints retain the kernel default mark.
+/// parent-to-ingress policy table. Relay/Exit packets need the same exemption when this node also
+/// consumes the network; otherwise its own Client ingress recursively captures contribution.
 fn wireguard_underlay_mark(resource: &DurableWireguardResource) -> u32 {
-    if resource.key().1 == WireguardRole::Client as i32 {
+    if matches!(
+        WireguardRole::try_from(resource.key().1),
+        Ok(WireguardRole::Client
+            | WireguardRole::RelayClient
+            | WireguardRole::RelayExit
+            | WireguardRole::Exit)
+    ) {
         CLIENT_INGRESS_IPV4_MARK
     } else {
         0
@@ -3315,6 +3322,34 @@ mod tests {
         }));
 
         assert!(encode_prepare_key_no_peers_v3(&resource, &Zeroizing::new([0; 32])).is_err());
+    }
+
+    #[test]
+    fn v3_activation_marks_every_role_to_bypass_combined_node_client_ingress() {
+        for (context_role, role) in [
+            (ContextRole::Client, WireguardRole::Client),
+            (ContextRole::Relay, WireguardRole::RelayClient),
+            (ContextRole::Relay, WireguardRole::RelayExit),
+            (ContextRole::Exit, WireguardRole::Exit),
+        ] {
+            let resource = durable_wireguard_resource_for_test([7; 16], context_role, 1, role, 11)
+                .expect("exact role resource");
+            let peer = WireguardV3PeerConfiguration {
+                public_key: [0x33; 32],
+                endpoint: "198.51.100.4:51820".parse().expect("endpoint"),
+                allowed_address: resource.peer_address(),
+                allowed_prefix_length: 128,
+                persistent_keepalive_seconds: 5,
+            };
+            let payload = encode_activate_device_v3(&resource, &peer).expect("activation encoding");
+            let device = attributes(&payload[GENL_HEADER_LEN..]).expect("device attributes");
+            assert!(
+                device.iter().any(|(kind, value)| {
+                    *kind == WGDEVICE_A_FWMARK && *value == CLIENT_INGRESS_IPV4_MARK.to_ne_bytes()
+                }),
+                "kernel WireGuard outer packets must bypass Client ingress in role {role:?}"
+            );
+        }
     }
 
     #[test]

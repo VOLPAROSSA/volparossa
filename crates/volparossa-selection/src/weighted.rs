@@ -74,7 +74,7 @@ pub struct DiversityAnchor {
     node_id: NodeId,
     peer_id: PeerId,
     operator_id: OperatorId,
-    asn: u32,
+    asn: Option<u32>,
     observed_network_prefix: ObservedNetworkPrefix,
     legacy_origin_equality_key: Option<ObservedNetworkOrigin>,
 }
@@ -164,6 +164,43 @@ impl DiversityAnchor {
         )
     }
 
+    /// Creates an anchor from explicitly scoped authenticated prefix evidence.
+    ///
+    /// An absent Internet ASN is permitted only for a local-LAN Relay and occupies the route's
+    /// single unknown-origin slot. It never proves a distinct Internet failure domain.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero ASN, unscoped prefixes, and unknown-origin Exit or public observations.
+    pub fn from_scoped_prefix(
+        node_id: NodeId,
+        peer_id: PeerId,
+        operator_id: OperatorId,
+        asn: Option<u32>,
+        observed_network_prefix: ObservedNetworkPrefix,
+        role: ServiceRole,
+    ) -> Result<Self, SelectionError> {
+        let valid = match asn {
+            Some(asn) => {
+                asn != 0
+                    && (observed_network_prefix.is_public_routable()
+                        || observed_network_prefix.is_local_lan())
+            }
+            None => role == ServiceRole::Relay && observed_network_prefix.is_local_lan(),
+        };
+        if !valid {
+            return Err(SelectionError::InvalidDiversityAnchors);
+        }
+        Ok(Self {
+            node_id,
+            peer_id,
+            operator_id,
+            asn,
+            observed_network_prefix,
+            legacy_origin_equality_key: None,
+        })
+    }
+
     fn from_parts(
         node_id: NodeId,
         peer_id: PeerId,
@@ -183,7 +220,7 @@ impl DiversityAnchor {
             node_id,
             peer_id,
             operator_id,
-            asn,
+            asn: Some(asn),
             observed_network_prefix,
             legacy_origin_equality_key,
         })
@@ -1610,7 +1647,8 @@ struct DiversitySet {
     peers: HashSet<PeerId>,
     operators: HashSet<OperatorId>,
     observed_network_prefixes: HashSet<ObservedNetworkPrefix>,
-    asns: HashSet<u32>,
+    // None is one shared unknown-origin occupancy, never an independent ASN identity.
+    asns: HashSet<Option<u32>>,
 }
 
 impl DiversitySet {
@@ -1641,9 +1679,10 @@ impl DiversitySet {
                 && !self.nodes.contains(&candidate.advertisement.node_id)
                 && !self.peers.contains(&candidate.advertisement.peer_id)
                 && !self.operators.contains(&network.operator_id)
-                && network
-                    .asn
-                    .is_some_and(|asn| asn != 0 && !self.asns.contains(&asn))
+                && (network.asn.is_some_and(|asn| asn != 0)
+                    || (network.uplink == volparossa_core::NetworkUplink::LocalOnly
+                        && prefix.is_local_lan()))
+                && !self.asns.contains(&network.asn)
                 && !self.observed_network_prefixes.contains(&prefix)
         })
     }
@@ -1652,13 +1691,14 @@ impl DiversitySet {
         !self.nodes.contains(&projection.node_id)
             && !self.peers.contains(&projection.peer_id)
             && !self.operators.contains(&projection.operator_id)
+            && (projection.asn.is_some() || !self.asns.contains(&None))
             && !self
                 .observed_network_prefixes
                 .contains(&projection.network_prefix)
     }
 
     fn has_new_projected_asn(&self, projection: &RelaySelectionProjection) -> bool {
-        projection.asn.is_some_and(|asn| !self.asns.contains(&asn))
+        projection.asn.is_some() && !self.asns.contains(&projection.asn)
     }
 
     fn insert_candidate<C: SelectionCandidate>(&mut self, input: &C) {
@@ -1670,9 +1710,7 @@ impl DiversitySet {
         if let Some(prefix) = input.observed_network_prefix() {
             self.observed_network_prefixes.insert(prefix);
         }
-        if let Some(asn) = network.asn {
-            self.asns.insert(asn);
-        }
+        self.asns.insert(network.asn);
     }
 
     fn insert_projected(&mut self, projection: &RelaySelectionProjection) {
@@ -1681,8 +1719,6 @@ impl DiversitySet {
         self.operators.insert(projection.operator_id.clone());
         self.observed_network_prefixes
             .insert(projection.network_prefix);
-        if let Some(asn) = projection.asn {
-            self.asns.insert(asn);
-        }
+        self.asns.insert(projection.asn);
     }
 }

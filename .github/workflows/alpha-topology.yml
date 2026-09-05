@@ -203,7 +203,8 @@ jobs:
             if test -f "$report"; then
               jq -r '
                 "local-link runtime succeeded: \(.success)",
-                "completed LAN/WAN UDP flows: \([.flows[] | select(.success)] | length)/1",
+                "completed consuming/contributing UDP flows: \([.flows[] | select(.success)] | length)/2",
+                "local-only relay contribution: \(.contribution_witness.node // "not proven")",
                 "observed blocker: \(.observed_blocker // "none")",
                 "cleanup complete: \(.cleanup.complete)",
                 "guest host state unchanged: \(.host_state.unchanged)"
@@ -368,14 +369,23 @@ jobs:
           jq -e --arg revision "$GITHUB_SHA" '
             .report_kind == "volparossa-local-link-runtime" and
             .source_revision == $revision and .success == true and
-            (.flows | length) == 1 and
+            (.flows | length) == 2 and
             all(.flows[]; .success == true and .state == 3 and
-              .client_node == "client" and .exit_node == "exit" and
               (.route_context_id | type == "string" and length == 32) and
               .relay_peer_id != .exit_peer_id and
               .path_evidence.client_relay_scope == "DirectLocalLan" and
-              .path_evidence.relay_exit_scope == "PublicInternet" and
+              (if .client_node == "client" then .exit_node == "exit" and
+                .path_evidence.relay_exit_scope == "PublicInternet"
+               else .client_node == "relay0" and .relay_node == "client" and
+                .exit_node == "relay2" and .path_evidence.relay_exit_scope == "DirectLocalLan" end) and
               all(.path_evidence.wireguard_both_legs[]; . > 0)) and
+            ([.flows[].client_node] | sort) == ["client","relay0"] and
+            .contribution_witness.node == "client" and
+            .contribution_witness.same_agent_pid == true and
+            .contribution_witness.independent_internet == false and
+            .contribution_witness.exit_enabled == false and
+            .contribution_witness.consuming_context != .contribution_witness.relaying_context and
+            .concurrent_echo_overlap_ns >= 2000000000 and
             (.nodes | length) == 4 and
             all(.nodes[]; .roles.client == true and .roles.relay == true and
               .roles.exit == (.node != "client") and .same_agent_pid == true and

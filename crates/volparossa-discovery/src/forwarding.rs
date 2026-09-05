@@ -3,7 +3,8 @@
 //! The client-facing and exit-facing protocols deliberately use distinct libp2p
 //! behaviours. Their Rust request and response types are different so the
 //! generated `NetworkBehaviour` events cannot be confused, while their protobuf
-//! wire representation remains byte-for-byte identical.
+//! wire representation remains byte-for-byte identical when no upstream-only control proof is
+//! attached. The control Relay may attach its own advertisement only to a native Permit request.
 
 use std::{io, time::Duration};
 
@@ -13,10 +14,11 @@ use libp2p::{PeerId, StreamProtocol, identity, request_response};
 use prost::Message;
 use thiserror::Error;
 use volparossa_protocol::{
-    ControlMessageType, ExitReservation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
-    MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE, NativeProbeAuthorizationChain,
-    NativeProbeEndpointBinding, PROTOCOL_VERSION, RelayAuthorization, SignedEnvelope,
-    decode_canonical, encode_canonical, node_id_from_public_key,
+    ControlMessageType, ControlPayload, ExitReservation, MAX_CONTROL_MESSAGE_SIZE,
+    MAX_CONTROL_PAYLOAD_SIZE, MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
+    NativeProbeAuthorizationChain, NativeProbeEndpointBinding, NodeAdvertisement, PROTOCOL_VERSION,
+    RelayAuthorization, SignedEnvelope, decode_canonical, encode_canonical,
+    node_id_from_public_key,
 };
 
 /// Client-to-control-relay exit-forwarding protocol.
@@ -206,6 +208,8 @@ pub struct ExitForwardRequest {
     operation: i32,
     #[prost(bytes = "vec", tag = "10")]
     canonical_request: Vec<u8>,
+    #[prost(bytes = "vec", tag = "11")]
+    control_advertisement: Vec<u8>,
 }
 
 impl ExitForwardRequest {
@@ -241,6 +245,7 @@ impl ExitForwardRequest {
             deadline_unix_ms,
             operation: operation as i32,
             canonical_request,
+            control_advertisement: Vec::new(),
         };
         request.validate()?;
         Ok(request)
@@ -281,6 +286,7 @@ impl ExitForwardRequest {
             return Err(ForwardingRpcError::InvalidFrame);
         }
         let operation = self.validated_operation()?;
+        validate_control_advertisement(self)?;
         match operation {
             ExitForwardOperation::FetchExitAdvertisement => {
                 if !self.exit_node_id.is_empty() || !self.canonical_request.is_empty() {
@@ -348,6 +354,22 @@ impl ExitForwardRequest {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn validate_client_hop(&self) -> Result<(), ForwardingRpcError> {
+        if !self.control_advertisement.is_empty() {
+            return Err(ForwardingRpcError::InvalidFrame);
+        }
+        self.validate()
+    }
+
+    /// Borrow the upstream control Relay's exact signed advertisement, if attached.
+    ///
+    /// This is framing, not verified authority. The Exit must independently verify the signature,
+    /// authenticated transport identity, signed Permit actor binding, policy and freshness.
+    #[must_use]
+    pub fn control_advertisement(&self) -> &[u8] {
+        &self.control_advertisement
     }
 
     /// Explicit forwarding identifier retained unchanged across both hops.
@@ -616,6 +638,27 @@ impl ExitForwardResponse {
 pub struct UpstreamExitForwardRequest(ExitForwardRequest);
 
 impl UpstreamExitForwardRequest {
+    /// Attach the control Relay's signed self-advertisement to one native Permit request.
+    ///
+    /// The original client-session-signed request is retained byte-for-byte. Client-hop codecs
+    /// and request APIs refuse the additional field.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty, oversized or noncanonical advertisement material, a different
+    /// actor or message type, or any operation other than a native Permit request.
+    pub fn with_control_advertisement(
+        mut self,
+        advertisement: Vec<u8>,
+    ) -> Result<Self, ForwardingRpcError> {
+        if advertisement.is_empty() || !self.0.control_advertisement.is_empty() {
+            return Err(ForwardingRpcError::InvalidFrame);
+        }
+        self.0.control_advertisement = advertisement;
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Borrow the canonical forwarding fields.
     #[must_use]
     pub const fn as_forward_request(&self) -> &ExitForwardRequest {
@@ -757,7 +800,9 @@ impl request_response::Codec for ExitForwardCodec {
         T: AsyncRead + Unpin + Send,
     {
         require_protocol(protocol, EXIT_FORWARD_PROTOCOL)?;
-        read_request(io).await
+        let request = read_request(io).await?;
+        request.validate_client_hop().map_err(invalid_data)?;
+        Ok(request)
     }
 
     async fn read_response<T>(
@@ -782,6 +827,7 @@ impl request_response::Codec for ExitForwardCodec {
         T: AsyncWrite + Unpin + Send,
     {
         require_protocol(protocol, EXIT_FORWARD_PROTOCOL)?;
+        request.validate_client_hop().map_err(invalid_data)?;
         write_request(io, &request).await
     }
 
@@ -1011,6 +1057,39 @@ fn validate_signed_type(
     Ok(envelope)
 }
 
+fn validate_control_advertisement(request: &ExitForwardRequest) -> Result<(), ForwardingRpcError> {
+    if request.control_advertisement.is_empty() {
+        return Ok(());
+    }
+    if request.validated_operation()? != ExitForwardOperation::NativeProbePermit {
+        return Err(ForwardingRpcError::InvalidFrame);
+    }
+    let envelope = validate_signed_type(
+        &request.control_advertisement,
+        ControlMessageType::NodeAdvertisement,
+    )?;
+    let advertisement =
+        decode_canonical::<NodeAdvertisement>(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE)
+            .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+    advertisement
+        .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+    advertisement
+        .validate_envelope(&envelope)
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+    if envelope.sender_id != request.control_relay_node_id
+        || envelope.sender_public_key != request.control_relay_public_key
+        || advertisement.peer_id != request.control_relay_peer_id
+        || !advertisement
+            .roles
+            .as_ref()
+            .is_some_and(|roles| roles.relay)
+    {
+        return Err(ForwardingRpcError::InvalidFrame);
+    }
+    Ok(())
+}
+
 fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, ForwardingRpcError> {
     match operation {
         ExitForwardOperation::CapacityHold => Ok(ControlMessageType::ExitCapacityHoldRequest),
@@ -1141,6 +1220,169 @@ mod tests {
     use super::*;
 
     const DEADLINE: u64 = 1_700_000_012_000;
+
+    #[tokio::test]
+    async fn control_advertisement_is_upstream_only_and_preserves_client_request_bytes() {
+        let (request, advertisement) = native_permit_control_fixture();
+        let client_request = request.canonical_request().to_vec();
+        let plain = encode_canonical(&request, frame_limit()).expect("plain request");
+        assert!(request.control_advertisement().is_empty());
+        // Compare with the pre-extension field sequence: an empty tag 11 is absent on wire.
+        let mut explicit_empty = plain.clone();
+        explicit_empty.extend_from_slice(&[0x5a, 0]);
+        assert!(decode_canonical::<ExitForwardRequest>(&explicit_empty, frame_limit()).is_err());
+
+        let upstream = UpstreamExitForwardRequest::from(request)
+            .with_control_advertisement(advertisement.clone())
+            .expect("bounded signed Relay advertisement");
+        assert_eq!(
+            upstream.as_forward_request().canonical_request(),
+            client_request
+        );
+        assert_eq!(
+            upstream.as_forward_request().control_advertisement(),
+            advertisement
+        );
+        let mut wire = Cursor::new(Vec::new());
+        let mut codec = UpstreamExitForwardCodec;
+        let protocol = StreamProtocol::new(EXIT_FORWARD_UPSTREAM_PROTOCOL);
+        codec
+            .write_request(&protocol, &mut wire, upstream.clone())
+            .await
+            .expect("upstream write");
+        let decoded = codec
+            .read_request(&protocol, &mut Cursor::new(wire.get_ref()))
+            .await
+            .expect("upstream read");
+        assert_eq!(decoded, upstream);
+
+        let mut client = ExitForwardCodec;
+        let protocol = StreamProtocol::new(EXIT_FORWARD_PROTOCOL);
+        assert!(
+            client
+                .read_request(&protocol, &mut Cursor::new(wire.into_inner()))
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .write_request(
+                    &protocol,
+                    &mut Cursor::new(Vec::new()),
+                    upstream.into_forward_request()
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn control_advertisement_rejects_wrong_operation_actor_type_and_bounds() {
+        let (request, advertisement) = native_permit_control_fixture();
+        for malformed in [
+            Vec::new(),
+            vec![1; MAX_CONTROL_MESSAGE_SIZE + 1],
+            envelope(ControlMessageType::NativeProbePermit, Vec::new()),
+            envelope(ControlMessageType::NodeAdvertisement, Vec::new()),
+        ] {
+            assert!(
+                UpstreamExitForwardRequest::from(request.clone())
+                    .with_control_advertisement(malformed)
+                    .is_err()
+            );
+        }
+        assert!(
+            UpstreamExitForwardRequest::from(advertisement_request())
+                .with_control_advertisement(advertisement.clone())
+                .is_err()
+        );
+        let (foreign, _) = native_permit_control_fixture();
+        assert!(
+            UpstreamExitForwardRequest::from(foreign)
+                .with_control_advertisement(advertisement.clone())
+                .is_err()
+        );
+        let mut noncanonical = advertisement.clone();
+        noncanonical.extend_from_slice(&[0x78, 0]);
+        assert!(
+            UpstreamExitForwardRequest::from(request.clone())
+                .with_control_advertisement(noncanonical)
+                .is_err()
+        );
+        let attached = UpstreamExitForwardRequest::from(request)
+            .with_control_advertisement(advertisement.clone())
+            .unwrap();
+        assert!(attached.with_control_advertisement(advertisement).is_err());
+    }
+
+    fn native_permit_control_fixture() -> (ExitForwardRequest, Vec<u8>) {
+        use volparossa_protocol::{
+            AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
+            AdvertisementPolicy, AdvertisementQuality, AdvertisementRoles, TimePolicy,
+            sign_control_message_with,
+        };
+
+        let key = identity::Keypair::generate_ed25519();
+        let public = key.public().try_into_ed25519().unwrap().to_bytes();
+        let mut request = advertisement_request();
+        request.control_relay_node_id = node_id_from_public_key(&public).to_vec();
+        request.control_relay_public_key = public.to_vec();
+        request.control_relay_peer_id = key.public().to_peer_id().to_bytes();
+        request.exit_node_id = vec![9; NODE_ID_LENGTH];
+        request.operation = ExitForwardOperation::NativeProbePermit as i32;
+        request.canonical_request =
+            envelope(ControlMessageType::NativeProbePermitRequest, Vec::new());
+        let advertisement = NodeAdvertisement {
+            node_id: request.control_relay_node_id.clone(),
+            peer_id: request.control_relay_peer_id.clone(),
+            sequence_number: 1,
+            roles: Some(AdvertisementRoles {
+                relay: true,
+                ..Default::default()
+            }),
+            capabilities: Some(AdvertisementCapabilities {
+                tcp_mptcp: true,
+                ipv4: true,
+                ..Default::default()
+            }),
+            control_addresses: vec!["/ip4/8.8.4.4/udp/4001/quic-v1".to_owned()],
+            capacity: Some(AdvertisementCapacity {
+                operator_relay_limit_up_mbps: 1,
+                operator_relay_limit_down_mbps: 1,
+                estimated_free_up_mbps: 1,
+                estimated_free_down_mbps: 1,
+                free_relay_slots: 1,
+                sample_window_seconds: 15,
+                ..Default::default()
+            }),
+            network: Some(AdvertisementNetwork {
+                region: "eu".to_owned(),
+                country_code: "NL".to_owned(),
+                asn: 64510,
+                ipv4_prefix_hint: "8.8.4.0/24".to_owned(),
+                operator_id: "test-relay".to_owned(),
+                ..Default::default()
+            }),
+            quality: Some(AdvertisementQuality::default()),
+            policy: Some(AdvertisementPolicy {
+                whitelist_version: 1,
+                whitelist_hash: vec![1; 32],
+            }),
+            measured_at_ms: 1,
+            expires_at_ms: 2,
+        };
+        let signed = sign_control_message_with(
+            &advertisement,
+            public,
+            1,
+            2,
+            [1; 32],
+            TimePolicy::default(),
+            |message| key.sign(message).ok()?.try_into().ok(),
+        )
+        .expect("signed self advertisement");
+        (request, signed)
+    }
 
     #[tokio::test]
     #[allow(

@@ -31,11 +31,15 @@ fabricated public ASNs or fake diverse public prefixes. Advertisements and capac
 must distinguish independently reachable Internet service from local-only contribution.
 
 The initial implementation uses signed `DirectLocalLan` scope, per-lease helper underlay binding
-and exact read-only kernel route checks. Its first live target is IPv4 local Client links to two
-WAN-capable Relay contacts (one control and one data), with independent public Relay-to-Exit
-connectivity. ULA classification and kernel route parsing have focused coverage, not live IPv6
-transfer evidence. LocalOnly nodes' unknown-ASN Relay selection, local Exit-facing links and
-automatic radio setup remain separate unfinished functionality, not hidden public-IP fallback.
+and exact read-only kernel route checks. The executable IPv4 fixture now requires the offline
+node to consume through one WAN-capable Relay while simultaneously contributing as another
+Client's Relay, with a private Exit-facing link to an independently connected Exit. Neither flow
+may connect its Client directly to its Exit. LocalOnly selection uses an absent ASN and a real
+authenticated LAN prefix; two unknown origins do not count as independent paths. The Exit's
+signed observation preserves the local scope instead of pretending the address is public.
+Focused checks and the evidence parser pass, but this two-flow fixture has not yet passed live.
+ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
+evidence. Automatic radio setup also remains unfinished; no hidden public-IP fallback is used.
 
 ## Sharing capacity
 

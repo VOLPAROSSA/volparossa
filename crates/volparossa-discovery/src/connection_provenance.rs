@@ -17,7 +17,7 @@ use libp2p::{
     },
 };
 use volparossa_core::{IpFamily, ObservedNetworkPrefix};
-use volparossa_protocol::{ObservationAddressFamily, ObservationNetworkPrefix};
+use volparossa_protocol::{ObservationAddressFamily, ObservationNetworkPrefix, UnderlayScope};
 
 use crate::{
     MAX_ESTABLISHED_CONNECTIONS, MAX_ESTABLISHED_CONNECTIONS_PER_PEER, PreselectionProvenanceReject,
@@ -212,7 +212,8 @@ impl BoundConnectionObservation {
     ///
     /// This is deliberately not a generic prefix accessor: it consumes the complete affine proof,
     /// emits only the endpoint-free protocol /24 or /48, and is used solely by the forwarded
-    /// preselection attestation owner.
+    /// preselection attestation owner. A local prefix describes only this authenticated
+    /// Relay-to-Exit connection, not the Exit's Internet uplink or a client's address.
     pub(super) fn consume_into_forwarded_preselection_prefix(
         self,
     ) -> Option<ObservationNetworkPrefix> {
@@ -222,21 +223,32 @@ impl BoundConnectionObservation {
             generation: _,
             prefix,
         } = self;
-        if !prefix.is_consistent() || !prefix.normalized.is_public_routable() {
+        if !prefix.is_consistent()
+            || !(prefix.normalized.is_public_routable() || prefix.normalized.is_local_lan())
+        {
             return None;
         }
         match prefix.bytes {
             NativePrefixBytes::Ipv4(bytes) => Some(ObservationNetworkPrefix {
-                scope: 0,
+                scope: UnderlayScope::PublicInternet as i32,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 network_prefix: bytes.to_vec(),
             }),
             NativePrefixBytes::Ipv6(bytes) => Some(ObservationNetworkPrefix {
-                scope: 0,
+                scope: UnderlayScope::PublicInternet as i32,
                 address_family: ObservationAddressFamily::Ipv6 as i32,
                 network_prefix: bytes.to_vec(),
             }),
-            NativePrefixBytes::LocalIpv4(_) | NativePrefixBytes::LocalIpv6(_) => None,
+            NativePrefixBytes::LocalIpv4(bytes) => Some(ObservationNetworkPrefix {
+                scope: UnderlayScope::DirectLocalLan as i32,
+                address_family: ObservationAddressFamily::Ipv4 as i32,
+                network_prefix: bytes.to_vec(),
+            }),
+            NativePrefixBytes::LocalIpv6(bytes) => Some(ObservationNetworkPrefix {
+                scope: UnderlayScope::DirectLocalLan as i32,
+                address_family: ObservationAddressFamily::Ipv6 as i32,
+                network_prefix: bytes.to_vec(),
+            }),
         }
     }
 }
@@ -417,6 +429,22 @@ impl ConnectionRegistry {
         })
     }
 
+    fn advisory_local_prefix(&self, peer_id: PeerId) -> Option<ObservedNetworkPrefix> {
+        if self.poisoned {
+            return None;
+        }
+        let mut records = self
+            .records
+            .values()
+            .filter(|record| record.peer_id == peer_id);
+        let record = records.next()?;
+        if records.next().is_some() || record.relayed {
+            return None;
+        }
+        let prefix = record.prefix.as_ref()?;
+        (prefix.is_consistent() && prefix.normalized.is_local_lan()).then_some(prefix.normalized)
+    }
+
     fn exact_witness(
         &self,
         peer_id: PeerId,
@@ -586,6 +614,10 @@ impl ConnectionProvenanceBehaviour {
         family: IpFamily,
     ) -> Option<ConnectionWitness> {
         self.registry.unique_witness(peer_id, family)
+    }
+
+    pub(super) fn advisory_local_prefix(&self, peer_id: PeerId) -> Option<ObservedNetworkPrefix> {
+        self.registry.advisory_local_prefix(peer_id)
     }
 
     pub(super) fn allows_identify_address_import(
@@ -1130,17 +1162,19 @@ mod tests {
     }
 
     #[test]
-    fn local_lan_connection_proof_is_scope_distinct_and_never_forwarded_as_exit_origin() {
-        for (remote, family, expected) in [
+    fn local_lan_connection_proof_preserves_scope_for_forwarded_upstream_origin() {
+        for (remote, family, expected, expected_bytes) in [
             (
                 "/ip4/192.168.20.2/udp/443/quic-v1",
                 IpFamily::Ipv4,
                 ObservedNetworkPrefix::local_ipv4_24([192, 168, 20]),
+                vec![192, 168, 20],
             ),
             (
                 "/ip6/fd12:3456:789a::2/udp/443/quic-v1",
                 IpFamily::Ipv6,
                 ObservedNetworkPrefix::local_ipv6_48([0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a]),
+                vec![0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a],
             ),
         ] {
             let peer = PeerId::random();
@@ -1165,7 +1199,11 @@ mod tests {
             let bound = behaviour
                 .bind(witness, peer, ConnectionId::new_unchecked(1))
                 .expect("new local lineage");
-            assert!(bound.consume_into_forwarded_preselection_prefix().is_none());
+            let forwarded = bound
+                .consume_into_forwarded_preselection_prefix()
+                .expect("authenticated local upstream prefix");
+            assert_eq!(forwarded.scope, UnderlayScope::DirectLocalLan as i32);
+            assert_eq!(forwarded.network_prefix, expected_bytes);
             let stale = behaviour
                 .unique_witness(peer, family)
                 .expect("old local witness");
@@ -1176,6 +1214,45 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn advisory_local_prefix_requires_one_current_direct_unpoisoned_connection() {
+        let peer = PeerId::random();
+        let local = dialer("/ip4/192.168.20.2/udp/443/quic-v1");
+        let public = dialer("/ip4/8.8.4.4/udp/443/quic-v1");
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
+        established(&mut behaviour, peer, 1, &local, 0);
+        assert!(
+            behaviour
+                .advisory_local_prefix(peer)
+                .unwrap()
+                .is_local_lan()
+        );
+        assert!(behaviour.advisory_local_prefix(PeerId::random()).is_none());
+        established(&mut behaviour, peer, 2, &local, 1);
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
+        closed(&mut behaviour, peer, 2, &local, 1);
+        assert!(
+            behaviour
+                .advisory_local_prefix(peer)
+                .unwrap()
+                .is_local_lan()
+        );
+        change(&mut behaviour, peer, 1, &local, &public);
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
+        change(&mut behaviour, peer, 1, &public, &local);
+        behaviour.registry.poison();
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
+
+        let circuit = dialer(&format!(
+            "/ip4/192.168.20.2/udp/443/quic-v1/p2p/{}/p2p-circuit/p2p/{peer}",
+            PeerId::random()
+        ));
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        established(&mut behaviour, peer, 1, &circuit, 0);
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
     }
 
     #[test]

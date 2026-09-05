@@ -2071,9 +2071,9 @@ where
         )?;
         let transcript = purpose_consume_transcript(record.transcript)?;
         if transcript.valid_until_ms() <= trusted_now_ms
-            || transcript
-                .upstream_network_prefix()
-                .is_some_and(|prefix| prefix.family() != family || !prefix.is_public_routable())
+            || transcript.upstream_network_prefix().is_some_and(|prefix| {
+                prefix.family() != family || !(prefix.is_public_routable() || prefix.is_local_lan())
+            })
         {
             return Err(PreselectionAttemptError::Protocol);
         }

@@ -2260,7 +2260,8 @@ async fn admit_completed_native_route(
             Ok(*preflight.native_instance_id())
         })?;
     let Ok(admission) = completed.into_route_admission(client_native_instance_id) else {
-        let _ = helper.cleanup_owned().await;
+        // The completed probe already confirmed exact-context destruction. There is no
+        // remaining Client probe authority here, and other roles' contexts must stay live.
         return Err(ClientRouteConnectError::RouteAdmissionUnavailable);
     };
     let (continuation, remote_retirement_confirmed, _exit_helper_runtime_id) =
@@ -2634,86 +2635,88 @@ async fn complete_required_client_native_paths(
             .await
             .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
     }
-    let result = Box::pin(complete_client_native_probe(ready, discovery, helper)).await;
-    if result.is_err() {
-        // A later affine protocol join may have consumed its exact current helper owner. The
-        // existing agent-scoped token is the only authority that can close the shared context.
-        let _ = helper.cleanup_owned().await;
-    }
-    result
+    Box::pin(complete_client_native_probe(ready, discovery, helper)).await
 }
 
 /// Drive the collected path set through one exact helper runtime and every signed native RPC.
 ///
-/// A helper-side context is destroyed immediately when the affine runtime owner is still
-/// available. Failures at consuming protocol joins fall back to the existing agent-scoped cleanup
-/// token because those joins intentionally reveal no reusable helper capability on failure.
+/// Destruction-only authority survives consuming protocol joins without duplicating lifecycle
+/// authority. A failed Client probe must never destroy the node's unrelated Relay/Exit contexts.
 async fn complete_client_native_probe(
     ready: selection_bridge::ClientNativeRelayReady,
     discovery: &DiscoveryControlHandle,
     helper: &HelperClient,
 ) -> Result<selection_bridge::CompletedClientNativeProbe, ClientRouteConnectError> {
     let prepare = ready
-        .prepare_request()
+        .prepare_request(discovery)
+        .await
         .map_err(|_| ClientRouteConnectError::NativeHelperPrepareUnavailable)?;
-    let Ok(prepared) = helper.prepare_lease_batch(prepare.clone()).await else {
-        let _ = helper.cleanup_owned().await;
-        return Err(ClientRouteConnectError::NativeHelperPrepareUnavailable);
-    };
-    let Ok(prepared) = ready.bind_prepared_endpoint(&prepare, prepared) else {
-        let _ = helper.cleanup_owned().await;
-        return Err(ClientRouteConnectError::NativeHelperPrepareUnavailable);
-    };
-    let Ok(mut authorized) = prepared.request_activation_authority(discovery).await else {
-        let _ = helper.cleanup_owned().await;
-        return Err(ClientRouteConnectError::NativeAuthorizationUnavailable);
-    };
-    let activation = authorized.activation_request().clone();
-    let Ok(activated) = helper
-        .activate_lease_batch(authorized.runtime_owner_mut(), activation)
-        .await
-    else {
-        let _ = helper
-            .destroy_context(&*authorized.runtime_owner_mut())
-            .await;
-        return Err(ClientRouteConnectError::NativeHelperActivateUnavailable);
-    };
-    if authorized.exchange_challenges(helper).await.is_err() {
-        let _ = helper
-            .destroy_context(&*authorized.runtime_owner_mut())
-            .await;
-        return Err(ClientRouteConnectError::NativeStartUnavailable);
-    }
-    let Ok(mut awaiting) = authorized.accept_activation(&activated) else {
-        let _ = helper.cleanup_owned().await;
-        return Err(ClientRouteConnectError::NativeStartUnavailable);
-    };
-    let commit = awaiting.commit_request();
-    let Ok(committed) = helper
-        .commit_lease_batch(awaiting.runtime_owner_mut(), commit)
-        .await
-    else {
-        let _ = helper.destroy_context(&*awaiting.runtime_owner_mut()).await;
-        return Err(ClientRouteConnectError::NativeHelperCommitUnavailable);
-    };
-    let completed =
-        match Box::pin(awaiting.accept_committed_and_dispatch(committed, discovery)).await {
-            Ok(completed) => completed,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "native terminal Start/result exact-set failed"
-                );
-                let _ = helper.cleanup_owned().await;
-                return Err(ClientRouteConnectError::NativeProofUnavailable);
+    let prepared = match helper.prepare_lease_batch(prepare.clone()).await {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            if let PrepareLeaseBatchFailure::Ambiguous { authority, .. } = failure {
+                // No context handle was received. Retain the exact dispatched Prepare authority
+                // until its setup deadline, then ask only that same helper runtime to reconcile.
+                let remaining = prepare
+                    .setup_expires_at_unix
+                    .saturating_mul(1_000)
+                    .saturating_sub(crate::unix_millis())
+                    .min(MAXIMUM_PHASE_LIFETIME_MS);
+                tokio::time::sleep(Duration::from_millis(remaining)).await;
+                if let Err(error) = helper.reconcile_expired_prepare(&authority).await {
+                    tracing::warn!(error = %error, "native probe Prepare reconciliation unconfirmed");
+                }
             }
-        };
-    let owner = completed
-        .runtime_owner()
-        .map_err(|_| ClientRouteConnectError::NativeProofUnavailable)?;
-    let Ok(destroyed) = helper.destroy_context(owner).await else {
-        return Err(ClientRouteConnectError::NativeHelperCommitUnavailable);
+            return Err(ClientRouteConnectError::NativeHelperPrepareUnavailable);
+        }
     };
+    let cleanup = prepared.retain_cleanup_authority();
+    let result = Box::pin(async {
+        let prepared = ready
+            .bind_prepared_endpoint(&prepare, prepared)
+            .map_err(|_| ClientRouteConnectError::NativeHelperPrepareUnavailable)?;
+        let mut authorized = prepared
+            .request_activation_authority(discovery)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeAuthorizationUnavailable)?;
+        let activation = authorized.activation_request().clone();
+        let activated = helper
+            .activate_lease_batch(authorized.runtime_owner_mut(), activation)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeHelperActivateUnavailable)?;
+        authorized
+            .exchange_challenges(helper)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeStartUnavailable)?;
+        let mut awaiting = authorized
+            .accept_activation(&activated)
+            .map_err(|_| ClientRouteConnectError::NativeStartUnavailable)?;
+        let commit = awaiting.commit_request();
+        let committed = helper
+            .commit_lease_batch(awaiting.runtime_owner_mut(), commit)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeHelperCommitUnavailable)?;
+        let completed = Box::pin(awaiting.accept_committed_and_dispatch(committed, discovery))
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "native terminal Start/result exact-set failed");
+                ClientRouteConnectError::NativeProofUnavailable
+            })?;
+        completed
+            .runtime_owner()
+            .map_err(|_| ClientRouteConnectError::NativeProofUnavailable)?;
+        Ok(completed)
+    })
+    .await;
+    // Run on both successful completion and every error, including errors that consumed the
+    // original owner. Nothing here can broaden destruction to another participant's context.
+    let destroyed = helper.destroy_context_after_join(&cleanup).await;
+    if let Err(error) = &destroyed {
+        tracing::warn!(error = %error, "native probe exact context destruction unconfirmed");
+    }
+    let completed = result?;
+    let destroyed =
+        destroyed.map_err(|_| ClientRouteConnectError::NativeHelperCommitUnavailable)?;
     completed
         .accept_destroyed(destroyed)
         .map_err(|_| ClientRouteConnectError::NativeProofUnavailable)
@@ -3102,7 +3105,7 @@ impl ProspectiveForwardedExit {
 #[derive(Clone, Eq, PartialEq)]
 struct DiversitySnapshot {
     operator_id: OperatorId,
-    asn: u32,
+    asn: Option<u32>,
     observed_network_prefix: ObservedNetworkPrefix,
 }
 
@@ -10306,12 +10309,12 @@ mod tests {
             .expect("forwarded exit capability"),
             control_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-control-real").expect("operator"),
-                asn: 64_410,
+                asn: Some(64_410),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([44, 10, 1]),
             },
             exit_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-exit-real").expect("operator"),
-                asn: 64_420,
+                asn: Some(64_420),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([45, 10, 1]),
             },
             evidence_batch_id: [55; ID_BYTES],
@@ -10485,12 +10488,12 @@ mod tests {
             .expect("valid forwarded exit snapshot"),
             control_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-control").expect("operator"),
-                asn: 64_499,
+                asn: Some(64_499),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([44, 1, 1]),
             },
             exit_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-exit").expect("operator"),
-                asn: 64_500,
+                asn: Some(64_500),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([45, 1, 1]),
             },
             evidence_batch_id: [55; ID_BYTES],
@@ -10641,12 +10644,12 @@ mod tests {
             .expect("fixture forwarded exit"),
             control_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-control").expect("operator"),
-                asn: 64_499,
+                asn: Some(64_499),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([44, 1, 1]),
             },
             exit_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-exit").expect("operator"),
-                asn: 64_500,
+                asn: Some(64_500),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([45, 1, 1]),
             },
             evidence_batch_id: [55; ID_BYTES],
@@ -10757,7 +10760,7 @@ mod tests {
         let observed_network_prefix = ObservedNetworkPrefix::ipv4_24([octet, 1, 1]);
         let diversity = DiversitySnapshot {
             operator_id: OperatorId::new(format!("operator-relay-{index}")).expect("operator"),
-            asn: 64_501 + u32::try_from(index).expect("bounded relay index"),
+            asn: Some(64_501 + u32::try_from(index).expect("bounded relay index")),
             observed_network_prefix,
         };
         let candidate = Candidate {
@@ -10795,7 +10798,7 @@ mod tests {
                     operator_id: diversity.operator_id.clone(),
                     region: "eu-west".to_owned(),
                     country_code: "NL".to_owned(),
-                    asn: Some(diversity.asn),
+                    asn: diversity.asn,
                     ipv4_prefix_hint: None,
                     ipv6_prefix_hint: None,
                 },
@@ -13526,7 +13529,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "operator_id: OperatorId,",
-                "asn: u32,",
+                "asn: Option<u32>,",
                 "prefix: ObservedNetworkPrefix,",
             ]
         );
@@ -13595,6 +13598,35 @@ mod tests {
         assert_unmeasured_setup_surface(product);
         assert_affine_route_setup_surface(product);
         assert_actor_bound_proof_surface(include_str!("route_setup/selection_bridge.rs"));
+    }
+
+    #[test]
+    fn client_route_cleanup_never_uses_all_owned_authority() {
+        let source = include_str!("route_setup.rs");
+        let (product, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("product source before test module");
+        assert!(
+            !product.contains("cleanup_owned("),
+            "one Client transaction must not destroy another participant's Relay/Exit resources"
+        );
+        let (_, probe) = product
+            .split_once("async fn complete_client_native_probe(")
+            .expect("native probe completion");
+        let (probe, _) = probe
+            .split_once("async fn begin_client_route(")
+            .expect("next function");
+        let retained = probe
+            .find("prepared.retain_cleanup_authority()")
+            .expect("cleanup authority");
+        let joined = probe
+            .find(".bind_prepared_endpoint(")
+            .expect("consuming join");
+        assert!(
+            retained < joined,
+            "cleanup authority must survive consuming joins"
+        );
+        assert!(probe.contains("helper.destroy_context_after_join(&cleanup).await"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use volparossa_protocol::{
     PROTOCOL_VERSION, PreselectionActorBinding, PreselectionObservationReceipt,
     PreselectionObservationRequest, PreselectionObservationRole, PreselectionObservationScope,
     ProtocolError, RelayAuthorization, RelayReservation, RelayReservationRequest, ReplayCache,
-    SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, WireguardEndpoint,
+    SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, UnderlayScope, WireguardEndpoint,
     consume_bound_direct_preselection_transcript_for_freshness,
     consume_bound_forwarded_preselection_transcript_for_freshness,
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
@@ -1226,6 +1226,62 @@ fn forwarded_prefix_is_public_family_exact_ipv4_24_or_ipv6_48() {
     assert_forwarded_rejected_without_replay(&signed, &encode_preselection_request(&request));
 }
 
+#[test]
+fn forwarded_local_upstream_prefix_requires_exact_signed_scope() {
+    for (family, local_prefix, public_prefix) in [
+        (
+            ObservationAddressFamily::Ipv4,
+            vec![192, 168, 20],
+            vec![8, 8, 4],
+        ),
+        (
+            ObservationAddressFamily::Ipv6,
+            vec![0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a],
+            vec![0x20, 0x01, 0x48, 0x60, 0, 0],
+        ),
+    ] {
+        let (request, _, signed, control_key, _) =
+            forwarded_preselection_fixture_with_prefix(family, public_prefix.clone());
+        let (outer, mut attestation) = decode_forwarded_attestation(&signed);
+        attestation.upstream_network_prefix = Some(ObservationNetworkPrefix {
+            scope: UnderlayScope::DirectLocalLan as i32,
+            address_family: family as i32,
+            network_prefix: local_prefix,
+        });
+        let encoded_request = encode_preselection_request(&request);
+        let signed = resign_attestation(outer.clone(), &attestation, &control_key);
+        let mut replay = ReplayCache::new(8).unwrap();
+        let verified = verify_forwarded_preselection_transcript(
+            &signed,
+            &encoded_request,
+            NOW + 1,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("signed local Relay-to-Exit observation");
+        let bound = consume_forwarded_preselection_transcript(verified, &encoded_request)
+            .expect("exact request");
+        let fresh = consume_bound_forwarded_preselection_transcript_for_freshness(bound)
+            .expect("scope-preserving freshness projection");
+        assert!(fresh.upstream_network_prefix().is_local_lan());
+        assert!(!fresh.upstream_network_prefix().is_public_routable());
+        assert_eq!(replay.len(), 2);
+        for scope in [UnderlayScope::PublicInternet as i32, 42] {
+            let mut invalid = attestation.clone();
+            invalid.upstream_network_prefix.as_mut().unwrap().scope = scope;
+            let signed = resign_attestation(outer.clone(), &invalid, &control_key);
+            assert_forwarded_rejected_without_replay(&signed, &encoded_request);
+        }
+        attestation
+            .upstream_network_prefix
+            .as_mut()
+            .unwrap()
+            .network_prefix = public_prefix;
+        let signed = resign_attestation(outer, &attestation, &control_key);
+        assert_forwarded_rejected_without_replay(&signed, &encoded_request);
+    }
+}
+
 fn assert_forwarded_prefix_invalid(family: ObservationAddressFamily, network_prefix: Vec<u8>) {
     let (_, _, signed, _, _) = forwarded_preselection_fixture_with_prefix(
         family,
@@ -1920,6 +1976,11 @@ fn assert_preselection_prefix_attestation_schema(rust: &str, schema: &str) {
                 "#[prost(bytes = \"vec\", tag = \"2\")]",
                 "pub network_prefix: Vec<u8>,",
                 "bytes network_prefix = 2;",
+            ),
+            (
+                "#[prost(enumeration = \"UnderlayScope\", tag = \"3\")]",
+                "pub scope: i32,",
+                "UnderlayScope scope = 3;",
             ),
         ],
     );

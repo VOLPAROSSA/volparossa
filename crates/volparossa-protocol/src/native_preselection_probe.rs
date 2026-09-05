@@ -17,9 +17,9 @@ use crate::messages::validate_rate;
 use crate::{
     ControlMessageType, ControlPayload, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
     ObservationAddressFamily, ObservationNetworkPrefix, PROTOCOL_VERSION, PreselectionActorBinding,
-    ProtocolError, ReplayCache, SignedEnvelope, TimePolicy, Transport, VerifiedControlMessage,
-    WireguardEndpoint, decode_canonical, encode_canonical, node_id_from_public_key,
-    sign_control_message, verify_control_message,
+    ProtocolError, ReplayCache, SignedEnvelope, TimePolicy, Transport, UnderlayScope,
+    VerifiedControlMessage, WireguardEndpoint, decode_canonical, encode_canonical,
+    node_id_from_public_key, sign_control_message, verify_control_message,
 };
 
 const ID_LENGTH: usize = 16;
@@ -1227,11 +1227,6 @@ impl ControlPayload for NativeProbeExitResult {
             .as_ref()
             .ok_or(ProtocolError::InvalidField("native exit result prefix"))?;
         let normalized = prefix.validated_normalized()?;
-        if !normalized.is_public_routable() {
-            return Err(ProtocolError::InvalidField(
-                "native Exit observation must be public",
-            ));
-        }
         if !matches!(
             (normalized.family(), scope_family(scope)?),
             (
@@ -1729,6 +1724,10 @@ pub fn verify_native_probe_exit_result_for_relay(
         && result.message().permit_hash == expected_permit
         && result.message().exit_ready_hash == expected_ready
         && lease_matches_endpoint(exit_lease, exit_endpoint)
+        && native_exit_observation_matches_relay_endpoint(
+            result.message(),
+            &start.relay_ready.relay_exit_endpoint,
+        )
         && result.message().expires_at_ms <= start.start.message().expires_at_ms
         && result.message().expires_at_ms
             <= start
@@ -1747,6 +1746,31 @@ pub fn verify_native_probe_exit_result_for_relay(
         start,
         signed_exit_result,
         exit_result: result,
+    })
+}
+
+fn native_exit_observation_matches_relay_endpoint(
+    result: &NativeProbeExitResult,
+    relay_exit: &NativeProbeEndpointBinding,
+) -> bool {
+    let Some(prefix) = result.observed_network_prefix.as_ref() else {
+        return false;
+    };
+    let Ok(normalized) = prefix.validated_normalized() else {
+        return false;
+    };
+    // Only the Relay-side owner can see its signed hidden endpoint. Local observations must
+    // agree with that endpoint's explicit scope and origin; no endpoint is exposed to the Client.
+    relay_exit.endpoint.as_ref().is_some_and(|endpoint| {
+        endpoint.validate("native RelayExit endpoint").is_ok()
+            && match UnderlayScope::try_from(endpoint.underlay_scope) {
+                Ok(UnderlayScope::PublicInternet) => normalized.is_public_routable(),
+                Ok(UnderlayScope::DirectLocalLan) => {
+                    normalized.is_local_lan()
+                        && endpoint.underlay_ip.starts_with(&prefix.network_prefix)
+                }
+                Err(_) => false,
+            }
     })
 }
 
@@ -2421,13 +2445,23 @@ mod tests {
         }
 
         fn signed_exit_ready(&self, permit: &[u8]) -> Vec<u8> {
+            self.signed_exit_ready_for_underlay(permit, false)
+        }
+
+        fn signed_exit_ready_for_underlay(&self, permit: &[u8], local: bool) -> Vec<u8> {
+            let mut exit_endpoint = endpoint(31, [4; 32], [84, 1, 1, 1]);
+            if local {
+                let endpoint = exit_endpoint.endpoint.as_mut().expect("Exit endpoint");
+                endpoint.underlay_scope = UnderlayScope::DirectLocalLan as i32;
+                endpoint.underlay_ip = vec![192, 168, 20, 2];
+            }
             let ready = NativeProbeExitReady {
                 permit_hash: native_probe_permit_hash(permit)
                     .expect("permit hash")
                     .to_vec(),
                 scope: Some(self.scope.clone()),
-                relay_exit_endpoint: Some(endpoint(30, [30; 32], [83, 1, 1, 1])),
-                exit_endpoint: Some(endpoint(31, [4; 32], [84, 1, 1, 1])),
+                relay_exit_endpoint: Some(relay_exit_endpoint(local)),
+                exit_endpoint: Some(exit_endpoint),
                 ready_at_ms: NOW + 2,
                 expires_at_ms: EXPIRY,
                 nonce: vec![12; 32],
@@ -2474,6 +2508,16 @@ mod tests {
             received_bytes_after_baseline: 64,
             transmitted_bytes_after_baseline: 64,
         }
+    }
+
+    fn relay_exit_endpoint(local: bool) -> NativeProbeEndpointBinding {
+        let mut binding = endpoint(30, [30; 32], [83, 1, 1, 1]);
+        if local {
+            let endpoint = binding.endpoint.as_mut().expect("RelayExit endpoint");
+            endpoint.underlay_scope = UnderlayScope::DirectLocalLan as i32;
+            endpoint.underlay_ip = vec![192, 168, 20, 1];
+        }
+        binding
     }
 
     fn helper_runtime_seed(endpoint_seed: u8) -> u8 {
@@ -2949,18 +2993,34 @@ mod tests {
     }
 
     #[test]
+    fn exact_relay_and_client_chains_verify_once_with_endpoint_bound_helper_proofs() {
+        verify_exact_relay_client_chain(false);
+    }
+
+    #[test]
+    fn local_upstream_relay_and_client_chains_keep_exit_endpoints_hidden() {
+        verify_exact_relay_client_chain(true);
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one complete signed native chain smoke keeps every phase transition visible"
     )]
-    fn exact_relay_and_client_chains_verify_once_with_endpoint_bound_helper_proofs() {
+    fn verify_exact_relay_client_chain(local: bool) {
         let fixture = Fixture::new();
         let request = fixture.signed_request();
         let permit_bytes = fixture.signed_permit(&request);
-        let exit_ready_bytes = fixture.signed_exit_ready(&permit_bytes);
+        let exit_ready_bytes = fixture.signed_exit_ready_for_underlay(&permit_bytes, local);
         let exit_ready_hash =
             native_probe_exit_ready_hash(&exit_ready_bytes).expect("Exit-ready hash");
-        let exit_result = exit_result(&fixture, &permit_bytes, exit_ready_hash, 31);
+        let mut exit_result = exit_result(&fixture, &permit_bytes, exit_ready_hash, 31);
+        if local {
+            exit_result.observed_network_prefix = Some(ObservationNetworkPrefix {
+                scope: UnderlayScope::DirectLocalLan as i32,
+                address_family: ObservationAddressFamily::Ipv4 as i32,
+                network_prefix: vec![192, 168, 20],
+            });
+        }
         let signed_exit_result = sign(&exit_result, &fixture.exit, NOW + 5, EXPIRY, [16; 32]);
 
         let mut relay_replay = ReplayCache::new(16).expect("Relay replay");
@@ -2981,7 +3041,7 @@ mod tests {
         let issued_relay_ready = sign_native_probe_relay_ready(
             relay_ready,
             endpoint(20, [3; 32], [80, 1, 1, 1]),
-            endpoint(30, [30; 32], [83, 1, 1, 1]),
+            relay_exit_endpoint(local),
             &fixture.relay,
             NOW + 3,
             [13; 32],
@@ -3072,6 +3132,51 @@ mod tests {
                 &mut client_replay,
             ),
             Err(ProtocolError::Replay)
+        ));
+    }
+
+    #[test]
+    fn local_native_exit_prefix_requires_matching_signed_relay_endpoint() {
+        let fixture = Fixture::new();
+        let request = fixture.signed_request();
+        let permit = fixture.signed_permit(&request);
+        let mut result = exit_result(&fixture, &permit, [12; 32], 31);
+        result.observed_network_prefix = Some(ObservationNetworkPrefix {
+            scope: UnderlayScope::DirectLocalLan as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            network_prefix: vec![192, 168, 20],
+        });
+        assert!(result.validate().is_ok());
+        assert!(native_exit_observation_matches_relay_endpoint(
+            &result,
+            &relay_exit_endpoint(true)
+        ));
+        assert!(!native_exit_observation_matches_relay_endpoint(
+            &result,
+            &relay_exit_endpoint(false)
+        ));
+        result
+            .observed_network_prefix
+            .as_mut()
+            .unwrap()
+            .network_prefix = vec![192, 168, 21];
+        assert!(!native_exit_observation_matches_relay_endpoint(
+            &result,
+            &relay_exit_endpoint(true)
+        ));
+        result.observed_network_prefix.as_mut().unwrap().scope =
+            UnderlayScope::PublicInternet as i32;
+        assert!(result.validate().is_err());
+        result.observed_network_prefix.as_mut().unwrap().scope = 42;
+        assert!(result.validate().is_err());
+        result.observed_network_prefix = Some(ObservationNetworkPrefix {
+            scope: UnderlayScope::PublicInternet as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            network_prefix: vec![8, 8, 4],
+        });
+        assert!(!native_exit_observation_matches_relay_endpoint(
+            &result,
+            &relay_exit_endpoint(true)
         ));
     }
 

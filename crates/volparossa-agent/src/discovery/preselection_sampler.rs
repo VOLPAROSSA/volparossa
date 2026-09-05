@@ -1,7 +1,7 @@
 //! Affine, discovery-private narrowing for one bounded A1 preselection slate.
 //!
 //! This stage uses only freshly revalidated advertisements, actor capabilities, signed network
-//! hints and bounded local history. In particular, a signed prefix hint is not an observed network
+//! hints, advisory authenticated LAN metadata and bounded local history. A signed prefix hint is not an observed network
 //! origin. The later transport exact-set join must replace every hint with the direct
 //! connection-derived or control-attested prefix before any record can become Fresh evidence.
 //! `DiscoveryRuntime` invokes this native-dataplane-agnostic stage before its affine request
@@ -163,16 +163,23 @@ pub(super) struct PreselectionSamplingFailure {
     pub(super) error: PreselectionSamplingError,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum AdvertisedPrefixHint {
     Ipv4([u8; 3]),
     Ipv6([u8; 6]),
+    AuthenticatedLocal(ObservedNetworkPrefix),
+}
+
+impl std::fmt::Debug for AdvertisedPrefixHint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AdvertisedPrefixHint([REDACTED])")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdvertisedDiversityHint {
     operator_id: OperatorId,
-    asn: u32,
+    asn: Option<u32>,
     prefix: AdvertisedPrefixHint,
 }
 
@@ -206,7 +213,8 @@ struct ScoredRelay {
 #[derive(Clone, Default)]
 struct AdvertisedDiversitySet {
     operators: HashSet<OperatorId>,
-    asns: HashSet<u32>,
+    // All absent Internet origins share one conservative occupancy, not distinct ASN keys.
+    asns: HashSet<Option<u32>>,
     prefixes: HashSet<AdvertisedPrefixHint>,
 }
 
@@ -519,8 +527,12 @@ fn scored_forwarded_exits(
             let exit = snapshot.forwarded_exits.get(exit_index)?;
             let control = snapshot.direct_relays.get(control_index)?;
             let exit_static = static_candidate(exit.advertisement(), ServiceRole::Exit, scope)?;
-            let control_static =
-                static_candidate(control.advertisement(), ServiceRole::Relay, scope)?;
+            let control_static = static_candidate_with_local(
+                control.advertisement(),
+                ServiceRole::Relay,
+                scope,
+                control.authenticated_local_prefix(),
+            )?;
             if !diversity_hints_are_distinct(&exit_static.diversity, &control_static.diversity) {
                 return None;
             }
@@ -558,7 +570,12 @@ fn scored_relays(
         .enumerate()
         .filter(|(index, _)| *index != control_index)
         .filter_map(|(index, relay)| {
-            let candidate = static_candidate(relay.advertisement(), ServiceRole::Relay, scope)?;
+            let candidate = static_candidate_with_local(
+                relay.advertisement(),
+                ServiceRole::Relay,
+                scope,
+                relay.authenticated_local_prefix(),
+            )?;
             Some(ScoredRelay {
                 index,
                 weight: candidate.weight,
@@ -581,12 +598,17 @@ fn static_candidate(
     role: ServiceRole,
     scope: ValidatedSamplingScope,
 ) -> Option<StaticCandidate> {
+    static_candidate_with_local(candidate, role, scope, None)
+}
+
+fn static_candidate_with_local(
+    candidate: &RouteCandidateAdvertisement,
+    role: ServiceRole,
+    scope: ValidatedSamplingScope,
+    authenticated_local_prefix: Option<ObservedNetworkPrefix>,
+) -> Option<StaticCandidate> {
     let advertisement = candidate.advertisement();
-    // The first LAN vertical selects independently connected Relay uplinks. Local-only nodes
-    // truthfully advertise contribution, but unknown-ASN/no-public-hint relay selection needs a
-    // separate diversity policy; do not substitute zero ASN or fabricate a public prefix here.
-    if advertisement.network.uplink != volparossa_core::NetworkUplink::IndependentInternet
-        || !advertisement.roles.supports(role)
+    if !advertisement.roles.supports(role)
         || !advertisement
             .capabilities
             .supports_transport(scope.transport)
@@ -613,8 +635,25 @@ fn static_candidate(
     if free_slots == 0 || !advertised_capacity.satisfies(scope.minimum_capacity) {
         return None;
     }
-    let asn = advertisement.network.asn.filter(|asn| *asn != 0)?;
-    let prefix = advertised_prefix_hint(advertisement, scope.family)?;
+    let (asn, prefix) = match advertisement.network.uplink {
+        volparossa_core::NetworkUplink::IndependentInternet => (
+            Some(advertisement.network.asn.filter(|asn| *asn != 0)?),
+            advertised_prefix_hint(advertisement, scope.family)?,
+        ),
+        volparossa_core::NetworkUplink::LocalOnly => {
+            if role != ServiceRole::Relay
+                || advertisement.network.asn.is_some()
+                || advertisement.network.ipv4_prefix_hint.is_some()
+                || advertisement.network.ipv6_prefix_hint.is_some()
+                || advertisement.roles.exit
+            {
+                return None;
+            }
+            let prefix = authenticated_local_prefix
+                .filter(|prefix| prefix.is_local_lan() && prefix.family() == scope.family)?;
+            (None, AdvertisedPrefixHint::AuthenticatedLocal(prefix))
+        }
+    };
     let diversity = AdvertisedDiversityHint {
         operator_id: advertisement.network.operator_id.clone(),
         asn,
@@ -1442,6 +1481,42 @@ mod tests {
         candidate.advertisement.network.ipv6_prefix_hint = None;
         assert!(static_candidate(&candidate, ServiceRole::Relay, scope).is_none());
         assert!(static_candidate(&candidate, ServiceRole::Exit, scope).is_none());
+        let prefix = ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]);
+        let local = DirectRelayCandidateSnapshot::for_test_with_local_prefix(
+            candidate,
+            snapshot.direct_relays[0].capability().clone(),
+            prefix,
+        );
+        let first = static_candidate_with_local(
+            local.advertisement(),
+            ServiceRole::Relay,
+            scope,
+            local.authenticated_local_prefix(),
+        )
+        .expect("authenticated local contributor");
+        assert_eq!(first.diversity.asn, None);
+        assert_eq!(
+            first.diversity.prefix,
+            AdvertisedPrefixHint::AuthenticatedLocal(prefix)
+        );
+        let mut second_advertisement = local.advertisement().clone();
+        second_advertisement.advertisement.network.operator_id =
+            OperatorId::new("another-local-operator").expect("operator");
+        let second = static_candidate_with_local(
+            &second_advertisement,
+            ServiceRole::Relay,
+            scope,
+            Some(ObservedNetworkPrefix::local_ipv4_24([192, 168, 2])),
+        )
+        .expect("separately authenticated local contributor");
+        let mut diversity = AdvertisedDiversitySet::default();
+        assert!(diversity.allows(&first.diversity));
+        diversity.insert(&first.diversity);
+        assert!(!diversity.allows(&second.diversity));
+        assert!(!diversity_hints_are_distinct(
+            &first.diversity,
+            &second.diversity
+        ));
     }
 
     #[tokio::test]

@@ -1167,10 +1167,25 @@ impl RouteCandidateAdvertisement {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct DirectRelayCandidateSnapshot {
     advertisement: RouteCandidateAdvertisement,
     capability: DirectRelayCapability,
+    authenticated_local_prefix: Option<volparossa_core::ObservedNetworkPrefix>,
+}
+
+impl fmt::Debug for DirectRelayCandidateSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DirectRelayCandidateSnapshot")
+            .field("advertisement", &self.advertisement)
+            .field("capability", &self.capability)
+            .field(
+                "has_authenticated_local_prefix",
+                &self.authenticated_local_prefix.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl DirectRelayCandidateSnapshot {
@@ -1182,6 +1197,13 @@ impl DirectRelayCandidateSnapshot {
         &self.capability
     }
 
+    /// Current authenticated LAN metadata for sampling, never a `FreshEvidence` capability.
+    pub(crate) const fn authenticated_local_prefix(
+        &self,
+    ) -> Option<volparossa_core::ObservedNetworkPrefix> {
+        self.authenticated_local_prefix
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(
         advertisement: RouteCandidateAdvertisement,
@@ -1190,6 +1212,20 @@ impl DirectRelayCandidateSnapshot {
         Self {
             advertisement,
             capability,
+            authenticated_local_prefix: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_local_prefix(
+        advertisement: RouteCandidateAdvertisement,
+        capability: DirectRelayCapability,
+        prefix: volparossa_core::ObservedNetworkPrefix,
+    ) -> Self {
+        Self {
+            advertisement,
+            capability,
+            authenticated_local_prefix: Some(prefix),
         }
     }
 }
@@ -1630,6 +1666,8 @@ pub struct DiscoveryRuntime {
     direct_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
     // Incoming data-relay authority for this node's Exit service is not local Client selection.
     exit_data_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
+    /// Signed control authorities for this Exit service, independent from its Client selection.
+    exit_control_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
     local_relay_snapshot: Option<DirectRelayCapability>,
     forwarded_exits: HashMap<ForwardedExitKey, ForwardedExitCapability>,
     forwarded_exit_targets: HashMap<Libp2pPeerId, u64>,
@@ -1778,6 +1816,7 @@ impl DiscoveryRuntime {
             preferred_exit_controls: HashMap::new(),
             direct_relays: HashMap::new(),
             exit_data_relays: HashMap::new(),
+            exit_control_relays: HashMap::new(),
             local_relay_snapshot: None,
             forwarded_exits: HashMap::new(),
             forwarded_exit_targets: HashMap::new(),
@@ -3505,6 +3544,11 @@ impl DiscoveryRuntime {
                 && capability.advertisement_expires_at_ms > now_ms
                 && capability.policy_expires_at_ms > now_ms
         });
+        self.exit_control_relays.retain(|_, capability| {
+            capability.expires_at_ms > now_ms
+                && capability.advertisement_expires_at_ms > now_ms
+                && capability.policy_expires_at_ms > now_ms
+        });
         self.preferred_exit_controls
             .retain(|exit_peer, control_peer| {
                 exit_peer != control_peer
@@ -3875,6 +3919,13 @@ impl DiscoveryRuntime {
         };
 
         self.exit_data_relays.retain(|_, capability| {
+            policy_matches(
+                capability.policy_version,
+                capability.policy_hash,
+                capability.policy_expires_at_ms,
+            )
+        });
+        self.exit_control_relays.retain(|_, capability| {
             policy_matches(
                 capability.policy_version,
                 capability.policy_hash,
@@ -7411,9 +7462,17 @@ impl DiscoveryRuntime {
         if dispatch_attempts > MAX_DISPATCH_ATTEMPTS {
             reject!("EXIT_FORWARD_RELAY_RETRY_EXHAUSTED");
         }
+        let Some(upstream) =
+            local_exit_forward_upstream_request(&self.service, request, local_peer, now_ms)
+        else {
+            reject!("EXIT_FORWARD_RELAY_CONTROL_AUTHORITY_UNAVAILABLE");
+        };
+        let upstream_size = canonical_request
+            .len()
+            .saturating_add(upstream.as_forward_request().control_advertisement().len());
         let Some(reserved_bytes) = retry
             .map(|entry| entry.reserved_bytes)
-            .or_else(|| ledger_reservation_bytes(canonical_request.len()))
+            .or_else(|| ledger_reservation_bytes(upstream_size))
         else {
             reject!("EXIT_FORWARD_RELAY_CAPACITY");
         };
@@ -7436,7 +7495,7 @@ impl DiscoveryRuntime {
         let attempt_deadline = rpc_deadline(operation_expires_at_ms, EXIT_FORWARD_UPSTREAM_TIMEOUT);
         let Ok(outbound_id) = self
             .service
-            .request_exit_forward_upstream(&exit_peer, request.clone().into())
+            .request_exit_forward_upstream(&exit_peer, upstream)
         else {
             reject!("EXIT_FORWARD_RELAY_TRANSPORT_UNAVAILABLE");
         };
@@ -8805,8 +8864,9 @@ impl DiscoveryRuntime {
                 | ExitForwardOperation::MptcpSessionStart
                 | ExitForwardOperation::MpquicSessionStart
         ) || self
-            .direct_relays
+            .exit_control_relays
             .get(&authenticated_control_relay)
+            .or_else(|| self.direct_relays.get(&authenticated_control_relay))
             .is_some_and(|capability| {
                 direct_relay_capability_matches(
                     capability,
@@ -10483,14 +10543,20 @@ impl DiscoveryRuntime {
         let local_peer = *self.service.local_peer_id();
         let exit_control_address =
             identity_bound_exit_control_address(&self.control_addresses, &scope, local_peer)?;
-        let current_control = self.direct_relays.get(&authenticated_control_relay)?;
+        let current_control = native_probe_relay_capability_from_advertisement(
+            request.control_advertisement(),
+            control,
+            &scope,
+            authenticated_control_relay,
+            now_ms,
+        )?;
         if control_relay_peer != authenticated_control_relay
             || control_relay_public_key != current_control.public_key
             || exit_node_id != self.local_node_id
             || exit_peer != local_peer
             || exit_peer == authenticated_control_relay
             || !native_probe_control_capability_lineage_matches(
-                current_control,
+                &current_control,
                 control,
                 &scope,
                 authenticated_control_relay,
@@ -10517,6 +10583,13 @@ impl DiscoveryRuntime {
             .service
             .bind_native_probe_control_connection(authenticated_control_relay, connection_id)
             .ok()?;
+        // The verified self-advertisement also authorizes subsequent reservation requests to
+        // this Exit. It never becomes a candidate for this node's unrelated Client role.
+        retain_exit_relay_capability(
+            &mut self.exit_control_relays,
+            self.candidate_limit,
+            current_control,
+        )?;
         let authenticated_control_peer = authenticated_control_relay.to_bytes();
         let identity = &self.identity;
         let accepted = self
@@ -10856,8 +10929,7 @@ impl DiscoveryRuntime {
         let Some(relay_wire_endpoint) = chain.relay_exit_endpoint().endpoint.as_ref() else {
             reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
         };
-        let Some(observed_network_prefix) =
-            native_probe_observed_relay_prefix(&relay_wire_endpoint.underlay_ip)
+        let Some(observed_network_prefix) = native_probe_observed_relay_prefix(relay_wire_endpoint)
         else {
             reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
         };
@@ -11187,7 +11259,7 @@ impl DiscoveryRuntime {
         ) else {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         };
-        let Some(prepare) = native_service_prepare_request(
+        let Some(mut prepare) = native_service_prepare_request(
             &scope,
             ContextRole::Exit,
             &[WireguardRole::Exit],
@@ -11195,6 +11267,19 @@ impl DiscoveryRuntime {
         ) else {
             reject!("NATIVE_PROBE_READY_EXIT_HELPER_SCOPE_REJECTED");
         };
+        if scope.required_path_count == 1 {
+            // The complete single-path set is already authenticated here. Multi-path Ready
+            // allocates its complete Exit batch at the first request, before later Relays are
+            // known; it cannot invent those paths' local interfaces from this one connection.
+            prepare.traversal_hints = self
+                .exact_endpoint_traversal_hints(vec![EndpointTraversalBinding {
+                    path_id: scope.candidate_ordinal,
+                    role: WireguardRole::Exit,
+                    observer_id: data_relay_node_id,
+                    observer_peer_id: authenticated_data_relay,
+                }])
+                .unwrap_or_default();
+        }
         let Some(attempt_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id) else {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         };
@@ -12606,6 +12691,9 @@ impl DiscoveryRuntime {
             direct_relays.push(DirectRelayCandidateSnapshot {
                 advertisement: candidate.advertisement.clone(),
                 capability: capability.clone(),
+                authenticated_local_prefix: self
+                    .service
+                    .authenticated_local_peer_prefix(exact.peer_id),
             });
         }
         direct_relays
@@ -13016,24 +13104,31 @@ fn native_probe_exit_socket_request(
     })
 }
 
-fn native_probe_observed_relay_prefix(underlay_ip: &[u8]) -> Option<ObservationNetworkPrefix> {
+fn native_probe_observed_relay_prefix(
+    endpoint: &volparossa_protocol::WireguardEndpoint,
+) -> Option<ObservationNetworkPrefix> {
+    let underlay_ip = endpoint.underlay_ip.as_slice();
     let address = match underlay_ip.len() {
         4 => IpAddr::from(<[u8; 4]>::try_from(underlay_ip).ok()?),
         16 => IpAddr::from(<[u8; 16]>::try_from(underlay_ip).ok()?),
         _ => return None,
     };
     // This is Exit-side Relay-to-Exit evidence, never the Client's local LAN origin.
-    if !is_public_routable_ip(address) {
+    let scope = volparossa_protocol::UnderlayScope::try_from(endpoint.underlay_scope).ok()?;
+    if !match scope {
+        volparossa_protocol::UnderlayScope::PublicInternet => is_public_routable_ip(address),
+        volparossa_protocol::UnderlayScope::DirectLocalLan => is_local_lan_ip(address),
+    } {
         return None;
     }
     match underlay_ip.len() {
         4 => Some(ObservationNetworkPrefix {
-            scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
+            scope: scope as i32,
             address_family: ObservationAddressFamily::Ipv4 as i32,
             network_prefix: underlay_ip[..3].to_vec(),
         }),
         16 => Some(ObservationNetworkPrefix {
-            scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
+            scope: scope as i32,
             address_family: ObservationAddressFamily::Ipv6 as i32,
             network_prefix: underlay_ip[..6].to_vec(),
         }),
@@ -14270,6 +14365,19 @@ fn cache_exit_data_relay_capability(
     ) {
         return None;
     }
+    retain_exit_relay_capability(cache, candidate_limit, capability)
+}
+
+/// Keep bounded Exit-service authority without changing the independent Client candidate set.
+fn retain_exit_relay_capability(
+    cache: &mut HashMap<Libp2pPeerId, DirectRelayCapability>,
+    candidate_limit: usize,
+    capability: DirectRelayCapability,
+) -> Option<DirectRelayCapability> {
+    let authenticated_peer = capability.peer_id;
+    if cache.get(&authenticated_peer) == Some(&capability) {
+        return Some(capability);
+    }
     let replace_cached = match cache.get(&authenticated_peer) {
         Some(current)
             if current.node_id != capability.node_id
@@ -14346,6 +14454,27 @@ fn native_probe_data_relay_capability_from_advertisement(
     authenticated_peer: Libp2pPeerId,
     now_ms: u64,
 ) -> Option<DirectRelayCapability> {
+    if scope.data_relay.as_ref() != Some(actor) {
+        return None;
+    }
+    native_probe_relay_capability_from_advertisement(
+        encoded_advertisement,
+        actor,
+        scope,
+        authenticated_peer,
+        now_ms,
+    )
+}
+
+/// Verify a self-contained signed Relay capability for the exact control or data actor.
+/// This never consults or populates this node's independent Client candidate cache.
+fn native_probe_relay_capability_from_advertisement(
+    encoded_advertisement: &[u8],
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    now_ms: u64,
+) -> Option<DirectRelayCapability> {
     if !advertisement_envelope_matches_peer(encoded_advertisement, &authenticated_peer) {
         return None;
     }
@@ -14375,9 +14504,10 @@ fn native_probe_data_relay_capability_from_advertisement(
     let advertisement_expires_at_ms = verified.expires_at_ms();
     let maximum_capability_expiry = advertisement_expires_at_ms.min(scope.policy_expires_at_ms);
 
-    if scope.data_relay.as_ref() != Some(actor)
+    if (scope.data_relay.as_ref() != Some(actor) && scope.control.as_ref() != Some(actor))
         || !roles.relay
-        || network.asn == 0
+        || (network.asn == 0
+            && network.uplink != volparossa_protocol::AdvertisementUplink::LocalOnly as i32)
         || !native_probe_capabilities_support_scope(capabilities, scope)
         || node_id_from_public_key(&public_key) != node_id
         || advertisement.node_id.as_slice() != node_id
@@ -14440,6 +14570,40 @@ fn local_native_probe_data_relay_authority(
         )
         .then(|| (capability, encoded.to_vec()))
     })
+}
+
+/// The control Relay adds only its own exact signed authority on the upstream hop. The
+/// client-session-signed request stays byte-identical, and no Client endpoint accompanies it.
+fn local_exit_forward_upstream_request(
+    service: &DiscoveryService,
+    request: &ExitForwardRequest,
+    local_peer: Libp2pPeerId,
+    now_ms: u64,
+) -> Option<UpstreamExitForwardRequest> {
+    request.validate().ok()?;
+    if !request.control_advertisement().is_empty() {
+        return None;
+    }
+    let upstream = UpstreamExitForwardRequest::from(request.clone());
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbePermit {
+        return Some(upstream);
+    }
+    let scope = verified_native_probe_forward_scope(request, now_ms)?;
+    let actor = scope.control.as_ref()?;
+    let advertisement = service.bounded_local_advertisements().find_map(|encoded| {
+        let capability = native_probe_relay_capability_from_advertisement(
+            encoded, actor, &scope, local_peer, now_ms,
+        )?;
+        native_probe_control_capability_matches(
+            &capability,
+            actor,
+            &scope,
+            local_peer,
+            scope.attempt_expires_at_ms,
+        )
+        .then(|| encoded.to_vec())
+    })?;
+    upstream.with_control_advertisement(advertisement).ok()
 }
 
 fn local_native_probe_exit_actor_is_served(
@@ -15728,8 +15892,24 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(native_probe_observed_relay_prefix(&[192, 168, 8, 2]).is_none());
-        assert!(native_probe_observed_relay_prefix(&[8, 8, 8, 8]).is_some());
+        let mut wire_endpoint = volparossa_protocol::WireguardEndpoint {
+            public_key: vec![8; 32],
+            underlay_ip: vec![192, 168, 8, 2],
+            listen_port: 41_000,
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
+        };
+        assert!(native_probe_observed_relay_prefix(&wire_endpoint).is_none());
+        wire_endpoint.underlay_scope = volparossa_protocol::UnderlayScope::DirectLocalLan as i32;
+        let local = native_probe_observed_relay_prefix(&wire_endpoint).unwrap();
+        assert_eq!(local.network_prefix, vec![192, 168, 8]);
+        assert_eq!(
+            local.scope,
+            volparossa_protocol::UnderlayScope::DirectLocalLan as i32
+        );
+        wire_endpoint.underlay_ip = vec![8, 8, 8, 8];
+        assert!(native_probe_observed_relay_prefix(&wire_endpoint).is_none());
+        wire_endpoint.underlay_scope = volparossa_protocol::UnderlayScope::PublicInternet as i32;
+        assert!(native_probe_observed_relay_prefix(&wire_endpoint).is_some());
     }
 
     #[tokio::test]
@@ -16555,6 +16735,8 @@ mod tests {
         fixture: RuntimeFixture,
         now_ms: u64,
         control: DirectRelayCapability,
+        control_identity: Identity,
+        control_advertisement: Vec<u8>,
         scope: NativeProbePathScope,
         request: ExitForwardRequest,
         local_advertisement: Vec<u8>,
@@ -16622,8 +16804,32 @@ mod tests {
         let actor_expires_at_ms = now_ms.saturating_add(20_000);
 
         let control_identity = Identity::generate();
-        let control =
+        let mut control =
             direct_capability(&control_identity, &fixture.policy, 17, actor_expires_at_ms);
+        let control_advertisement = service_advertisement(
+            &control_identity,
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: false,
+            },
+            &fixture.policy,
+            17,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let control_envelope: SignedEnvelope = decode_canonical(
+            &control_advertisement,
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("signed control advertisement");
+        control.advertisement_expires_at_ms = control_envelope.expires_at_ms;
+        control.advertisement_payload_hash = advertisement_fingerprint(&control_advertisement)
+            .expect("control fingerprint")
+            .payload_hash;
         fixture
             .runtime
             .direct_relays
@@ -16725,6 +16931,8 @@ mod tests {
             fixture,
             now_ms,
             control,
+            control_identity,
+            control_advertisement,
             scope,
             request,
             local_advertisement,
@@ -17031,6 +17239,105 @@ mod tests {
             fixture.now_ms,
         ));
         (encoded, scope)
+    }
+
+    #[tokio::test]
+    async fn native_permit_control_authority_is_carried_without_exit_client_candidates() {
+        let mut fixture = native_permit_forward_fixture();
+        fixture.fixture.runtime.direct_relays.clear();
+        let mut control_service = DiscoveryService::new_with_protocol_roles(
+            fixture.control_identity.keypair().clone(),
+            DiscoveryProtocolRoles::new(false, true, false),
+        )
+        .expect("control service");
+        control_service
+            .set_local_advertisement(fixture.control_advertisement.clone())
+            .expect("serve exact signed control advertisement");
+        let upstream = local_exit_forward_upstream_request(
+            &control_service,
+            &fixture.request,
+            fixture.control.peer_id,
+            fixture.now_ms,
+        )
+        .expect("control adds its own authority without rewriting the signed Client request");
+        let forwarded = upstream.as_forward_request();
+        assert_eq!(
+            forwarded.canonical_request(),
+            fixture.request.canonical_request()
+        );
+        assert_eq!(
+            forwarded.control_advertisement(),
+            fixture.control_advertisement
+        );
+        let actor = fixture.scope.control.as_ref().unwrap();
+        let accepted = native_probe_relay_capability_from_advertisement(
+            forwarded.control_advertisement(),
+            actor,
+            &fixture.scope,
+            fixture.control.peer_id,
+            fixture.now_ms,
+        )
+        .expect("Exit verifies exact signed authority without its own Client candidates");
+        assert_eq!(accepted, fixture.control);
+        assert!(fixture.fixture.runtime.direct_relays.is_empty());
+        assert!(
+            retain_exit_relay_capability(
+                &mut fixture.fixture.runtime.exit_control_relays,
+                1,
+                accepted.clone(),
+            )
+            .is_some()
+        );
+        assert_eq!(
+            fixture
+                .fixture
+                .runtime
+                .exit_control_relays
+                .get(&accepted.peer_id),
+            Some(&accepted)
+        );
+        assert!(fixture.fixture.runtime.direct_relays.is_empty());
+        assert!(
+            native_probe_relay_capability_from_advertisement(
+                &[],
+                actor,
+                &fixture.scope,
+                fixture.control.peer_id,
+                fixture.now_ms,
+            )
+            .is_none()
+        );
+        assert!(
+            native_probe_relay_capability_from_advertisement(
+                forwarded.control_advertisement(),
+                actor,
+                &fixture.scope,
+                *Identity::generate().peer_id(),
+                fixture.now_ms,
+            )
+            .is_none()
+        );
+        let mut wrong_actor = actor.clone();
+        wrong_actor.advertisement_payload_hash[0] ^= 1;
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.control = Some(wrong_actor.clone());
+        assert!(
+            native_probe_relay_capability_from_advertisement(
+                forwarded.control_advertisement(),
+                &wrong_actor,
+                &wrong_scope,
+                fixture.control.peer_id,
+                fixture.now_ms,
+            )
+            .is_none()
+        );
+        let production = include_str!("discovery.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .unwrap()
+            .0;
+        let handler = braced_item(production, "fn prepare_native_probe_permit_response(");
+        assert!(!handler.contains(".direct_relays"));
+        assert!(handler.contains("request.control_advertisement()"));
     }
 
     #[tokio::test]

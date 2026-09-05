@@ -467,6 +467,17 @@ pub(crate) struct RuntimeBoundPreparedLeaseBatch {
     phase: RuntimeLeasePhase,
 }
 
+/// Destruction-only authority for one context, retained across consuming protocol joins.
+///
+/// This contains no lease handles or phase state and cannot activate or commit a route. In
+/// particular, it grants no authority over other contexts served by the same combined-role node.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct RuntimeBoundContextCleanup {
+    helper_runtime_id: [u8; 32],
+    route_context_id: Vec<u8>,
+    context_handle: Vec<u8>,
+}
+
 impl RuntimeBoundPreparedLeaseBatch {
     fn new(
         helper_runtime_id: [u8; 32],
@@ -513,6 +524,14 @@ impl RuntimeBoundPreparedLeaseBatch {
 
     pub(crate) fn destroy_request(&self) -> DestroyContext {
         DestroyContext {
+            route_context_id: self.prepare.route_context_id.clone(),
+            context_handle: self.prepared.context_handle.clone(),
+        }
+    }
+
+    pub(crate) fn retain_cleanup_authority(&self) -> RuntimeBoundContextCleanup {
+        RuntimeBoundContextCleanup {
+            helper_runtime_id: self.helper_runtime_id,
             route_context_id: self.prepare.route_context_id.clone(),
             context_handle: self.prepared.context_handle.clone(),
         }
@@ -804,7 +823,7 @@ impl HelperClient {
         match result {
             Ok(Ok((helper_runtime_id, prepared))) => {
                 RuntimeBoundPreparedLeaseBatch::new(helper_runtime_id, value, prepared)
-                    .map_err(PrepareLeaseBatchFailure::Definitive)
+                    .map_err(|error| classify_prepare_failure(error, dispatch_state))
             }
             Ok(Err(error)) => Err(classify_prepare_failure(error, dispatch_state)),
             Err(_) => Err(classify_prepare_failure(
@@ -949,6 +968,27 @@ impl HelperClient {
         let value = owner.destroy_request();
         match self
             .execute_runtime_bound_readonly(owner, helper_request::Operation::DestroyContext(value))
+            .await?
+        {
+            helper_response::Outcome::DestroyedContext(value) => Ok(value),
+            _ => Err(HelperClientError::Correlation),
+        }
+    }
+
+    /// Destroy only the context retained before an affine join consumed its lifecycle owner.
+    pub(crate) async fn destroy_context_after_join(
+        &self,
+        cleanup: &RuntimeBoundContextCleanup,
+    ) -> Result<DestroyedContext, HelperClientError> {
+        let value = DestroyContext {
+            route_context_id: cleanup.route_context_id.clone(),
+            context_handle: cleanup.context_handle.clone(),
+        };
+        match self
+            .execute_expected_runtime(
+                &cleanup.helper_runtime_id,
+                helper_request::Operation::DestroyContext(value),
+            )
             .await?
         {
             helper_response::Outcome::DestroyedContext(value) => Ok(value),
@@ -1355,6 +1395,15 @@ impl HelperClient {
         owner: &RuntimeBoundPreparedLeaseBatch,
         operation: helper_request::Operation,
     ) -> Result<helper_response::Outcome, HelperClientError> {
+        self.execute_expected_runtime(&owner.helper_runtime_id, operation)
+            .await
+    }
+
+    async fn execute_expected_runtime(
+        &self,
+        expected_runtime: &[u8; 32],
+        operation: helper_request::Operation,
+    ) -> Result<helper_response::Outcome, HelperClientError> {
         let bind_request_id = random_request_id(&[]);
         let operation_request_id = random_request_id(&[bind_request_id]);
         let (bind_frame, bind_digest) = runtime_bind_frame(bind_request_id)?;
@@ -1372,7 +1421,7 @@ impl HelperClient {
             let mut stream = self.connect_authenticated().await?;
             self.bind_expected_runtime(
                 &mut stream,
-                owner,
+                expected_runtime,
                 bind_frame.as_slice(),
                 &bind_request_id,
                 &bind_digest,
@@ -1412,7 +1461,7 @@ impl HelperClient {
             let mut stream = self.connect_authenticated().await?;
             self.bind_expected_runtime(
                 &mut stream,
-                owner,
+                &owner.helper_runtime_id,
                 bind_frame.as_slice(),
                 &bind_request_id,
                 &bind_digest,
@@ -1451,7 +1500,7 @@ impl HelperClient {
     async fn bind_expected_runtime(
         &self,
         stream: &mut UnixStream,
-        owner: &RuntimeBoundPreparedLeaseBatch,
+        expected_runtime: &[u8; 32],
         bind_frame: &[u8],
         bind_request_id: &[u8; 16],
         bind_digest: &[u8; 32],
@@ -1461,12 +1510,7 @@ impl HelperClient {
         else {
             return Err(HelperClientError::Correlation);
         };
-        if owner
-            .helper_runtime_id
-            .ct_eq(&helper_runtime_id)
-            .unwrap_u8()
-            != 1
-        {
+        if expected_runtime.ct_eq(&helper_runtime_id).unwrap_u8() != 1 {
             return Err(HelperClientError::RuntimeChanged);
         }
         Ok(())
@@ -2701,6 +2745,104 @@ mod tests {
             .destroy_context(&owner)
             .await
             .expect("same-runtime Destroy");
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn cleanup_after_consumed_client_owner_preserves_other_role_contexts() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let owner = RuntimeBoundPreparedLeaseBatch::for_test(
+            prepare_sequence_value(),
+            PreparedLeaseBatch {
+                context_handle: vec![3; 32],
+                leases: Vec::new(),
+            },
+        );
+        let cleanup = owner.retain_cleanup_authority();
+        // Model a consuming protocol join returning an error: lifecycle authority is gone.
+        drop(owner);
+        let server = tokio::spawn(async move {
+            let mut contexts = BTreeMap::from([
+                (vec![7; 16], vec![3; 32]), // Failing local Client context.
+                (vec![8; 16], vec![4; 32]), // Another participant's Relay context.
+                (vec![9; 16], vec![5; 32]), // Another participant's Exit context.
+            ]);
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let bind = read_request(&mut stream).await.expect("runtime Bind");
+            assert!(matches!(
+                bind.operation,
+                Some(helper_request::Operation::BindHelperRuntime(
+                    BindHelperRuntime {
+                        prepare_intent: None
+                    }
+                ))
+            ));
+            write_runtime(&mut stream, &bind, [0xa5; 32]).await;
+            let request = read_request(&mut stream).await.expect("exact destruction");
+            let Some(helper_request::Operation::DestroyContext(value)) = request.operation.as_ref()
+            else {
+                panic!("cleanup after a Client failure must never dispatch CleanupOwned");
+            };
+            assert_eq!(value.route_context_id, vec![7; 16]);
+            assert_eq!(
+                contexts.get(&value.route_context_id),
+                Some(&value.context_handle)
+            );
+            contexts.remove(&value.route_context_id);
+            write_test_response(
+                &mut stream,
+                &request,
+                HelperResult::Ok,
+                Some(helper_response::Outcome::DestroyedContext(
+                    DestroyedContext { existed: true },
+                )),
+            )
+            .await;
+            contexts
+        });
+        let client =
+            HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
+        assert!(
+            client
+                .destroy_context_after_join(&cleanup)
+                .await
+                .expect("exact cleanup")
+                .existed
+        );
+        assert_eq!(
+            server.await.expect("server"),
+            BTreeMap::from([(vec![8; 16], vec![4; 32]), (vec![9; 16], vec![5; 32])])
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_after_consumed_owner_never_dispatches_to_changed_runtime() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let owner = RuntimeBoundPreparedLeaseBatch::for_test(
+            prepare_sequence_value(),
+            PreparedLeaseBatch {
+                context_handle: vec![3; 32],
+                leases: Vec::new(),
+            },
+        );
+        let cleanup = owner.retain_cleanup_authority();
+        drop(owner);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let bind = read_request(&mut stream).await.expect("runtime Bind");
+            write_runtime(&mut stream, &bind, [0xb6; 32]).await;
+            assert_no_followup_frame(&mut stream).await;
+        });
+        let client =
+            HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
+        assert!(matches!(
+            client.destroy_context_after_join(&cleanup).await,
+            Err(HelperClientError::RuntimeChanged)
+        ));
         server.await.expect("server");
     }
 

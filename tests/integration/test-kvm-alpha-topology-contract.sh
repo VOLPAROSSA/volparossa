@@ -243,6 +243,8 @@ grep -F '"$WORK/tls-policy/tls-policy-cert.der"' "$GUEST" >/dev/null
 grep -F 'destination.volparossa.test' "$GUEST" >/dev/null
 grep -F '"$WORK/bin/dns-policy-client.py" udp "$RUN_ID"' "$GUEST" >/dev/null
 grep -F '"$WORK/bin/dns-policy-client.py" tcp "$RUN_ID"' "$GUEST" >/dev/null
+grep -F "'47.163.4.2 destination.volparossa.test destination.volparossa.test.'" "$GUEST" >/dev/null
+grep -F 'getent ahostsv4 destination.volparossa.test. |' "$GUEST" >/dev/null
 # setpriv executes this fixture directly: without a shebang it becomes shell input.
 awk '
     /^cat >"\$WORK\/bin\/dns-policy-client\.py"/ {

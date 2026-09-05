@@ -977,6 +977,22 @@ impl DiscoveryService {
         self.swarm.local_peer_id()
     }
 
+    /// Return an advisory LAN prefix from one current authenticated direct peer connection.
+    ///
+    /// Multiple connections, non-LAN endpoints and poisoned lineage yield no hint. This copies
+    /// no endpoint or connection authority and creates no affine proof: selection must still
+    /// obtain its normal signed, connection-bound freshness evidence before admission.
+    #[must_use]
+    pub fn authenticated_local_peer_prefix(
+        &self,
+        peer: PeerId,
+    ) -> Option<volparossa_core::ObservedNetworkPrefix> {
+        self.swarm
+            .behaviour()
+            .connection_provenance
+            .advisory_local_prefix(peer)
+    }
+
     /// Returns the immutable local protocol roles.
     #[must_use]
     pub const fn protocol_roles(&self) -> DiscoveryProtocolRoles {
@@ -1315,7 +1331,7 @@ impl DiscoveryService {
         if !self.protocol_roles.client() {
             return Err(DiscoveryError::ProtocolRole);
         }
-        request.validate()?;
+        request.validate_client_hop()?;
         let wrapper_relay = peer_id_from_wire(request.control_relay_peer_id())?;
         let wrapper_exit = peer_id_from_wire(request.exit_peer_id())?;
         if wrapper_relay != *control_relay_peer

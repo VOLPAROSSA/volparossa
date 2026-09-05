@@ -17,8 +17,16 @@ the generated Python DNS client lacked a shebang and was interpreted as shell co
 The corrected [rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/33975821992)
 at `aaa44d60` stopped earlier at `A01_BOOTSTRAP1_ADVERTISEMENT_STALLED`: the new discovery
 scheduler suppressed refreshing an unexpired advertisement after its Relay restarted.
-Provider-triggered refresh is restored and its focused regression passes; live confirmation
-is still required. This rerun did not reach A08, so A08--A14 remain unproven here.
+Provider-triggered refresh is restored. The next
+[datapath run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33979920940) at `0ae30c88`
+again passed A01--A07 and A15, confirming discovery restart recovery. It reached A08 but still
+stopped at `A08_ALLOWED_DNS_UDP_NOT_PROVEN`: the DNS client produced no response before its
+deadline, although the Exit's own resolver returned the permitted fixture address. This is a
+remaining DNS integration blocker, not a successful A08 result. A08--A14 remain unproven here.
+The cause is now corrected in the helper: UDP DNS uses TPROXY so the receiving agent keeps
+the original resolver address and port 53; TCP DNS retains REDIRECT with `SO_ORIGINAL_DST`.
+The real disposable-veth ingress smoke passed with exact DNS destination/reply-source metadata
+and a subsequent datagram while the reply descriptor remained live. A full A08 rerun is pending.
 `0075033e` also passed
 [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972360525) and
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972358060).
@@ -47,7 +55,10 @@ All nodes use the same software. Development fixtures may still isolate roles to
 - [x] CLI/wire/agent honor Client disable; dormant Connect is rejected before route work.
 - [x] One packaged node supervises separate immutable native Client and Exit workers/sockets.
 - [x] Local Client candidate/provenance state is separate from Relay forwarding and Exit incoming
-  data-relay authority for other clients. Provider scheduling retains forwarded-only Exit choices
+  Relay authority for other clients. Native Permit forwarding carries the control Relay's exact
+  signed self-advertisement on the upstream-only hop; the Exit verifies it against the signed
+  actor and authenticated connection without depending on its own Client candidate cache.
+  The original Client-signed request is unchanged. Provider scheduling retains forwarded-only Exit choices
   in a homogeneous combined-role candidate pool.
 - [ ] Live reciprocal datapath proof: the same participant daemons concurrently consume the
   network and carry other participants' Relay and policy-limited Exit traffic.
@@ -66,9 +77,18 @@ unchanged agent processes. Its script/evidence-parser checks pass. The first
 stopped at `RECIPROCITY_NEIGHBOR_DISCOVERY_UNAVAILABLE` before application traffic; all four
 participants enabled all roles, but the signed candidate pool was incomplete. Startup partitioning
 now waits for a viable provider pool across completed queries, preserving known neighboring
-Relay contacts. Focused ordering checks pass; live confirmation remains pending. Both failed
-KVM runs completely cleaned their owned state and retained unchanged host-state hashes.
+Relay contacts. The [next reciprocal run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33979922348)
+at `0ae30c88` passed neighbor discovery but stopped at `RECIPROCITY_NATIVE_ROUTE_UNAVAILABLE`.
+Kernel-originated Relay/Exit WireGuard outer packets lacked the Client-ingress bypass mark;
+all four WireGuard roles now receive that mark. Failed Client native probes also used an
+all-owned cleanup fallback that could destroy other roles' contexts: a destruction-only exact
+context authority now survives consuming protocol joins, with no broad fallback in route setup.
+These fixes have focused coverage; reciprocal application traffic still needs a successful rerun.
+The failed KVM runs completely cleaned their owned state and retained unchanged host-state hashes.
 The `27a4e73` [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33976851986) passed.
+At `0ae30c88`, CodeQL passed but Quality found one stale exact-schema assertion for the new
+`ObservationNetworkPrefix.scope` field. The strict assertion now includes tag 3, without
+removing its field-count check.
 The workflow defaults to `datapath` (all A01--A15 without package/release work); `alpha` retains
 the additional package checks, and `reciprocity` emits only its own clearly scoped report.
 The historical scorecard below predates the vertical runtime and this participation revision;
@@ -103,12 +123,27 @@ binding. Public-IP validation remains unchanged. Focused checks cover scoped can
 local provenance, planner-to-preprobe consumption, mixed-leg signed helper activation and kernel
 route parsing. These checks are not live LAN packet evidence, so the datapath items remain open.
 
-This initial route uses a WAN-capable Relay with truthful ASN metadata; LocalOnly advertisements
-can be signed without invented ASN/public prefixes, but such unknown-ASN nodes are not yet
-selectable as data Relays. Exit-facing origin evidence remains public-only in this slice.
-Direct radio setup, simultaneous WAN+LAN transfer, local-only Relay contribution and owner-priority
-sharing remain unfinished. No direct-radio or phone-without-SIM support is claimed by existing
-Debian KVM evidence. See [local-link scope](LOCAL_LINK_NETWORK.md).
+LocalOnly Relays are now selectable using an explicit authenticated LAN prefix and an absent
+ASN, never a fabricated public origin. Unknown origins conservatively collide with one another;
+they cannot be claimed as independent multipath contributions. Exit-facing signed origin
+evidence can be explicitly local as well, while the Exit must still declare an independent
+Internet uplink. The first [local-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33979923423)
+at `0ae30c88` reached neighbor discovery but stopped at `LOCAL_LINK_NATIVE_ROUTE_UNAVAILABLE`:
+its Exit incorrectly required its own Client-role control candidate, addressed by the carried
+signed authority above. It transferred no proven application traffic.
+
+The local-link scenario now requires two overlapping flows: the offline node consumes through
+a WAN-capable Relay and simultaneously relays another node's traffic over two private links
+to a different WAN-capable Exit. It checks application hashes, both WireGuard legs, Exit source
+addresses, one unchanged offline daemon and the absence of an offline default route. Script
+checks pass; this extended giving-and-taking datapath has no passing live result yet.
+Client native preselection and single-path Exit Ready also carry exact observer-bound local
+interface hints into their helper Prepare operations. They cannot rely on a public default route
+on a LocalOnly node. Multi-path Exit Ready still prepares its full lease batch before receiving
+all Relay identities; mixed local Exit-facing batches need a later complete-set integration.
+Direct radio setup, simultaneous WAN+LAN aggregation and owner-priority sharing remain
+unfinished. No direct-radio or phone-without-SIM support is claimed by Debian KVM evidence.
+See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
 

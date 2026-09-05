@@ -46,7 +46,7 @@ print_plan() {
     elif [ "$scenario" = local-link ]; then
         printf '%s\n' \
             'Local-link scenario: offline RFC1918 consumer, two LAN Relay contacts and WAN Exit;' \
-            '  one real UDP route, not radio or aggregate capacity; packaging is skipped.'
+            '  concurrent real consumption and LAN relay contribution, not radio or aggregate capacity; packaging is skipped.'
     elif [ "$scenario" = reciprocity ]; then
         printf '%s\n' \
             'Reciprocity scenario: simultaneous client/relay/exit datapaths;' \

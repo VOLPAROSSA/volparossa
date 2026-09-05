@@ -313,19 +313,14 @@ fn hard_filter_core(
         return Err(HardFilterReason::SeriousProtocolFault);
     }
     let observed_network_is_usable = match observed_network {
-        ObservedNetworkInput::Legacy => candidate.evidence.observed_network_origin.is_some(),
+        ObservedNetworkInput::Legacy => {
+            candidate.advertisement.network.uplink
+                == volparossa_core::NetworkUplink::IndependentInternet
+                && candidate.evidence.observed_network_origin.is_some()
+        }
         ObservedNetworkInput::Prefix(prefix) => {
             candidate.evidence.observed_network_origin.is_none()
-                && (prefix.is_public_routable()
-                    || (requirements.role == ServiceRole::Relay
-                        && prefix.is_local_lan()
-                        && candidate.advertisement.network.uplink
-                            == volparossa_core::NetworkUplink::IndependentInternet
-                        && candidate
-                            .advertisement
-                            .network
-                            .asn
-                            .is_some_and(|asn| asn != 0)))
+                && scoped_network_is_usable(candidate, requirements.role, *prefix)
                 && requirements
                     .address_family
                     .is_none_or(|family| family == prefix.family())
@@ -349,4 +344,21 @@ fn hard_filter_core(
         return Err(HardFilterReason::InsufficientCapacity);
     }
     Ok(usable)
+}
+
+fn scoped_network_is_usable(
+    candidate: &Candidate,
+    role: ServiceRole,
+    prefix: ObservedNetworkPrefix,
+) -> bool {
+    let network = &candidate.advertisement.network;
+    match network.uplink {
+        volparossa_core::NetworkUplink::IndependentInternet => {
+            prefix.is_public_routable()
+                || (prefix.is_local_lan() && network.asn.is_some_and(|asn| asn != 0))
+        }
+        volparossa_core::NetworkUplink::LocalOnly => {
+            role == ServiceRole::Relay && network.asn.is_none() && prefix.is_local_lan()
+        }
+    }
 }

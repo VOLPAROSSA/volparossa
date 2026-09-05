@@ -341,7 +341,7 @@ fn install_transaction(
         rule(
             table,
             MANGLE_CHAIN,
-            dns_accept_expressions(NFPROTO_IPV4, IPPROTO_UDP)?,
+            dns_udp_tproxy_expressions(NFPROTO_IPV4, ports.ipv4.dns_udp, CLIENT_INGRESS_IPV4_MARK)?,
         )?,
         rule(
             table,
@@ -351,7 +351,7 @@ fn install_transaction(
         rule(
             table,
             MANGLE_CHAIN,
-            dns_accept_expressions(NFPROTO_IPV6, IPPROTO_UDP)?,
+            dns_udp_tproxy_expressions(NFPROTO_IPV6, ports.ipv6.dns_udp, CLIENT_INGRESS_IPV6_MARK)?,
         )?,
         rule(
             table,
@@ -408,29 +408,9 @@ fn install_transaction(
             NAT_CHAIN,
             dns_redirect_expressions(
                 ingress_ifindex,
-                NFPROTO_IPV4,
-                IPPROTO_UDP,
-                ports.ipv4.dns_udp,
-            )?,
-        )?,
-        rule(
-            table,
-            NAT_CHAIN,
-            dns_redirect_expressions(
-                ingress_ifindex,
                 NFPROTO_IPV6,
                 IPPROTO_TCP,
                 ports.ipv6.dns_tcp,
-            )?,
-        )?,
-        rule(
-            table,
-            NAT_CHAIN,
-            dns_redirect_expressions(
-                ingress_ifindex,
-                NFPROTO_IPV6,
-                IPPROTO_UDP,
-                ports.ipv6.dns_udp,
             )?,
         )?,
     ];
@@ -442,7 +422,7 @@ fn install_transaction(
             rule,
         )?;
     }
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 20, &batch_nfgen())?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 18, &batch_nfgen())?;
     Ok(transaction)
 }
 
@@ -681,11 +661,34 @@ fn tproxy_expressions(
     port: u16,
     mark: u32,
 ) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    let mut expressions = protocol_expressions(family, protocol)?;
+    expressions.extend(tproxy_delivery_expressions(family, port, mark)?);
+    Ok(expressions)
+}
+
+fn dns_udp_tproxy_expressions(
+    family: u8,
+    port: u16,
+    mark: u32,
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    // UDP ORIGDST ancillary data comes from the received packet headers, not conntrack's
+    // pre-NAT tuple. REDIRECT would replace the resolver:53 with our local socket tuple.
+    // TPROXY delivers to the dedicated DNS socket without changing the application's resolver tuple.
+    let mut expressions = protocol_expressions(family, IPPROTO_UDP)?;
+    expressions.extend(destination_port_expressions(DNS_PORT)?);
+    expressions.extend(tproxy_delivery_expressions(family, port, mark)?);
+    Ok(expressions)
+}
+
+fn tproxy_delivery_expressions(
+    family: u8,
+    port: u16,
+    mark: u32,
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
     if port == 0 || mark == 0 {
         return Err(ClientIngressPolicyError::Malformed);
     }
-    let mut expressions = protocol_expressions(family, protocol)?;
-    expressions.push(immediate_value(&port.to_be_bytes())?);
+    let mut expressions = vec![immediate_value(&port.to_be_bytes())?];
     let mut tproxy = Vec::new();
     attr(
         &mut tproxy,
@@ -709,7 +712,7 @@ fn dns_redirect_expressions(
     protocol: u8,
     port: u16,
 ) -> Result<Vec<Expression>, ClientIngressPolicyError> {
-    if port == 0 {
+    if port == 0 || protocol != IPPROTO_TCP {
         return Err(ClientIngressPolicyError::Malformed);
     }
     let mut expressions = vec![
@@ -1221,7 +1224,7 @@ mod tests {
             },
         )
         .expect("transaction");
-        assert_eq!(transaction.requests.len(), 20);
+        assert_eq!(transaction.requests.len(), 18);
         assert!(transaction.bytes.len() <= MAX_BATCH_BYTES);
         assert_eq!(
             transaction
@@ -1229,8 +1232,44 @@ mod tests {
                 .iter()
                 .filter(|request| request.ack)
                 .count(),
-            18
+            16
         );
+    }
+
+    #[test]
+    fn dns_udp_uses_exact_port_tproxy_without_nat_for_both_families() {
+        for (family, port, mark) in [
+            (NFPROTO_IPV4, 20_004_u16, CLIENT_INGRESS_IPV4_MARK),
+            (NFPROTO_IPV6, 21_004_u16, CLIENT_INGRESS_IPV6_MARK),
+        ] {
+            let expressions =
+                dns_udp_tproxy_expressions(family, port, mark).expect("dedicated DNS UDP delivery");
+            let expected_protocol = protocol_expressions(family, IPPROTO_UDP).expect("protocol");
+            let expected_destination = destination_port_expressions(53).expect("DNS port");
+            for (actual, expected) in expressions
+                .iter()
+                .zip(expected_protocol.iter().chain(&expected_destination))
+            {
+                assert_eq!(actual.name, expected.name);
+                assert_eq!(actual.data, expected.data);
+            }
+            assert_eq!(
+                expressions[6].data,
+                immediate_value(&port.to_be_bytes()).unwrap().data
+            );
+            assert_eq!(expressions[7].name, b"tproxy");
+            assert_eq!(
+                expressions[8].data,
+                immediate_value(&mark.to_ne_bytes()).unwrap().data
+            );
+            assert_eq!(expressions.len(), 11);
+            assert!(
+                !expressions
+                    .iter()
+                    .any(|expression| expression.name == b"redir")
+            );
+            assert!(dns_redirect_expressions(9, family, IPPROTO_UDP, port).is_err());
+        }
     }
 
     #[test]
@@ -1411,30 +1450,8 @@ mod tests {
             .create_client_ingress_veth(SMOKE_RUNTIME, namespace.as_raw_fd(), deadline)
             .expect("create real app-to-worker veth");
         let ports = parse_worker_ports(&read_worker_line(&mut child_output, "VPI_PORTS"));
-
-        let acquire = ingress_request(
-            [0xa1; 16],
-            internal_worker_request::Operation::AcquireClientIngressSocket(
-                AcquireClientIngressSocket {
-                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
-                    descriptor_kind: InternalIngressSocketKind::TransparentUdp as i32,
-                    address_family: InternalIngressAddressFamily::Ipv4 as i32,
-                    expected_local: Some(InternalSocketAddress {
-                        address: vec![0; 4],
-                        port: u32::from(ports.ipv4.transparent_udp),
-                    }),
-                },
-            ),
-        );
-        send_credential_worker_request(&parent_channel, &acquire).expect("request transferred UDP");
         let expected_worker = ExpectedUnixCredentials::new(child_pid, 0, 0)
             .expect("worker credentials in disposable user namespace");
-        let mut execution =
-            receive_credential_worker_response(&parent_channel, &acquire, expected_worker)
-                .expect("credentialed UDP descriptor");
-        assert_eq!(execution.response.result, InternalWorkerResult::Ok as i32);
-        let transparent_udp = execution.descriptor.take().expect("transparent UDP owner");
-
         let parent_routing = parent_kernel
             .install_client_ingress_parent_routing(&ingress_link, deadline)
             .expect("install parent marked route");
@@ -1447,69 +1464,101 @@ mod tests {
         )
         .expect("install parent output steering");
 
-        let app = UdpSocket::bind("192.0.2.2:0").expect("bind app underlay address");
-        let application = app.local_addr().expect("application tuple");
-        let remote = "198.18.0.42:4242".parse().expect("remote tuple");
-        app.send_to(SMOKE_PAYLOAD, remote).expect("send app packet");
-        let receiver = UdpSocket::from(transparent_udp);
-        receiver
-            .set_nonblocking(false)
-            .expect("blocking receive for bounded smoke");
-        receiver
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("bounded receive");
-        let mut datagram = [0_u8; 128];
-        let (length, _) = receiver
-            .recv_from(&mut datagram)
-            .expect("packet reached transferred transparent socket");
-        assert_eq!(&datagram[..length], SMOKE_PAYLOAD);
-
-        let reply_request = ingress_request(
-            [0xa3; 16],
-            internal_worker_request::Operation::AcquireClientIngressReplySocket(
-                AcquireClientIngressReplySocket {
-                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
-                    remote: Some(internal_socket_address(remote)),
-                    application: Some(internal_socket_address(application)),
-                },
+        for (kind, local_port, remote) in [
+            (
+                InternalIngressSocketKind::TransparentUdp,
+                ports.ipv4.transparent_udp,
+                "198.18.0.42:4242",
             ),
-        );
-        send_credential_worker_request(&parent_channel, &reply_request)
-            .expect("request exact reply descriptor");
-        let mut reply_execution =
-            receive_credential_worker_response(&parent_channel, &reply_request, expected_worker)
-                .expect("credentialed reply descriptor");
-        assert_eq!(
-            reply_execution.response.result,
-            InternalWorkerResult::Ok as i32
-        );
-        let reply = UdpSocket::from(
-            reply_execution
-                .descriptor
-                .take()
-                .expect("source-bound reply descriptor"),
-        );
-        app.set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("bounded application receive");
-        reply
-            .send_to(SMOKE_REPLY, application)
-            .expect("send exact transparent reply");
-        let (length, source) = app
-            .recv_from(&mut datagram)
-            .expect("application received transparent reply");
-        assert_eq!(source, remote);
-        assert_eq!(&datagram[..length], SMOKE_REPLY);
+            (
+                InternalIngressSocketKind::DnsUdp,
+                ports.ipv4.dns_udp,
+                "9.9.9.9:53",
+            ),
+        ] {
+            let acquire = ingress_request(
+                [0xa1; 16],
+                internal_worker_request::Operation::AcquireClientIngressSocket(
+                    AcquireClientIngressSocket {
+                        client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                        descriptor_kind: kind as i32,
+                        address_family: InternalIngressAddressFamily::Ipv4 as i32,
+                        expected_local: Some(InternalSocketAddress {
+                            address: vec![0; 4],
+                            port: u32::from(local_port),
+                        }),
+                    },
+                ),
+            );
+            send_credential_worker_request(&parent_channel, &acquire)
+                .expect("request transferred UDP");
+            let mut execution =
+                receive_credential_worker_response(&parent_channel, &acquire, expected_worker)
+                    .expect("credentialed UDP descriptor");
+            assert_eq!(execution.response.result, InternalWorkerResult::Ok as i32);
+            let transparent_udp = execution.descriptor.take().expect("transparent UDP owner");
 
-        // Keep the reply descriptor alive while proving that Linux TPROXY still sends the next
-        // datagram on the exact same four-tuple to the transparent ingress owner. A connected
-        // transparent reply socket wins TPROXY's established-flow lookup and silently consumes
-        // this packet instead.
-        app.send_to(SMOKE_SECOND_PAYLOAD, remote)
-            .expect("send second app packet on exact tuple");
-        let (length, _) = receiver
-            .recv_from(&mut datagram)
-            .expect("second packet reached transparent socket while reply socket remains open");
-        assert_eq!(&datagram[..length], SMOKE_SECOND_PAYLOAD);
+            let app = UdpSocket::bind("192.0.2.2:0").expect("bind app underlay address");
+            let application = app.local_addr().expect("application tuple");
+            let remote = remote.parse().expect("remote tuple");
+            app.send_to(SMOKE_PAYLOAD, remote).expect("send app packet");
+            let receiver = UdpSocket::from(transparent_udp);
+            let mut datagram = [0_u8; 128];
+            let metadata = receive_smoke_udp(&receiver, kind, local_port, &mut datagram);
+            assert_eq!(metadata.source(), application);
+            assert_eq!(metadata.original_destination(), remote);
+            assert_eq!(&datagram[..metadata.bytes()], SMOKE_PAYLOAD);
+
+            let reply_request = ingress_request(
+                [0xa3; 16],
+                internal_worker_request::Operation::AcquireClientIngressReplySocket(
+                    AcquireClientIngressReplySocket {
+                        client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                        remote: Some(internal_socket_address(remote)),
+                        application: Some(internal_socket_address(application)),
+                    },
+                ),
+            );
+            send_credential_worker_request(&parent_channel, &reply_request)
+                .expect("request exact reply descriptor");
+            let mut reply_execution = receive_credential_worker_response(
+                &parent_channel,
+                &reply_request,
+                expected_worker,
+            )
+            .expect("credentialed reply descriptor");
+            assert_eq!(
+                reply_execution.response.result,
+                InternalWorkerResult::Ok as i32
+            );
+            let reply = UdpSocket::from(
+                reply_execution
+                    .descriptor
+                    .take()
+                    .expect("source-bound reply descriptor"),
+            );
+            app.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bounded application receive");
+            reply
+                .send_to(SMOKE_REPLY, application)
+                .expect("send exact transparent reply");
+            let (length, source) = app
+                .recv_from(&mut datagram)
+                .expect("application received transparent reply");
+            assert_eq!(source, remote);
+            assert_eq!(&datagram[..length], SMOKE_REPLY);
+
+            // Keep the reply descriptor alive while proving that Linux TPROXY still sends the next
+            // datagram on the exact same four-tuple to the transparent ingress owner. A connected
+            // transparent reply socket wins TPROXY's established-flow lookup and silently consumes
+            // this packet instead.
+            app.send_to(SMOKE_SECOND_PAYLOAD, remote)
+                .expect("send second app packet on exact tuple");
+            let metadata = receive_smoke_udp(&receiver, kind, local_port, &mut datagram);
+            assert_eq!(metadata.source(), application);
+            assert_eq!(metadata.original_destination(), remote);
+            assert_eq!(&datagram[..metadata.bytes()], SMOKE_SECOND_PAYLOAD);
+        }
 
         remove_parent(&parent_policy, deadline).expect("remove exact parent nft table");
         parent_kernel
@@ -1529,9 +1578,36 @@ mod tests {
         parent_kernel
             .delete_client_ingress_veth(&ingress_link, deadline)
             .expect("delete exact veth pair");
-        drop(receiver);
         drop(parent_channel);
         assert!(child.wait().expect("wait worker smoke child").success());
+    }
+
+    fn receive_smoke_udp(
+        socket: &UdpSocket,
+        kind: InternalIngressSocketKind,
+        local_port: u16,
+        payload: &mut [u8],
+    ) -> volparossa_linux_uapi::ReceivedUdpDatagram {
+        let mut descriptors = [PollFd::new(socket.as_fd(), PollFlags::POLLIN)];
+        assert_eq!(
+            poll(&mut descriptors, 2_000_u16).expect("bounded ingress wait"),
+            1
+        );
+        let kind = match kind {
+            InternalIngressSocketKind::TransparentUdp => {
+                volparossa_linux_uapi::IngressSocketKind::TransparentUdp
+            }
+            InternalIngressSocketKind::DnsUdp => volparossa_linux_uapi::IngressSocketKind::DnsUdp,
+            _ => panic!("UDP smoke kind"),
+        };
+        volparossa_linux_uapi::receive_udp_with_original_destination(
+            socket,
+            kind,
+            volparossa_linux_uapi::IngressSocketFamily::Ipv4,
+            local_port,
+            payload,
+        )
+        .expect("exact application and original destination from transferred ingress socket")
     }
 
     #[allow(clippy::too_many_lines)] // One disposable process owns setup, proof, and teardown.
@@ -1610,70 +1686,69 @@ mod tests {
         let expected_parent =
             ExpectedUnixCredentials::new(parent_pid, geteuid().as_raw(), getegid().as_raw())
                 .expect("parent credentials");
-        let acquire = receive_credential_worker_request(&channel, expected_parent)
-            .expect("receive Acquire")
-            .request;
-        let expected_local = locals
-            .get(&(
-                InternalIngressSocketKind::TransparentUdp,
-                InternalIngressAddressFamily::Ipv4,
-            ))
-            .cloned()
-            .expect("UDP local");
-        assert!(matches!(
-            acquire.operation.as_ref(),
-            Some(internal_worker_request::Operation::AcquireClientIngressSocket(value))
-                if value.client_runtime_id.as_slice() == SMOKE_RUNTIME
-                    && value.descriptor_kind == InternalIngressSocketKind::TransparentUdp as i32
-                    && value.address_family == InternalIngressAddressFamily::Ipv4 as i32
-                    && value.expected_local.as_ref() == Some(&expected_local)
-        ));
-        let response = super::super::correlated_response(
-            &acquire,
-            InternalWorkerResult::Ok,
-            Some(internal_worker_response::Outcome::IngressSocketReady(
-                IngressSocketReady {
-                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
-                    descriptor_kind: InternalIngressSocketKind::TransparentUdp as i32,
-                    address_family: InternalIngressAddressFamily::Ipv4 as i32,
-                    local: Some(expected_local),
-                },
-            )),
-        )
-        .expect("correlated Acquire response");
-        let udp = sockets
-            .remove(&(
-                InternalIngressSocketKind::TransparentUdp,
-                InternalIngressAddressFamily::Ipv4,
-            ))
-            .expect("UDP owner");
-        send_credential_worker_response(&channel, &acquire, &response, Some(udp))
-            .expect("transfer transparent UDP descriptor");
+        for kind in [
+            InternalIngressSocketKind::TransparentUdp,
+            InternalIngressSocketKind::DnsUdp,
+        ] {
+            let acquire = receive_credential_worker_request(&channel, expected_parent)
+                .expect("receive Acquire")
+                .request;
+            let expected_local = locals
+                .get(&(kind, InternalIngressAddressFamily::Ipv4))
+                .cloned()
+                .expect("UDP local");
+            assert!(matches!(
+                acquire.operation.as_ref(),
+                Some(internal_worker_request::Operation::AcquireClientIngressSocket(value))
+                    if value.client_runtime_id.as_slice() == SMOKE_RUNTIME
+                        && value.descriptor_kind == kind as i32
+                        && value.address_family == InternalIngressAddressFamily::Ipv4 as i32
+                        && value.expected_local.as_ref() == Some(&expected_local)
+            ));
+            let response = super::super::correlated_response(
+                &acquire,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::IngressSocketReady(
+                    IngressSocketReady {
+                        client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                        descriptor_kind: kind as i32,
+                        address_family: InternalIngressAddressFamily::Ipv4 as i32,
+                        local: Some(expected_local),
+                    },
+                )),
+            )
+            .expect("correlated Acquire response");
+            let udp = sockets
+                .remove(&(kind, InternalIngressAddressFamily::Ipv4))
+                .expect("UDP owner");
+            send_credential_worker_response(&channel, &acquire, &response, Some(udp))
+                .expect("transfer transparent UDP descriptor");
 
-        let reply_request = receive_credential_worker_request(&channel, expected_parent)
-            .expect("receive reply Acquire")
-            .request;
-        let Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(reply)) =
-            reply_request.operation.as_ref()
-        else {
-            panic!("reply Acquire operation");
-        };
-        assert_eq!(reply.client_runtime_id.as_slice(), SMOKE_RUNTIME);
-        let descriptor = create_client_ingress_reply_socket(reply).expect("create exact reply");
-        let response = super::super::correlated_response(
-            &reply_request,
-            InternalWorkerResult::Ok,
-            Some(internal_worker_response::Outcome::IngressReplySocketReady(
-                IngressReplySocketReady {
-                    client_runtime_id: SMOKE_RUNTIME.to_vec(),
-                    remote: reply.remote.clone(),
-                    application: reply.application.clone(),
-                },
-            )),
-        )
-        .expect("correlated reply Acquire response");
-        send_credential_worker_response(&channel, &reply_request, &response, Some(descriptor))
-            .expect("transfer source-bound reply descriptor");
+            let reply_request = receive_credential_worker_request(&channel, expected_parent)
+                .expect("receive reply Acquire")
+                .request;
+            let Some(internal_worker_request::Operation::AcquireClientIngressReplySocket(reply)) =
+                reply_request.operation.as_ref()
+            else {
+                panic!("reply Acquire operation");
+            };
+            assert_eq!(reply.client_runtime_id.as_slice(), SMOKE_RUNTIME);
+            let descriptor = create_client_ingress_reply_socket(reply).expect("create exact reply");
+            let response = super::super::correlated_response(
+                &reply_request,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::IngressReplySocketReady(
+                    IngressReplySocketReady {
+                        client_runtime_id: SMOKE_RUNTIME.to_vec(),
+                        remote: reply.remote.clone(),
+                        application: reply.application.clone(),
+                    },
+                )),
+            )
+            .expect("correlated reply Acquire response");
+            send_credential_worker_response(&channel, &reply_request, &response, Some(descriptor))
+                .expect("transfer source-bound reply descriptor");
+        }
 
         let destroy = receive_credential_worker_request(&channel, expected_parent)
             .expect("receive Destroy")
