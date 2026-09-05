@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-05
+Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
@@ -33,6 +33,24 @@ strict helper Clippy also pass. This fixes the reproduced defect; the complete r
 verify A08 and the separately observed ten-second coordinator retirement behavior. Eight fixed,
 identity-free cleanup checkpoints identify the stage if that behavior recurs. The DNS parser
 and acceptance gate are unchanged. A14's actual crash sequence still has no pass.
+The [following complete attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33994616201)
+at `092da0fb` passed A01--A07 and A15. All 55 exact Destroy responses returned within
+0.498 seconds, without the former ambiguous ten-second timeout. A08 reached the next stage:
+Client activation crossed from 22:14:29.971 to 22:14:30.002 UTC, but its actual WireGuard
+handshake occurred in second 29. Commit incorrectly demanded the later completion second.
+The helper now retains the pre-dispatch activation lower bound; a clock-advance regression
+fails before the fix and passes after it, with existing bidirectional-growth and expiry checks
+unchanged. Later whole-daemon cleanup also exposed historical FD-store snapshots rejecting
+independent sibling routes. Same-runtime exact removal now confirms the current inventory
+under the mutation gate and preserves every unrelated descriptor; restart inventory ordering
+remains strict. Both sibling-publication and sibling-removal reproductions pass. Eleven focused
+helper checks and strict helper Clippy pass. These are implemented fixes awaiting a new live
+run, not an A08/A14 pass. A09--A14 were not executed in this attempt; final disposable cleanup
+left zero owned objects and matching guest-state hashes.
+The same revision's [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33994604081)
+found three source-boundary assertions still expecting a private test module after its fixture
+helper became `pub(super)`. Their exact boundaries are updated, preserving the custody checks
+and negative mutations; all three now pass locally.
 Benchmarks now select and record a suitable real route before starting
 payloads; committed MPTCP paths are Reachable metadata, never a substitute for kernel subflow
 and packet evidence.
@@ -206,9 +224,17 @@ and interface-replacement cleanup gating. Strict Clippy for the changed packages
 The `uplink-link` multi-node fixture now holds an actual application socket across withdrawal,
 requires signed Exit-role loss/recovery without restarting the daemons, and exercises six
 consume/contribute flows over the three phases with payload, source, path and cleanup evidence.
-Its five focused validator/preview checks and script contract pass; the live transition has
-not yet run. This does not check the full transition requirement above or change unconfigured
-legacy behavior.
+Its five focused validator/preview checks and script contract pass. The
+[first live attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33994615937)
+at `092da0fb` stopped before application traffic or uplink withdrawal:
+`UPLINK_LOCAL_CONTRIBUTION_ROUTE_UNAVAILABLE`. Ordinary Client Disconnect incorrectly requested
+whole-helper cleanup, including other roles, and an older route's historical FD-store snapshot
+rejected a newer sibling. Client Disconnect now retires only its exact retained owner, reports
+pending cleanup without losing that owner on cancellation/timeout, and blocks replacement
+until confirmation. Unrelated Relay/Exit roles and newer context projections are untouched.
+Four focused Client tests and strict agent Clippy pass; the independent-order FD-store fix is
+described above. The failed live attempt cleaned all owned objects with matching guest-state
+hashes. The complete transition remains unproven; unconfigured uplink-monitor behavior is unchanged.
 
 The first implementation now carries explicitly signed RFC1918/ULA endpoint scope through
 authenticated connection provenance, selection, endpoint leases, reservations and helper
@@ -389,6 +415,8 @@ These narrower results do not check the full sharing item above.
 
 The first explicit Debian `wifi_mesh` runtime is implemented and its kernel backend has passed
 the disposable simulated-radio proof below. Full-agent mesh routing and physical radios remain open.
+The user has no spare Linux devices or Wi-Fi adapters available at present (2026-09-06), so
+physical-radio acceptance is explicitly deferred; simulated-radio results do not fill that gap.
 The helper creates one separately owned open-L2 802.11s interface using nl80211, with a bounded
 private connected subnet and no default route. Existing active radio interfaces are not retuned;
 unsupported/regulatory/coexistence conditions are rejected. The agent creates the interface

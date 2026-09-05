@@ -7857,7 +7857,7 @@ pub(super) mod tests {
             return false;
         };
         let worker = &worker[..worker_end];
-        let Some(functional_end) = functional.find("#[cfg(test)]\nmod tests {") else {
+        let Some(functional_end) = functional.find("#[cfg(test)]\npub(super) mod tests {") else {
             return false;
         };
         let functional = &functional[..functional_end];
@@ -7983,7 +7983,7 @@ pub(super) mod tests {
     fn opaque_same_runtime_settlement_has_one_private_production_path() {
         let source = include_str!("functional_backend.rs");
         let production_end = source
-            .find("#[cfg(test)]\nmod tests {")
+            .find("#[cfg(test)]\npub(super) mod tests {")
             .expect("production source boundary");
         let production = &source[..production_end];
         let actor_source = include_str!("../ownership_journal/actor.rs");
@@ -8214,7 +8214,7 @@ pub(super) mod tests {
     fn opaque_never_dispatched_settlement_has_one_bounded_production_path() {
         let functional_source = include_str!("functional_backend.rs");
         let functional_end = functional_source
-            .find("#[cfg(test)]\nmod tests {")
+            .find("#[cfg(test)]\npub(super) mod tests {")
             .expect("functional production boundary");
         let functional = &functional_source[..functional_end];
         let worker_source = include_str!("../worker_v3.rs");
