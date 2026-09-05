@@ -7,8 +7,8 @@ use super::{
     EndpointTraversalBinding, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
     FORWARD_ID_BYTES, Libp2pPeerId, MAX_CONCURRENT_FORWARDING_STREAMS, NativeProbePathScope,
     NativeProbeReadyForwardRequest, PrepareLeaseBatch, RwLock, TraversalEndpointHint,
-    UpstreamExitForwardResponse, WireguardRole, fixed_bytes, native_service_prepare_request,
-    request_response, unix_millis,
+    UpstreamExitForwardResponse, WireguardRole, fixed_bytes, log_relay_forward_admission,
+    native_service_prepare_request, request_response, unix_millis,
 };
 
 pub(super) struct PendingExitNativeReady {
@@ -132,10 +132,19 @@ impl ExitNativeReadyPlan {
 }
 
 fn same_attempt(left: &NativeProbePathScope, right: &NativeProbePathScope) -> bool {
+    // Client signatures and Exit Permits have already authenticated each complete scope. The
+    // client deliberately mints a fresh ephemeral signing identity per path, alongside its
+    // probe/challenge. Those fields remain pinned to that path, not shared across the attempt.
     let mut common = left.clone();
     common.probe_id.clone_from(&right.probe_id);
     common.candidate_ordinal = right.candidate_ordinal;
     common.data_relay.clone_from(&right.data_relay);
+    common
+        .client_session_id
+        .clone_from(&right.client_session_id);
+    common
+        .client_session_public_key
+        .clone_from(&right.client_session_public_key);
     common.challenge_hash.clone_from(&right.challenge_hash);
     common == *right
 }
@@ -247,6 +256,7 @@ impl DiscoveryRuntime {
                 retained_bytes: 0,
             });
         let Ok(complete) = set.plan.insert(path, now_ms) else {
+            log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_EXIT_SET_SCOPE_REJECTED");
             let set = self.pending_exit_native_ready.remove(&attempt_id);
             self.reject_pending_exit_native_ready(pending);
             if let Some(set) = set {
@@ -283,6 +293,10 @@ impl DiscoveryRuntime {
             )
             .unwrap_or_default();
         let Some(prepare) = set.plan.prepare(hints, unix_millis()) else {
+            log_relay_forward_admission(
+                Some(state),
+                "NATIVE_PROBE_READY_EXIT_SET_TRAVERSAL_REJECTED",
+            );
             self.reject_exit_native_ready_set(set);
             return;
         };
@@ -360,17 +374,43 @@ impl DiscoveryRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Identity, PreselectionActorBinding, Transport};
+    use ed25519_dalek::SigningKey;
+    use volparossa_protocol::{
+        NativeProbePermit, NativeProbePermitRequest, ObservationAddressFamily, ReplayCache,
+        TimePolicy, native_probe_permit_request_hash, node_id_from_public_key,
+        sign_control_message, verify_native_probe_permit,
+    };
+
+    use super::super::{PreselectionActorBinding, Transport};
     use super::*;
 
     const NOW: u64 = 100_000;
 
+    fn actor(seed: u8) -> PreselectionActorBinding {
+        let public_key = SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes();
+        let ed25519 = libp2p::identity::ed25519::PublicKey::try_from_bytes(&public_key).unwrap();
+        PreselectionActorBinding {
+            node_id: node_id_from_public_key(&public_key).to_vec(),
+            peer_id: libp2p::identity::PublicKey::from(ed25519)
+                .to_peer_id()
+                .to_bytes(),
+            public_key: public_key.to_vec(),
+            advertisement_sequence: 1,
+            advertisement_expires_at_ms: NOW + 30_000,
+            advertisement_payload_hash: vec![seed; 32],
+            capability_expires_at_ms: NOW + 30_000,
+        }
+    }
+
     fn path(ordinal: u8, local: bool) -> ExitNativeReadyPath {
-        let identity = Identity::generate();
-        let node_id = [ordinal; 32];
-        let peer_id = *identity.peer_id();
-        // This planner receives already-verified scopes; signing/replay admission remains in
-        // answer_native_probe_ready_upstream and is covered by its native Permit tests.
+        let relay = actor(ordinal);
+        let node_id = relay.node_id.clone().try_into().unwrap();
+        let peer_id = Libp2pPeerId::from_bytes(&relay.peer_id).unwrap();
+        // Production mint_path_authorities creates a different ephemeral key for every path.
+        let session_key = SigningKey::from_bytes(&[ordinal + 10; 32]);
+        let session_public_key = session_key.verifying_key().to_bytes();
         let scope = NativeProbePathScope {
             attempt_id: vec![1; 16],
             probe_id: vec![ordinal; 16],
@@ -379,13 +419,20 @@ mod tests {
             required_path_count: 2,
             attempt_expires_at_ms: NOW + 20_000,
             transport: Transport::MultipathQuic as i32,
-            data_relay: Some(PreselectionActorBinding {
-                node_id: node_id.to_vec(),
-                peer_id: peer_id.to_bytes(),
-                ..PreselectionActorBinding::default()
-            }),
-            ..NativeProbePathScope::default()
+            data_relay: Some(relay),
+            control: Some(actor(3)),
+            exit: Some(actor(4)),
+            client_session_id: node_id_from_public_key(&session_public_key).to_vec(),
+            client_session_public_key: session_public_key.to_vec(),
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: 1,
+            policy_hash: vec![5; 32],
+            policy_expires_at_ms: NOW + 30_000,
+            challenge_hash: vec![ordinal; 32],
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
         };
+        let scope = verified_scope(scope, &session_key, ordinal);
         ExitNativeReadyPath {
             scope,
             binding: EndpointTraversalBinding {
@@ -410,6 +457,60 @@ mod tests {
             },
             deadline_ms: NOW + 5_000,
         }
+    }
+
+    fn verified_scope(
+        scope: NativeProbePathScope,
+        session_key: &SigningKey,
+        ordinal: u8,
+    ) -> NativeProbePathScope {
+        let expires = scope.attempt_expires_at_ms;
+        let request = NativeProbePermitRequest {
+            scope: Some(scope.clone()),
+            created_at_ms: NOW,
+            expires_at_ms: expires,
+            nonce: vec![ordinal; 32],
+        };
+        let signed_request = sign_control_message(
+            &request,
+            session_key,
+            NOW,
+            expires,
+            [ordinal; 32],
+            TimePolicy::default(),
+        )
+        .unwrap();
+        let permit = NativeProbePermit {
+            request_hash: native_probe_permit_request_hash(&signed_request)
+                .unwrap()
+                .to_vec(),
+            scope: Some(scope),
+            issued_at_ms: NOW,
+            expires_at_ms: expires,
+            nonce: vec![ordinal + 20; 32],
+            exit_control_address: format!(
+                "/ip4/46.162.3.2/udp/41000/quic-v1/p2p/{}",
+                Libp2pPeerId::from_bytes(&actor(4).peer_id).unwrap(),
+            ),
+        };
+        let signed_permit = sign_control_message(
+            &permit,
+            &SigningKey::from_bytes(&[4; 32]),
+            NOW,
+            expires,
+            [ordinal + 20; 32],
+            TimePolicy::default(),
+        )
+        .unwrap();
+        verify_native_probe_permit(
+            signed_request,
+            signed_permit,
+            NOW,
+            &mut ReplayCache::new(2).unwrap(),
+        )
+        .expect("each path retains its independently signed exact session/Permit binding")
+        .scope()
+        .clone()
     }
 
     fn hint(path: &ExitNativeReadyPath) -> TraversalEndpointHint {
@@ -473,6 +574,37 @@ mod tests {
                 .peer_address,
             vec![192, 168, 7, 2]
         );
+    }
+
+    #[test]
+    fn native_ready_collector_accepts_distinct_signed_path_sessions_only_with_shared_attempt() {
+        let first = path(1, false);
+        let second = path(2, false);
+        assert_ne!(
+            first.scope.client_session_id,
+            second.scope.client_session_id
+        );
+        assert_ne!(
+            first.scope.client_session_public_key,
+            second.scope.client_session_public_key,
+        );
+        assert!(same_attempt(&first.scope, &second.scope));
+        let mut changed = second.scope.clone();
+        changed.attempt_id[0] ^= 1;
+        assert!(!same_attempt(&first.scope, &changed));
+        changed = second.scope.clone();
+        changed.policy_hash[0] ^= 1;
+        assert!(!same_attempt(&first.scope, &changed));
+        changed = second.scope.clone();
+        changed.reserved_up_mbps += 1;
+        assert!(!same_attempt(&first.scope, &changed));
+        changed = second.scope.clone();
+        changed.control.as_mut().unwrap().advertisement_sequence += 1;
+        assert!(!same_attempt(&first.scope, &changed));
+        let mut plan = ExitNativeReadyPlan::default();
+        assert_eq!(plan.insert(first, NOW), Ok(false));
+        assert_eq!(plan.insert(second, NOW), Ok(true));
+        assert_eq!(plan.prepare(Vec::new(), NOW).unwrap().leases.len(), 2);
     }
 
     #[test]

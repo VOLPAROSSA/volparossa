@@ -220,6 +220,13 @@ the complete authenticated ordinal/endpoint set before one shared helper Prepare
 exact local traversal hints for each LAN path. Partial sets expire without helper allocation.
 Nine focused tests, the mixed-plan real helper encoder check and strict agent Clippy pass;
 mixed-path application traffic remains unproven.
+The [next v1 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33986783919)
+at `f8660814` stopped during A01 selection. Its Exit collector wrongly required identical
+ephemeral Client sessions across paths, although production deliberately creates a distinct
+session per path. The collector now compares shared attempt fields while each path retains its
+independently signed session/Permit binding. A regression using real Client and Exit signatures
+fails before the fix and passes after; all ten Ready tests and strict agent Clippy pass. The
+private-address dial guard is unchanged. Live recovery still needs a successful rerun.
 The disposable `mixed-link` scenario now reuses the real A06 HTTP/3 transfer with one
 LocalOnly LAN Relay and one public Relay to the same Exit. It retains bounded ordinary
 selection draws and requires matching 4/8-MiB payload hashes, two genuine native paths,
