@@ -182,6 +182,17 @@ connection, although simultaneous direct connections are normal. Advisory select
 multiple currently authenticated connections only when all agree on one consistent local prefix;
 each dispatched response still binds its own exact connection witness. Conflicting prefixes,
 families, public/circuit addresses and unparsed records remain ineligible.
+The [next local-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33984858452)
+at `b78a57c5` established both consumers' native routes, then failed at
+`LOCAL_LINK_APPLICATION_ECHO_UNAVAILABLE`. The offline application's initial unmarked route
+lookup returned `EHOSTUNREACH` before OUTPUT interception. The helper now installs owned
+initial lookup rules for unmarked local unprivileged applications, excluding the agent UID,
+root/helper observations and marked WireGuard traffic. It does not add a physical default
+route or remove the fixture's direct-egress denial. Focused encoding checks and the existing
+real marked-ingress/DNS smoke pass; the new initial-route behavior needs a live KVM rerun.
+The other consumer's observed data path used the WAN neighbor, with the offline node as its
+control Relay. Therefore this run does not prove the offline node's simultaneous dataplane
+contribution; that fixture requirement remains open.
 Client native preselection and single-path Exit Ready also carry exact observer-bound local
 interface hints into their helper Prepare operations. They cannot rely on a public default route
 on a LocalOnly node. Multi-path Exit Ready still prepares its full lease batch before receiving

@@ -2395,7 +2395,7 @@ impl FunctionalAlphaLeaseBackend {
             let mut kernel = BirthNamespaceKernel::connect(deadline)
                 .map_err(|_| BackendError::CleanupIncomplete)?;
             let routing = kernel
-                .install_client_ingress_parent_routing(link, deadline)
+                .install_client_ingress_parent_routing(link, self.trusted_agent_uid, deadline)
                 .map_err(|_| BackendError::CleanupIncomplete)?;
             let coordinates = (routing.parent_ifindex(), routing.loopback_ifindex());
             entry.parent_routing = Some(routing);

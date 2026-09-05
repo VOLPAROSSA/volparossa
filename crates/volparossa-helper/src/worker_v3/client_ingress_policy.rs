@@ -1463,7 +1463,7 @@ mod tests {
         let expected_worker = ExpectedUnixCredentials::new(child_pid, 0, 0)
             .expect("worker credentials in disposable user namespace");
         let parent_routing = parent_kernel
-            .install_client_ingress_parent_routing(&ingress_link, deadline)
+            .install_client_ingress_root_smoke_routing(&ingress_link, deadline)
             .expect("install parent marked route");
         let parent_policy = install_parent(
             SMOKE_RUNTIME,
