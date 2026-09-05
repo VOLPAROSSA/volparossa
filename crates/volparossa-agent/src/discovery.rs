@@ -1747,6 +1747,23 @@ pub struct DiscoveryRuntime {
 }
 
 impl DiscoveryRuntime {
+    /// Install listeners and initial peer dials only after the owned mesh address exists.
+    /// No radio operation is performed by this unprivileged actor.
+    pub(crate) fn configure_mesh_network(
+        &mut self,
+        mesh_installed: bool,
+    ) -> Result<(), DiscoveryRuntimeError> {
+        configure_network(&mut self.service, &self.config)?;
+        if mesh_installed {
+            if let Some(address) = mesh_listener_address(&self.config)? {
+                self.service
+                    .listen_on(address)
+                    .map_err(|_| DiscoveryRuntimeError::Build)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Builds and configures the real libp2p swarm without altering host routes,
     /// firewall, DNS, or interfaces.
     #[allow(
@@ -1776,7 +1793,11 @@ impl DiscoveryRuntime {
             .ed25519_public_key_bytes()
             .map_err(|_| DiscoveryRuntimeError::Build)?;
         let local_node_id = node_id_from_public_key(&local_public_key);
-        configure_network(&mut service, config)?;
+        // An explicitly configured mesh and its on-link bootstrap addresses do not exist yet.
+        // Startup creates the helper-owned interface before listening/dialing on that underlay.
+        if !config.wifi_mesh.enabled {
+            configure_network(&mut service, config)?;
+        }
         let replay_capacity = config
             .network
             .candidate_pool_size
@@ -15456,6 +15477,42 @@ fn exit_response_matches(
                 .signed_responses()
                 .iter()
                 .all(|envelope| signed_envelope_matches_peer(envelope, &expected_exit_peer)))
+}
+
+fn mesh_listener_address(config: &Config) -> Result<Option<Multiaddr>, DiscoveryRuntimeError> {
+    use libp2p::multiaddr::Protocol;
+    let ip: IpAddr = config
+        .wifi_mesh
+        .local_address
+        .parse()
+        .map_err(|_| DiscoveryRuntimeError::ListenAddress)?;
+    if config.network.listen_addresses.is_empty() && ip.is_ipv4() {
+        return Ok(None); // The normal IPv4 wildcard QUIC listener covers this new interface.
+    }
+    for text in &config.network.listen_addresses {
+        let address =
+            Multiaddr::from_str(text).map_err(|_| DiscoveryRuntimeError::ListenAddress)?;
+        let same_address = address.iter().any(|protocol| match protocol {
+            Protocol::Ip4(value) => {
+                ip.is_ipv4() && (value.is_unspecified() || IpAddr::V4(value) == ip)
+            }
+            Protocol::Ip6(value) => {
+                ip.is_ipv6() && (value.is_unspecified() || IpAddr::V6(value) == ip)
+            }
+            _ => false,
+        });
+        if same_address
+            && address
+                .iter()
+                .any(|protocol| matches!(protocol, Protocol::QuicV1))
+        {
+            return Ok(None);
+        }
+    }
+    let family = if ip.is_ipv4() { "ip4" } else { "ip6" };
+    Multiaddr::from_str(&format!("/{family}/{ip}/udp/0/quic-v1"))
+        .map(Some)
+        .map_err(|_| DiscoveryRuntimeError::ListenAddress)
 }
 
 fn configure_network(

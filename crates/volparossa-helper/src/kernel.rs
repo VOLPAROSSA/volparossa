@@ -29,6 +29,7 @@ use crate::{
 mod wireguard_probe;
 
 pub(crate) mod underlay_sharing;
+pub(crate) mod wifi_mesh;
 
 use wireguard_probe::WireguardDeviceState;
 

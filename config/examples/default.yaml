@@ -51,6 +51,20 @@ sharing:
   total_upload_mbps: 0
   contribution_upload_ceiling_mbps: 0
 
+# Explicit direct 802.11s underlay; never enable or reconfigure a radio automatically.
+# This first mode is open L2, not SAE; existing LAN-exposed host services remain exposed.
+# On supported hardware set a common mesh ID/channel and a distinct private host address
+# per neighbor. Existing active interfaces must already use a compatible channel.
+wifi_mesh:
+  enabled: false
+  acknowledge_open_underlay: false
+  parent_interface: ""
+  mesh_id: ""
+  frequency_mhz: 0
+  local_address: ""
+  prefix_len: 0
+  maximum_peers: 8
+
 routing:
   context_ttl_seconds: 600
   maximum_active_contexts: 64

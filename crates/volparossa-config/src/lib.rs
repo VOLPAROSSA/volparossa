@@ -1,5 +1,8 @@
 //! Strict, fail-closed configuration for all VOLPAROSSA processes.
 
+mod wifi_mesh;
+pub use wifi_mesh::WifiMeshConfig;
+
 use std::{
     collections::HashSet,
     fmt, fs,
@@ -81,6 +84,8 @@ pub struct Config {
     pub capacity: CapacityConfig,
     /// Optional node-wide upload sharing; configuring it never starts participation.
     pub sharing: SharingConfig,
+    /// Explicit direct Wi-Fi underlay; disabled until its open-L2 scope is acknowledged.
+    pub wifi_mesh: WifiMeshConfig,
     /// Route-context and interception safety settings.
     pub routing: RoutingConfig,
     /// TCP/MPTCP settings.
@@ -104,6 +109,7 @@ impl Default for Config {
             selection: SelectionConfig::default(),
             capacity: CapacityConfig::default(),
             sharing: SharingConfig::default(),
+            wifi_mesh: WifiMeshConfig::default(),
             routing: RoutingConfig::default(),
             tcp: TcpConfig::default(),
             udp: UdpConfig::default(),
@@ -188,6 +194,7 @@ impl Config {
         validate_selection(&self.selection)?;
         validate_capacity(self.roles, &self.capacity)?;
         validate_sharing(&self.sharing)?;
+        self.wifi_mesh.validate()?;
         validate_routing(self.runtime_mode, &self.routing)?;
         validate_tcp(self.tcp)?;
         validate_udp(&self.udp)?;

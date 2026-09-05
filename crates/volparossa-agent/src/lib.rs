@@ -25,6 +25,7 @@ mod secret;
 mod state;
 mod udp_exit_provider;
 mod uplink_sharing;
+mod wifi_mesh;
 
 use std::{
     fs::{self, OpenOptions},
@@ -63,6 +64,7 @@ use route_setup::{ClientPathMaintenance, ClientRouteConnectError, ClientRouteCon
 use secret::read_identity_credential;
 use state::AgentState;
 use uplink_sharing::UplinkSharingRuntime;
+use wifi_mesh::WifiMeshRuntime;
 
 pub use paths::{
     AgentPaths, DEFAULT_CONFIG, DEFAULT_CONTROL_SOCKET, DEFAULT_HELPER_SOCKET,
@@ -168,7 +170,7 @@ impl Agent {
         clippy::too_many_lines,
         reason = "one owner starts and shuts down the complete bounded service actor set"
     )]
-    pub async fn run_with_shutdown<F>(self, shutdown: F) -> Result<(), AgentError>
+    pub async fn run_with_shutdown<F>(mut self, shutdown: F) -> Result<(), AgentError>
     where
         F: Future<Output = ()> + Send,
     {
@@ -192,18 +194,39 @@ impl Agent {
                     return Err(AgentError::UplinkSharing);
                 }
             };
+        let mesh = match WifiMeshRuntime::start(self.helper.clone(), &self.config.wifi_mesh, roles)
+            .await
+        {
+            Ok(mesh) => mesh,
+            Err(error) => {
+                tracing::error!(error = ?error, "direct Wi-Fi mesh startup failed");
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::WifiMesh);
+            }
+        };
+        if self.config.wifi_mesh.enabled {
+            if let Err(error) = self.discovery.configure_mesh_network(mesh.is_some()) {
+                tracing::error!(error = ?error, "direct Wi-Fi discovery startup failed");
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::WifiMesh);
+            }
+        }
         let client_ingress = if roles.client {
             let ingress = match ClientIngressRuntime::start(self.helper.clone()).await {
                 Ok(ingress) => ingress,
                 Err(error) => {
                     tracing::error!(error = ?error, "client ingress startup failed");
-                    if let Some(sharing) = &sharing {
-                        if sharing.shutdown().await.is_err() {
-                            self.helper
-                                .cleanup_owned()
-                                .await
-                                .map_err(|_| AgentError::ShutdownCleanup)?;
-                        }
+                    if mesh.is_some() || sharing.is_some() {
+                        self.helper
+                            .cleanup_owned()
+                            .await
+                            .map_err(|_| AgentError::ShutdownCleanup)?;
                     }
                     return Err(AgentError::ClientIngress);
                 }
@@ -215,6 +238,10 @@ impl Agent {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut sharing_task = tokio::spawn(UplinkSharingRuntime::monitor(
             sharing.as_ref().map(Arc::clone),
+            shutdown_rx.clone(),
+        ));
+        let mut mesh_task = tokio::spawn(WifiMeshRuntime::monitor(
+            mesh.as_ref().map(Arc::clone),
             shutdown_rx.clone(),
         ));
         let routes = production_client_routes(&self.paths, &self.state);
@@ -287,6 +314,7 @@ impl Agent {
             _ = &mut dns_ingress_task => Err(AgentError::Task),
             _ = &mut dns_tcp_ingress_task => Err(AgentError::Task),
             _ = &mut sharing_task => Err(AgentError::UplinkSharing),
+            _ = &mut mesh_task => Err(AgentError::WifiMesh),
         };
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
@@ -298,6 +326,7 @@ impl Agent {
         stop_task(&mut dns_ingress_task).await;
         stop_task(&mut dns_tcp_ingress_task).await;
         stop_task(&mut sharing_task).await;
+        stop_task(&mut mesh_task).await;
         routes.disconnect().await;
         if let Some(client_ingress) = client_ingress {
             let Ok(client_ingress) = Arc::try_unwrap(client_ingress) else {
@@ -310,6 +339,15 @@ impl Agent {
             }
         }
 
+        if let Some(mesh) = mesh {
+            if mesh.shutdown().await.is_err() {
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::ShutdownCleanup);
+            }
+        }
         if let Some(sharing) = sharing {
             if sharing.shutdown().await.is_err() {
                 self.helper
@@ -1525,6 +1563,9 @@ pub enum AgentError {
     /// The explicitly configured upload scheduler could not be installed or retained.
     #[error("owner-priority upload sharing is unavailable")]
     UplinkSharing,
+    /// The explicitly configured direct radio adjacency could not be installed or retained.
+    #[error("direct Wi-Fi mesh is unavailable")]
+    WifiMesh,
     /// Loopback-only aggregate metrics endpoint failed.
     #[error("agent metrics endpoint failed")]
     Metrics(#[source] volparossa_metrics::MetricsError),
@@ -1553,6 +1594,7 @@ impl AgentError {
             Self::Control(_) => "CONTROL_FAILED",
             Self::ClientIngress => "CLIENT_INGRESS_FAILED",
             Self::UplinkSharing => "UPLINK_SHARING_FAILED",
+            Self::WifiMesh => "WIFI_MESH_FAILED",
             Self::Metrics(_) => "METRICS_FAILED",
             Self::Task => "RUNTIME_TASK_FAILED",
             Self::ShutdownCleanup => "SHUTDOWN_CLEANUP_FAILED",

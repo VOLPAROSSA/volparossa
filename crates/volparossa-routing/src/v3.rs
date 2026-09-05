@@ -4,6 +4,15 @@
 //! limits. It cannot provide private keys, local overlay addresses, allowed prefixes, listen
 //! ports, filesystem paths or free-form privileged input. The independent upload-sharing owner
 //! accepts one bounded physical interface name, resolved and revalidated by the helper.
+//! The separate, explicitly enabled direct-mesh owner accepts an existing radio name, a bounded
+//! mesh ID/channel and a private connected subnet only for its newly created interface. It cannot
+//! replace an existing interface or install an Internet route.
+
+mod wifi_mesh;
+pub use wifi_mesh::{
+    DestroyWifiMesh, DestroyedWifiMesh, InspectWifiMesh, InstallWifiMesh, InstalledWifiMesh,
+    WifiMeshPeer, WifiMeshSnapshot, validate_wifi_mesh_response,
+};
 
 use std::{
     collections::BTreeSet,
@@ -56,7 +65,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -69,8 +78,9 @@ pub mod helper_request {
         AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
         ActivateClientIngress, ActivateLeaseBatch, AddMptcpEndpoint, BindHelperRuntime,
         CleanupOwned, CommitLeaseBatch, DestroyClientIngress, DestroyContext, DestroyUplinkSharing,
-        InspectUplinkSharing, InstallUplinkSharing, PrepareClientIngress, PrepareLeaseBatch,
-        ReconcileExpiredPrepare, RemoveMptcpEndpoint,
+        DestroyWifiMesh, InspectUplinkSharing, InspectWifiMesh, InstallUplinkSharing,
+        InstallWifiMesh, PrepareClientIngress, PrepareLeaseBatch, ReconcileExpiredPrepare,
+        RemoveMptcpEndpoint,
     };
 
     /// Exactly one typed operation.
@@ -130,6 +140,15 @@ pub mod helper_request {
         /// Retire only the exact owned upload-sharing tree.
         #[prost(message, tag = "39")]
         DestroyUplinkSharing(DestroyUplinkSharing),
+        /// Create one explicit, runtime-owned direct Wi-Fi mesh underlay.
+        #[prost(message, tag = "40")]
+        InstallWifiMesh(InstallWifiMesh),
+        /// Inspect actual mesh peering on the exact owned interface.
+        #[prost(message, tag = "41")]
+        InspectWifiMesh(InspectWifiMesh),
+        /// Leave and remove only the exact owned mesh interface.
+        #[prost(message, tag = "42")]
+        DestroyWifiMesh(DestroyWifiMesh),
     }
 }
 
@@ -782,7 +801,7 @@ pub struct HelperResponse {
     /// Operation-specific success output; absent on failure.
     #[prost(
         oneof = "helper_response::Outcome",
-        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39"
+        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     pub outcome: Option<helper_response::Outcome>,
 }
@@ -793,9 +812,10 @@ pub mod helper_response {
 
     use super::{
         ActivatedClientIngress, ActivatedLeaseBatch, CommittedLeaseBatch, DestroyedClientIngress,
-        DestroyedContext, DestroyedSharing, Empty, HelperRuntime, IngressReplySocketReady,
-        IngressSocketReady, InstalledUplinkSharing, PreparedClientIngress, PreparedLeaseBatch,
-        ReconciledExpiredPrepare, SharingCounters, TransportSocketReady,
+        DestroyedContext, DestroyedSharing, DestroyedWifiMesh, Empty, HelperRuntime,
+        IngressReplySocketReady, IngressSocketReady, InstalledUplinkSharing, InstalledWifiMesh,
+        PreparedClientIngress, PreparedLeaseBatch, ReconciledExpiredPrepare, SharingCounters,
+        TransportSocketReady, WifiMeshSnapshot,
     };
 
     /// Exactly one successful outcome.
@@ -849,6 +869,15 @@ pub mod helper_response {
         /// Idempotent sharing retirement result.
         #[prost(message, tag = "39")]
         DestroyedSharing(DestroyedSharing),
+        /// Installed direct mesh underlay with exact kernel identity.
+        #[prost(message, tag = "40")]
+        InstalledWifiMesh(InstalledWifiMesh),
+        /// Actual bounded peering/counter snapshot, not estimated bandwidth.
+        #[prost(message, tag = "41")]
+        WifiMeshSnapshot(WifiMeshSnapshot),
+        /// Exact mesh retirement result.
+        #[prost(message, tag = "42")]
+        DestroyedWifiMesh(DestroyedWifiMesh),
     }
 }
 
@@ -1470,6 +1499,12 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
         Operation::InstallUplinkSharing(_) => "install one owned upload-sharing runtime".to_owned(),
         Operation::InspectUplinkSharing(_) => "inspect one owned upload-sharing runtime".to_owned(),
         Operation::DestroyUplinkSharing(_) => "destroy one owned upload-sharing runtime".to_owned(),
+        Operation::InstallWifiMesh(_) => {
+            "create one owned open-L2 Wi-Fi mesh link; no default route or radio retuning"
+                .to_owned()
+        }
+        Operation::InspectWifiMesh(_) => "inspect one owned direct Wi-Fi mesh link".to_owned(),
+        Operation::DestroyWifiMesh(_) => "leave and remove one owned Wi-Fi mesh link".to_owned(),
         Operation::CleanupOwned(value) => match CleanupScope::try_from(value.scope)
             .map_err(|_| HelperProtocolError::Invalid("cleanup scope"))?
         {
@@ -1745,6 +1780,15 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
             sharing_runtime(&operation.sharing_runtime_id)?;
             handle(&operation.sharing_handle)
         }
+        Operation::InstallWifiMesh(operation) => wifi_mesh::validate_install(operation),
+        Operation::InspectWifiMesh(operation) => {
+            context(&operation.mesh_runtime_id)?;
+            handle(&operation.mesh_handle)
+        }
+        Operation::DestroyWifiMesh(operation) => {
+            context(&operation.mesh_runtime_id)?;
+            handle(&operation.mesh_handle)
+        }
     }
 }
 
@@ -1997,38 +2041,45 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
         ),
         Outcome::PreparedClientIngress(value) => validate_prepared_ingress_outcome(value),
         Outcome::IngressSocketReady(value) => validate_ingress_ready_outcome(value),
-        Outcome::IngressReplySocketReady(value) => {
-            runtime(&value.client_runtime_id)?;
-            handle(&value.ingress_handle)?;
-            let remote = concrete_ingress_address(
-                value
-                    .remote
-                    .as_ref()
-                    .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
-            )?;
-            let application = concrete_ingress_address(
-                value
-                    .application
-                    .as_ref()
-                    .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
-            )?;
-            if remote == application || remote.is_ipv4() != application.is_ipv4() {
-                return Err(HelperProtocolError::Invalid("ingress reply address pair"));
-            }
-            Ok(())
-        }
+        Outcome::IngressReplySocketReady(value) => validate_ingress_reply_ready(value),
         Outcome::ActivatedClientIngress(value) => {
             runtime(&value.client_runtime_id)?;
             handle(&value.ingress_handle)
         }
         Outcome::InstalledUplinkSharing(value) => validate_installed_sharing(value),
         Outcome::SharingCounters(value) => validate_sharing_counters(value),
+        Outcome::InstalledWifiMesh(value) => wifi_mesh::validate_installed(value),
+        Outcome::WifiMeshSnapshot(value) => wifi_mesh::validate_snapshot(value),
         Outcome::DestroyedClientIngress(_)
         | Outcome::DestroyedContext(_)
         | Outcome::DestroyedSharing(_)
+        | Outcome::DestroyedWifiMesh(_)
         | Outcome::Empty(_) => Ok(()),
         Outcome::HelperRuntime(value) => helper_runtime(&value.helper_runtime_id),
     }
+}
+
+fn validate_ingress_reply_ready(
+    value: &IngressReplySocketReady,
+) -> Result<(), HelperProtocolError> {
+    runtime(&value.client_runtime_id)?;
+    handle(&value.ingress_handle)?;
+    let remote = concrete_ingress_address(
+        value
+            .remote
+            .as_ref()
+            .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
+    )?;
+    let application = concrete_ingress_address(
+        value
+            .application
+            .as_ref()
+            .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
+    )?;
+    if remote == application || remote.is_ipv4() != application.is_ipv4() {
+        return Err(HelperProtocolError::Invalid("ingress reply address pair"));
+    }
+    Ok(())
 }
 
 fn validate_installed_sharing(value: &InstalledUplinkSharing) -> Result<(), HelperProtocolError> {

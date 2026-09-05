@@ -41,6 +41,13 @@ use uplink_sharing::SharingRecord;
 pub(crate) use uplink_sharing::{
     SharingBackendAction, SharingBackendBinding, SharingBackendCompletion, SharingBackendRequest,
 };
+#[path = "engine_v3/wifi_mesh.rs"]
+mod wifi_mesh;
+use wifi_mesh::MeshRecord;
+pub(crate) use wifi_mesh::{
+    MeshBackendAction, MeshBackendBinding, MeshBackendCompletion, MeshBackendRequest,
+    MeshInterfaceIdentity,
+};
 
 const MAX_CONTEXTS: usize = 64;
 const MAX_CACHED_REQUESTS: usize = 1_024;
@@ -90,6 +97,7 @@ struct EngineState {
     ingress_acquire_request_ids: HashMap<[u8; 16], IngressAcquireRequestRecord>,
     next_ingress_generation: u64,
     sharing: Option<SharingRecord>,
+    mesh: Option<MeshRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -648,6 +656,27 @@ pub(crate) enum BackendError {
 /// unavailable backend. A complete production adapter still requires integration tests for all of
 /// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
+    fn install_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<volparossa_routing::InstallWifiMesh>,
+    ) -> BackendFuture<MeshBackendCompletion<MeshInterfaceIdentity>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn inspect_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<()>,
+    ) -> BackendFuture<MeshBackendCompletion<crate::kernel::wifi_mesh::MeshSnapshot>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn destroy_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<()>,
+    ) -> BackendFuture<MeshBackendCompletion<ConfirmedAbsent>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
     fn install_uplink_sharing(
         self: Arc<Self>,
         request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
@@ -1519,6 +1548,11 @@ impl HelperEngine {
                 | helper_request::Operation::InspectUplinkSharing(_)
                 | helper_request::Operation::DestroyUplinkSharing(_),
             ) => Some(self.execute_sharing(request, sender).await),
+            Some(
+                helper_request::Operation::InstallWifiMesh(_)
+                | helper_request::Operation::InspectWifiMesh(_)
+                | helper_request::Operation::DestroyWifiMesh(_),
+            ) => Some(self.execute_mesh(request, sender).await),
             Some(
                 helper_request::Operation::ReconcileExpiredPrepare(_)
                 | helper_request::Operation::BindHelperRuntime(_),
@@ -4733,6 +4767,7 @@ impl HelperEngine {
         }
         if scope == CleanupScope::AllOwnedResources {
             complete &= self.cleanup_sharing().await;
+            complete &= self.cleanup_mesh().await;
         }
         if response_sent {
             return None;
@@ -5205,6 +5240,7 @@ impl HelperEngine {
             complete &= confirmed;
         }
         complete &= self.cleanup_sharing().await;
+        complete &= self.cleanup_mesh().await;
         let engine_cleanup_complete = {
             let state = self.inner.state.lock().await;
             cleanup_state_complete(&state)
@@ -5264,7 +5300,8 @@ impl HelperEngine {
                 && state
                     .sharing
                     .as_ref()
-                    .is_none_or(|sharing| sharing.handle != handle);
+                    .is_none_or(|sharing| sharing.handle != handle)
+                && state.mesh.as_ref().is_none_or(|mesh| mesh.handle != handle);
             if unused {
                 return Some(handle);
             }
@@ -5791,6 +5828,7 @@ fn cleanup_state_complete(state: &EngineState) -> bool {
         && state.ingress.is_none()
         && state.ingress_acquire_request_ids.is_empty()
         && state.sharing.is_none()
+        && state.mesh.is_none()
 }
 
 fn route_cleanup_state_complete(state: &EngineState) -> bool {
@@ -5859,6 +5897,9 @@ fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
         | helper_request::Operation::InstallUplinkSharing(_)
         | helper_request::Operation::InspectUplinkSharing(_)
         | helper_request::Operation::DestroyUplinkSharing(_)
+        | helper_request::Operation::InstallWifiMesh(_)
+        | helper_request::Operation::InspectWifiMesh(_)
+        | helper_request::Operation::DestroyWifiMesh(_)
         | helper_request::Operation::CleanupOwned(_) => return None,
     };
     fixed(value)
@@ -6081,6 +6122,10 @@ mod tests {
         sharing_bindings: StdMutex<Vec<SharingBackendBinding>>,
         fail_sharing_install: AtomicBool,
         fail_sharing_destroy: AtomicBool,
+        mesh_bindings: StdMutex<Vec<MeshBackendBinding>>,
+        fail_mesh_install: AtomicBool,
+        fail_mesh_destroy: AtomicBool,
+        substitute_mesh_binding: AtomicBool,
     }
 
     impl FakeBackend {
@@ -6101,6 +6146,85 @@ mod tests {
     }
 
     impl AsyncLeaseBackend for FakeBackend {
+        fn install_wifi_mesh(
+            self: Arc<Self>,
+            request: MeshBackendRequest<volparossa_routing::InstallWifiMesh>,
+        ) -> BackendFuture<MeshBackendCompletion<MeshInterfaceIdentity>> {
+            let (mut binding, _) = request.into_parts();
+            self.mesh_bindings
+                .lock()
+                .expect("mesh bindings")
+                .push(binding);
+            Box::pin(async move {
+                if self.substitute_mesh_binding.load(Ordering::Acquire) {
+                    binding.request_digest[0] ^= 1;
+                }
+                MeshBackendCompletion {
+                    binding,
+                    result: if self.fail_mesh_install.load(Ordering::Acquire) {
+                        Err(BackendError::CleanupIncomplete)
+                    } else {
+                        Ok(MeshInterfaceIdentity {
+                            interface: "vw050505050505".to_owned(),
+                            ifindex: 2,
+                            wiphy: 0,
+                        })
+                    },
+                }
+            })
+        }
+
+        fn inspect_wifi_mesh(
+            self: Arc<Self>,
+            request: MeshBackendRequest<()>,
+        ) -> BackendFuture<MeshBackendCompletion<crate::kernel::wifi_mesh::MeshSnapshot>> {
+            let (binding, ()) = request.into_parts();
+            self.mesh_bindings
+                .lock()
+                .expect("mesh bindings")
+                .push(binding);
+            Box::pin(async move {
+                MeshBackendCompletion {
+                    binding,
+                    result: Ok(crate::kernel::wifi_mesh::MeshSnapshot {
+                        ifindex: 2,
+                        wiphy: 0,
+                        frequency_mhz: 2412,
+                        joined: true,
+                        peers: vec![crate::kernel::wifi_mesh::MeshPeer {
+                            mac: [2, 1, 2, 3, 4, 5],
+                            established: true,
+                            rx_bytes: 10,
+                            tx_bytes: 20,
+                            rx_packets: 1,
+                            tx_packets: 2,
+                        }],
+                    }),
+                }
+            })
+        }
+
+        fn destroy_wifi_mesh(
+            self: Arc<Self>,
+            request: MeshBackendRequest<()>,
+        ) -> BackendFuture<MeshBackendCompletion<ConfirmedAbsent>> {
+            let (binding, ()) = request.into_parts();
+            self.mesh_bindings
+                .lock()
+                .expect("mesh bindings")
+                .push(binding);
+            Box::pin(async move {
+                MeshBackendCompletion {
+                    binding,
+                    result: if self.fail_mesh_destroy.load(Ordering::Acquire) {
+                        Err(BackendError::CleanupIncomplete)
+                    } else {
+                        Ok(ConfirmedAbsent)
+                    },
+                }
+            })
+        }
+
         fn install_uplink_sharing(
             self: Arc<Self>,
             request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
@@ -7732,6 +7856,210 @@ mod tests {
 
         let engine = HelperEngine::new([9; 32], 1_000);
         requires_zeroizing_array(&engine.inner.cleanup_token);
+    }
+
+    #[tokio::test]
+    async fn wifi_mesh_survives_route_cleanup_and_rejects_other_owner() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        let install = mesh_install_request(80);
+        let installed = engine.execute(install.clone()).await;
+        let Some(helper_response::Outcome::InstalledWifiMesh(owner)) = installed.outcome else {
+            panic!("installed mesh");
+        };
+        let _ = commit_client_context(&engine, &backend).await;
+        let cleanup = engine
+            .execute(request(
+                81,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::RouteContextsOnly as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert!(engine.inner.state.lock().await.mesh.is_some());
+        assert!(
+            backend
+                .mesh_bindings
+                .lock()
+                .expect("bindings")
+                .iter()
+                .all(|binding| binding.action == MeshBackendAction::Install)
+        );
+        for (id, runtime, handle) in [
+            (82, vec![3; 16], owner.mesh_handle.clone()),
+            (83, owner.mesh_runtime_id.clone(), vec![3; 32]),
+        ] {
+            let denied = engine
+                .execute(request(
+                    id,
+                    helper_request::Operation::DestroyWifiMesh(
+                        volparossa_routing::DestroyWifiMesh {
+                            mesh_runtime_id: runtime,
+                            mesh_handle: handle,
+                        },
+                    ),
+                ))
+                .await;
+            assert_eq!(denied.result, HelperResult::UnauthorisedPeer as i32);
+        }
+        let inspected = engine
+            .execute(request(
+                84,
+                helper_request::Operation::InspectWifiMesh(volparossa_routing::InspectWifiMesh {
+                    mesh_runtime_id: owner.mesh_runtime_id.clone(),
+                    mesh_handle: owner.mesh_handle.clone(),
+                }),
+            ))
+            .await;
+        let Some(helper_response::Outcome::WifiMeshSnapshot(counters)) = inspected.outcome else {
+            panic!("real counter projection");
+        };
+        assert!(counters.joined);
+        assert_eq!(counters.wiphy, 0);
+        assert_eq!(counters.peers.len(), 1);
+        assert_eq!(counters.peers[0].address, [2, 1, 2, 3, 4, 5]);
+        assert_eq!(counters.peers[0].received_bytes, 10);
+        assert_eq!(counters.peers[0].transmitted_bytes, 20);
+        assert_eq!(counters.peers[0].received_packets, 1);
+        assert_eq!(counters.peers[0].transmitted_packets, 2);
+        assert!(engine.shutdown_cleanup().await);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let replacement = engine.execute(install).await;
+        let Some(helper_response::Outcome::InstalledWifiMesh(replacement)) = replacement.outcome
+        else {
+            panic!("fresh mesh install after cleanup");
+        };
+        assert_ne!(
+            replacement.mesh_handle, owner.mesh_handle,
+            "cleanup purges stale cached Install"
+        );
+        assert!(engine.shutdown_cleanup().await);
+    }
+
+    #[tokio::test]
+    async fn wifi_mesh_partial_install_retains_owner_until_all_owned_cleanup() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.fail_mesh_install.store(true, Ordering::Release);
+        backend.fail_mesh_destroy.store(true, Ordering::Release);
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        assert_eq!(
+            engine.execute(mesh_install_request(80)).await.result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        let state = engine.inner.state.lock().await;
+        assert!(state.mesh.is_some());
+        assert!(!cleanup_state_complete(&state));
+        assert!(route_cleanup_state_complete(&state));
+        drop(state);
+        backend.fail_mesh_destroy.store(false, Ordering::Release);
+        let cleanup = engine
+            .execute(request(
+                81,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::AllOwnedResources as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let bindings = backend.mesh_bindings.lock().expect("bindings");
+        assert_eq!(bindings.len(), 3);
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| binding.helper_runtime_id == [0xa5; 32]
+                    && binding.mesh_runtime_id == [5; 16]
+                    && binding.mesh_handle == bindings[0].mesh_handle)
+        );
+    }
+
+    #[tokio::test]
+    async fn wifi_mesh_exact_destroy_preserves_independent_sharing_owner() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        let mesh = engine.execute(mesh_install_request(80)).await;
+        let sharing = engine.execute(sharing_install_request(81)).await;
+        let Some(helper_response::Outcome::InstalledWifiMesh(mesh)) = mesh.outcome else {
+            panic!("mesh owner");
+        };
+        let Some(helper_response::Outcome::InstalledUplinkSharing(sharing)) = sharing.outcome
+        else {
+            panic!("sharing owner");
+        };
+        assert_ne!(mesh.mesh_handle, sharing.sharing_handle);
+        let destroy = volparossa_routing::DestroyWifiMesh {
+            mesh_runtime_id: mesh.mesh_runtime_id,
+            mesh_handle: mesh.mesh_handle,
+        };
+        for (id, existed) in [(82, true), (83, false)] {
+            let destroyed = engine
+                .execute(request(
+                    id,
+                    helper_request::Operation::DestroyWifiMesh(destroy.clone()),
+                ))
+                .await;
+            assert_eq!(destroyed.result, HelperResult::Ok as i32);
+            assert!(matches!(destroyed.outcome,
+                Some(helper_response::Outcome::DestroyedWifiMesh(value)) if value.existed == existed));
+        }
+        let state = engine.inner.state.lock().await;
+        assert!(state.mesh.is_none());
+        assert!(state.sharing.is_some());
+        assert!(!cleanup_state_complete(&state));
+        drop(state);
+        assert!(engine.shutdown_cleanup().await);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+    }
+
+    fn mesh_install_request(id: u8) -> HelperRequest {
+        request(
+            id,
+            helper_request::Operation::InstallWifiMesh(volparossa_routing::InstallWifiMesh {
+                mesh_runtime_id: vec![5; 16],
+                parent_interface: "wlan0".to_owned(),
+                mesh_id: b"volparossa-test".to_vec(),
+                frequency_mhz: 2412,
+                local_address: vec![10, 81, 0, 1],
+                prefix_len: 24,
+                maximum_peers: 4,
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn wifi_mesh_substituted_completion_retires_only_exact_owner() {
+        let backend = Arc::new(FakeBackend::default());
+        backend
+            .substitute_mesh_binding
+            .store(true, Ordering::Release);
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        assert_eq!(
+            engine.execute(mesh_install_request(80)).await.result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let calls = backend.mesh_bindings.lock().expect("mesh bindings");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].action, MeshBackendAction::Install);
+        assert_eq!(calls[1].action, MeshBackendAction::Destroy);
+        assert_eq!(calls[0].mesh_handle, calls[1].mesh_handle);
+        assert_eq!(calls[0].mesh_runtime_id, calls[1].mesh_runtime_id);
+        assert_eq!(calls[0].helper_runtime_id, calls[1].helper_runtime_id);
     }
 
     #[tokio::test]

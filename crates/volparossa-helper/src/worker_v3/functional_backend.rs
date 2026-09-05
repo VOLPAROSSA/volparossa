@@ -57,8 +57,9 @@ use crate::{
         BackendError, BackendFuture, BackendLineage, BackendPhase, BackendProbe, BackendRequest,
         BackendRuntimeCompletion, BackendRuntimeRequest, ConfirmedAbsent, ContextPhase,
         IngressBackendAction, IngressBackendBinding, IngressBackendCompletion,
-        IngressBackendRequest, KernelCounters, OperationKind, PreparedKernelIngressSocket,
-        PreparedKernelLease, SharingBackendCompletion, SharingBackendRequest,
+        IngressBackendRequest, KernelCounters, MeshBackendCompletion, MeshBackendRequest,
+        MeshInterfaceIdentity, OperationKind, PreparedKernelIngressSocket, PreparedKernelLease,
+        SharingBackendCompletion, SharingBackendRequest,
     },
     internal_protocol::{
         AcquireClientIngressReplySocket as InternalAcquireClientIngressReplySocket,
@@ -128,6 +129,8 @@ const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
 mod uplink_sharing;
 use uplink_sharing::OpenSharingEntry;
+mod wifi_mesh;
+use wifi_mesh::OpenMeshEntry;
 
 /// Install the deliberately narrow process-owned backend used only by the production server.
 pub(crate) fn functional_alpha_lease_backend(
@@ -149,6 +152,7 @@ pub(crate) fn functional_alpha_lease_backend(
         )),
         ingress_state: Mutex::new(None),
         sharing_state: Mutex::new(None),
+        mesh_state: Mutex::new(None),
         trusted_agent_uid,
         durable_ownership: Some(durable_ownership),
         dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -169,6 +173,7 @@ struct FunctionalAlphaLeaseBackend {
     state: Mutex<OpenLeaseState>,
     ingress_state: Mutex<Option<OpenIngressEntry>>,
     sharing_state: Mutex<Option<OpenSharingEntry>>,
+    mesh_state: Mutex<Option<OpenMeshEntry>>,
     trusted_agent_uid: u32,
     /// Always present in production. `None` exists only for narrow unit fixtures which never
     /// execute Prepare.
@@ -2681,6 +2686,27 @@ impl FunctionalAlphaLeaseBackend {
 }
 
 impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
+    fn install_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<volparossa_routing::InstallWifiMesh>,
+    ) -> BackendFuture<MeshBackendCompletion<MeshInterfaceIdentity>> {
+        Box::pin(self.install_mesh_backend(request))
+    }
+
+    fn inspect_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<()>,
+    ) -> BackendFuture<MeshBackendCompletion<crate::kernel::wifi_mesh::MeshSnapshot>> {
+        Box::pin(self.inspect_mesh_backend(request))
+    }
+
+    fn destroy_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<()>,
+    ) -> BackendFuture<MeshBackendCompletion<ConfirmedAbsent>> {
+        Box::pin(self.destroy_mesh_backend(request))
+    }
+
     fn install_uplink_sharing(
         self: Arc<Self>,
         request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
@@ -2868,6 +2894,12 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
             let result = match deadline {
                 Err(error) => Err(error),
                 Ok(deadline) => {
+                    if let Err(error) = Arc::clone(&self)
+                        .shutdown_mesh_backend(request.binding().helper_runtime_id, deadline)
+                        .await
+                    {
+                        return request.complete(Err(error));
+                    }
                     if let Err(error) = Arc::clone(&self)
                         .shutdown_sharing_backend(request.binding().helper_runtime_id, deadline)
                         .await
@@ -5800,6 +5832,7 @@ mod tests {
             state: Mutex::new(state.into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -5863,6 +5896,7 @@ mod tests {
                 state: Mutex::new(Some(entry).into()),
                 ingress_state: Mutex::new(None),
                 sharing_state: Mutex::new(None),
+                mesh_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
                 dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -6182,6 +6216,7 @@ mod tests {
                 state: Mutex::new(Some(entry).into()),
                 ingress_state: Mutex::new(None),
                 sharing_state: Mutex::new(None),
+                mesh_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
                 dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -10959,6 +10994,7 @@ mod tests {
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -11189,6 +11225,7 @@ mod tests {
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -11462,6 +11499,7 @@ mod tests {
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),
@@ -11578,6 +11616,7 @@ mod tests {
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: Some(handle),
             dead_worker_reaper: Arc::new(ProductionDeadWorkerNamespaceReaper),

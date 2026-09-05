@@ -62,11 +62,38 @@ These are scheduling hints, not a security identity for arbitrary local applicat
 Real disposable-veth traffic and engine-to-kernel lifecycle checks pass: two contribution
 sources share one cap, owner upload takes priority, contribution recovers, and exact cleanup
 restores the original queue. The new `sharing` KVM scenario exercises the production node
-with real protected Exit traffic and competing node-owned upload; its live result is pending.
-This first slice accepts only supported pristine queue roots with no options. Physical `mq`
-and ordinary nonempty `fq_codel` configurations are currently refused before mutation, not
-silently overwritten. It is not automatic bandwidth estimation, download-bottleneck control,
+with real protected Exit traffic and competing node-owned upload. Its first traffic run measured
+nearly the full 12-Mbps upload for the owner and zero contribution under owner load, but only
+3.5 Mbps contribution outside that load, below the unchanged 4-Mbps acceptance threshold.
+The UDP stop-and-wait bottleneck has been removed and a live rerun is pending. Supported software
+`mq` and ordinary default `fq_codel` roots are restored exactly; custom options, classifiers and
+unsupported/offloaded geometry are refused before mutation. It is not automatic bandwidth estimation, download-bottleneck control,
 Wi-Fi airtime management or local/WAN throughput aggregation.
+
+## Explicit Debian Wi-Fi mesh runtime
+
+The first radio implementation is open-L2 802.11s on a new helper-owned interface. It is disabled
+by default and requires explicit acknowledgement of that open local link layer. VOLPAROSSA's
+authenticated control transport and two-leg/end-to-end overlay protections remain required;
+this mode does not implement SAE or add protection for other services exposed by the host on a LAN.
+
+Configuration supplies an existing wireless parent, common mesh ID, explicit 20-MHz frequency,
+nonconflicting private host address/prefix and at most 32 neighbors. The helper verifies actual
+hardware, regulatory and active-interface coexistence before creating the separate interface;
+it does not retune an existing connection or change rfkill. Only the new interface receives the
+connected address. No Internet default route, DNS setting, mesh forwarding or portal is installed.
+The exact socket-owned interface is inspected throughout the daemon lifetime and removed at
+shutdown. Route-only cleanup does not remove it. Listeners and local bootstrap dials start after
+the mesh address exists. Compatible physical radios still need a real association/transfer test;
+pure validation and ownership tests are not that evidence.
+
+The shipped configuration keeps `wifi_mesh.enabled` false. An operator configuring a disposable
+pair can select the same `mesh_id` and `frequency_mhz` on both peers, distinct `local_address`
+values in the same private prefix, and each machine's own `parent_interface`. Enabling it also
+requires `acknowledge_open_underlay: true` and explicit participation roles. Configuration/role
+changes require a controlled daemon restart; this is not automatic discovery of usable radios,
+address allocation or channel selection. Do not enable it on an active host until the separate
+radio proof has passed for the intended environment.
 
 ## Practical boundaries and completion evidence
 

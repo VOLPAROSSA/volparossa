@@ -199,6 +199,13 @@ initial lookup rules for unmarked local unprivileged applications, excluding the
 root/helper observations and marked WireGuard traffic. It does not add a physical default
 route or remove the fixture's direct-egress denial. Focused encoding checks and the existing
 real marked-ingress/DNS smoke pass; the new initial-route behavior needs a live KVM rerun.
+The [initial-route rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/33986598019)
+at `63918006` passed the initial send and selected the offline node as the second flow's actual
+data Relay. The other consumer received 289 matching echoes through that offline Relay over
+about 60 seconds. The offline consumer's destination received 30 requests and emitted replies,
+but its application received zero. This proves real contribution, not the complete simultaneous
+offline give-and-take scenario; the offline return path remains under diagnosis. Cleanup completed
+with unchanged host-state hashes.
 The other consumer's observed data path used the WAN neighbor, with the offline node as its
 control Relay. Therefore this run does not prove the offline node's simultaneous dataplane
 contribution. The fixture now checks the actual selected Relay before starting applications,
@@ -217,7 +224,8 @@ The disposable `mixed-link` scenario now reuses the real A06 HTTP/3 transfer wit
 LocalOnly LAN Relay and one public Relay to the same Exit. It retains bounded ordinary
 selection draws and requires matching 4/8-MiB payload hashes, two genuine native paths,
 more than 1 MiB on each WireGuard leg, scoped privacy captures and full cleanup. Its five
-focused report/observer checks and shell/workflow contract pass; live execution is pending.
+focused report/observer checks and shell/workflow contract pass; the
+[live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33987800329) is pending.
 It makes no aggregate-bandwidth or real-radio claim.
 Direct radio setup, simultaneous WAN+LAN aggregation and owner-priority sharing remain
 unfinished. No direct-radio or phone-without-SIM support is claimed by Debian KVM evidence.
@@ -245,11 +253,27 @@ The [next sharing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/339
 at `63918006` reached all three real traffic windows and restored the original scheduler.
 Under owner load it measured 11.999 Mbps owner upload and zero contributed upload, within the
 12-Mbps physical cap. Idle/recovery contribution was only 3.446/3.504 Mbps, below the required
-4 Mbps, so the scenario still failed. General UDP currently waits for each response before
-reading the next request; bounded independent response draining is being implemented to
-remove that actual stop-and-wait bottleneck. The throughput checks are not weakened.
+4 Mbps, so the scenario still failed. General UDP's stop-and-wait bottleneck is now removed:
+bounded reverse draining is independent of subsequent sends; explicit transient native TX
+backpressure drops one continuation without destroying the route. Startup authorization and
+the separate DNS association retain their original bounded semantics. Four focused pipeline
+tests, the exact ingress tuple test and strict agent Clippy pass. The
+[new live sharing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33988084401)
+also requires two actual requests before the first echo. Throughput checks remain unchanged.
+The fixture's Exit-side Disconnect was on an idle local Client route, so its result does not
+prove retirement of an active same-node route while sharing; exact scheduler teardown is proven.
 Download control, automatic available-bandwidth estimation and radio airtime remain unfinished.
 These narrower results do not check the full sharing item above.
+
+The first explicit Debian `wifi_mesh` runtime is implemented but has no live radio result yet.
+The helper creates one separately owned open-L2 802.11s interface using nl80211, with a bounded
+private connected subnet and no default route. Existing active radio interfaces are not retuned;
+unsupported/regulatory/coexistence conditions are rejected. The agent creates the interface
+before its mesh listeners/bootstrap dials, inspects the exact owner periodically and retires it
+after route shutdown. Kernel link-layer forwarding and automatic address/default-route acquisition
+are disabled on the new interface. Nine focused kernel/engine tests and four wire/config/agent
+tests pass; strict helper and agent Clippy pass. This is not SAE, LAN host-service isolation, physical-radio
+coexistence, mobile support, airtime management or a speed-increase claim.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
