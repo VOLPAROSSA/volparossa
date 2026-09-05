@@ -6,6 +6,19 @@ Last updated: 2026-09-05
 
 ## Current live integration checkpoint
 
+The latest [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989949727)
+at `dbb89962` has finalized **passing A01--A13 and A15 evidence on one unchanged build**.
+It stopped before A14's forced crashes: the inventory counted 18 durable route-worker namespaces
+plus the separate live ingress namespace, but demanded two durable descriptors for all 19.
+The actual 36 descriptors cover the route workers; the ingress worker has a different lifetime
+owner. Its real held MPTCP request reached the destination through the exact Exit. A14 remains
+failed until exact worker-class inventory and the actual SIGKILL/restart sequence pass.
+All measured remaining objects, worker namespace references and FD-store descriptors were zero,
+and guest-root state hashes matched. `cleanup.complete` is nevertheless false because the A14
+proof did not complete. This is not an all-A01--A15 alpha pass, nor proof of the newer extensions.
+
+### Earlier integration evidence and corrections
+
 The detailed historical checklist below has not yet been reconciled with the complete
 vertical runtime. It must not be read as a current measurement of elapsed work.
 The retained [Debian 13 KVM datapath run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972373384)
@@ -227,6 +240,15 @@ selected the WAN neighbor as data Relay and the offline node as control Relay. I
 the application windows, so it does not test the offline reply fix or invalidate the earlier
 289-echo contribution witness. Cleanup completed with zero owned objects and unchanged host
 hashes. The complete simultaneous offline give-and-take requirement remains open.
+The common local/mixed selection blocker is now corrected: discovery fetches at most three
+current authenticated control lineages per Exit, refreshing near-expiry slots without briefly
+enrolling a fourth. Each newly captured snapshot chooses exactly one consistent signed Exit
+lineage before building its affine subjects; the Exit is never weighted multiple times, and
+existing operations do not migrate. Four fetch checks, seven signed/projection checks, formatter
+and strict agent Clippy pass. Runs
+[local-link](https://github.com/VOLPAROSSA/volparossa/actions/runs/33990931726) and
+[mixed-link](https://github.com/VOLPAROSSA/volparossa/actions/runs/33990931649) at `f1881887`
+are pending. Their application, path-count, privacy and cleanup requirements are unchanged.
 Client native preselection and single-path Exit Ready also carry exact observer-bound local
 interface hints into their helper Prepare operations. They cannot rely on a public default route
 on a LocalOnly node. Multi-path Ready now collects all signed Permits, dispatches Relay Ready
@@ -334,6 +356,15 @@ counters increased. Both normal removals were idempotent, closing the crashed ow
 removed its exact interface, and namespace/guest-network baselines were restored with zero owned
 objects remaining. This is real kernel 802.11s behavior on simulated radios, not physical-radio,
 phone, capacity-gain or full-agent-overlay evidence.
+The next `wifi-link` vertical now composes the actual agents with those simulated radios:
+mesh-only mDNS plus authenticated signed peer discovery occurs before the other agents start,
+then the offline node consumes and contributes real protected traffic concurrently. An Ethernet
+contact remains for distinct local-prefix diversity. The actual contributing flow must traverse
+the mesh, with per-interface WireGuard transport counts and station counter growth; consumption
+is attributed only to its observed selected underlay. Mesh survives route-only Disconnect and
+must disappear on agent shutdown before helpers stop. Four parser/report/preview checks and the
+existing shell/workflow contract pass; [its first live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33990931641)
+at `f1881887` is pending, not a completed full-agent radio claim.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
