@@ -18,8 +18,8 @@ use volparossa_discovery::capability;
 use volparossa_identity::{Identity, IdentityError};
 use volparossa_protocol::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork, AdvertisementPolicy,
-    AdvertisementQuality, AdvertisementRoles, NodeAdvertisement, ProtocolError, TimePolicy,
-    generate_nonce, node_id_from_public_key, sign_control_message_with,
+    AdvertisementQuality, AdvertisementRoles, AdvertisementUplink, NodeAdvertisement,
+    ProtocolError, TimePolicy, generate_nonce, node_id_from_public_key, sign_control_message_with,
 };
 
 const MAX_WIRE_TTL_SECONDS: u64 = 15 * 60;
@@ -164,6 +164,16 @@ impl AdvertisementPublisher {
 }
 
 fn service_claims_are_consistent(input: &LocalAdvertisementInput) -> bool {
+    let origin = match AdvertisementUplink::try_from(input.origin.uplink) {
+        Ok(AdvertisementUplink::IndependentInternet) => input.origin.asn != 0,
+        Ok(AdvertisementUplink::LocalOnly) => {
+            !input.roles.exit
+                && input.origin.asn == 0
+                && input.origin.ipv4_prefix_hint.is_empty()
+                && input.origin.ipv6_prefix_hint.is_empty()
+        }
+        Err(_) => false,
+    };
     let transport = input.capabilities.tcp_mptcp
         || input.capabilities.udp_single_path
         || input.capabilities.multipath_quic;
@@ -173,7 +183,7 @@ fn service_claims_are_consistent(input: &LocalAdvertisementInput) -> bool {
     let exit_capacity = !input.roles.exit
         || (input.capacity.operator_exit_limit_up_mbps > 0
             && input.capacity.operator_exit_limit_down_mbps > 0);
-    input.origin.asn != 0
+    origin
         && !input.origin.region.is_empty()
         && input.origin.country_code.len() == 2
         && transport
@@ -427,7 +437,7 @@ mod tests {
                 sample_window_seconds: 0,
             },
             origin: AdvertisementNetwork {
-                uplink: volparossa_protocol::AdvertisementUplink::IndependentInternet as i32,
+                uplink: AdvertisementUplink::IndependentInternet as i32,
                 region: "test".to_owned(),
                 country_code: "NL".to_owned(),
                 asn: 64_512,
@@ -507,6 +517,91 @@ mod tests {
         .expect("verified refreshed ad");
         assert_eq!(second_verified.message().sequence_number, 2);
         assert_eq!(second_verified.message().expires_at_ms, NOW_MS + 301_000);
+    }
+
+    #[test]
+    fn local_only_relay_publishes_signed_capability_without_invented_origin() {
+        let directory = tempdir().expect("tempdir");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+        let identity = Identity::generate();
+        let publisher =
+            AdvertisementPublisher::new(directory.path().join("advertisement.sequence"), 300);
+        let mut local = input();
+        local.origin.uplink = AdvertisementUplink::LocalOnly as i32;
+        local.origin.asn = 0;
+        local.origin.ipv4_prefix_hint.clear();
+        local.origin.ipv6_prefix_hint.clear();
+        local.control_addresses = BTreeSet::from([
+            "/ip4/10.241.10.1/udp/41000/quic-v1".to_owned(),
+            "/ip4/10.241.12.1/udp/41000/quic-v1".to_owned(),
+        ]);
+        let signed = publisher
+            .sign(&identity, &local, NOW_MS)
+            .expect("signed local Relay ad");
+        assert!(signed.provider_keys.contains(capability::RELAY));
+        assert!(!signed.provider_keys.contains(capability::EXIT));
+        let mut replay = ReplayCache::new(1).expect("replay cache");
+        let verified = verify_control_message::<NodeAdvertisement>(
+            &signed.envelope,
+            NOW_MS + 1,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("genuine signed LocalOnly advertisement");
+        let advertisement = verified.message();
+        assert_eq!(
+            advertisement.roles,
+            Some(AdvertisementRoles {
+                client: true,
+                relay: true,
+                exit: false,
+            })
+        );
+        let network = advertisement.network.as_ref().expect("network");
+        assert_eq!(network.uplink, AdvertisementUplink::LocalOnly as i32);
+        assert_eq!(network.asn, 0);
+        assert!(network.ipv4_prefix_hint.is_empty());
+        assert!(network.ipv6_prefix_hint.is_empty());
+
+        for (uplink, asn, ipv4, ipv6, exit) in [
+            (AdvertisementUplink::LocalOnly as i32, 64_512, "", "", false),
+            (
+                AdvertisementUplink::LocalOnly as i32,
+                0,
+                "44.12.34.0/24",
+                "",
+                false,
+            ),
+            (
+                AdvertisementUplink::LocalOnly as i32,
+                0,
+                "",
+                "2606:4700:100::/48",
+                false,
+            ),
+            (AdvertisementUplink::LocalOnly as i32, 0, "", "", true),
+            (
+                AdvertisementUplink::IndependentInternet as i32,
+                0,
+                "",
+                "",
+                false,
+            ),
+            (i32::MAX, 0, "", "", false),
+        ] {
+            let mut invalid = local.clone();
+            invalid.origin.uplink = uplink;
+            invalid.origin.asn = asn;
+            invalid.origin.ipv4_prefix_hint = ipv4.to_owned();
+            invalid.origin.ipv6_prefix_hint = ipv6.to_owned();
+            invalid.roles.exit = exit;
+            invalid.capacity.operator_exit_limit_up_mbps = u64::from(exit);
+            invalid.capacity.operator_exit_limit_down_mbps = u64::from(exit);
+            assert!(matches!(
+                publisher.sign(&identity, &invalid, NOW_MS),
+                Err(AdvertisementError::InvalidInput)
+            ));
+        }
     }
 
     #[test]

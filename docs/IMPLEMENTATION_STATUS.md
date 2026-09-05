@@ -60,8 +60,9 @@ All nodes use the same software. Development fixtures may still isolate roles to
   actor and authenticated connection without depending on its own Client candidate cache.
   The original Client-signed request is unchanged. Provider scheduling retains forwarded-only Exit choices
   in a homogeneous combined-role candidate pool.
-- [ ] Live reciprocal datapath proof: the same participant daemons concurrently consume the
-  network and carry other participants' Relay and policy-limited Exit traffic.
+- [x] Live reciprocal single-path QUIC MASQUE UDP proof: four unchanged participant daemons
+  consume concurrently; three simultaneously serve as Client, Relay and policy-limited Exit
+  in the observed path assignment. This does not claim combined-role TCP/MPQUIC load coverage.
 
 Verification for the initial combined-role implementation: 369 agent library tests, 18 config tests, the Client
 wire/CLI cases, strict Clippy for the changed Rust packages, and the combined native launcher
@@ -83,7 +84,13 @@ Kernel-originated Relay/Exit WireGuard outer packets lacked the Client-ingress b
 all four WireGuard roles now receive that mark. Failed Client native probes also used an
 all-owned cleanup fallback that could destroy other roles' contexts: a destruction-only exact
 context authority now survives consuming protocol joins, with no broad fallback in route setup.
-These fixes have focused coverage; reciprocal application traffic still needs a successful rerun.
+These fixes have focused coverage. The live
+[rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982372708) at `9da11b81`
+now **passes**: four simultaneous application flows, 3.178 seconds of observed echo overlap,
+matching request/response hashes and selected Exit sources, both WireGuard legs, three exact
+same-daemon Client+Relay+Exit witnesses, zero direct Client--Exit packets/plaintext leaks and
+complete cleanup with unchanged host-state hashes. It is the scoped reciprocal UDP proof,
+not an A01--A15 or radio/aggregation result.
 The failed KVM runs completely cleaned their owned state and retained unchanged host-state hashes.
 The `27a4e73` [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33976851986) passed.
 At `0ae30c88`, CodeQL passed but Quality found one stale exact-schema assertion for the new
@@ -137,6 +144,15 @@ a WAN-capable Relay and simultaneously relays another node's traffic over two pr
 to a different WAN-capable Exit. It checks application hashes, both WireGuard legs, Exit source
 addresses, one unchanged offline daemon and the absence of an offline default route. Script
 checks pass; this extended giving-and-taking datapath has no passing live result yet.
+The [extended run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982376532) at
+`9da11b81` stopped at `LOCAL_LINK_NEIGHBOR_DISCOVERY_UNAVAILABLE`: the offline consumer's
+three-peer view was ready, but the second consumer's candidate view stayed empty. It never
+reached application traffic; all owned state was cleaned and host-state hashes were unchanged.
+The cause was a stale publisher guard requiring an ASN even for `LocalOnly`: the offline
+node could consume advertisements but never publish its own Relay capability. The publisher
+now accepts truthful LocalOnly Relay service without an ASN or invented public prefix, while
+rejecting LocalOnly Exit service. A real signed-advertisement regression and strict agent
+Clippy pass; the extended live scenario still needs a successful rerun.
 Client native preselection and single-path Exit Ready also carry exact observer-bound local
 interface hints into their helper Prepare operations. They cannot rely on a public default route
 on a LocalOnly node. Multi-path Exit Ready still prepares its full lease batch before receiving
