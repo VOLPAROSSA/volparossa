@@ -322,9 +322,13 @@ impl ActiveProductionMpquicExitRoute {
                 return Ok(());
             }
             let now = Instant::now();
-            flows.retain(|_, flow| now.duration_since(flow.last_activity) < self.flow_idle_timeout);
-            pending_browser_flows
-                .retain(|_, flow| now.duration_since(flow.last_activity) < self.flow_idle_timeout);
+            retain_live_exit_udp_flows(
+                &mut flows,
+                &mut pending_browser_flows,
+                now,
+                current_ms,
+                self.flow_idle_timeout,
+            );
             pending_general_udp.retain(|_, datagram| {
                 now.duration_since(datagram.received_at) < MAXIMUM_PENDING_GENERAL_UDP_AGE
             });
@@ -605,6 +609,33 @@ struct ExitUdpFlow {
     socket: UdpSocket,
     last_activity: Instant,
     browser_authorization: Option<AuthorizedUdpFlow>,
+}
+
+fn retain_live_exit_udp_flows(
+    flows: &mut HashMap<ExitUdpFlowKey, ExitUdpFlow>,
+    pending_browser_flows: &mut HashMap<SocketAddrV4, PendingExitBrowserQuicFlow>,
+    now: Instant,
+    now_ms: u64,
+    route_idle_timeout: Duration,
+) {
+    // Retire an individual signed browser grant before either direction is polled. Its
+    // expiry is ordinary flow cleanup, not a failure of every flow sharing the native route.
+    flows.retain(|_, flow| {
+        let idle = now.saturating_duration_since(flow.last_activity);
+        idle < route_idle_timeout
+            && flow
+                .browser_authorization
+                .as_ref()
+                .is_none_or(|authorization| {
+                    authorization.ensure_active_at(now_ms).is_ok()
+                        && idle < authorization.idle_timeout()
+                })
+    });
+    pending_browser_flows.retain(|_, flow| {
+        flow.authorization.ensure_active_at(now_ms).is_ok()
+            && now.saturating_duration_since(flow.last_activity)
+                < route_idle_timeout.min(flow.authorization.idle_timeout())
+    });
 }
 
 impl ExitUdpFlow {
@@ -3501,6 +3532,80 @@ mod tests {
 
         assert!(take_verified_browser_quic_candidate(&mut pending, client).is_none());
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_exit_browser_flow_does_not_retire_live_sibling_socket() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        let destination = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let SocketAddr::V4(destination_address) = destination.local_addr().unwrap() else {
+            panic!("IPv4 test destination");
+        };
+        let permission =
+            ProtocolPort::new(TransportProtocol::Udp, destination_address.port()).unwrap();
+        let policy = verified_development_manifest(
+            NOW_MS,
+            vec![
+                DestinationRule::exact_domain("destination.volparossa.test", [permission]).unwrap(),
+            ],
+        )
+        .unwrap();
+        let fixture = SignedRouteFixture::new(2, &[Transport::MultipathQuic], NOW_MS).unwrap();
+        let now = Instant::now();
+        let mut flows = HashMap::new();
+        let mut pending = HashMap::new();
+        for id in 1..=3 {
+            let key = ExitUdpFlowKey {
+                client: SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 52_000 + u16::from(id)),
+                destination: destination_address,
+            };
+            let issued_at = if id == 1 { NOW_MS } else { NOW_MS + 1_000 };
+            let authorization = browser_flow(&fixture, &policy, destination_address, id, issued_at);
+            let mut flow = ExitUdpFlow::connect(destination_address, Some(authorization))
+                .await
+                .unwrap();
+            // Flow 1 expires by signature, flow 3 by its signed 30-second idle timeout.
+            flow.last_activity = if id == 3 {
+                now - Duration::from_secs(30)
+            } else {
+                now
+            };
+            let pending_authorization =
+                browser_flow(&fixture, &policy, destination_address, id + 3, issued_at);
+            let mut pending_flow = PendingExitBrowserQuicFlow::new(pending_authorization);
+            pending_flow.last_activity = flow.last_activity;
+            pending.insert(key.client, pending_flow);
+            flows.insert(key, flow);
+        }
+        let live_key = ExitUdpFlowKey {
+            client: SocketAddrV4::new(Ipv4Addr::new(10, 76, 0, 2), 52_002),
+            destination: destination_address,
+        };
+        let original_socket = flows[&live_key].socket.local_addr().unwrap();
+        retain_live_exit_udp_flows(
+            &mut flows,
+            &mut pending,
+            now,
+            NOW_MS + 60_000,
+            Duration::from_secs(600),
+        );
+        assert_eq!(flows.len(), 1);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains_key(&live_key.client));
+        let live = flows.get_mut(&live_key).unwrap();
+        assert_eq!(live.socket.local_addr().unwrap(), original_socket);
+        live.authorize(&policy, NOW_MS + 60_000, destination_address)
+            .unwrap();
+        live.send(b"surviving-flow").await.unwrap();
+        let mut payload = [0_u8; 32];
+        let (length, peer) = destination.recv_from(&mut payload).await.unwrap();
+        assert_eq!(&payload[..length], b"surviving-flow");
+        assert_eq!(peer, original_socket);
+        destination.send_to(b"reply", peer).await.unwrap();
+        let length = live.socket.recv(&mut payload).await.unwrap();
+        assert_eq!(&payload[..length], b"reply");
     }
 
     #[tokio::test]

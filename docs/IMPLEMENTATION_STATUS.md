@@ -2,7 +2,25 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-01
+Last updated: 2026-09-05
+
+## Current live integration checkpoint
+
+The detailed historical checklist below has not yet been reconciled with the complete
+vertical runtime. It must not be read as a current measurement of elapsed work.
+The latest retained [Debian 13 KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33743981933)
+at `1ebbf976` passed A01--A06 and A15, including a real two-relay HTTP/3 transfer;
+A07 failed during the 32 MiB active-transfer relay-removal case. Later cases were not
+reached. The last pushed candidate `5968efec` passed
+[Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33746672039) and
+[CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33746669221).
+This is partial evidence, not an all-A01--A15 alpha pass.
+
+The current A07 correction gives a browser flow an explicit signature bounded by its
+route, manifest and protocol lifetime, rather than the unrelated 60-second ingress
+token. Expired or idle Exit browser flows are retired independently of other flows
+sharing the same native connection. Live failover verification of this correction is
+still pending; A07 remains unchecked.
 
 ## Fixed alpha v1 scorecard
 

@@ -59,7 +59,6 @@ const TLS_CLIENT_HELLO_PEEK_BYTES: usize = 64 * 1024 + 64;
 const TLS_CLIENT_HELLO_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const IPV4_HEADER_BYTES: usize = 20;
 const UDP_HEADER_BYTES: usize = 8;
-const MAX_BROWSER_QUIC_DATAGRAMS_PER_FLOW: u32 = 65_536;
 const MAX_PENDING_BROWSER_QUIC_DATAGRAMS: usize = 128;
 const MAX_PENDING_BROWSER_QUIC_BYTES: usize = 256 * 1024;
 const MAX_RETAINED_INGRESS_REPLY_SOCKETS: usize = 64;
@@ -792,7 +791,7 @@ impl BrowserQuicIngressGate {
             destination,
             hostname,
             policy_hash,
-            expires_at_ms,
+            expires_at_ms: browser_flow_expiry(policy, policy.expires_at_ms(), now_ms)?,
         };
         Ok(refreshed)
     }
@@ -894,7 +893,7 @@ impl BrowserQuicIngressGate {
         policy
             .authorize_domain(now_ms, &hostname, TransportProtocol::Udp, BROWSER_QUIC_PORT)
             .map_err(ClientIngressUdpError::Policy)?;
-        let expires_at_ms = udp_flow_expiry(policy, now_ms)?;
+        let expires_at_ms = browser_flow_expiry(policy, policy.expires_at_ms(), now_ms)?;
         let source = *source;
         let destination = *destination;
         let buffered = std::mem::take(datagrams);
@@ -928,6 +927,25 @@ fn udp_flow_expiry(policy: &VerifiedManifest, now_ms: u64) -> Result<u64, Client
     let expires_at_ms = now_ms
         .checked_add(INGRESS_UDP_FLOW_TTL_MS)
         .ok_or(ClientIngressUdpError::Clock)?
+        .min(policy.expires_at_ms());
+    (expires_at_ms > now_ms)
+        .then_some(expires_at_ms)
+        .ok_or(ClientIngressUdpError::Clock)
+}
+
+// A per-datagram ingress capability is deliberately short lived. A signed browser flow is
+// different: it carries an established QUIC connection, bounded by the retained route, policy
+// and protocol lifetime, with a separately enforced idle timeout. Copying the ingress token's
+// 60-second expiry here terminates legitimate active downloads and relay failover transfers.
+fn browser_flow_expiry(
+    policy: &VerifiedManifest,
+    route_expires_at_ms: u64,
+    now_ms: u64,
+) -> Result<u64, ClientIngressUdpError> {
+    let expires_at_ms = now_ms
+        .checked_add(TimePolicy::default().maximum_lifetime_ms)
+        .ok_or(ClientIngressUdpError::Clock)?
+        .min(route_expires_at_ms)
         .min(policy.expires_at_ms());
     (expires_at_ms > now_ms)
         .then_some(expires_at_ms)
@@ -1055,7 +1073,7 @@ impl PolicyAuthorizedUdpIngress {
         {
             return Err(ClientIngressUdpError::PolicyBinding);
         }
-        let expires_at_ms = self.expires_at_ms.min(route_expires_at_ms);
+        let expires_at_ms = browser_flow_expiry(policy, route_expires_at_ms, now_ms)?;
         let signed_authorization = if let Some(hostname) = self.hostname.as_deref() {
             coordinator.sign_udp_hostname_pinned(
                 route_context_id,
@@ -1146,7 +1164,6 @@ impl PolicyAuthorizedUdpIngress {
                 tunnel_source,
                 policy_hash: self.policy_hash,
                 last_activity_ms: now_ms,
-                datagrams: 0,
                 signed_authorization: signed_authorization.to_vec(),
             },
             packet,
@@ -1322,7 +1339,6 @@ pub(crate) struct BrowserQuicFlowBinding {
     tunnel_source: Ipv4Addr,
     policy_hash: [u8; 32],
     last_activity_ms: u64,
-    datagrams: u32,
     signed_authorization: Vec<u8>,
 }
 
@@ -1366,10 +1382,6 @@ impl BrowserQuicFlowBinding {
     pub(crate) fn record_sent(&mut self, now_ms: u64) -> Result<(), ClientIngressUdpError> {
         self.ensure_activity_bound(now_ms)?;
         self.last_activity_ms = now_ms;
-        self.datagrams = self
-            .datagrams
-            .checked_add(1)
-            .ok_or(ClientIngressUdpError::FlowBound)?;
         Ok(())
     }
 
@@ -1387,10 +1399,6 @@ impl BrowserQuicFlowBinding {
             return Err(ClientIngressUdpError::DestinationBinding);
         }
         self.last_activity_ms = now_ms;
-        self.datagrams = self
-            .datagrams
-            .checked_add(1)
-            .ok_or(ClientIngressUdpError::FlowBound)?;
         Ok(payload)
     }
 
@@ -1441,7 +1449,6 @@ impl BrowserQuicFlowBinding {
             .map_err(|_| ClientIngressUdpError::FlowBound)?;
         if now_ms < self.last_activity_ms
             || now_ms.saturating_sub(self.last_activity_ms) >= idle_timeout_ms
-            || self.datagrams >= MAX_BROWSER_QUIC_DATAGRAMS_PER_FLOW
         {
             return Err(ClientIngressUdpError::FlowBound);
         }
@@ -1726,7 +1733,7 @@ pub(crate) enum ClientIngressUdpError {
     PacketBinding,
     #[error("browser QUIC ClientHello inspection failed closed")]
     QuicInspection,
-    #[error("browser QUIC flow exceeded its idle, lifetime, or datagram bound")]
+    #[error("browser QUIC flow exceeded its idle or lifetime bound")]
     FlowBound,
     #[error("UDP reply payload exceeded the fixed datagram bound")]
     ReplyPayload,
@@ -1749,15 +1756,16 @@ mod tests {
         ReplayCache, TimePolicy, Transport, UdpFlowAuthorization, generate_nonce,
         sign_control_message,
     };
+    use volparossa_reservation::ReservationCoordinator;
     use volparossa_test_support::{SignedRouteFixture, verified_development_manifest};
     use volparossa_udp::VerifiedSingleRelayPath;
 
     use super::{
-        BrowserQuicIngressGate, BrowserQuicIngressState, ClientIngressUdpError,
-        ExactReplySocketCache, MAX_RETAINED_INGRESS_REPLY_SOCKETS, ObservedTcpIngress,
-        ObservedUdpIngress, PolicyAuthorizedDnsIngress, PolicyAuthorizedUdpIngress,
-        authorize_tcp_destination, build_ipv4_udp_packet, parse_ipv4_udp_packet,
-        split_udp_gro_payload,
+        BrowserQuicIngressDecision, BrowserQuicIngressGate, BrowserQuicIngressState,
+        ClientIngressUdpError, ExactReplySocketCache, MAX_RETAINED_INGRESS_REPLY_SOCKETS,
+        ObservedTcpIngress, ObservedUdpIngress, PolicyAuthorizedDnsIngress,
+        PolicyAuthorizedUdpIngress, authorize_tcp_destination, browser_flow_expiry,
+        build_ipv4_udp_packet, parse_ipv4_udp_packet, split_udp_gro_payload,
     };
 
     #[test]
@@ -2163,6 +2171,63 @@ mod tests {
     }
 
     #[test]
+    fn browser_flow_lifetime_is_signed_for_the_route_not_the_ingress_token() {
+        const NOW_MS: u64 = 1_900_000_000_000;
+        const HOSTNAME: &str = "destination.volparossa.test";
+        let application = SocketAddr::from((Ipv4Addr::new(43, 159, 1, 9), 52_000));
+        let remote = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 443));
+        let permission = ProtocolPort::new(TransportProtocol::Udp, 443).unwrap();
+        let policy = verified_development_manifest(
+            NOW_MS,
+            vec![DestinationRule::exact_domain(HOSTNAME, [permission]).unwrap()],
+        )
+        .unwrap();
+        let coordinator = ReservationCoordinator::new(4).unwrap();
+        let ingress = authorize_browser_quic_test_ingress(
+            application,
+            remote,
+            b"initial",
+            HOSTNAME,
+            &policy,
+            NOW_MS,
+        );
+        assert_eq!(ingress.expires_at_ms, NOW_MS + 60_000);
+        let route_expiry = NOW_MS + 300_000;
+        let (mut binding, _) = ingress
+            .bind_to_multipath_route(
+                [2; 16],
+                *coordinator.client_session_id(),
+                route_expiry,
+                &coordinator,
+                &policy,
+                Ipv4Addr::new(10, 76, 0, 2),
+                1_280,
+                NOW_MS,
+            )
+            .unwrap();
+        assert_eq!(binding.flow().expires_at_ms(), route_expiry);
+        // Long transfers do not allocate per packet and must not have a hidden 65,536-packet
+        // download limit. Count, buffer, idle, policy and route bounds still apply elsewhere.
+        for _ in 0..70_000 {
+            binding.record_sent(NOW_MS).unwrap();
+        }
+        for offset in [20_000, 40_000, 60_000, 80_000] {
+            binding.record_sent(NOW_MS + offset).unwrap();
+        }
+        assert!(binding.is_live(&policy, NOW_MS + 80_001));
+        assert!(!binding.is_live(&policy, NOW_MS + 110_000));
+        binding.last_activity_ms = route_expiry - 1;
+        assert!(!binding.is_live(&policy, route_expiry));
+        assert_eq!(
+            browser_flow_expiry(&policy, u64::MAX, NOW_MS).unwrap(),
+            policy
+                .expires_at_ms()
+                .min(NOW_MS + TimePolicy::default().maximum_lifetime_ms),
+        );
+        assert!(browser_flow_expiry(&policy, NOW_MS, NOW_MS).is_err());
+    }
+
+    #[test]
     fn browser_quic_refreshes_policy_binding_after_slow_route_establishment() {
         const INSPECTION_MS: u64 = 1_900_000_000_000;
         const ROUTE_READY_MS: u64 = INSPECTION_MS + 61_000;
@@ -2215,6 +2280,18 @@ mod tests {
         };
         assert_eq!(*policy_hash, *ready_policy.policy_hash());
         assert!(*expires_at_ms > ROUTE_READY_MS);
+
+        // Retained ClientHello inspection is not discarded while its route-bound application
+        // flow is still active. Each new datagram nevertheless gets a fresh policy check.
+        let next = gate
+            .inspect(
+                ObservedUdpIngress::new(application.into(), remote.into(), b"quic-data".to_vec())
+                    .unwrap(),
+                &ready_policy,
+                ROUTE_READY_MS + 61_000,
+            )
+            .unwrap();
+        assert!(matches!(next, BrowserQuicIngressDecision::Authorized(_)));
 
         let denied_policy =
             verified_development_manifest(ROUTE_READY_MS, Vec::new()).expect("denying policy");
