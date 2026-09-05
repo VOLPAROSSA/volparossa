@@ -2581,6 +2581,7 @@ json.dump(
 sys.stdout.write("\n")
 PYTHON
 cat >"$WORK/bin/dns-policy-client.py" <<'PYTHON'
+#!/usr/bin/python3
 import hashlib
 import json
 import socket
