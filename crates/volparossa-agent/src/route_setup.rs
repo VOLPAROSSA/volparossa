@@ -191,6 +191,13 @@ enum ClientTransportState {
     Mpquic(Box<ActiveProductionMpquicRoute>),
 }
 
+enum ClientPathProjection {
+    None,
+    Mptcp(Vec<PathSummary>),
+    Mpquic(Vec<PathSummary>),
+    SingleUdp(PathSummary),
+}
+
 struct ActiveProductionNativeUdpRoute {
     session: ProductionMpquicSession,
     path: VerifiedSingleRelayPath,
@@ -209,7 +216,7 @@ struct GeneralUdpSessionLifetime {
 
 struct ActiveProductionMpquicRoute {
     session: ProductionMpquicSession,
-    identity: CommittedMpquicRouteIdentity,
+    identity: CommittedRelayRouteIdentity,
     health: ProductionMpquicPathHealth,
     browser_flows: Vec<BrowserQuicFlowBinding>,
 }
@@ -234,16 +241,16 @@ pub(crate) enum ClientPathMaintenance {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CommittedMpquicPathIdentity {
+struct CommittedRelayPathIdentity {
     path_id: u32,
     relay_peer_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CommittedMpquicRouteIdentity {
+struct CommittedRelayRouteIdentity {
     route_context_id: [u8; ID_BYTES],
     exit_peer_id: String,
-    paths: Vec<CommittedMpquicPathIdentity>,
+    paths: Vec<CommittedRelayPathIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -292,7 +299,35 @@ impl EstablishedClientRoute {
         )
     }
 
-    async fn shutdown(self) {
+    async fn path_projection(&self) -> Result<ClientPathProjection, ClientRouteConnectError> {
+        match &self.transport {
+            ClientTransportState::TcpMptcp(_) => self
+                .route
+                .as_ref()
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+                .committed_mptcp_paths()
+                .map(ClientPathProjection::Mptcp),
+            ClientTransportState::Mpquic(active) => active
+                .path_summaries()
+                .await
+                .map(ClientPathProjection::Mpquic),
+            ClientTransportState::NativeUdp(active) => active
+                .path_summary()
+                .await
+                .map(ClientPathProjection::SingleUdp),
+            ClientTransportState::UdpReady(_) | ClientTransportState::UdpActive(_) => {
+                Ok(ClientPathProjection::None)
+            }
+        }
+    }
+
+    async fn shutdown(self, agent_state: Option<&Arc<tokio::sync::RwLock<AgentState>>>) {
+        // Capture the retired context before consuming its affine owner. A newer context's
+        // display must survive any delayed completion of this teardown.
+        let retired_context_id = self
+            .route
+            .as_ref()
+            .map(|route| route.established.request.parameters.route_context_id);
         if let Some(flow) = self.tcp_flow {
             flow.shutdown();
         }
@@ -317,6 +352,12 @@ impl EstablishedClientRoute {
             let _ = Box::pin(route.disconnect()).await;
         }
         let _ = self.orchestrator.shutdown().await;
+        if let (Some(state), Some(context_id)) = (agent_state, retired_context_id) {
+            state
+                .write()
+                .await
+                .clear_committed_path_context(&context_id);
+        }
     }
 }
 
@@ -526,7 +567,42 @@ const fn retain_degraded_path_for_active_browser_flow(
     browser_flows != 0 && active_paths.saturating_sub(1) < minimum_paths
 }
 
-impl CommittedMpquicRouteIdentity {
+impl CommittedRelayRouteIdentity {
+    fn selected_mptcp_paths(
+        &self,
+        active_path_ids: &[u32],
+    ) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
+        let selected = active_path_ids.iter().copied().collect::<BTreeSet<_>>();
+        if !(2..=8).contains(&selected.len())
+            || selected.len() != active_path_ids.len()
+            || selected.iter().any(|path_id| {
+                self.paths
+                    .iter()
+                    .filter(|path| path.path_id == *path_id)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let mut paths = self
+            .paths
+            .iter()
+            .filter(|path| selected.contains(&path.path_id))
+            .map(|path| PathSummary {
+                route_context_id: self.route_context_id.to_vec(),
+                path_id: path.path_id,
+                relay_peer_id: path.relay_peer_id.clone(),
+                exit_peer_id: self.exit_peer_id.clone(),
+                state: PathState::Reachable as i32,
+                smoothed_rtt_micros: 0,
+                user_bytes: 0,
+            })
+            .collect::<Vec<_>>();
+        paths.sort_unstable_by_key(|path| path.path_id);
+        Ok(paths)
+    }
+
     fn project<I>(
         &self,
         statuses: &[NativePathStatus],
@@ -890,8 +966,7 @@ impl ClientRouteControl {
                 .then(|| std::mem::replace(&mut *state, ClientRouteControlState::Connecting))
         };
         if let Some(ClientRouteControlState::Established(established)) = expired {
-            Box::pin(established.shutdown()).await;
-            self.clear_agent_transport_paths().await;
+            Box::pin(established.shutdown(self.agent_state.as_ref())).await;
             let mut state = self.state.lock().await;
             if matches!(*state, ClientRouteControlState::Connecting) {
                 *state = ClientRouteControlState::Idle;
@@ -1126,8 +1201,7 @@ impl ClientRouteControl {
             }
         };
         if let Some(previous) = previous {
-            Box::pin(previous.shutdown()).await;
-            self.clear_agent_transport_paths().await;
+            Box::pin(previous.shutdown(self.agent_state.as_ref())).await;
         }
 
         let result = Box::pin(begin_client_route(config, discovery)).await;
@@ -1172,62 +1246,52 @@ impl ClientRouteControl {
         established: EstablishedClientRoute,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         if established.is_expired(crate::unix_millis(), Instant::now()) {
-            Box::pin(established.shutdown()).await;
-            self.clear_agent_transport_paths().await;
+            Box::pin(established.shutdown(self.agent_state.as_ref())).await;
             let mut state = self.state.lock().await;
             *state = ClientRouteControlState::Idle;
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
         let progress = established.progress();
-        let mpquic_paths = match &established.transport {
-            ClientTransportState::Mpquic(active) => match active.path_summaries().await {
-                Ok(paths) => Some(paths),
-                Err(error) => {
-                    Box::pin(established.shutdown()).await;
-                    let mut state = self.state.lock().await;
-                    *state = ClientRouteControlState::Idle;
-                    return Err(error);
-                }
-            },
-            _ => None,
-        };
-        let single_udp_path = match &established.transport {
-            ClientTransportState::NativeUdp(active) => match active.path_summary().await {
-                Ok(path) => Some(path),
-                Err(error) => {
-                    Box::pin(established.shutdown()).await;
-                    self.clear_agent_transport_paths().await;
-                    *self.state.lock().await = ClientRouteControlState::Idle;
-                    return Err(error);
-                }
-            },
-            _ => None,
+        let projection = match established.path_projection().await {
+            Ok(projection) => projection,
+            Err(error) => {
+                Box::pin(established.shutdown(self.agent_state.as_ref())).await;
+                *self.state.lock().await = ClientRouteControlState::Idle;
+                return Err(error);
+            }
         };
         let mut state = self.state.lock().await;
         *state = ClientRouteControlState::Established(Box::new(established));
-        if let Some(paths) = mpquic_paths {
-            if self.replace_agent_mpquic_paths(paths).await.is_err() {
-                let previous = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
-                drop(state);
-                if let ClientRouteControlState::Established(established) = previous {
-                    Box::pin(established.shutdown()).await;
-                }
-                self.clear_agent_transport_paths().await;
-                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        if self
+            .replace_agent_path_projection(projection)
+            .await
+            .is_err()
+        {
+            let previous = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
+            drop(state);
+            if let ClientRouteControlState::Established(established) = previous {
+                Box::pin(established.shutdown(self.agent_state.as_ref())).await;
             }
-        }
-        if let Some(path) = single_udp_path {
-            if self.replace_agent_single_udp_path(path).await.is_err() {
-                let previous = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
-                drop(state);
-                if let ClientRouteControlState::Established(established) = previous {
-                    Box::pin(established.shutdown()).await;
-                }
-                self.clear_agent_transport_paths().await;
-                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
-            }
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
         Ok(progress)
+    }
+
+    async fn replace_agent_path_projection(
+        &self,
+        projection: ClientPathProjection,
+    ) -> Result<(), ClientRouteConnectError> {
+        let Some(state) = self.agent_state.as_ref() else {
+            return Ok(());
+        };
+        let mut state = state.write().await;
+        match projection {
+            ClientPathProjection::None => Ok(()),
+            ClientPathProjection::Mptcp(paths) => state.replace_mptcp_paths(paths),
+            ClientPathProjection::Mpquic(paths) => state.replace_mpquic_paths(paths),
+            ClientPathProjection::SingleUdp(path) => state.replace_single_udp_path(path),
+        }
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
     }
 
     async fn replace_agent_mpquic_paths(
@@ -1256,14 +1320,6 @@ impl ClientRouteControl {
             .await
             .replace_single_udp_path(path)
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
-    }
-
-    async fn clear_agent_transport_paths(&self) {
-        if let Some(agent_state) = self.agent_state.as_ref() {
-            let mut state = agent_state.write().await;
-            state.clear_mpquic_paths();
-            state.clear_single_udp_path();
-        }
     }
 
     /// Consume the connected genuine-MPTCP capability into one pinned TLS 1.3 TCP flow.
@@ -1375,9 +1431,8 @@ impl ClientRouteControl {
             let prior_route = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
             drop(state);
             if let ClientRouteControlState::Established(established) = prior_route {
-                Box::pin(established.shutdown()).await;
+                Box::pin(established.shutdown(self.agent_state.as_ref())).await;
             }
-            self.clear_agent_transport_paths().await;
         }
         Err(ClientRouteConnectError::TransportRuntimeUnavailable)
     }
@@ -2121,9 +2176,8 @@ impl ClientRouteControl {
             std::mem::replace(&mut *state, ClientRouteControlState::Idle)
         };
         if let ClientRouteControlState::Established(established) = previous {
-            Box::pin(established.shutdown()).await;
+            Box::pin(established.shutdown(self.agent_state.as_ref())).await;
         }
-        self.clear_agent_transport_paths().await;
     }
 }
 
@@ -5134,9 +5188,21 @@ impl ProductionRoute {
 
     fn committed_mpquic_identity(
         &self,
-    ) -> Result<CommittedMpquicRouteIdentity, ClientRouteConnectError> {
+    ) -> Result<CommittedRelayRouteIdentity, ClientRouteConnectError> {
+        self.committed_multipath_identity(Transport::MultipathQuic)
+    }
+
+    fn committed_mptcp_paths(&self) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
+        self.committed_multipath_identity(Transport::TcpMptcp)?
+            .selected_mptcp_paths(&self.established.active_path_ids)
+    }
+
+    fn committed_multipath_identity(
+        &self,
+        transport: Transport,
+    ) -> Result<CommittedRelayRouteIdentity, ClientRouteConnectError> {
         let path_count = self.established.relay_grants.len();
-        if self.selected_transport() != Some(Transport::MultipathQuic)
+        if self.selected_transport() != Some(transport)
             || !(2..=usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)).contains(&path_count)
             || self.established.relay_authorities.len() != path_count
         {
@@ -5156,18 +5222,19 @@ impl ProductionRoute {
             let relay_peer_id = authority.peer_id.to_string();
             if grant.route_context_id() != &route_context_id
                 || grant.relay_node_id() != &authority.node_id
+                || authority.peer_id == self.established.request.exit.peer_id
                 || !path_ids.insert(path_id)
                 || !relay_peers.insert(relay_peer_id.clone())
             {
                 return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
             }
-            paths.push(CommittedMpquicPathIdentity {
+            paths.push(CommittedRelayPathIdentity {
                 path_id,
                 relay_peer_id,
             });
         }
         paths.sort_unstable_by_key(|path| path.path_id);
-        Ok(CommittedMpquicRouteIdentity {
+        Ok(CommittedRelayRouteIdentity {
             route_context_id,
             exit_peer_id: self.established.request.exit.peer_id.to_string(),
             paths,
@@ -7844,16 +7911,47 @@ mod tests {
     }
 
     #[test]
+    fn committed_mptcp_projection_uses_selected_ids_without_native_activity_claims() {
+        let identity = CommittedRelayRouteIdentity {
+            route_context_id: [6; ID_BYTES],
+            exit_peer_id: "committed-exit".to_owned(),
+            paths: (1..=3)
+                .map(|path_id| CommittedRelayPathIdentity {
+                    path_id,
+                    relay_peer_id: format!("committed-relay-{path_id}"),
+                })
+                .collect(),
+        };
+        let paths = identity.selected_mptcp_paths(&[3, 1]).unwrap();
+        assert_eq!(
+            paths.iter().map(|path| path.path_id).collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(paths[0].relay_peer_id, "committed-relay-1");
+        assert_eq!(paths[1].relay_peer_id, "committed-relay-3");
+        assert!(paths.iter().all(|path| {
+            path.route_context_id == [6; ID_BYTES]
+                && path.exit_peer_id == "committed-exit"
+                && path.state == PathState::Reachable as i32
+                && path.smoothed_rtt_micros == 0
+                && path.user_bytes == 0
+        }));
+        for invalid in [&[1][..], &[1, 1], &[1, 4], &[0, 1]] {
+            assert!(identity.selected_mptcp_paths(invalid).is_err());
+        }
+    }
+
+    #[test]
     fn committed_mpquic_identity_projects_native_status_by_exact_path_id() {
-        let identity = CommittedMpquicRouteIdentity {
+        let identity = CommittedRelayRouteIdentity {
             route_context_id: [7; ID_BYTES],
             exit_peer_id: "exit-peer".to_owned(),
             paths: vec![
-                CommittedMpquicPathIdentity {
+                CommittedRelayPathIdentity {
                     path_id: 1,
                     relay_peer_id: "relay-one".to_owned(),
                 },
-                CommittedMpquicPathIdentity {
+                CommittedRelayPathIdentity {
                     path_id: 2,
                     relay_peer_id: "relay-two".to_owned(),
                 },
@@ -7909,15 +8007,15 @@ mod tests {
 
     #[test]
     fn committed_mpquic_identity_rejects_duplicate_native_path_status() {
-        let identity = CommittedMpquicRouteIdentity {
+        let identity = CommittedRelayRouteIdentity {
             route_context_id: [7; ID_BYTES],
             exit_peer_id: "exit-peer".to_owned(),
             paths: vec![
-                CommittedMpquicPathIdentity {
+                CommittedRelayPathIdentity {
                     path_id: 1,
                     relay_peer_id: "relay-one".to_owned(),
                 },
-                CommittedMpquicPathIdentity {
+                CommittedRelayPathIdentity {
                     path_id: 2,
                     relay_peer_id: "relay-two".to_owned(),
                 },
@@ -7935,11 +8033,11 @@ mod tests {
 
     #[test]
     fn committed_mpquic_identity_keeps_warm_path_out_of_active_projection() {
-        let identity = CommittedMpquicRouteIdentity {
+        let identity = CommittedRelayRouteIdentity {
             route_context_id: [7; ID_BYTES],
             exit_peer_id: "exit-peer".to_owned(),
             paths: (1..=3)
-                .map(|path_id| CommittedMpquicPathIdentity {
+                .map(|path_id| CommittedRelayPathIdentity {
                     path_id,
                     relay_peer_id: format!("relay-{path_id}"),
                 })

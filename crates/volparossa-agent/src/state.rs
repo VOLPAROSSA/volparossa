@@ -25,6 +25,7 @@ pub struct AgentState {
     connected_peers: HashSet<String>,
     peers: BTreeMap<String, PeerSummary>,
     paths: Vec<PathSummary>,
+    mptcp_context_id: Option<Vec<u8>>,
     mpquic_context_id: Option<Vec<u8>>,
     single_udp_context_id: Option<Vec<u8>>,
     sessions: Vec<SessionSummary>,
@@ -55,6 +56,7 @@ impl AgentState {
             connected_peers: HashSet::new(),
             peers: BTreeMap::new(),
             paths: Vec::new(),
+            mptcp_context_id: None,
             mpquic_context_id: None,
             single_udp_context_id: None,
             sessions: Vec::new(),
@@ -75,6 +77,7 @@ impl AgentState {
         let active_contexts = self
             .route_contexts
             .context_count()
+            .saturating_add(usize::from(self.mptcp_context_id.is_some()))
             .saturating_add(usize::from(self.mpquic_context_id.is_some()))
             .saturating_add(usize::from(self.single_udp_context_id.is_some()));
         StatusSnapshot {
@@ -188,12 +191,60 @@ impl AgentState {
         }
     }
 
-    /// Returns only actually selected paths; currently empty until complete
-    /// dataplane orchestration creates one.
+    /// Returns committed selected paths and any separately observed native path counters.
     #[must_use]
     pub fn path_list(&self) -> PathList {
         PathList {
             paths: self.paths.clone(),
+        }
+    }
+
+    /// Publishes committed MPTCP relay paths, not observed active kernel subflows.
+    ///
+    /// Without per-subflow measurements these remain reachable with zero RTT and user bytes.
+    pub fn replace_mptcp_paths(&mut self, mut paths: Vec<PathSummary>) -> Result<(), StateError> {
+        let context_id = validate_mpquic_paths(&paths)
+            .map_err(|_| StateError::InvalidMptcpPaths)?
+            .to_vec();
+        if self.mpquic_context_id.as_ref() == Some(&context_id)
+            || self.single_udp_context_id.as_ref() == Some(&context_id)
+            || paths.iter().any(|path| {
+                path.state != PathState::Reachable as i32
+                    || path.user_bytes != 0
+                    || path.smoothed_rtt_micros != 0
+                    || path.relay_peer_id == path.exit_peer_id
+            })
+        {
+            return Err(StateError::InvalidMptcpPaths);
+        }
+        if let Some(previous) = self.mptcp_context_id.as_ref() {
+            self.paths.retain(|path| &path.route_context_id != previous);
+        }
+        paths.sort_unstable_by_key(|path| path.path_id);
+        self.paths.extend(paths);
+        self.mptcp_context_id = Some(context_id);
+        self.sync_metrics();
+        Ok(())
+    }
+
+    /// Clears only the matching committed MPTCP context after its route owner stops.
+    pub fn clear_mptcp_paths(&mut self, context_id: &[u8]) {
+        if self.mptcp_context_id.as_deref() == Some(context_id) {
+            self.paths
+                .retain(|path| path.route_context_id != context_id);
+            self.mptcp_context_id = None;
+            self.sync_metrics();
+        }
+    }
+
+    /// Retires only the display owned by this exact committed transport context.
+    pub fn clear_committed_path_context(&mut self, context_id: &[u8]) {
+        self.clear_mptcp_paths(context_id);
+        if self.mpquic_context_id.as_deref() == Some(context_id) {
+            self.clear_mpquic_paths();
+        }
+        if self.single_udp_context_id.as_deref() == Some(context_id) {
+            self.clear_single_udp_path();
         }
     }
 
@@ -204,7 +255,9 @@ impl AgentState {
     /// untouched.
     pub fn replace_mpquic_paths(&mut self, mut paths: Vec<PathSummary>) -> Result<(), StateError> {
         let context_id = validate_mpquic_paths(&paths)?.to_vec();
-        if self.single_udp_context_id.as_ref() == Some(&context_id) {
+        if self.single_udp_context_id.as_ref() == Some(&context_id)
+            || self.mptcp_context_id.as_ref() == Some(&context_id)
+        {
             return Err(StateError::InvalidMpquicPaths);
         }
         if let Some(previous) = self.mpquic_context_id.as_ref() {
@@ -250,6 +303,7 @@ impl AgentState {
                 Some(PathState::Reachable | PathState::Active)
             )
             || self.mpquic_context_id.as_ref() == Some(&path.route_context_id)
+            || self.mptcp_context_id.as_ref() == Some(&path.route_context_id)
         {
             return Err(StateError::InvalidSingleUdpPath);
         }
@@ -311,6 +365,7 @@ impl AgentState {
             config.routing.context_ttl_seconds,
         )?;
         self.paths.clear();
+        self.mptcp_context_id = None;
         self.mpquic_context_id = None;
         self.single_udp_context_id = None;
         self.sessions.clear();
@@ -324,6 +379,7 @@ impl AgentState {
     #[must_use]
     pub fn has_network_state(&self) -> bool {
         self.route_contexts.context_count() > 0
+            || self.mptcp_context_id.is_some()
             || self.mpquic_context_id.is_some()
             || self.single_udp_context_id.is_some()
             || !self.paths.is_empty()
@@ -395,6 +451,9 @@ fn bounded_u32(value: usize) -> u32 {
 /// Internal bounded-state construction failure.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
+    /// Committed MPTCP metadata was ambiguous or claimed unobserved subflow activity.
+    #[error("committed MPTCP path state is invalid")]
+    InvalidMptcpPaths,
     /// Route-context limits were invalid.
     #[error("route-context state limits are invalid")]
     Route(#[from] volparossa_selection::RouteContextError),
@@ -557,5 +616,92 @@ mod tests {
         state.clear_after_helper_cleanup(&config).expect("cleanup");
         assert!(!state.has_network_state());
         assert!(!state.status().connected);
+    }
+
+    fn selected_mptcp_paths(context: u8) -> Vec<PathSummary> {
+        ["tcp-relay-one", "tcp-relay-two"]
+            .into_iter()
+            .zip(1..=2)
+            .map(|(relay, path_id)| {
+                let mut path = path(context, path_id, relay, PathState::Reachable);
+                path.smoothed_rtt_micros = 0;
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mptcp_projection_counts_only_committed_context_and_clears_exact_owner() {
+        let config = Config::default();
+        let registry = MetricsRegistry::new();
+        let mut state = AgentState::new(&config, config.roles, None, registry.clone()).unwrap();
+        state
+            .replace_mpquic_paths(vec![
+                path(7, 1, "quic-one", PathState::Active),
+                path(7, 2, "quic-two", PathState::Active),
+            ])
+            .unwrap();
+        state
+            .replace_single_udp_path(path(3, 1, "udp-relay", PathState::Active))
+            .unwrap();
+        let other_paths = state.path_list();
+        state.replace_mptcp_paths(selected_mptcp_paths(5)).unwrap();
+        assert_eq!(state.status().active_contexts, 3);
+        assert_eq!(registry.snapshot().active_route_contexts, 3);
+        assert_eq!(state.status().mptcp_subflows, 0);
+        assert_eq!(registry.snapshot().mptcp_subflows, 0);
+        assert_eq!(state.status().mpquic_paths, 2);
+
+        state.replace_mptcp_paths(selected_mptcp_paths(6)).unwrap();
+        let current = state.path_list();
+        state.clear_committed_path_context(&[5; ROUTE_CONTEXT_ID_BYTES]);
+        assert_eq!(
+            state.path_list(),
+            current,
+            "late old teardown preserves replacement"
+        );
+        state.clear_committed_path_context(&[6; ROUTE_CONTEXT_ID_BYTES]);
+        assert_eq!(state.path_list(), other_paths);
+        assert_eq!(state.status().active_contexts, 2);
+        state.replace_mptcp_paths(selected_mptcp_paths(6)).unwrap();
+        state.clear_after_helper_cleanup(&config).unwrap();
+        assert!(!state.has_network_state());
+        assert_eq!(state.status().active_contexts, 0);
+    }
+
+    #[test]
+    fn mptcp_projection_rejects_unobserved_activity_and_cross_transport_contexts() {
+        let config = Config::default();
+        let mut state =
+            AgentState::new(&config, config.roles, None, MetricsRegistry::new()).unwrap();
+        state.replace_mptcp_paths(selected_mptcp_paths(5)).unwrap();
+        let before = state.path_list();
+        for mutation in 0..5 {
+            let mut invalid = selected_mptcp_paths(6);
+            match mutation {
+                0 => invalid[0].state = PathState::Active as i32,
+                1 => invalid[0].user_bytes = 1,
+                2 => invalid[0].smoothed_rtt_micros = 1,
+                3 => invalid[1].path_id = invalid[0].path_id,
+                4 => invalid[0].relay_peer_id = "exit-peer".to_owned(),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                state.replace_mptcp_paths(invalid),
+                Err(StateError::InvalidMptcpPaths)
+            ));
+            assert_eq!(state.path_list(), before);
+        }
+        assert!(state.replace_mpquic_paths(selected_mptcp_paths(5)).is_err());
+        assert!(
+            state
+                .replace_single_udp_path(path(5, 1, "udp", PathState::Active))
+                .is_err()
+        );
+        state
+            .replace_single_udp_path(path(3, 1, "udp", PathState::Active))
+            .unwrap();
+        assert!(state.replace_mptcp_paths(selected_mptcp_paths(3)).is_err());
+        assert_eq!(state.status().mptcp_subflows, 0);
     }
 }
