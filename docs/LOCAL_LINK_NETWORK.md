@@ -61,11 +61,15 @@ These are scheduling hints, not a security identity for arbitrary local applicat
 
 Real disposable-veth traffic and engine-to-kernel lifecycle checks pass: two contribution
 sources share one cap, owner upload takes priority, contribution recovers, and exact cleanup
-restores the original queue. The new `sharing` KVM scenario exercises the production node
-with real protected Exit traffic and competing node-owned upload. Its first traffic run measured
-nearly the full 12-Mbps upload for the owner and zero contribution under owner load, but only
-3.5 Mbps contribution outside that load, below the unchanged 4-Mbps acceptance threshold.
-The UDP stop-and-wait bottleneck has been removed and a live rerun is pending. Supported software
+restores the original queue. The [production-node upload run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989126592)
+at `21aa8f21` also passed with real protected Exit traffic and competing node-owned upload:
+5.430 Mbps contributed when idle, zero contribution while the owner received 11.996 Mbps of the
+12-Mbps uplink, and 7.377 Mbps contribution after owner load stopped. The same protected UDP
+route delivered exact application echoes before and after that load, all observers lost zero
+packets and detected no plaintext/direct-exit leaks, and cleanup restored the original network
+state. This proves upload queue behavior, not application goodput or arbitrary-link speed.
+General UDP now pipelines bounded sends/replies; bounded FQ-CoDel separates contributed flows
+under the unchanged owner-priority and rate caps. Supported software
 `mq` and ordinary default `fq_codel` roots are restored exactly; custom options, classifiers and
 unsupported/offloaded geometry are refused before mutation. It is not automatic bandwidth estimation, download-bottleneck control,
 Wi-Fi airtime management or local/WAN throughput aggregation.

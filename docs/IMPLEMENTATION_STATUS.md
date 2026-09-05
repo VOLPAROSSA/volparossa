@@ -56,7 +56,13 @@ alternatives. Four focused scope checks (real disposable IPv4/ULA veth and link-
 five existing Identify/lineage checks and strict discovery Clippy pass. Mixed explicit dial
 lists containing an ineligible private address are rejected as a whole. This is dial eligibility,
 not a substitute for exact authenticated/helper route provenance. The zero-unexpected-packet
-acceptance rule is unchanged; its live rerun remains pending.
+acceptance rule is unchanged. The [subsequent run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33988489921)
+at `512fb180` traversed the privacy gates and reached A14, where it stopped at
+`A14_OWNED_INVENTORY_INCOMPLETE`. Its failure handler also tried to aggregate an absent optional
+A14 artifact, preventing the final report and individual evidence export. Therefore the runner
+log alone is not a finalized A01--A13 pass. The crash fixture must establish an actual live
+application route (completed probes are correctly retired), and failure reporting must retain
+the already collected evidence. A passing all-A01--A15 report remains outstanding.
 `0075033e` also passed
 [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972360525) and
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972358060).
@@ -213,12 +219,14 @@ sets source-mark validation only on its own newly created parent veth and marks 
 arriving from that interface. Existing global/default RPF settings are not weakened. Sixteen
 focused ingress tests and strict helper Clippy pass. The earlier KVM artifact lacked RPF counters,
 so attributing that exact historical failure remains an inference; new runs retain those counters.
-The other consumer's observed data path used the WAN neighbor, with the offline node as its
-control Relay. Therefore this run does not prove the offline node's simultaneous dataplane
-contribution. The fixture now checks the actual selected Relay before starting applications,
-retains every draw, and uses bounded ordinary Disconnect/Connect sampling to exercise the
-offline data-Relay assignment. It fails if that assignment is never selected; final application
-and both-leg packet evidence remain mandatory. The live contribution requirement remains open.
+The fixture checks the actual selected Relay before starting applications, retains every draw,
+and uses bounded ordinary Disconnect/Connect sampling to exercise the offline data-Relay
+assignment. The [RPF-fix run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989039724)
+at `a24addac` stopped at `LOCAL_LINK_DATA_CONTRIBUTOR_NOT_SELECTED`: its seven retained reconnects
+selected the WAN neighbor as data Relay and the offline node as control Relay. It never started
+the application windows, so it does not test the offline reply fix or invalidate the earlier
+289-echo contribution witness. Cleanup completed with zero owned objects and unchanged host
+hashes. The complete simultaneous offline give-and-take requirement remains open.
 Client native preselection and single-path Exit Ready also carry exact observer-bound local
 interface hints into their helper Prepare operations. They cannot rely on a public default route
 on a LocalOnly node. Multi-path Ready now collects all signed Permits, dispatches Relay Ready
@@ -264,7 +272,7 @@ administrator changes or crash recovery. The complete-node
 [sharing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33985062548) at `01727102`
 installed and removed the scheduler with exact baseline restoration, but stopped at
 `SHARING_NATIVE_ROUTE_UNAVAILABLE`: the route's CapacityHold was rejected after the native
-probe, before the application/competition windows. There is no whole-node sharing pass yet.
+probe, before the application/competition windows. The later bounded upload pass is recorded below.
 Completed native probes now release their exact Relay and Exit capacity reservations after
 confirmed helper destruction, before the real route's next CapacityHold. The signed-chain
 regression demonstrates a full-capacity hold failing while the probe is live and succeeding
@@ -286,9 +294,18 @@ Owner traffic retained 12.002 Mbps while contribution yielded to zero. Recovery 
 the run still failed. The contribution band now uses bounded kernel FQ-CoDel flow queuing under
 the same priority and rate caps, instead of one tail-drop FIFO shared by Exit UDP and encrypted
 feedback. Six focused sharing tests, including real veth and single/multiqueue TAP restoration,
-and strict helper Clippy pass. Recovery improvement remains to be measured. The disposable packet
+and strict helper Clippy pass. The disposable packet
 observer also requests a verified bounded 4-MiB socket buffer without changing a global sysctl;
 zero capture drops remain mandatory. Throughput checks are not weakened.
+The [corrected sharing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989126592)
+at `21aa8f21` **passed** the complete upload scenario: contributed traffic measured 5.430 Mbps
+when idle, yielded to zero while the owner received 11.996 Mbps of the 12-Mbps uplink, and
+recovered to 7.377 Mbps. The same protected UDP context delivered 1643/2/2226 exact echoes across
+those windows through one selected Relay and both WireGuard legs. Two destination requests
+preceded the first reply, proving actual pipelining. All four packet observers reported zero
+drops, direct Client--Exit packets and plaintext leaks; exact scheduler/guest-network baselines
+were restored with zero owned objects. These are queue/physical upload measurements, not
+application goodput or a promise of these rates on other links.
 The fixture's Exit-side Disconnect was on an idle local Client route, so its result does not
 prove retirement of an active same-node route while sharing; exact scheduler teardown is proven.
 Download control, automatic available-bandwidth estimation and radio airtime remain unfinished.
