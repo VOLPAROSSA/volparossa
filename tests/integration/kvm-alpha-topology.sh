@@ -13,6 +13,7 @@ umask 077
 mode=preview
 scenario=alpha
 wifi_link=no
+uplink_link=no
 approval=no
 source_directory=
 binary_directory=
@@ -25,10 +26,24 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|wifi-link]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link]'
 }
 
 print_plan() {
+    if [ "$uplink_link" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA uplink-link runtime transition plan:' \
+            '  use only exact owned disposable KVM namespaces and the current signed overlay;' \
+            '  C remains local-only; A is an unmonitored actual alternative, B explicitly monitors r2d;' \
+            '  prove concurrent C→A→X consumption and A→C→B LAN relay contribution;' \
+            '  remove only B r2d default and take that link down, retaining every daemon PID;' \
+            '  require verified Exit withdrawal, stopped old application and no fresh ready B route;' \
+            '  prove B→C→A and C→A→X, restore B uplink and require a new A→C→B context;' \
+            '  retain exact hashes, both WG legs, Exit sources and complete privacy captures;' \
+            '  remove all owned objects and verify unchanged guest-root host state;' \
+            '  emit uplink-link-smoke.json, not A01-A15 or automatic all-interface Internet detection.'
+        return
+    fi
     if [ "$wifi_link" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA Wi-Fi local-link runtime smoke plan:' \
@@ -139,8 +154,9 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             case $2 in
-                wifi-link) scenario=local-link; wifi_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|sharing) scenario=$2; wifi_link=no ;;
+                wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
+                uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
+                alpha|reciprocity|local-link|mixed-link|sharing) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -241,6 +257,7 @@ if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario
     [ "$scenario" != local-link ] || scenario_fixtures="$scenario_fixtures local-link-smoke.sh local-link-smoke.py"
     [ "$scenario" != sharing ] || scenario_fixtures="$scenario_fixtures sharing-smoke.sh sharing-smoke.py"
     [ "$wifi_link" != yes ] || scenario_fixtures="$scenario_fixtures wifi-link-smoke.sh wifi-link-smoke.py"
+    [ "$uplink_link" != yes ] || scenario_fixtures="$scenario_fixtures uplink-link-smoke.sh uplink-link-smoke.py"
     for reciprocity_fixture in $scenario_fixtures; do
         [ -f "$source_directory/tests/integration/$reciprocity_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$reciprocity_fixture" ] \
@@ -1165,7 +1182,11 @@ cleanup() {
     elif [ "$scenario" = sharing ]; then
         sharing_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = local-link ]; then
-        local_link_finalize_report "$original_status" || original_status=1
+        if [ "$uplink_link" = yes ]; then
+            uplink_link_finalize_report "$original_status" || original_status=1
+        else
+            local_link_finalize_report "$original_status" || original_status=1
+        fi
         if [ "$wifi_link" = yes ]; then
             wifi_link_finalize_report "$original_status" || original_status=1
         fi
@@ -1207,6 +1228,10 @@ fi
 if [ "$wifi_link" = yes ]; then
     # shellcheck source=tests/integration/wifi-link-smoke.sh
     . "$source_directory/tests/integration/wifi-link-smoke.sh"
+fi
+if [ "$uplink_link" = yes ]; then
+    # shellcheck source=tests/integration/uplink-link-smoke.sh
+    . "$source_directory/tests/integration/uplink-link-smoke.sh"
 fi
 if [ "$scenario" = sharing ]; then
     # shellcheck source=tests/integration/sharing-smoke.sh
@@ -1425,6 +1450,7 @@ elif [ "$scenario" = sharing ]; then
     sharing_extend_network
 elif [ "$scenario" = local-link ]; then
     local_link_extend_network
+    [ "$uplink_link" != yes ] || uplink_link_extend_network
     [ "$wifi_link" != yes ] || wifi_link_prepare
 elif [ "$scenario" = reciprocity ]; then
     reciprocity_extend_network
@@ -1562,6 +1588,9 @@ write_config() {
         printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-alpha-%s\n' "$RUN_ID"
         printf '  protocol_version: 4\n  advertisement_ttl_seconds: 300\n'
         printf '  uplink: %s\n' "$uplink"
+        if [ "$uplink_link" = yes ] && [ "$node" = relay2 ]; then
+            printf '  independent_egress_interface: r2d\n'
+        fi
         [ "$operator" = null ] && printf '  operator_id: null\n' \
             || printf '  operator_id: %s\n' "$operator"
         printf '  advertised_region: acceptance\n  advertised_country_code: ZZ\n'
@@ -3247,7 +3276,7 @@ if [ "$scenario" = sharing ]; then
     sharing_run
     exit 0
 elif [ "$scenario" = local-link ]; then
-    local_link_run
+    if [ "$uplink_link" = yes ]; then uplink_link_run; else local_link_run; fi
     exit 0
 elif [ "$scenario" = reciprocity ]; then
     reciprocity_run

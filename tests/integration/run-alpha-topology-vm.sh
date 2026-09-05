@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh.'
 }
 
@@ -59,6 +59,10 @@ print_plan() {
         printf '%s\n' \
             'Sharing scenario: genuine Exit contribution and owner upload on one shared veth;' \
             '  actual contention, recovery and exact cleanup; no download/radio or packaging claim.'
+    elif [ "$scenario" = uplink-link ]; then
+        printf '%s\n' \
+            'Uplink-link scenario: same-daemon independent egress loss and restoration, actual fallback UDP;' \
+            '  exact new contexts, local contribution, packet/privacy and cleanup proof; no packaging claim.'
     elif [ "$scenario" = local-link ]; then
         printf '%s\n' \
             'Local-link scenario: offline RFC1918 consumer, two LAN Relay contacts and WAN Exit;' \
@@ -82,7 +86,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -316,7 +320,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link) ;; *) exit 64 ;; esac
 cd /home/vpci
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
 if [ "$scenario" = wifi-mesh ]; then
@@ -389,7 +393,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|sharing|wifi-link) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link) topology_scenario=$scenario ;; esac
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
     --execute --yes \

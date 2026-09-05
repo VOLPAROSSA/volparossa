@@ -22,8 +22,11 @@ at `590378a9` passed A01--A07 and A15, but stopped at `A08_ALLOWED_DNS_UDP_NOT_P
 A09--A14 were not executed. Its MPTCP aggregation measured 14.113 Mbps against a 7.046-Mbps
 single-path baseline (2.003x), with exact 32-MiB hashes and independent path evidence. This is
 the bounded v1 benchmark, not a LAN/Wi-Fi speed-gain claim. Cleanup left zero owned objects and
-unchanged host-state hashes. The DNS failure is under diagnosis, so A14's actual crash sequence
-still has no pass. Benchmarks now select and record a suitable real route before starting
+unchanged host-state hashes. The DNS request never acquired its route: its preselection probe
+reached the Exit, but the Relay's exact Destroy timed out before the terminal result could
+return. Earlier Relay cleanup quarantines in the same run are under diagnosis; the DNS parser
+and acceptance gate are unchanged. A14's actual crash sequence still has no pass.
+Benchmarks now select and record a suitable real route before starting
 payloads; committed MPTCP paths are Reachable metadata, never a substitute for kernel subflow
 and packet evidence.
 
@@ -193,8 +196,12 @@ Focused checks passed: actual capabilities-free socket binding in a disposable n
 link/default loss and return with an alternate default left unused, a real protected UDP echo
 followed by cancellation and exact listener release, signed-role/policy withdrawal and recovery,
 and interface-replacement cleanup gating. Strict Clippy for the changed packages passes.
-The complete multi-node consume/contribute transition fixture is still being integrated; this
-does not check the full transition requirement above or change unconfigured legacy behavior.
+The `uplink-link` multi-node fixture now holds an actual application socket across withdrawal,
+requires signed Exit-role loss/recovery without restarting the daemons, and exercises six
+consume/contribute flows over the three phases with payload, source, path and cleanup evidence.
+Its five focused validator/preview checks and script contract pass; the live transition has
+not yet run. This does not check the full transition requirement above or change unconfigured
+legacy behavior.
 
 The first implementation now carries explicitly signed RFC1918/ULA endpoint scope through
 authenticated connection provenance, selection, endpoint leases, reservations and helper
@@ -422,7 +429,13 @@ peering first, then preserves the full signed-role check after the remaining age
 Six focused fixture checks pass; the real application run still needs to pass. All mesh/radio
 objects were removed and guest-state hashes matched; the backend-only radio pass is unchanged.
 The [next full-agent mesh attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33993298958)
-at `48c1fb6a` is pending.
+at `48c1fb6a` passed that association stage: eight exact remote mDNS records and both expected
+authenticated mesh PeerID/endpoints were observed before the other agents started. Later
+signed roles were present as well. It then failed at `LOCAL_LINK_NATIVE_ROUTE_UNAVAILABLE`:
+both mesh nodes' Client and Relay Prepare operations failed before application traffic, while
+the other nodes could prepare. Kernel link-attribute decoding is under investigation. All
+mesh/radio objects were removed and guest-state hashes matched. Full-agent application traffic
+over the mesh is still unproven.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

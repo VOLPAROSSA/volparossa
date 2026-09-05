@@ -22,6 +22,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario local-link | grep -Fi 'local-link' >/dev/null
     "$script" --preview --scenario mixed-link | grep -Fi 'mixed-link' >/dev/null
     "$script" --preview --scenario sharing | grep -Fi 'sharing' >/dev/null
+    "$script" --preview --scenario uplink-link | grep -Fi 'uplink-link' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?
@@ -695,4 +696,6 @@ grep -F 'mixed_link_validate_evidence' "$GUEST" >/dev/null
 python3 -B "$HERE/test-mixed-link-smoke.py"
 python3 -B "$HERE/test-benchmark-selection.py"
 python3 -B "$HERE/test-wifi-link-smoke.py"
-printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing and wifi-link topology static contract passed'
+sh -n "$HERE/uplink-link-smoke.sh"
+python3 -B "$HERE/test-uplink-link-smoke.py"
+printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing, wifi-link and uplink-link topology static contract passed'
