@@ -19,6 +19,7 @@ for script in "$GUEST" "$HOST"; do
     sh -n "$script"
     "$script" --preview | grep -F 'PREVIEW ONLY:' >/dev/null
     "$script" --preview --scenario reciprocity | grep -Fi 'recipro' >/dev/null
+    "$script" --preview --scenario local-link | grep -Fi 'local-link' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?
@@ -473,4 +474,9 @@ assert fixture["decode_frame"](bytes(12)) is None
 print("Reciprocity pure evidence/parser contract passed; no live datapath claim")
 PYTHON
 
-printf '%s\n' 'KVM alpha and reciprocity topology static contract passed'
+sh -n "$HERE/local-link-smoke.sh"
+grep -F 'uplink=local_only; exit_role=false; exit_capacity=0' "$GUEST" >/dev/null
+grep -F 'volparossa-local-link-runtime' "$WORKFLOW" >/dev/null
+grep -F 'local_link_finalize_report' "$GUEST" >/dev/null
+python3 -B "$HERE/test-local-link-smoke.py"
+printf '%s\n' 'KVM alpha, reciprocity and local-link topology static contract passed'

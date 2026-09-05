@@ -12,7 +12,7 @@ mod time;
 
 pub use advertisement::{
     AdvertisementError, MAX_ADVERTISEMENT_ENDPOINTS, MAX_ADVERTISEMENT_TTL_SECONDS,
-    NetworkMetadata, NodeAdvertisement, NodeCapabilities, NodeQuality, NodeRoles,
+    NetworkMetadata, NetworkUplink, NodeAdvertisement, NodeCapabilities, NodeQuality, NodeRoles,
     ObservedNetworkOrigin,
 };
 pub use capacity::{
@@ -22,7 +22,7 @@ pub use id::{
     ClientEphemeralId, FlowId, IdentifierError, LocalProfileId, NodeId, OperatorId, OriginKey,
     PathId, PeerId, ReservationId, RouteContextId,
 };
-pub use network::{ObservedNetworkPrefix, is_public_routable_ip};
+pub use network::{ObservedNetworkPrefix, is_local_lan_ip, is_public_routable_ip};
 pub use time::{TimeError, UnixTime};
 
 use serde::{Deserialize, Serialize};

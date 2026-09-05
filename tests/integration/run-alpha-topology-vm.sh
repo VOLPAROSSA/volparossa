@@ -23,8 +23,8 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity]' \
-        '       --package is required for alpha; datapath and reciprocity skip packaging.'
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link]' \
+        '       --package is required only for alpha; functional scenarios skip packaging.'
 }
 
 print_plan() {
@@ -43,6 +43,10 @@ print_plan() {
         printf '%s\n' \
             'Alpha scenario: verify/copy the exact candidate Debian package and prove' \
             '  install, doctor, start, upgrade and removal inside the guest first.'
+    elif [ "$scenario" = local-link ]; then
+        printf '%s\n' \
+            'Local-link scenario: offline RFC1918 consumer, two LAN Relay contacts and WAN Exit;' \
+            '  one real UDP route, not radio or aggregate capacity; packaging is skipped.'
     elif [ "$scenario" = reciprocity ]; then
         printf '%s\n' \
             'Reciprocity scenario: simultaneous client/relay/exit datapaths;' \
@@ -62,7 +66,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -291,7 +295,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link) ;; *) exit 64 ;; esac
 cd /home/vpci
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
 printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
@@ -353,7 +357,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-[ "$scenario" != reciprocity ] || topology_scenario=reciprocity
+case $scenario in reciprocity|local-link) topology_scenario=$scenario ;; esac
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
     --execute --yes \

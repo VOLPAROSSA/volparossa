@@ -1708,11 +1708,13 @@ mod dispatch_tests {
         } = ready_fixture();
         let now_ms = crate::unix_millis();
         let local = WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: vec![32; KEY_BYTES],
             underlay_ip: vec![1, 1, 1, 1],
             listen_port: 42_001,
         };
         let remote = WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: vec![12; KEY_BYTES],
             underlay_ip: vec![8, 8, 8, 8],
             listen_port: 41_001,
@@ -1951,11 +1953,13 @@ mod dispatch_tests {
         let exit = scope.exit.as_ref().expect("Exit");
         let control = scope.control.as_ref().expect("control Relay");
         let relay_exit = WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: vec![62; KEY_BYTES],
             underlay_ip: vec![9, 9, 9, 9],
             listen_port: 43_001,
         };
         let exit_endpoint = WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: vec![72; KEY_BYTES],
             underlay_ip: vec![7, 7, 7, 7],
             listen_port: 44_001,
@@ -2063,6 +2067,7 @@ mod dispatch_tests {
             helper_runtime_id: vec![seed; KEY_BYTES],
             route_context_id: route_context_id.to_vec(),
             endpoint: Some(WireguardEndpoint {
+                underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 public_key: vec![seed + 1; KEY_BYTES],
                 underlay_ip: address.to_vec(),
                 listen_port: port,

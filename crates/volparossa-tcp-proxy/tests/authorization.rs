@@ -362,6 +362,7 @@ where
 
 fn endpoint(key: u8, port: u16) -> WireguardEndpoint {
     WireguardEndpoint {
+        underlay_scope: 0,
         public_key: vec![key; 32],
         underlay_ip: vec![8, 8, 4, key],
         listen_port: u32::from(port),

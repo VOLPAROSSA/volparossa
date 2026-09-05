@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Datapath/reciprocity are functional-only; alpha also verifies packaging
+        description: Functional datapath/reciprocity/local-link; alpha also verifies packaging
         required: true
         default: datapath
         type: choice
@@ -12,6 +12,7 @@ on:
           - datapath
           - alpha
           - reciprocity
+          - local-link
   pull_request:
     branches:
       - main
@@ -197,6 +198,22 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = local-link; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/local-link-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "local-link runtime succeeded: \(.success)",
+                "completed LAN/WAN UDP flows: \([.flows[] | select(.success)] | length)/1",
+                "observed blocker: \(.observed_blocker // "none")",
+                "cleanup complete: \(.cleanup.complete)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish local-link runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = reciprocity; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/reciprocity-smoke.json"
             if test -f "$report"; then
@@ -266,7 +283,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -338,6 +355,39 @@ jobs:
             .host_state.unchanged == true
           ' "$report" >/dev/null
 
+      - name: Require real local-link runtime evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'local-link'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/local-link-smoke.json"
+          test -f "$report"
+          test ! -L "$report"
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-local-link-runtime" and
+            .source_revision == $revision and .success == true and
+            (.flows | length) == 1 and
+            all(.flows[]; .success == true and .state == 3 and
+              .client_node == "client" and .exit_node == "exit" and
+              (.route_context_id | type == "string" and length == 32) and
+              .relay_peer_id != .exit_peer_id and
+              .path_evidence.client_relay_scope == "DirectLocalLan" and
+              .path_evidence.relay_exit_scope == "PublicInternet" and
+              all(.path_evidence.wireguard_both_legs[]; . > 0)) and
+            (.nodes | length) == 4 and
+            all(.nodes[]; .roles.client == true and .roles.relay == true and
+              .roles.exit == (.node != "client") and .same_agent_pid == true and
+              .agent_pid_before > 0 and .agent_pid_before == .agent_pid_after) and
+            .local_only.before.independent_internet == false and
+            .local_only.after.independent_internet == false and
+            .local_only.before.main_table_default_routes == 0 and
+            .local_only.after.main_table_default_routes == 0 and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$report" >/dev/null
+
       - name: Upload bounded topology diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -348,7 +398,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

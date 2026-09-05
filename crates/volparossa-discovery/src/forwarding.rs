@@ -1635,6 +1635,7 @@ mod tests {
             helper_runtime_id: vec![3; NODE_ID_LENGTH],
             route_context_id: vec![4; REQUEST_ID_LENGTH],
             endpoint: Some(WireguardEndpoint {
+                underlay_scope: 0,
                 public_key: vec![5; PUBLIC_KEY_LENGTH],
                 underlay_ip: vec![8, 8, 8, 8],
                 listen_port: 40_001,

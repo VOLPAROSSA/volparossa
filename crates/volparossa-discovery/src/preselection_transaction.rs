@@ -209,7 +209,8 @@ pub struct ClientPreselectionTransportFreshnessProof {
 }
 
 impl ClientPreselectionTransportFreshnessProof {
-    /// Return the endpoint-free public prefix from the exact authenticated connection lineage.
+    /// Return the endpoint-free, scope-distinct prefix of the authenticated connection lineage.
+    /// Local scope is neither Internet-origin diversity nor privileged on-link authority.
     #[must_use]
     pub const fn observed_network_prefix(&self) -> ObservedNetworkPrefix {
         self.observed_network_prefix

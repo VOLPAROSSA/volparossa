@@ -2301,6 +2301,11 @@ fn wire_endpoint(endpoint: PublicWireGuardEndpoint) -> volparossa_protocol::Wire
         IpAddr::V6(address) => address.octets().to_vec(),
     };
     volparossa_protocol::WireguardEndpoint {
+        underlay_scope: if endpoint.is_local_lan() {
+            volparossa_protocol::UnderlayScope::DirectLocalLan
+        } else {
+            volparossa_protocol::UnderlayScope::PublicInternet
+        } as i32,
         public_key: endpoint.public_key().as_bytes().to_vec(),
         underlay_ip,
         listen_port: u32::from(endpoint.listen_port()),
@@ -2318,7 +2323,16 @@ fn public_endpoint(
         bytes => IpAddr::V6(Ipv6Addr::from(fixed::<16>(bytes, name)?)),
     };
     let port = u16::try_from(endpoint.listen_port).map_err(|_| ExitError::InvalidGrant(name))?;
-    PublicWireGuardEndpoint::new(key, address, port).map_err(|_| ExitError::InvalidGrant(name))
+    let endpoint = match volparossa_protocol::UnderlayScope::try_from(endpoint.underlay_scope) {
+        Ok(volparossa_protocol::UnderlayScope::PublicInternet) => {
+            PublicWireGuardEndpoint::new(key, address, port)
+        }
+        Ok(volparossa_protocol::UnderlayScope::DirectLocalLan) => {
+            PublicWireGuardEndpoint::new_direct_local_lan(key, address, port)
+        }
+        Err(_) => return Err(ExitError::InvalidGrant(name)),
+    };
+    endpoint.map_err(|_| ExitError::InvalidGrant(name))
 }
 
 fn public_key(bytes: &[u8], name: &'static str) -> Result<WireGuardPublicKey, ExitError> {
@@ -2437,6 +2451,29 @@ pub enum ExitError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_endpoint_scope_survives_exit_wire_mapping() {
+        use super::{public_endpoint, wire_endpoint};
+
+        let local = PublicWireGuardEndpoint::new_direct_local_lan(
+            WireGuardPublicKey::from_bytes([7; 32]),
+            "192.168.20.2".parse().expect("LAN address"),
+            51820,
+        )
+        .expect("explicit local endpoint");
+        let mut wire = wire_endpoint(local);
+        assert_eq!(
+            wire.underlay_scope,
+            volparossa_protocol::UnderlayScope::DirectLocalLan as i32
+        );
+        assert_eq!(
+            public_endpoint(&wire, "endpoint").expect("scoped round trip"),
+            local
+        );
+        wire.underlay_scope = volparossa_protocol::UnderlayScope::PublicInternet as i32;
+        assert!(public_endpoint(&wire, "endpoint").is_err());
+    }
+
     use ring::aead;
 
     use ed25519_dalek::{Signer as _, SigningKey};

@@ -13,7 +13,7 @@ use std::{
 use prost::Message;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
-pub use volparossa_core::is_public_routable_ip;
+pub use volparossa_core::{is_local_lan_ip, is_public_routable_ip};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Exact agent/helper protocol version.
@@ -177,6 +177,8 @@ pub enum UnderlayEvidence {
     DirectAssigned = 1,
     /// Public address observed by the exact authenticated peer for coordinated UDP punching.
     ObservedUdpPunch = 2,
+    /// Private LAN address assigned to a kernel-verified on-link route to the exact lease peer.
+    DirectOnLink = 3,
 }
 
 /// Closed set of Linux MPTCP endpoint behaviours.
@@ -405,7 +407,18 @@ pub struct LeasePlan {
     pub role: i32,
 }
 
-/// One bounded public-address observation tied to an exact route/path/role and control peer.
+/// Exact local and remote LAN address candidates; the helper verifies their kernel route.
+#[derive(Clone, PartialEq, Message)]
+pub struct OnLinkUnderlayHint {
+    /// Four RFC1918 or sixteen ULA address bytes assigned to the local interface.
+    #[prost(bytes = "vec", tag = "1")]
+    pub local_address: Vec<u8>,
+    /// Same-family private address of the authenticated adjacent control peer.
+    #[prost(bytes = "vec", tag = "2")]
+    pub peer_address: Vec<u8>,
+}
+
+/// One bounded underlay observation tied to an exact route/path/role and control peer.
 ///
 /// The helper treats this only as a candidate for the already fixed `WireGuard` listen port. The
 /// final endpoint is subsequently signed into the reservation protocol before peer activation.
@@ -420,12 +433,16 @@ pub struct TraversalEndpointHint {
     /// Non-zero route actor identity (node ID, or ephemeral client-session ID).
     #[prost(bytes = "vec", tag = "3")]
     pub observer_id: Vec<u8>,
-    /// Authenticated libp2p peer that supplied the Identify observation.
+    /// Authenticated transport peer supplying the observation; kept helper-local. For clients,
+    /// its association with the separately signed ephemeral actor is checked by the agent.
     #[prost(bytes = "vec", tag = "4")]
     pub observer_peer_id: Vec<u8>,
     /// Four or sixteen public-unicast address bytes, without a peer-controlled port.
     #[prost(bytes = "vec", tag = "5")]
     pub observed_address: Vec<u8>,
+    /// Explicit local-LAN candidate; mutually exclusive with the public Identify observation.
+    #[prost(message, optional, tag = "6")]
+    pub on_link: Option<OnLinkUnderlayHint>,
 }
 
 /// Atomically prepare all local endpoint roles for a route context.
@@ -1309,7 +1326,7 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 handle(&lease.lease_handle)?;
                 path_role(lease.path_id, lease.role)?;
                 public_key(&lease.peer_public_key)?;
-                endpoint(
+                activation_endpoint(
                     lease
                         .peer_endpoint
                         .as_ref()
@@ -1577,13 +1594,28 @@ fn validate_traversal_hints(
         {
             return Err(HelperProtocolError::Invalid("traversal hint lineage"));
         }
-        let address = parse_public_address(&hint.observed_address)?;
+        let (address, address_bytes) = if let Some(on_link) = &hint.on_link {
+            if !hint.observed_address.is_empty() {
+                return Err(HelperProtocolError::Invalid("mixed underlay hints"));
+            }
+            let local = parse_local_lan_address(&on_link.local_address)?;
+            let peer = parse_local_lan_address(&on_link.peer_address)?;
+            if local == peer || local.is_ipv4() != peer.is_ipv4() {
+                return Err(HelperProtocolError::Invalid("on-link address pair"));
+            }
+            (local, on_link.local_address.as_slice())
+        } else {
+            (
+                parse_public_address(&hint.observed_address)?,
+                hint.observed_address.as_slice(),
+            )
+        };
         let family = u8::from(address.is_ipv4()); // IPv6 sorts before IPv4.
         let key = (
             hint.path_id,
             hint.role,
             family,
-            hint.observed_address.as_slice(),
+            address_bytes,
             hint.observer_peer_id.as_slice(),
         );
         if previous.as_ref().is_some_and(|previous| previous >= &key)
@@ -1688,17 +1720,21 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
                 handle(&lease.lease_handle)?;
                 path_role(lease.path_id, lease.role)?;
                 public_key(&lease.public_key)?;
-                endpoint(
-                    lease
-                        .public_endpoint
-                        .as_ref()
-                        .ok_or(HelperProtocolError::Invalid("public endpoint"))?,
-                )?;
-                if !matches!(
-                    UnderlayEvidence::try_from(lease.underlay_evidence),
-                    Ok(UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch)
-                ) {
-                    return Err(HelperProtocolError::Invalid("underlay evidence"));
+                let public_endpoint = lease
+                    .public_endpoint
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("public endpoint"))?;
+                match UnderlayEvidence::try_from(lease.underlay_evidence) {
+                    Ok(UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch) => {
+                        endpoint(public_endpoint)?;
+                    }
+                    Ok(UnderlayEvidence::DirectOnLink) => {
+                        if !(1..=65_535).contains(&public_endpoint.port) {
+                            return Err(HelperProtocolError::Invalid("UDP port"));
+                        }
+                        let _ = parse_local_lan_address(&public_endpoint.address)?;
+                    }
+                    _ => return Err(HelperProtocolError::Invalid("underlay evidence")),
                 }
                 Ok((lease.path_id, lease.role))
             })
@@ -2058,6 +2094,35 @@ fn endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
     }
     let _address = parse_public_address(&value.address)?;
     Ok(())
+}
+
+/// An activation endpoint is only a candidate: its opaque prepared lease and signed authority
+/// must match the helper's stored kernel-verified on-link binding before private UDP is enabled.
+fn activation_endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
+    if endpoint(value).is_ok() {
+        return Ok(());
+    }
+    if !(1..=65_535).contains(&value.port) {
+        return Err(HelperProtocolError::Invalid("UDP port"));
+    }
+    let _ = parse_local_lan_address(&value.address)?;
+    Ok(())
+}
+
+fn parse_local_lan_address(bytes: &[u8]) -> Result<IpAddr, HelperProtocolError> {
+    let address = match bytes {
+        bytes if bytes.len() == 4 => IpAddr::V4(Ipv4Addr::from(
+            <[u8; 4]>::try_from(bytes).map_err(|_| HelperProtocolError::Invalid("LAN address"))?,
+        )),
+        bytes if bytes.len() == 16 => IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(bytes).map_err(|_| HelperProtocolError::Invalid("LAN address"))?,
+        )),
+        _ => return Err(HelperProtocolError::Invalid("LAN address")),
+    };
+    if !is_local_lan_ip(address) {
+        return Err(HelperProtocolError::Invalid("LAN address"));
+    }
+    Ok(address)
 }
 
 fn parse_public_address(bytes: &[u8]) -> Result<IpAddr, HelperProtocolError> {
@@ -2496,6 +2561,7 @@ mod tests {
             role: WireguardRole::Client as i32,
             observer_id: vec![7; 32],
             observer_peer_id: vec![8; 38],
+            on_link: None,
             observed_address: "2606:4700:4700::1111"
                 .parse::<Ipv6Addr>()
                 .expect("IPv6")
@@ -2546,6 +2612,49 @@ mod tests {
             ..ipv4
         }];
         assert!(encode_request(&private).is_err());
+    }
+
+    #[test]
+    fn on_link_hints_are_scoped_pairs_not_public_observations() {
+        let leases = [plan(1, WireguardRole::Client)];
+        let hint = TraversalEndpointHint {
+            path_id: 1,
+            role: WireguardRole::Client as i32,
+            observer_id: vec![7; 32],
+            observer_peer_id: vec![8; 38],
+            observed_address: Vec::new(),
+            on_link: Some(OnLinkUnderlayHint {
+                local_address: vec![10, 42, 0, 2],
+                peer_address: vec![10, 42, 0, 1],
+            }),
+        };
+        validate_traversal_hints(&leases, std::slice::from_ref(&hint)).expect("scoped LAN hint");
+        assert_eq!(
+            TraversalEndpointHint::decode(hint.encode_to_vec().as_slice()).unwrap(),
+            hint
+        );
+        let mut mixed = hint.clone();
+        mixed.observed_address = vec![8, 8, 8, 8];
+        assert!(validate_traversal_hints(&leases, &[mixed]).is_err());
+        for peer in [
+            vec![8, 8, 8, 8],
+            vec![127, 0, 0, 1],
+            vec![169, 254, 1, 2],
+            vec![10, 42, 0, 2],
+            vec![0; 16],
+        ] {
+            let mut substituted = hint.clone();
+            substituted.on_link.as_mut().unwrap().peer_address = peer;
+            assert!(validate_traversal_hints(&leases, &[substituted]).is_err());
+        }
+        assert!(validate_traversal_hints(&leases, &[hint.clone(), hint]).is_err());
+        assert!(
+            endpoint(&PublicUdpEndpoint {
+                address: vec![10, 42, 0, 1],
+                port: 51820
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -2702,6 +2811,19 @@ mod tests {
         };
         batch.leases[0].underlay_evidence = UnderlayEvidence::ObservedUdpPunch as i32;
         assert!(encode_response(&punch).is_ok());
+        let mut local = response.clone();
+        let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = local.outcome.as_mut()
+        else {
+            panic!("prepared");
+        };
+        batch.leases[0].public_endpoint.as_mut().unwrap().address = vec![10, 42, 0, 2];
+        assert!(encode_response(&local).is_err());
+        let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = local.outcome.as_mut()
+        else {
+            panic!("prepared");
+        };
+        batch.leases[0].underlay_evidence = UnderlayEvidence::DirectOnLink as i32;
+        assert!(encode_response(&local).is_ok());
         let mut wrong = response;
         let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = wrong.outcome.as_mut()
         else {

@@ -1,6 +1,6 @@
 //! Fail-atomic conversion from helper-v3 prepare outcomes to local client endpoint capabilities.
 //!
-//! The signed reservation protocol receives only public endpoint tuples. Opaque helper handles
+//! The signed reservation protocol receives explicitly scoped endpoint tuples. Opaque helper handles
 //! stay in this process-local boundary and are compared with the exact client prepare request
 //! before any lease is made available to reservation code.
 
@@ -10,7 +10,7 @@ use std::{
 };
 
 use thiserror::Error;
-use volparossa_protocol::WireguardEndpoint;
+use volparossa_protocol::{UnderlayScope, WireguardEndpoint};
 use volparossa_routing::{
     ContextRole, HELPER_PROTOCOL_VERSION, HelperRequest, PrepareLeaseBatch, PreparedLease,
     PreparedLeaseBatch, UnderlayEvidence, WireguardRole, encode_request, helper_request,
@@ -87,8 +87,8 @@ struct ParsedLease {
 ///
 /// Returns an error unless the request is exactly `ContextRole::Client` with one through eight
 /// unique `WireguardRole::Client` paths. Also rejects malformed or substituted responses,
-/// evidence other than a direct assignment or exact-peer UDP-punch observation, duplicate
-/// capabilities/key material/ports, non-public addresses and role-binding failures.
+/// evidence other than a direct assignment, exact-peer UDP-punch observation or bound local-LAN
+/// assignment, duplicate capabilities/key material/ports, unscoped addresses and role failures.
 pub fn bind_prepared_endpoint_leases(
     request: &PrepareLeaseBatch,
     response: PreparedLeaseBatch,
@@ -234,6 +234,11 @@ pub(crate) fn protocol_endpoint_for_native(endpoint: PublicWireGuardEndpoint) ->
         IpAddr::V6(address) => address.octets().to_vec(),
     };
     WireguardEndpoint {
+        underlay_scope: if endpoint.is_local_lan() {
+            UnderlayScope::DirectLocalLan
+        } else {
+            UnderlayScope::PublicInternet
+        } as i32,
         public_key: endpoint.public_key().as_bytes().to_vec(),
         underlay_ip,
         listen_port: u32::from(endpoint.listen_port()),
@@ -346,7 +351,9 @@ fn parse_response(
         }
         if !matches!(
             UnderlayEvidence::try_from(lease.underlay_evidence),
-            Ok(UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch)
+            Ok(UnderlayEvidence::DirectAssigned
+                | UnderlayEvidence::ObservedUdpPunch
+                | UnderlayEvidence::DirectOnLink)
         ) {
             return Err(EndpointLeaseBindingError::InvalidPreparedOutcome);
         }
@@ -370,7 +377,12 @@ fn parse_response(
         if !listen_ports.insert(listen_port) {
             return Err(WireGuardError::DuplicateListenPort.into());
         }
-        let endpoint = PublicWireGuardEndpoint::new(
+        let constructor = if lease.underlay_evidence == UnderlayEvidence::DirectOnLink as i32 {
+            PublicWireGuardEndpoint::new_direct_local_lan
+        } else {
+            PublicWireGuardEndpoint::new
+        };
+        let endpoint = constructor(
             WireGuardPublicKey::from_bytes(public_key_bytes),
             parse_ip(&public.address)?,
             listen_port,
@@ -438,6 +450,23 @@ mod tests {
             context_handle: vec![99; HELPER_HANDLE_BYTES],
             leases,
         }
+    }
+
+    #[test]
+    fn direct_local_prepared_endpoints_preserve_signed_scope() {
+        let mut local = prepared(1, WireguardRole::Client, 1, 40_001);
+        local.public_endpoint.as_mut().unwrap().address = vec![192, 168, 8, 1];
+        let expected = BTreeSet::from([(1, WireguardRole::Client)]);
+        let handle = HelperContextHandle::from_bytes([99; HELPER_HANDLE_BYTES]).unwrap();
+        assert!(parse_response(vec![local.clone()], &expected, handle).is_err());
+        local.underlay_evidence = UnderlayEvidence::DirectOnLink as i32;
+        let parsed = parse_response(vec![local], &expected, handle).unwrap();
+        let endpoint = protocol_endpoint_for_native(parsed[&(1, WireguardRole::Client)].endpoint);
+        assert_eq!(endpoint.underlay_ip, vec![192, 168, 8, 1]);
+        assert_eq!(
+            endpoint.underlay_scope,
+            UnderlayScope::DirectLocalLan as i32
+        );
     }
 
     #[test]

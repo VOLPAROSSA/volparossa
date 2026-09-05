@@ -2062,6 +2062,11 @@ fn wire_endpoint(endpoint: PublicWireGuardEndpoint) -> WireguardEndpoint {
         IpAddr::V6(address) => address.octets().to_vec(),
     };
     WireguardEndpoint {
+        underlay_scope: if endpoint.is_local_lan() {
+            volparossa_protocol::UnderlayScope::DirectLocalLan
+        } else {
+            volparossa_protocol::UnderlayScope::PublicInternet
+        } as i32,
         public_key: endpoint.public_key().as_bytes().to_vec(),
         underlay_ip,
         listen_port: u32::from(endpoint.listen_port()),
@@ -2080,8 +2085,16 @@ fn public_endpoint(
     };
     let listen_port =
         u16::try_from(endpoint.listen_port).map_err(|_| CoordinatorError::Scope(field))?;
-    PublicWireGuardEndpoint::new(public_key, underlay_ip, listen_port)
-        .map_err(|_| CoordinatorError::Scope(field))
+    match volparossa_protocol::UnderlayScope::try_from(endpoint.underlay_scope) {
+        Ok(volparossa_protocol::UnderlayScope::PublicInternet) => {
+            PublicWireGuardEndpoint::new(public_key, underlay_ip, listen_port)
+        }
+        Ok(volparossa_protocol::UnderlayScope::DirectLocalLan) => {
+            PublicWireGuardEndpoint::new_direct_local_lan(public_key, underlay_ip, listen_port)
+        }
+        Err(_) => return Err(CoordinatorError::Scope(field)),
+    }
+    .map_err(|_| CoordinatorError::Scope(field))
 }
 
 fn fixed<const N: usize>(bytes: &[u8], field: &'static str) -> Result<[u8; N], CoordinatorError> {
@@ -2107,6 +2120,29 @@ pub enum CoordinatorError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_endpoint_scope_survives_reservation_wire_mapping() {
+        use super::{public_endpoint, wire_endpoint};
+
+        let local = PublicWireGuardEndpoint::new_direct_local_lan(
+            WireGuardPublicKey::from_bytes([7; 32]),
+            "192.168.20.2".parse().expect("LAN address"),
+            51820,
+        )
+        .expect("explicit local endpoint");
+        let mut wire = wire_endpoint(local);
+        assert_eq!(
+            wire.underlay_scope,
+            volparossa_protocol::UnderlayScope::DirectLocalLan as i32
+        );
+        assert_eq!(
+            public_endpoint(&wire, "endpoint").expect("scoped round trip"),
+            local
+        );
+        wire.underlay_scope = volparossa_protocol::UnderlayScope::PublicInternet as i32;
+        assert!(public_endpoint(&wire, "endpoint").is_err());
+    }
+
     use std::{
         cell::Cell,
         collections::HashSet,

@@ -10791,6 +10791,7 @@ mod tests {
                     sample_window_seconds: 30,
                 },
                 network: NetworkMetadata {
+                    uplink: volparossa_core::NetworkUplink::IndependentInternet,
                     operator_id: diversity.operator_id.clone(),
                     region: "eu-west".to_owned(),
                     country_code: "NL".to_owned(),

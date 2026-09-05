@@ -1,8 +1,7 @@
 //! Bounded, read-only `NETLINK_ROUTE` snapshot collection.
 //!
-//! The production functional-alpha backend uses this collector before its single Client-lease
-//! Prepare transaction. The collector cannot activate routes, links, addresses, DNS or firewall
-//! state.
+//! Preparation selects each lease independently; activation revalidates adjacent LAN bindings.
+//! The collector cannot activate routes, links, addresses, DNS or firewall state.
 
 use std::{
     io,
@@ -18,8 +17,10 @@ use volparossa_routing::{LeasePlan, TraversalEndpointHint};
 use crate::deadline::{HardDeadline, wait_for_fd};
 
 use super::{
-    UnderlayAddress, UnderlayCandidate, UnderlayFamily, UnderlayLink, UnderlayRoute,
-    UnderlaySelectionError, select_direct_underlay, select_observed_punch_underlay,
+    ConnectedUnderlayRoute, OnLinkBinding, UnderlayAddress, UnderlayBinding, UnderlayBindings,
+    UnderlayCandidate, UnderlayEvidence, UnderlayFamily, UnderlayLink, UnderlayRoute,
+    UnderlaySelectionError, lan_address, select_direct_underlay, select_observed_punch_underlay,
+    select_on_link_underlay,
 };
 
 const MAX_DATAGRAM_BYTES: usize = 64 * 1024;
@@ -73,6 +74,7 @@ const RTA_PRIORITY: u16 = 6;
 const RTA_PREFSRC: u16 = 7;
 const RTA_METRICS: u16 = 8;
 const RTA_MULTIPATH: u16 = 9;
+const RTA_CACHEINFO: u16 = 12;
 const RTA_TABLE: u16 = 15;
 const RTA_VIA: u16 = 18;
 const RTA_NEWDST: u16 = 19;
@@ -91,7 +93,10 @@ const RTA_NH_ID: u16 = 30;
 const RT_TABLE_UNSPEC: u8 = 0;
 const RT_TABLE_MAIN: u32 = 254;
 const RT_SCOPE_UNIVERSE: u8 = 0;
+const RT_SCOPE_LINK: u8 = 253;
 const RTN_UNICAST: u8 = 1;
+const RTM_F_CLONED: u32 = 0x200;
+const RTPROT_KERNEL: u8 = 2;
 
 const HELPER_ALIAS_PREFIX: &[u8] = b"volparossa:";
 const HELPER_OWNERSHIP_V1_ALIAS_PREFIX: &[u8] = b"volparossa:wireguard:ownership-v1:";
@@ -162,6 +167,7 @@ struct UnderlaySnapshot {
     links: Vec<UnderlayLink>,
     addresses: Vec<UnderlayAddress>,
     routes: Vec<UnderlayRoute>,
+    connected_routes: Vec<ConnectedUnderlayRoute>,
 }
 
 impl UnderlaySnapshot {
@@ -169,6 +175,7 @@ impl UnderlaySnapshot {
         self.links.sort_unstable();
         self.addresses.sort_unstable();
         self.routes.sort_unstable();
+        self.connected_routes.sort_unstable();
         if self
             .links
             .windows(2)
@@ -177,6 +184,10 @@ impl UnderlaySnapshot {
                 pair[0].ifindex == pair[1].ifindex && pair[0].address == pair[1].address
             })
             || self.routes.windows(2).any(|pair| pair[0] == pair[1])
+            || self
+                .connected_routes
+                .windows(2)
+                .any(|pair| pair[0] == pair[1])
         {
             return Err(UnderlayNetlinkError::Malformed);
         }
@@ -329,6 +340,9 @@ impl DumpState {
                 if let Some(route) = decode_route(frame)? {
                     self.snapshot.routes.push(route);
                 }
+                if let Some(route) = decode_connected_route(frame)? {
+                    self.snapshot.connected_routes.push(route);
+                }
             }
         }
         Ok(())
@@ -391,7 +405,10 @@ impl NetlinkCollector {
             match kind {
                 DumpKind::Link => snapshot.links = part.links,
                 DumpKind::Address => snapshot.addresses = part.addresses,
-                DumpKind::Route => snapshot.routes = part.routes,
+                DumpKind::Route => {
+                    snapshot.routes = part.routes;
+                    snapshot.connected_routes = part.connected_routes;
+                }
             }
         }
         snapshot.canonicalize()?;
@@ -415,28 +432,194 @@ impl NetlinkCollector {
         deadline.ensure_remaining()?;
         state.finish()
     }
+
+    fn verify_on_link_route(
+        &mut self,
+        deadline: HardDeadline,
+        budget: &mut CollectionBudget,
+        candidate: UnderlayCandidate,
+        peer: IpAddr,
+    ) -> Result<(), UnderlayNetlinkError> {
+        let sequence = self.next_sequence();
+        let request = encode_route_lookup(sequence, candidate.address, peer)?;
+        send_bounded(&self.socket, &request, deadline)?;
+        let (bytes, sender) = receive_bounded(&self.socket, deadline, budget)?;
+        budget.record_datagram(bytes.len())?;
+        budget.record_frame()?;
+        if sender != SocketAddr::new(0, 0) {
+            return Err(UnderlayNetlinkError::Malformed);
+        }
+        verify_route_lookup(&bytes, sequence, self.local_port_id, candidate, peer)?;
+        deadline.complete(())?;
+        Ok(())
+    }
 }
 
 /// Collect two identical bounded snapshots, then make the pure fail-closed selection.
 ///
 /// The production functional-alpha backend calls this before any mutation. It is read-only, opens
-/// only `NETLINK_ROUTE`, and uses one deadline for all six dumps. Its result proves only local
-/// assignment plus an unambiguous main-table default route; it never infers NAT behaviour or global
-/// reachability.
-pub(crate) fn collect_consistent_underlay(
+/// only `NETLINK_ROUTE`, and uses one deadline and aggregate budget for all dumps/lookups. Public
+/// choices retain the existing default-route/observation rules; LAN choices require the exact
+/// authenticated peer, assigned source and kernel-proven connected route, without a default route.
+pub(crate) fn collect_consistent_underlays(
     deadline: HardDeadline,
     leases: &[LeasePlan],
     hints: &[TraversalEndpointHint],
-) -> Result<UnderlayCandidate, UnderlayNetlinkError> {
+) -> Result<UnderlayBindings, UnderlayNetlinkError> {
     deadline.ensure_remaining()?;
     let mut collector = NetlinkCollector::connect(deadline)?;
     let mut budget = CollectionBudget::production();
     let first = collector.collect_snapshot(deadline, &mut budget)?;
     let second = collector.collect_snapshot(deadline, &mut budget)?;
     deadline.ensure_remaining()?;
-    let selected = select_consistent(&first, &second, leases, hints)?;
+    if first != second {
+        return Err(UnderlayNetlinkError::Inconsistent);
+    }
+    let selected = select_bindings(&first, leases, hints)?;
+    for binding in selected.values() {
+        if let Some(on_link) = &binding.on_link {
+            collector.verify_on_link_route(
+                deadline,
+                &mut budget,
+                binding.candidate,
+                on_link.peer_address,
+            )?;
+        }
+    }
     let selected = deadline.complete(selected)?;
     Ok(selected)
+}
+
+/// Repeat the bounded read-only LAN proof immediately before enabling stored peer endpoints.
+pub(crate) fn revalidate_underlay_bindings(
+    deadline: HardDeadline,
+    bindings: &UnderlayBindings,
+) -> Result<(), UnderlayNetlinkError> {
+    deadline.ensure_remaining()?;
+    if bindings.len() > 16 || bindings.is_empty() {
+        return Err(UnderlayNetlinkError::Limit);
+    }
+    if bindings.values().any(|binding| {
+        binding.on_link.is_some() != (binding.candidate.evidence == UnderlayEvidence::DirectOnLink)
+    }) {
+        return Err(UnderlayNetlinkError::Malformed);
+    }
+    if bindings.values().all(|binding| binding.on_link.is_none()) {
+        return Ok(());
+    }
+    let mut collector = NetlinkCollector::connect(deadline)?;
+    let mut budget = CollectionBudget::production();
+    let first = collector.collect_snapshot(deadline, &mut budget)?;
+    let second = collector.collect_snapshot(deadline, &mut budget)?;
+    if first != second {
+        return Err(UnderlayNetlinkError::Inconsistent);
+    }
+    for binding in bindings.values() {
+        if let Some(on_link) = &binding.on_link {
+            let current = select_on_link_underlay(
+                &first.links,
+                &first.addresses,
+                &first.connected_routes,
+                binding.candidate.address,
+                on_link.peer_address,
+            )
+            .map_err(map_selection_error)?;
+            if current != binding.candidate {
+                return Err(UnderlayNetlinkError::Inconsistent);
+            }
+            collector.verify_on_link_route(deadline, &mut budget, current, on_link.peer_address)?;
+        } else if binding.candidate.evidence == UnderlayEvidence::DirectOnLink {
+            return Err(UnderlayNetlinkError::Malformed);
+        }
+    }
+    deadline.complete(())?;
+    Ok(())
+}
+
+fn select_bindings(
+    snapshot: &UnderlaySnapshot,
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
+) -> Result<UnderlayBindings, UnderlayNetlinkError> {
+    if leases.is_empty()
+        || leases.len() > 16
+        || hints.len() > volparossa_routing::MAX_HELPER_TRAVERSAL_HINTS
+    {
+        return Err(UnderlayNetlinkError::Limit);
+    }
+    let mut bindings = UnderlayBindings::new();
+    let mut public_leases = Vec::new();
+    for lease in leases {
+        let key = (lease.path_id, lease.role);
+        let matching = hints.iter().filter(|hint| (hint.path_id, hint.role) == key);
+        if bindings.contains_key(&key)
+            || public_leases
+                .iter()
+                .any(|old: &LeasePlan| (old.path_id, old.role) == key)
+        {
+            return Err(UnderlayNetlinkError::Ambiguous);
+        }
+        if let Some((hint, lan)) = matching
+            .clone()
+            .find_map(|hint| hint.on_link.as_ref().map(|lan| (hint, lan)))
+        {
+            if matching.count() != 1 {
+                return Err(UnderlayNetlinkError::Ambiguous);
+            }
+            let local = lan_address(&lan.local_address).ok_or(UnderlayNetlinkError::NoCandidate)?;
+            let peer = lan_address(&lan.peer_address).ok_or(UnderlayNetlinkError::NoCandidate)?;
+            let actor = <[u8; 32]>::try_from(hint.observer_id.as_slice())
+                .map_err(|_| UnderlayNetlinkError::Malformed)?;
+            if actor == [0; 32]
+                || !hint.observed_address.is_empty()
+                || hint.observer_peer_id.len() > 128
+                || libp2p_identity::PeerId::from_bytes(&hint.observer_peer_id).is_err()
+            {
+                return Err(UnderlayNetlinkError::Malformed);
+            }
+            let candidate = select_on_link_underlay(
+                &snapshot.links,
+                &snapshot.addresses,
+                &snapshot.connected_routes,
+                local,
+                peer,
+            )
+            .map_err(map_selection_error)?;
+            bindings.insert(
+                key,
+                UnderlayBinding {
+                    candidate,
+                    on_link: Some(OnLinkBinding {
+                        peer_address: peer,
+                        peer_actor_id: actor,
+                        peer_peer_id: hint.observer_peer_id.clone(),
+                    }),
+                },
+            );
+        } else {
+            public_leases.push(lease.clone());
+        }
+    }
+    if hints.iter().any(|hint| {
+        !leases
+            .iter()
+            .any(|lease| (lease.path_id, lease.role) == (hint.path_id, hint.role))
+    }) {
+        return Err(UnderlayNetlinkError::Malformed);
+    }
+    if !public_leases.is_empty() {
+        let candidate = select_consistent(snapshot, snapshot, &public_leases, hints)?;
+        for lease in public_leases {
+            bindings.insert(
+                (lease.path_id, lease.role),
+                UnderlayBinding {
+                    candidate,
+                    on_link: None,
+                },
+            );
+        }
+    }
+    Ok(bindings)
 }
 
 fn select_consistent(
@@ -717,7 +900,9 @@ fn decode_address(frame: &[u8]) -> Result<Option<UnderlayAddress>, UnderlayNetli
     if flags & 0xff != header_flags {
         return Err(UnderlayNetlinkError::Malformed);
     }
-    if scope != RT_SCOPE_UNIVERSE || !is_public_routable_ip(value) {
+    if scope != RT_SCOPE_UNIVERSE
+        || !(is_public_routable_ip(value) || volparossa_routing::is_local_lan_ip(value))
+    {
         return Ok(None);
     }
     let unsafe_kind = value.is_multicast()
@@ -821,6 +1006,200 @@ fn decode_route(frame: &[u8]) -> Result<Option<UnderlayRoute>, UnderlayNetlinkEr
         main_table: true,
         universe_scope: true,
     }))
+}
+
+fn decode_connected_route(
+    frame: &[u8],
+) -> Result<Option<ConnectedUnderlayRoute>, UnderlayNetlinkError> {
+    let payload = frame
+        .get(NLMSG_HEADER_LEN..)
+        .ok_or(UnderlayNetlinkError::Malformed)?;
+    if payload.len() < RTMSG_LEN {
+        return Err(UnderlayNetlinkError::Malformed);
+    }
+    let family = address_family(payload[0])?;
+    let max_prefix = if family == UnderlayFamily::Ipv4 {
+        32
+    } else {
+        128
+    };
+    let attributes = parse_attributes(&payload[RTMSG_LEN..])?;
+    if payload[1] == 0
+        || payload[1] > max_prefix
+        || payload[5] != RTPROT_KERNEL
+        || payload[6]
+            != if family == UnderlayFamily::Ipv4 {
+                RT_SCOPE_LINK
+            } else {
+                RT_SCOPE_UNIVERSE
+            }
+        || payload[7] != RTN_UNICAST
+        || effective_route_table(payload[4], &attributes)? != RT_TABLE_MAIN
+    {
+        return Ok(None);
+    }
+    if payload[2] != 0 || payload[3] != 0 || read_u32(payload, 8) != Some(0) {
+        return Err(UnderlayNetlinkError::Ambiguous);
+    }
+    let mut network = None;
+    let mut output = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for attribute in attributes {
+        reject_unknown_flags(attribute.flags)?;
+        if !seen.insert(attribute.kind) {
+            return Err(UnderlayNetlinkError::Malformed);
+        }
+        match attribute.kind {
+            RTA_DST => network = Some(parse_ip(attribute.value, family)?),
+            RTA_OIF => output = Some(exact_u32(attribute.value)?),
+            RTA_TABLE | RTA_PRIORITY => {
+                let _ = exact_u32(attribute.value)?;
+            }
+            RTA_PREFSRC => {
+                let _ = parse_ip(attribute.value, family)?;
+            }
+            RTA_PREF if attribute.value.len() == 1 => {}
+            RTA_PAD if attribute.value.is_empty() => {}
+            // A gateway, multipath or policy-dependent route never proves adjacency.
+            _ => return Ok(None),
+        }
+    }
+    let network = network.ok_or(UnderlayNetlinkError::Malformed)?;
+    let ifindex = output
+        .filter(|value| *value != 0)
+        .ok_or(UnderlayNetlinkError::Malformed)?;
+    Ok(Some(ConnectedUnderlayRoute {
+        ifindex,
+        network,
+        prefix_length: payload[1],
+    }))
+}
+
+fn append_attribute(
+    bytes: &mut Vec<u8>,
+    kind: u16,
+    value: &[u8],
+) -> Result<(), UnderlayNetlinkError> {
+    let length = ATTRIBUTE_HEADER_LEN + value.len();
+    bytes.extend_from_slice(
+        &u16::try_from(length)
+            .map_err(|_| UnderlayNetlinkError::Limit)?
+            .to_ne_bytes(),
+    );
+    bytes.extend_from_slice(&kind.to_ne_bytes());
+    bytes.extend_from_slice(value);
+    bytes.resize(align4(bytes.len()), 0);
+    Ok(())
+}
+
+fn ip_bytes(address: IpAddr) -> Vec<u8> {
+    match address {
+        IpAddr::V4(address) => address.octets().to_vec(),
+        IpAddr::V6(address) => address.octets().to_vec(),
+    }
+}
+
+fn encode_route_lookup(
+    sequence: u32,
+    local: IpAddr,
+    peer: IpAddr,
+) -> Result<Vec<u8>, UnderlayNetlinkError> {
+    if sequence == 0
+        || local.is_ipv4() != peer.is_ipv4()
+        || !volparossa_routing::is_local_lan_ip(local)
+        || !volparossa_routing::is_local_lan_ip(peer)
+        || local == peer
+    {
+        return Err(UnderlayNetlinkError::Malformed);
+    }
+    let mut request = vec![0; NLMSG_HEADER_LEN + RTMSG_LEN];
+    request[4..6].copy_from_slice(&RTM_GETROUTE.to_ne_bytes());
+    request[6..8].copy_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+    request[8..12].copy_from_slice(&sequence.to_ne_bytes());
+    request[NLMSG_HEADER_LEN] = u8::try_from(if local.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    })
+    .map_err(|_| UnderlayNetlinkError::Malformed)?;
+    let prefix = if local.is_ipv4() { 32 } else { 128 };
+    request[NLMSG_HEADER_LEN + 1] = prefix;
+    request[NLMSG_HEADER_LEN + 2] = prefix;
+    append_attribute(&mut request, RTA_DST, &ip_bytes(peer))?;
+    append_attribute(&mut request, RTA_SRC, &ip_bytes(local))?;
+    let length = u32::try_from(request.len()).map_err(|_| UnderlayNetlinkError::Limit)?;
+    request[..4].copy_from_slice(&length.to_ne_bytes());
+    Ok(request)
+}
+
+fn verify_route_lookup(
+    frame: &[u8],
+    sequence: u32,
+    port_id: u32,
+    candidate: UnderlayCandidate,
+    peer: IpAddr,
+) -> Result<(), UnderlayNetlinkError> {
+    if frame.len() < NLMSG_HEADER_LEN + RTMSG_LEN
+        || read_u32(frame, 0).and_then(|length| usize::try_from(length).ok()) != Some(frame.len())
+        || read_u16(frame, 4) != Some(RTM_NEWROUTE)
+        || read_u16(frame, 6) != Some(0)
+        || read_u32(frame, 8) != Some(sequence)
+        || read_u32(frame, 12) != Some(port_id)
+    {
+        return Err(UnderlayNetlinkError::Malformed);
+    }
+    let payload = &frame[NLMSG_HEADER_LEN..];
+    let family = address_family(payload[0])?;
+    let full_prefix = if family == UnderlayFamily::Ipv4 {
+        32
+    } else {
+        128
+    };
+    let attrs = parse_attributes(&payload[RTMSG_LEN..])?;
+    if family != UnderlayFamily::of(candidate.address)
+        || payload[1] != full_prefix
+        || ![0, full_prefix].contains(&payload[2])
+        || payload[3] != 0
+        || effective_route_table(payload[4], &attrs)? != RT_TABLE_MAIN
+        || payload[7] != RTN_UNICAST
+        || read_u32(payload, 8).is_none_or(|flags| flags & !RTM_F_CLONED != 0)
+    {
+        return Err(UnderlayNetlinkError::NoCandidate);
+    }
+    let mut destination = None;
+    let mut source = None;
+    let mut output = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for attribute in attrs {
+        reject_unknown_flags(attribute.flags)?;
+        if !seen.insert(attribute.kind) {
+            return Err(UnderlayNetlinkError::Malformed);
+        }
+        match attribute.kind {
+            RTA_DST => destination = Some(parse_ip(attribute.value, family)?),
+            RTA_SRC => source = Some(parse_ip(attribute.value, family)?),
+            RTA_OIF => output = Some(exact_u32(attribute.value)?),
+            RTA_PREFSRC => {
+                if parse_ip(attribute.value, family)? != candidate.address {
+                    return Err(UnderlayNetlinkError::NoCandidate);
+                }
+            }
+            RTA_TABLE | RTA_UID | RTA_PRIORITY => {
+                let _ = exact_u32(attribute.value)?;
+            }
+            RTA_CACHEINFO if attribute.value.len() == 32 => {}
+            RTA_PREF if attribute.value.len() == 1 => {}
+            RTA_PAD if attribute.value.is_empty() => {}
+            _ => return Err(UnderlayNetlinkError::NoCandidate),
+        }
+    }
+    if destination != Some(peer)
+        || source != Some(candidate.address)
+        || output != Some(candidate.ifindex)
+    {
+        return Err(UnderlayNetlinkError::NoCandidate);
+    }
+    Ok(())
 }
 
 fn effective_route_table(
@@ -1156,6 +1535,7 @@ mod tests {
                 main_table: true,
                 universe_scope: true,
             }],
+            connected_routes: Vec::new(),
         }
     }
 
@@ -1559,6 +1939,258 @@ mod tests {
             select_consistent(&ambiguous, &ambiguous, &[], &[]),
             Err(UnderlayNetlinkError::Ambiguous)
         ));
+    }
+
+    fn connected(network: &str, prefix: u8, extra: &[u8]) -> Vec<u8> {
+        let ip: IpAddr = network.parse().expect("network");
+        let family = UnderlayFamily::of(ip);
+        let mut frame = route(family, &attr(RTA_DST, &raw_ip(network)));
+        frame[NLMSG_HEADER_LEN + 1] = prefix;
+        frame[NLMSG_HEADER_LEN + 5] = RTPROT_KERNEL;
+        frame[NLMSG_HEADER_LEN + 6] = if ip.is_ipv4() {
+            RT_SCOPE_LINK
+        } else {
+            RT_SCOPE_UNIVERSE
+        };
+        frame.extend_from_slice(extra);
+        let length = u32::try_from(frame.len()).expect("small frame");
+        frame[..4].copy_from_slice(&length.to_ne_bytes());
+        frame
+    }
+
+    #[test]
+    fn connected_ipv4_and_ula_kernel_routes_decode_without_default_or_gateway() {
+        for (network, local, prefix) in [
+            ("192.168.42.0", "192.168.42.2", 24),
+            ("fd42::", "fd42::2", 64),
+        ] {
+            let frame = connected(network, prefix, &[]);
+            let snapshot =
+                parse(DumpKind::Route, &[frame.clone(), done()]).expect("connected route");
+            assert!(snapshot.routes.is_empty());
+            assert_eq!(snapshot.connected_routes.len(), 1);
+            assert_eq!(
+                snapshot.connected_routes[0].network,
+                network.parse::<IpAddr>().expect("IP")
+            );
+            let assigned =
+                parse(DumpKind::Address, &[address(local, 0), done()]).expect("assigned LAN");
+            assert_eq!(assigned.addresses.len(), 1);
+            let gateway = connected(network, prefix, &attr(RTA_GATEWAY, &raw_ip(local)));
+            assert!(
+                decode_connected_route(&gateway)
+                    .expect("gateway not connected")
+                    .is_none()
+            );
+            let mut static_route = frame;
+            static_route[NLMSG_HEADER_LEN + 5] = 4;
+            assert!(
+                decode_connected_route(&static_route)
+                    .expect("not kernel")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn bindings_keep_local_and_wan_lease_choices_and_peer_identity_separate() {
+        let local: IpAddr = "192.168.42.2".parse().expect("local");
+        let peer: IpAddr = "192.168.42.1".parse().expect("peer");
+        let key = libp2p_identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let lan_lease = LeasePlan {
+            path_id: 1,
+            role: volparossa_routing::WireguardRole::RelayClient as i32,
+        };
+        let wan_lease = LeasePlan {
+            path_id: 1,
+            role: volparossa_routing::WireguardRole::RelayExit as i32,
+        };
+        let hint = TraversalEndpointHint {
+            path_id: lan_lease.path_id,
+            role: lan_lease.role,
+            observer_id: vec![9; 32],
+            observer_peer_id: key.to_bytes(),
+            observed_address: Vec::new(),
+            on_link: Some(volparossa_routing::OnLinkUnderlayHint {
+                local_address: ip_bytes(local),
+                peer_address: ip_bytes(peer),
+            }),
+        };
+        let mut snapshot = stable("8.8.8.8", UnderlayFamily::Ipv4);
+        snapshot.links.push(UnderlayLink {
+            ifindex: 8,
+            ..snapshot.links[0]
+        });
+        snapshot.addresses.push(UnderlayAddress {
+            ifindex: 8,
+            address: local,
+            ..snapshot.addresses[0]
+        });
+        snapshot.connected_routes.push(ConnectedUnderlayRoute {
+            ifindex: 8,
+            network: "192.168.42.0".parse().expect("network"),
+            prefix_length: 24,
+        });
+        let bindings = select_bindings(
+            &snapshot,
+            &[lan_lease.clone(), wan_lease.clone()],
+            &[hint.clone()],
+        )
+        .expect("mixed leases");
+        let binding = &bindings[&(lan_lease.path_id, lan_lease.role)];
+        assert_eq!(binding.candidate.address, local);
+        assert_eq!(
+            binding.on_link.as_ref().expect("bound LAN").peer_peer_id,
+            key.to_bytes()
+        );
+        assert_eq!(
+            bindings[&(wan_lease.path_id, wan_lease.role)]
+                .candidate
+                .evidence,
+            UnderlayEvidence::DirectAssigned
+        );
+        snapshot.routes.clear();
+        assert!(select_bindings(&snapshot, &[lan_lease.clone()], &[hint.clone()]).is_ok());
+        assert!(
+            select_bindings(&snapshot, &[lan_lease.clone(), wan_lease], &[hint.clone()]).is_err()
+        );
+        let mut bad_hint = hint.clone();
+        bad_hint.observer_id.fill(0);
+        assert!(select_bindings(&snapshot, &[lan_lease.clone()], &[bad_hint]).is_err());
+        assert!(select_bindings(&snapshot, &[lan_lease], &[hint.clone(), hint]).is_err());
+    }
+
+    #[test]
+    fn bindings_preserve_bounded_dual_family_public_hints_for_every_lease() {
+        let snapshot = stable("192.168.42.2", UnderlayFamily::Ipv4);
+        let peer = libp2p_identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut leases = Vec::new();
+        let mut hints = Vec::new();
+        for path_id in 1..=8 {
+            for role in [
+                volparossa_routing::WireguardRole::RelayClient,
+                volparossa_routing::WireguardRole::RelayExit,
+            ] {
+                leases.push(LeasePlan {
+                    path_id,
+                    role: role as i32,
+                });
+                for public in ["8.8.8.8", "2606:4700:4700::1111"] {
+                    hints.push(TraversalEndpointHint {
+                        path_id,
+                        role: role as i32,
+                        observer_id: vec![9; 32],
+                        observer_peer_id: peer.to_bytes(),
+                        observed_address: ip_bytes(public.parse().expect("public")),
+                        on_link: None,
+                    });
+                }
+            }
+        }
+        assert_eq!(hints.len(), volparossa_routing::MAX_HELPER_TRAVERSAL_HINTS);
+        let bindings =
+            select_bindings(&snapshot, &leases, &hints).expect("two public families per lease");
+        assert_eq!(bindings.len(), 16);
+        assert!(bindings.values().all(|binding| binding.candidate.evidence
+            == UnderlayEvidence::ObservedUdpPunch
+            && binding.on_link.is_none()));
+        hints.push(hints[0].clone());
+        assert!(matches!(
+            select_bindings(&snapshot, &leases, &hints),
+            Err(UnderlayNetlinkError::Limit)
+        ));
+    }
+
+    #[test]
+    fn exact_route_lookup_rejects_redirected_interface_gateway_source_and_identity() {
+        for (local, peer) in [("192.168.42.2", "192.168.42.1"), ("fd42::2", "fd42::1")] {
+            let local: IpAddr = local.parse().expect("local");
+            let peer: IpAddr = peer.parse().expect("peer");
+            let candidate = UnderlayCandidate {
+                ifindex: 7,
+                address: local,
+                evidence: UnderlayEvidence::DirectOnLink,
+            };
+            let request = encode_route_lookup(SEQ, local, peer).expect("read-only lookup");
+            assert_eq!(read_u16(&request, 4), Some(RTM_GETROUTE));
+            assert_eq!(read_u16(&request, 6), Some(NLM_F_REQUEST));
+            let mut payload = request[NLMSG_HEADER_LEN..].to_vec();
+            payload[4] = u8::try_from(RT_TABLE_MAIN).expect("main");
+            payload[7] = RTN_UNICAST;
+            payload[8..12].copy_from_slice(&RTM_F_CLONED.to_ne_bytes());
+            payload.extend_from_slice(&attr(RTA_OIF, &7_u32.to_ne_bytes()));
+            let frame = msg(RTM_NEWROUTE, 0, SEQ, &payload);
+            verify_route_lookup(&frame, SEQ, PORT_ID, candidate, peer).expect("exact result");
+            assert!(verify_route_lookup(&frame, SEQ + 1, PORT_ID, candidate, peer).is_err());
+            assert!(verify_route_lookup(&frame, SEQ, PORT_ID + 1, candidate, peer).is_err());
+            assert!(
+                verify_route_lookup(
+                    &frame,
+                    SEQ,
+                    PORT_ID,
+                    UnderlayCandidate {
+                        ifindex: 8,
+                        ..candidate
+                    },
+                    peer
+                )
+                .is_err()
+            );
+            payload.extend_from_slice(&attr(RTA_GATEWAY, &ip_bytes(peer)));
+            assert!(
+                verify_route_lookup(
+                    &msg(RTM_NEWROUTE, 0, SEQ, &payload),
+                    SEQ,
+                    PORT_ID,
+                    candidate,
+                    peer
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "read-only host-dependent rtnetlink diagnostic; requires an assigned RFC1918/ULA LAN"]
+    fn read_only_kernel_lan_route_lookup_matches_decoder() {
+        let deadline = HardDeadline::after(std::time::Duration::from_secs(3)).expect("deadline");
+        let mut collector = NetlinkCollector::connect(deadline).expect("read-only socket");
+        let mut budget = CollectionBudget::production();
+        let snapshot = collector
+            .collect_dump(DumpKind::Address, deadline, &mut budget)
+            .expect("read-only assigned addresses");
+        for address in &snapshot.addresses {
+            if !volparossa_routing::is_local_lan_ip(address.address) {
+                continue;
+            }
+            let peer = match address.address {
+                IpAddr::V4(ip) => {
+                    let mut value = u32::from(ip) ^ 1;
+                    if matches!(value & 255, 0 | 255) {
+                        value = u32::from(ip) ^ 2;
+                    }
+                    IpAddr::V4(value.into())
+                }
+                IpAddr::V6(ip) => IpAddr::V6((u128::from(ip) ^ 1).into()),
+            };
+            // This optional diagnostic verifies the kernel lookup's response encoding only.
+            // The production collector additionally requires both complete snapshots and the
+            // exact connected-route/link selection covered above; this does not bypass it.
+            let candidate = UnderlayCandidate {
+                ifindex: address.ifindex,
+                address: address.address,
+                evidence: UnderlayEvidence::DirectOnLink,
+            };
+            collector
+                .verify_on_link_route(deadline, &mut budget, candidate, peer)
+                .expect("kernel exact source route; no packet emitted");
+            return;
+        }
+        panic!("no eligible assigned connected LAN for this optional diagnostic");
     }
 
     #[test]

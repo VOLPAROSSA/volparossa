@@ -1227,6 +1227,11 @@ impl ControlPayload for NativeProbeExitResult {
             .as_ref()
             .ok_or(ProtocolError::InvalidField("native exit result prefix"))?;
         let normalized = prefix.validated_normalized()?;
+        if !normalized.is_public_routable() {
+            return Err(ProtocolError::InvalidField(
+                "native Exit observation must be public",
+            ));
+        }
         if !matches!(
             (normalized.family(), scope_family(scope)?),
             (
@@ -2450,6 +2455,7 @@ mod tests {
             helper_runtime_id: vec![helper_runtime_seed(port); 32],
             route_context_id: vec![1; 16],
             endpoint: Some(WireguardEndpoint {
+                underlay_scope: 0,
                 public_key: key.to_vec(),
                 underlay_ip: address.to_vec(),
                 listen_port: 10_000 + u32::from(port),
@@ -2504,6 +2510,7 @@ mod tests {
             scope: Some(fixture.scope.clone()),
             challenge_response: vec![7; 32],
             observed_network_prefix: Some(ObservationNetworkPrefix {
+                scope: 0,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 network_prefix: vec![82, 1, 1],
             }),
@@ -3285,6 +3292,7 @@ mod tests {
         ));
 
         let prepared = WireguardEndpoint {
+            underlay_scope: 0,
             public_key: vec![9; 32],
             underlay_ip: vec![85, 1, 1, 1],
             listen_port: 20_000,
@@ -3334,6 +3342,7 @@ mod tests {
             scope: Some(fixture.scope.clone()),
             challenge_response: vec![7; 32],
             observed_network_prefix: Some(ObservationNetworkPrefix {
+                scope: 0,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 network_prefix: vec![82, 1, 1],
             }),

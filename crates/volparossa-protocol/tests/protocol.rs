@@ -1180,6 +1180,7 @@ fn forwarded_prefix_is_public_family_exact_ipv4_24_or_ipv6_48() {
     let (_, _, signed, _, _) = forwarded_preselection_fixture();
     let (_, mut attestation) = decode_forwarded_attestation(&signed);
     attestation.upstream_network_prefix = Some(ObservationNetworkPrefix {
+        scope: 0,
         address_family: ObservationAddressFamily::Ipv6 as i32,
         network_prefix: vec![0x20, 0x01, 0x48, 0x60, 0, 0],
     });
@@ -1217,6 +1218,7 @@ fn forwarded_prefix_is_public_family_exact_ipv4_24_or_ipv6_48() {
     let (request, _, signed, control_key, _) = forwarded_preselection_fixture();
     let (outer, mut attestation) = decode_forwarded_attestation(&signed);
     attestation.upstream_network_prefix = Some(ObservationNetworkPrefix {
+        scope: 0,
         address_family: ObservationAddressFamily::Ipv6 as i32,
         network_prefix: vec![0x20, 0x01, 0x48, 0x60, 0, 0],
     });
@@ -2703,6 +2705,7 @@ fn forwarded_preselection_fixture_with_prefix(
         exit: Some(exit),
         scope: request.scope.clone(),
         upstream_network_prefix: Some(ObservationNetworkPrefix {
+            scope: 0,
             address_family: family as i32,
             network_prefix,
         }),
@@ -3514,6 +3517,7 @@ fn relay_advertisement(signing_key: &SigningKey) -> NodeAdvertisement {
             sample_window_seconds: 15,
         }),
         network: Some(AdvertisementNetwork {
+            uplink: 0,
             region: "eu-west".to_owned(),
             country_code: "NL".to_owned(),
             asn: 64_496,
@@ -3977,10 +3981,138 @@ fn relay_request_commitment_hashes_the_complete_canonical_signed_envelope() {
 
 fn endpoint(key: u8, port: u16) -> WireguardEndpoint {
     WireguardEndpoint {
+        underlay_scope: 0,
         public_key: vec![key; 32],
         underlay_ip: vec![8, 8, 4, key],
         listen_port: u32::from(port),
     }
+}
+
+#[test]
+fn local_lan_endpoint_scope_is_explicit_and_public_encoding_stays_compatible() {
+    use volparossa_protocol::UnderlayScope;
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyEndpoint {
+        #[prost(bytes = "vec", tag = "1")]
+        public_key: Vec<u8>,
+        #[prost(bytes = "vec", tag = "2")]
+        underlay_ip: Vec<u8>,
+        #[prost(uint32, tag = "3")]
+        listen_port: u32,
+    }
+    let public = endpoint(5, 51820);
+    let legacy = LegacyEndpoint {
+        public_key: public.public_key.clone(),
+        underlay_ip: public.underlay_ip.clone(),
+        listen_port: public.listen_port,
+    };
+    assert_eq!(public.encode_to_vec(), legacy.encode_to_vec());
+    for ip in [
+        "10.20.30.4",
+        "172.16.4.5",
+        "192.168.4.5",
+        "fd12:3456:789a::5",
+    ] {
+        let mut local = public.clone();
+        local.underlay_ip = match ip.parse::<std::net::IpAddr>().expect("fixture address") {
+            std::net::IpAddr::V4(address) => address.octets().to_vec(),
+            std::net::IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        assert!(
+            local.validate("fixture endpoint").is_err(),
+            "private address without scope: {ip}"
+        );
+        local.underlay_scope = UnderlayScope::DirectLocalLan as i32;
+        local
+            .validate("fixture endpoint")
+            .expect("explicitly scoped local endpoint");
+        let encoded = encode_canonical(&local, 256).expect("canonical local endpoint");
+        assert_eq!(
+            decode_canonical::<WireguardEndpoint>(&encoded, 256).expect("decoded"),
+            local
+        );
+        local.underlay_scope = 42;
+        assert!(local.validate("fixture endpoint").is_err());
+    }
+    for ip in [
+        "8.8.8.8",
+        "169.254.1.1",
+        "100.64.1.1",
+        "127.0.0.1",
+        "192.0.2.1",
+        "fe80::1",
+        "::1",
+        "2001:db8::1",
+        "ff02::1",
+    ] {
+        let mut invalid = public.clone();
+        invalid.underlay_scope = UnderlayScope::DirectLocalLan as i32;
+        invalid.underlay_ip = match ip.parse::<std::net::IpAddr>().expect("fixture address") {
+            std::net::IpAddr::V4(address) => address.octets().to_vec(),
+            std::net::IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        assert!(
+            invalid.validate("fixture endpoint").is_err(),
+            "prohibited local endpoint: {ip}"
+        );
+    }
+}
+
+#[test]
+fn local_only_signed_advertisement_cannot_invent_exit_or_public_origin() {
+    let key = SigningKey::from_bytes(&[77; 32]);
+    let mut advertisement = relay_advertisement(&key);
+    let network = advertisement.network.as_mut().expect("network");
+    network.uplink = volparossa_protocol::AdvertisementUplink::LocalOnly as i32;
+    network.asn = 0;
+    network.ipv4_prefix_hint.clear();
+    network.ipv6_prefix_hint.clear();
+    advertisement.control_addresses = vec!["/ip4/192.168.4.5/udp/41000/quic-v1".to_owned()];
+    advertisement
+        .validate()
+        .expect("truthful local advertisement");
+    let signed = sign_control_message(
+        &advertisement,
+        &key,
+        NOW,
+        EXPIRY,
+        [76; 32],
+        TimePolicy::default(),
+    )
+    .expect("signed local advertisement");
+    let verified = verify_control_message::<NodeAdvertisement>(
+        &signed,
+        NOW,
+        TimePolicy::default(),
+        &mut ReplayCache::new(1).expect("replay cache"),
+    )
+    .expect("verified local advertisement");
+    assert_eq!(verified.into_message().network.expect("network").uplink, 1);
+    for mutation in 0..5 {
+        let mut invalid = advertisement.clone();
+        let network = invalid.network.as_mut().expect("network");
+        match mutation {
+            0 => invalid.roles.as_mut().expect("roles").exit = true,
+            1 => network.asn = 64500,
+            2 => network.ipv4_prefix_hint = "8.8.8.0/24".to_owned(),
+            3 => network.ipv6_prefix_hint = "2606:4700:4700::/48".to_owned(),
+            _ => network.uplink = 42,
+        }
+        assert!(invalid.validate().is_err());
+    }
+    let mut tampered: SignedEnvelope = decode_canonical(&signed, 16384).expect("envelope");
+    let mut substituted = advertisement;
+    substituted.network.as_mut().expect("network").uplink = 0;
+    tampered.payload = substituted.encode_to_vec();
+    assert!(
+        verify_control_message::<NodeAdvertisement>(
+            &tampered.encode_to_vec(),
+            NOW,
+            TimePolicy::default(),
+            &mut ReplayCache::new(1).expect("replay")
+        )
+        .is_err()
+    );
 }
 
 #[test]

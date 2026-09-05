@@ -582,7 +582,11 @@ fn static_candidate(
     scope: ValidatedSamplingScope,
 ) -> Option<StaticCandidate> {
     let advertisement = candidate.advertisement();
-    if !advertisement.roles.supports(role)
+    // The first LAN vertical selects independently connected Relay uplinks. Local-only nodes
+    // truthfully advertise contribution, but unknown-ASN/no-public-hint relay selection needs a
+    // separate diversity policy; do not substitute zero ASN or fabricate a public prefix here.
+    if advertisement.network.uplink != volparossa_core::NetworkUplink::IndependentInternet
+        || !advertisement.roles.supports(role)
         || !advertisement
             .capabilities
             .supports_transport(scope.transport)
@@ -1417,6 +1421,27 @@ mod tests {
         .expect("scripted fallback entropy")
         .expect("empty requested band falls back to all eligible candidates");
         assert_eq!(fallback.marker, 7);
+    }
+
+    #[tokio::test]
+    async fn scoped_local_lan_sampler_keeps_wan_metadata_without_fabricating_local_only_diversity()
+    {
+        let snapshot = preselection_snapshot_fixture(1, false).await.snapshot;
+        let scope = sampling_scope(ObservationAddressFamily::Ipv4, 1, 1)
+            .validated()
+            .expect("scope");
+        let mut candidate = snapshot.direct_relays[0].advertisement.clone();
+        candidate.advertisement.control_endpoints =
+            vec!["/ip4/192.168.1.2/udp/443/quic-v1".to_owned()];
+        assert!(static_candidate(&candidate, ServiceRole::Relay, scope).is_some());
+
+        candidate.advertisement.network.asn = None;
+        assert!(static_candidate(&candidate, ServiceRole::Relay, scope).is_none());
+        candidate.advertisement.network.uplink = volparossa_core::NetworkUplink::LocalOnly;
+        candidate.advertisement.network.ipv4_prefix_hint = None;
+        candidate.advertisement.network.ipv6_prefix_hint = None;
+        assert!(static_candidate(&candidate, ServiceRole::Relay, scope).is_none());
+        assert!(static_candidate(&candidate, ServiceRole::Exit, scope).is_none());
     }
 
     #[tokio::test]

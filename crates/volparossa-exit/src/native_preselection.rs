@@ -1540,6 +1540,7 @@ mod tests {
             [0xd1; NODE_ID_BYTES],
             [0xd3; NODE_ID_BYTES],
             WireguardEndpoint {
+                underlay_scope: 0,
                 public_key: vec![0xd2; NODE_ID_BYTES],
                 underlay_ip: vec![83, 1, 1, 1],
                 listen_port: 20_002,
@@ -1565,6 +1566,7 @@ mod tests {
             [0xd1; NODE_ID_BYTES],
             [0xd4; NODE_ID_BYTES],
             WireguardEndpoint {
+                underlay_scope: 0,
                 public_key: vec![0xd5; NODE_ID_BYTES],
                 underlay_ip: vec![83, 1, 1, 2],
                 listen_port: 20_003,
@@ -1603,6 +1605,7 @@ mod tests {
             [0xc1; NODE_ID_BYTES],
             [0xc2; NODE_ID_BYTES],
             WireguardEndpoint {
+                underlay_scope: 0,
                 public_key: vec![0xc3; NODE_ID_BYTES],
                 underlay_ip: vec![82, 1, 1, 1],
                 listen_port: 20_004,
@@ -1659,6 +1662,7 @@ mod tests {
                 .expect("commitment"),
             challenge_response: Zeroizing::new(CHALLENGE),
             observed_network_prefix: ObservationNetworkPrefix {
+                scope: 0,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 network_prefix: vec![82, 1, 1],
             },
@@ -2586,6 +2590,7 @@ mod tests {
         let colliding_relay = relay_binding_with_endpoint(
             &collision.scope,
             WireguardEndpoint {
+                underlay_scope: 0,
                 public_key: vec![0xd4; NODE_ID_BYTES],
                 ..local_endpoint
             },

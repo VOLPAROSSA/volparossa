@@ -110,6 +110,7 @@ impl DiversityAnchor {
             asn,
             ObservedNetworkPrefix::from_origin(observed_network_origin),
             Some(observed_network_origin),
+            ServiceRole::Exit,
         )
     }
 
@@ -133,6 +134,33 @@ impl DiversityAnchor {
             asn,
             observed_network_prefix,
             None,
+            ServiceRole::Exit,
+        )
+    }
+
+    /// Creates an explicitly direct-Relay anchor with either public or local-LAN observations.
+    ///
+    /// A local prefix stays a local collision key, never a public origin claim. The ASN must
+    /// still be a nonzero independent-uplink claim; this does not admit unknown-ASN local relays.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SelectionError::InvalidDiversityAnchors`] for zero ASN or invalid scoped prefix.
+    pub fn from_direct_relay_prefix(
+        node_id: NodeId,
+        peer_id: PeerId,
+        operator_id: OperatorId,
+        asn: u32,
+        observed_network_prefix: ObservedNetworkPrefix,
+    ) -> Result<Self, SelectionError> {
+        Self::from_parts(
+            node_id,
+            peer_id,
+            operator_id,
+            asn,
+            observed_network_prefix,
+            None,
+            ServiceRole::Relay,
         )
     }
 
@@ -143,8 +171,12 @@ impl DiversityAnchor {
         asn: u32,
         observed_network_prefix: ObservedNetworkPrefix,
         legacy_origin_equality_key: Option<ObservedNetworkOrigin>,
+        role: ServiceRole,
     ) -> Result<Self, SelectionError> {
-        if asn == 0 || !observed_network_prefix.is_public_routable() {
+        if asn == 0
+            || !(observed_network_prefix.is_public_routable()
+                || (role == ServiceRole::Relay && observed_network_prefix.is_local_lan()))
+        {
             return Err(SelectionError::InvalidDiversityAnchors);
         }
         Ok(Self {
@@ -1605,7 +1637,7 @@ impl DiversitySet {
         let candidate = input.candidate();
         let network = &candidate.advertisement.network;
         input.observed_network_prefix().is_some_and(|prefix| {
-            prefix.is_public_routable()
+            (prefix.is_public_routable() || prefix.is_local_lan())
                 && !self.nodes.contains(&candidate.advertisement.node_id)
                 && !self.peers.contains(&candidate.advertisement.peer_id)
                 && !self.operators.contains(&network.operator_id)

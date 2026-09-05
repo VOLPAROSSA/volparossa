@@ -24,10 +24,24 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link]'
 }
 
 print_plan() {
+    if [ "$scenario" = local-link ]; then
+        printf '%s\n' \
+            'VOLPAROSSA local-link runtime smoke plan:' \
+            '  require the same disposable Debian 13 KVM guest and exact source/native build;' \
+            '  retain twelve owned namespaces and eleven isolated helper/agent instances;' \
+            '  give the local-only Client two RFC1918 LAN Relay contacts, no public address or default;' \
+            '  enable its Client and Relay roles, keep Exit disabled and ASN/public prefix absent;' \
+            '  retain independent WAN Relay contacts and one remote Internet Exit;' \
+            '  prove actual signed selection and one application UDP echo over both WireGuard legs;' \
+            '  capture LAN/WAN packets, exact Exit source, no direct-exit or plaintext leak;' \
+            '  stop workers, remove owned networks and verify unchanged guest-root host state;' \
+            '  emit local-link-smoke.json; no radio, multipath-capacity or A01-A15 claim.'
+        return
+    fi
     if [ "$scenario" = reciprocity ]; then
         printf '%s\n' \
             'VOLPAROSSA reciprocal-node runtime smoke plan:' \
@@ -82,7 +96,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
-            case $2 in alpha|reciprocity) scenario=$2 ;; *) usage >&2; exit 64 ;; esac
+            case $2 in alpha|reciprocity|local-link) scenario=$2 ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --source)
@@ -171,8 +185,10 @@ for executable in volparossa volparossa-agent volparossa-helper; do
     [ -x "$binary_directory/$executable" ] \
         || { printf 'required product executable unavailable: %s\n' "$executable" >&2; exit 69; }
 done
-if [ "$scenario" = reciprocity ]; then
-    for reciprocity_fixture in reciprocity-smoke.sh reciprocity-smoke.py; do
+if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
+    scenario_fixtures='reciprocity-smoke.sh reciprocity-smoke.py'
+    [ "$scenario" != local-link ] || scenario_fixtures="$scenario_fixtures local-link-smoke.sh local-link-smoke.py"
+    for reciprocity_fixture in $scenario_fixtures; do
         [ -f "$source_directory/tests/integration/$reciprocity_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$reciprocity_fixture" ] \
             || { printf 'reciprocity fixture unavailable: %s\n' "$reciprocity_fixture" >&2; exit 69; }
@@ -330,6 +346,7 @@ PRIVACY_RELAY1_PID=
 PRIVACY_RELAY2_PID=
 PRIVACY_EXIT_PID=
 FINALIZED=no
+# shellcheck disable=SC2034 # Shared process ownership is consumed by sourced runtime scenarios.
 RECIPROCITY_PIDS=
 
 capture_host_state() {
@@ -492,7 +509,7 @@ capture_worker_network_diagnostics() {
     printf 'capture=%s\n' "$diagnostic_label" \
         >>"$WORK/worker-network-diagnostics.txt"
     diagnostic_nodes='client relay1 relay2 exit'
-    [ "$scenario" != reciprocity ] || diagnostic_nodes='client relay0 relay2 exit'
+    case $scenario in reciprocity|local-link) diagnostic_nodes='client relay0 relay2 exit' ;; esac
     for diagnostic_node in $diagnostic_nodes; do
         diagnostic_unit=volparossa-alpha-helper@$diagnostic_node.service
         diagnostic_cgroup=$(systemctl show --property=ControlGroup --value \
@@ -815,7 +832,7 @@ cleanup() {
     [ "$FINALIZED" = no ] || exit "$original_status"
     FINALIZED=yes
     trap - EXIT HUP INT TERM
-    if [ "$scenario" = reciprocity ]; then
+    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
         reciprocity_stop_processes
     fi
 
@@ -1082,7 +1099,9 @@ cleanup() {
     fi
     copy_artifacts
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = reciprocity ]; then
+    if [ "$scenario" = local-link ]; then
+        local_link_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = reciprocity ]; then
         reciprocity_finalize_report "$original_status" || original_status=1
     else
         write_report "$original_status"
@@ -1109,9 +1128,13 @@ fail() {
     exit 1
 }
 
-if [ "$scenario" = reciprocity ]; then
+if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
     # shellcheck source=tests/integration/reciprocity-smoke.sh
     . "$source_directory/tests/integration/reciprocity-smoke.sh"
+fi
+if [ "$scenario" = local-link ]; then
+    # shellcheck source=tests/integration/local-link-smoke.sh
+    . "$source_directory/tests/integration/local-link-smoke.sh"
 fi
 
 PHASE=host-state-before
@@ -1315,7 +1338,9 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
-if [ "$scenario" = reciprocity ]; then
+if [ "$scenario" = local-link ]; then
+    local_link_extend_network
+elif [ "$scenario" = reciprocity ]; then
     reciprocity_extend_network
 fi
 TOPOLOGY_READY=true
@@ -1375,6 +1400,7 @@ write_config() {
     node=$1; operator=$2; relay_role=$3; exit_role=$4; listen_ip=$5
     bootstrap_one=$6; bootstrap_two=$7; bootstrap_three=$8
     client_role=false; relay_capacity=0; exit_capacity=0; advertised_asn=0; advertised_prefix=null
+    uplink=independent_internet; extra_listen=none
     [ "$node" != client ] || client_role=true
     [ "$relay_role" = false ] || relay_capacity=32
     [ "$exit_role" = false ] || exit_capacity=32
@@ -1388,7 +1414,7 @@ write_config() {
         exit) advertised_asn=64514; advertised_prefix=46.162.3.0/24 ;;
         exit2) exit_capacity=1; advertised_asn=64518; advertised_prefix=51.167.7.0/24 ;;
     esac
-    if [ "$scenario" = reciprocity ]; then
+    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
         case $node in
             client|relay0|relay2|exit)
                 client_role=true; relay_role=true; exit_role=true
@@ -1416,9 +1442,31 @@ write_config() {
                 ;;
         esac
     fi
+    if [ "$scenario" = local-link ]; then
+        case $node in
+            client)
+                uplink=local_only; exit_role=false; exit_capacity=0
+                advertised_asn=0; advertised_prefix=null
+                listen_ip=10.241.10.1; extra_listen=10.241.12.1
+                bootstrap_one="/ip4/10.241.10.2/udp/41000/quic-v1/p2p/$R0_PEER"
+                bootstrap_two="/ip4/10.241.12.2/udp/41000/quic-v1/p2p/$R2_PEER"
+                ;;
+            relay0)
+                extra_listen=10.241.10.2
+                bootstrap_one="/ip4/10.241.10.1/udp/41000/quic-v1/p2p/$CLIENT_PEER"
+                ;;
+            relay2)
+                extra_listen=10.241.12.2
+                bootstrap_one="/ip4/10.241.12.1/udp/41000/quic-v1/p2p/$CLIENT_PEER"
+                ;;
+            exit) ;;
+            *) bootstrap_one=none; bootstrap_two=none; bootstrap_three=none ;;
+        esac
+    fi
     {
         printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-alpha-%s\n' "$RUN_ID"
         printf '  protocol_version: 4\n  advertisement_ttl_seconds: 300\n'
+        printf '  uplink: %s\n' "$uplink"
         [ "$operator" = null ] && printf '  operator_id: null\n' \
             || printf '  operator_id: %s\n' "$operator"
         printf '  advertised_region: acceptance\n  advertised_country_code: ZZ\n'
@@ -1426,7 +1474,9 @@ write_config() {
         [ "$advertised_prefix" = null ] && printf '  advertised_ipv4_prefix: null\n' \
             || printf '  advertised_ipv4_prefix: %s\n' "$advertised_prefix"
         printf '  advertised_ipv6_prefix: null\n  listen_addresses:\n'
-        printf '    - /ip4/%s/udp/41000/quic-v1\n  bootstrap_peers:\n' "$listen_ip"
+        printf '    - /ip4/%s/udp/41000/quic-v1\n' "$listen_ip"
+        [ "$extra_listen" = none ] || printf '    - /ip4/%s/udp/41000/quic-v1\n' "$extra_listen"
+        printf '  bootstrap_peers:\n'
         [ "$bootstrap_one" = none ] \
             || printf '    - %s\n' "$bootstrap_one"
         [ "$bootstrap_two" = none ] \
@@ -1653,7 +1703,7 @@ launch_mpquic() {
     mpquic_unit=volparossa-alpha-mpquic@$node.service
     mpquic_log=$WORK/mpquic-$node.log
     native_socket=/run/volparossa/native/mpquic.sock
-    if [ "$scenario" = reciprocity ]; then
+    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
         mpquic_unit=volparossa-alpha-mpquic@$node-$native_mode.service
         mpquic_log=$WORK/mpquic-$node-$native_mode.log
         [ "$native_mode" != exit ] || native_socket=$native_socket.exit
@@ -1718,7 +1768,7 @@ verify_mpquic() {
     mpquic_unit=volparossa-alpha-mpquic@$node.service
     native_socket=$WORK/runtime-$node/native/mpquic.sock
     native_record=$WORK/mpquic-record-$node.json
-    if [ "$scenario" = reciprocity ]; then
+    if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
         mpquic_unit=volparossa-alpha-mpquic@$node-$native_mode.service
         native_record=$WORK/mpquic-record-$node-$native_mode.json
         [ "$native_mode" != exit ] || native_socket=$native_socket.exit
@@ -1759,13 +1809,15 @@ verify_mpquic() {
           api_version:6,socket_verified:true}' >"$native_record"
 }
 
-if [ "$scenario" = reciprocity ]; then
+if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ]; then
     for native_node in client relay0 relay2 exit; do
         native_namespace=$(reciprocity_namespace "$native_node")
         launch_mpquic "$native_node" "$native_namespace" client
-        launch_mpquic "$native_node" "$native_namespace" exit
         verify_mpquic "$native_node" "$native_namespace" client
-        verify_mpquic "$native_node" "$native_namespace" exit
+        if [ "$scenario" != local-link ] || [ "$native_node" != client ]; then
+            launch_mpquic "$native_node" "$native_namespace" exit
+            verify_mpquic "$native_node" "$native_namespace" exit
+        fi
     done
 else
     launch_mpquic client "$CLIENT" client
@@ -2982,7 +3034,10 @@ done
 AGENTS_READY=true
 DESTINATION_READY=true
 
-if [ "$scenario" = reciprocity ]; then
+if [ "$scenario" = local-link ]; then
+    local_link_run
+    exit 0
+elif [ "$scenario" = reciprocity ]; then
     reciprocity_run
     exit 0
 fi

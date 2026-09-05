@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::time::Instant;
 use volparossa_core::IpFamily;
 use volparossa_protocol::{
-    MAX_CONTROL_MESSAGE_SIZE, NodeAdvertisement, ObservationAddressFamily,
+    AdvertisementUplink, MAX_CONTROL_MESSAGE_SIZE, NodeAdvertisement, ObservationAddressFamily,
     PreselectionActorBinding, PreselectionObservationReceipt, PreselectionObservationRequest,
     PreselectionObservationRole, PreselectionObservationScope, ReplayCache, SignedEnvelope,
     TimePolicy, Transport, decode_canonical, node_id_from_public_key,
@@ -1061,7 +1061,9 @@ impl DiscoveryService {
             || advertisement.peer_id != local_peer.to_bytes()
             || advertisement.sequence_number == 0
             || !role_enabled
-            || network.asn == 0
+            || (network.asn == 0
+                && !(network.uplink == AdvertisementUplink::LocalOnly as i32
+                    && matches!(required_role, LocalResponderRole::Relay)))
             || payload_hash == [0; 32]
             || advertised_policy.whitelist_version != policy.version
             || advertised_policy.whitelist_hash.as_slice() != policy.hash
@@ -1273,6 +1275,7 @@ mod tests {
                 sample_window_seconds: 15,
             }),
             network: Some(AdvertisementNetwork {
+                uplink: 0,
                 region: "eu-west".to_owned(),
                 country_code: "NL".to_owned(),
                 asn: 64_496,
@@ -1793,6 +1796,91 @@ mod tests {
             &mut replay,
         )
         .expect("complete direct transcript");
+    }
+
+    #[tokio::test]
+    async fn local_only_relay_can_respond_without_inventing_asn_or_exit_authority() {
+        let mut fixture = fixture().await;
+        let mut advertisement = relay_advertisement(&fixture.relay_key, fixture.relay_public_key);
+        let network = advertisement.network.as_mut().expect("network");
+        network.uplink = AdvertisementUplink::LocalOnly as i32;
+        network.asn = 0;
+        network.ipv4_prefix_hint.clear();
+        network.ipv6_prefix_hint.clear();
+        advertisement.control_addresses = vec!["/ip4/192.168.20.2/udp/41000/quic-v1".to_owned()];
+        let signed = sign_control_message_with(
+            &advertisement,
+            fixture.relay_public_key,
+            NOW_MS,
+            ADVERTISEMENT_EXPIRY_MS,
+            [92; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&fixture.relay_key, message),
+        )
+        .expect("local-only advertisement");
+        let scope = PreselectionObservationScope {
+            role: PreselectionObservationRole::Relay as i32,
+            transport: Transport::UdpSinglePath as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: POLICY_VERSION,
+            policy_hash: POLICY_HASH.to_vec(),
+            policy_expires_at_ms: POLICY_EXPIRY_MS,
+        };
+        fixture
+            .service
+            .set_local_advertisement(signed.clone())
+            .expect("local advertisement");
+        assert!(
+            fixture
+                .service
+                .local_preselection_authority_from_encoded(
+                    &signed,
+                    fixture.policy,
+                    fixture.relay_public_key,
+                    &scope,
+                    NOW_MS + 100,
+                    LocalResponderRole::Relay
+                )
+                .is_some()
+        );
+        assert!(
+            fixture
+                .service
+                .local_preselection_authority_from_encoded(
+                    &signed,
+                    fixture.policy,
+                    fixture.relay_public_key,
+                    &scope,
+                    NOW_MS + 100,
+                    LocalResponderRole::Exit
+                )
+                .is_none()
+        );
+        advertisement.network.as_mut().expect("network").uplink =
+            AdvertisementUplink::IndependentInternet as i32;
+        let unknown_asn = sign_control_message_with(
+            &advertisement,
+            fixture.relay_public_key,
+            NOW_MS,
+            ADVERTISEMENT_EXPIRY_MS,
+            [93; 32],
+            TimePolicy::default(),
+            |message| sign_with_key(&fixture.relay_key, message),
+        )
+        .expect("public advertisement without ASN");
+        assert!(
+            fixture
+                .service
+                .local_preselection_authority_from_encoded(
+                    &unknown_asn,
+                    fixture.policy,
+                    fixture.relay_public_key,
+                    &scope,
+                    NOW_MS + 100,
+                    LocalResponderRole::Relay
+                )
+                .is_none()
+        );
     }
 
     #[tokio::test]

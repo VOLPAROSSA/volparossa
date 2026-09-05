@@ -22,12 +22,12 @@ pub use envelope::{
 };
 pub use messages::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork, AdvertisementPolicy,
-    AdvertisementQuality, AdvertisementRoles, ControlMessageType, ExitConfirmationReceipt,
-    ExitReservation, ExitReservationConfirmation, NativeRouteCredentialDelivery,
-    NativeRouteCredentialScope, NativeRouteIdentity, NodeAdvertisement, OpenTcp,
-    RelayAuthorization, RelayReservation, Transport, UdpFlowAuthorization, WireguardEndpoint,
-    exit_confirmation_envelope_hash, finalized_reservation_bundle_hash,
-    relay_reservation_request_sha256, verify_relay_reservation,
+    AdvertisementQuality, AdvertisementRoles, AdvertisementUplink, ControlMessageType,
+    ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
+    NativeRouteCredentialDelivery, NativeRouteCredentialScope, NativeRouteIdentity,
+    NodeAdvertisement, OpenTcp, RelayAuthorization, RelayReservation, Transport,
+    UdpFlowAuthorization, UnderlayScope, WireguardEndpoint, exit_confirmation_envelope_hash,
+    finalized_reservation_bundle_hash, relay_reservation_request_sha256, verify_relay_reservation,
 };
 pub use native_preselection_probe::{
     IssuedNativeProbeRelayReady, IssuedNativeProbeRelayResult, IssuedNativeProbeStart,

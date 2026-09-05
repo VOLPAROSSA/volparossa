@@ -5413,11 +5413,22 @@ fn prepared_matches(request: &PrepareLeaseBatch, prepared: &[PreparedKernelLease
     let mut public_keys = BTreeSet::new();
     let mut public_endpoints = BTreeSet::new();
     for (requested, lease) in request.leases.iter().zip(prepared) {
+        let on_link = request.traversal_hints.iter().find_map(|hint| {
+            ((hint.path_id, hint.role) == (lease.path_id, lease.role))
+                .then_some(hint.on_link.as_ref())
+                .flatten()
+        });
+        let evidence_matches = match lease.evidence {
+            UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch => {
+                on_link.is_none()
+            }
+            UnderlayEvidence::DirectOnLink => {
+                on_link.is_some_and(|hint| hint.local_address == lease.public_endpoint.address)
+            }
+            UnderlayEvidence::Unspecified => false,
+        };
         if lease.public_key.iter().all(|byte| *byte == 0)
-            || !matches!(
-                lease.evidence,
-                UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch
-            )
+            || !evidence_matches
             || (requested.path_id, requested.role) != (lease.path_id, lease.role)
             || !public_keys.insert(lease.public_key)
             || !public_endpoints.insert((
@@ -8381,6 +8392,46 @@ mod tests {
             backend.destroyed.lock().expect("destroyed").as_slice(),
             &[[7; 16]]
         );
+    }
+
+    #[test]
+    fn on_link_prepare_evidence_requires_the_exact_requested_local_source() {
+        let prepare = prepare_request(43);
+        let Some(helper_request::Operation::PrepareLeaseBatch(mut request)) = prepare.operation
+        else {
+            panic!("Prepare request");
+        };
+        let lease = PreparedKernelLease {
+            path_id: 1,
+            role: WireguardRole::Client as i32,
+            public_key: [1; 32],
+            public_endpoint: PublicUdpEndpoint {
+                address: vec![10, 42, 0, 2],
+                port: 51820,
+            },
+            evidence: UnderlayEvidence::DirectOnLink,
+        };
+        assert!(!prepared_matches(&request, std::slice::from_ref(&lease)));
+        request
+            .traversal_hints
+            .push(volparossa_routing::TraversalEndpointHint {
+                path_id: lease.path_id,
+                role: lease.role,
+                observer_id: vec![7; 32],
+                observer_peer_id: vec![8; 38],
+                observed_address: Vec::new(),
+                on_link: Some(volparossa_routing::OnLinkUnderlayHint {
+                    local_address: lease.public_endpoint.address.clone(),
+                    peer_address: vec![10, 42, 0, 1],
+                }),
+            });
+        assert!(prepared_matches(&request, std::slice::from_ref(&lease)));
+        let mut wrong = lease.clone();
+        wrong.public_endpoint.address[3] = 3;
+        assert!(!prepared_matches(&request, &[wrong]));
+        let mut fallback = lease;
+        fallback.evidence = UnderlayEvidence::DirectAssigned;
+        assert!(!prepared_matches(&request, &[fallback]));
     }
 
     #[test]

@@ -30,6 +30,13 @@ globally routable by relaxing the common public-IP predicate. Local peers do not
 fabricated public ASNs or fake diverse public prefixes. Advertisements and capacity indexes
 must distinguish independently reachable Internet service from local-only contribution.
 
+The initial implementation uses signed `DirectLocalLan` scope, per-lease helper underlay binding
+and exact read-only kernel route checks. Its first live target is IPv4 local Client links to two
+WAN-capable Relay contacts (one control and one data), with independent public Relay-to-Exit
+connectivity. ULA classification and kernel route parsing have focused coverage, not live IPv6
+transfer evidence. LocalOnly nodes' unknown-ASN Relay selection, local Exit-facing links and
+automatic radio setup remain separate unfinished functionality, not hidden public-IP fallback.
+
 ## Sharing capacity
 
 Configured limits remain hard ceilings, not evidence of unused bandwidth. The sharing controller

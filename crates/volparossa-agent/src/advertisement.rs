@@ -427,6 +427,7 @@ mod tests {
                 sample_window_seconds: 0,
             },
             origin: AdvertisementNetwork {
+                uplink: volparossa_protocol::AdvertisementUplink::IndependentInternet as i32,
                 region: "test".to_owned(),
                 country_code: "NL".to_owned(),
                 asn: 64_512,

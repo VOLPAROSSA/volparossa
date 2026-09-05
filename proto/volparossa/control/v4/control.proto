@@ -69,6 +69,17 @@ enum ObservationAddressFamily {
   OBSERVATION_ADDRESS_FAMILY_IPV6 = 2;
 }
 
+// Zero preserves the existing public-only wire representation. Local scope is not adjacency proof.
+enum UnderlayScope {
+  UNDERLAY_SCOPE_PUBLIC_INTERNET = 0;
+  UNDERLAY_SCOPE_DIRECT_LOCAL_LAN = 1;
+}
+
+enum AdvertisementUplink {
+  ADVERTISEMENT_UPLINK_INDEPENDENT_INTERNET = 0;
+  ADVERTISEMENT_UPLINK_LOCAL_ONLY = 1;
+}
+
 message SignedEnvelope {
   uint32 protocol_version = 1;
   bytes sender_id = 2;
@@ -169,6 +180,7 @@ message PreselectionObservationReceipt {
 message ObservationNetworkPrefix {
   ObservationAddressFamily address_family = 1;
   bytes network_prefix = 2;
+  UnderlayScope scope = 3;
 }
 
 // Forwarded attestation envelopes are at most 8192 bytes and their exact nested
@@ -399,6 +411,7 @@ message AdvertisementNetwork {
   string ipv4_prefix_hint = 4;
   string ipv6_prefix_hint = 5;
   string operator_id = 6;
+  AdvertisementUplink uplink = 7;
 }
 
 message AdvertisementQuality {
@@ -416,6 +429,7 @@ message WireguardEndpoint {
   bytes public_key = 1;
   bytes underlay_ip = 2;
   uint32 listen_port = 3;
+  UnderlayScope underlay_scope = 4;
 }
 
 message NodeAdvertisement {

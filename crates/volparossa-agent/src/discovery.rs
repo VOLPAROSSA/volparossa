@@ -52,7 +52,7 @@ use volparossa_config::{Config, RolesConfig};
 use volparossa_core::{
     Bandwidth, CapacitySnapshot, NetworkMetadata, NodeAdvertisement as CoreAdvertisement,
     NodeCapabilities, NodeId, NodeQuality, NodeRoles, OperatorId, PeerId as CorePeerId, PolicyHash,
-    UnixTime, is_public_routable_ip,
+    UnixTime, is_local_lan_ip, is_public_routable_ip,
 };
 use volparossa_discovery::{
     AdvertisementResponse, BehaviourEvent, BoundClientPreselectionTransport,
@@ -4169,6 +4169,14 @@ impl DiscoveryRuntime {
 
     fn local_advertisement_origin(&self) -> AdvertisementNetwork {
         AdvertisementNetwork {
+            uplink: match self.config.network.uplink {
+                volparossa_config::NetworkUplink::IndependentInternet => {
+                    volparossa_protocol::AdvertisementUplink::IndependentInternet
+                }
+                volparossa_config::NetworkUplink::LocalOnly => {
+                    volparossa_protocol::AdvertisementUplink::LocalOnly
+                }
+            } as i32,
             region: self.config.network.advertised_region.clone(),
             country_code: self.config.network.advertised_country_code.clone(),
             asn: self.config.network.advertised_asn,
@@ -4314,8 +4322,8 @@ impl DiscoveryRuntime {
         observer_peer: Libp2pPeerId,
         observed_address: &Multiaddr,
     ) {
-        let Some(address) =
-            multiaddr_ip(observed_address).filter(|address| is_public_routable_ip(*address))
+        let Some(address) = multiaddr_ip(observed_address)
+            .filter(|address| is_public_routable_ip(*address) || is_local_lan_ip(*address))
         else {
             return;
         };
@@ -4379,16 +4387,13 @@ impl DiscoveryRuntime {
                 let [address] = candidates.as_slice() else {
                     continue;
                 };
-                hints.push(TraversalEndpointHint {
-                    path_id: binding.path_id,
-                    role: binding.role as i32,
-                    observer_id: binding.observer_id.to_vec(),
-                    observer_peer_id: binding.observer_peer_id.to_bytes(),
-                    observed_address: match address {
-                        IpAddr::V4(address) => address.octets().to_vec(),
-                        IpAddr::V6(address) => address.octets().to_vec(),
-                    },
-                });
+                if let Some(hint) = endpoint_hint_from_observation(
+                    &binding,
+                    *address,
+                    &self.observed_endpoints[&binding.observer_peer_id],
+                ) {
+                    hints.push(hint);
+                }
             }
         }
         Ok(hints)
@@ -4676,16 +4681,15 @@ impl DiscoveryRuntime {
                 || self.reserved_provider_exit_peers.contains_key(&peer)
                 || self.peer_is_forwarded_exit_target(peer, now_ms)
                 || self
-                    .direct_relays
-                    .get(&peer)
-                    .is_some_and(|entry| entry.expires_at_ms > now_ms.saturating_add(1_000))
-                || self
                     .relay_advertisement_requests
                     .values()
                     .any(|pending| *pending == peer)
             {
                 continue;
             }
+            // A fresh provider observation may refer to a restarted or changed Relay while the
+            // previous advertisement is still unexpired. Refresh within the existing request
+            // bounds; expiry is an authority ceiling, not a reason to suppress updates.
             if let Ok(request_id) = self.service.request_relay_advertisement(&peer) {
                 self.relay_advertisement_requests.insert(request_id, peer);
             }
@@ -4693,6 +4697,21 @@ impl DiscoveryRuntime {
     }
 
     fn reserve_provider_exit_candidates(&mut self, now_ms: u64) {
+        // An Exit query finishing says nothing about peers which have not announced yet.
+        // This route architecture needs a separate Exit, control Relay and data Relay. Do not
+        // permanently sacrifice one of the first two neighbors before that pool can exist.
+        if self.reserved_provider_exit_peers.is_empty()
+            && self
+                .relay_provider_peers
+                .keys()
+                .chain(self.exit_provider_peers.keys())
+                .copied()
+                .collect::<HashSet<_>>()
+                .len()
+                < 3
+        {
+            return;
+        }
         for (peer, expires_at_ms) in &mut self.reserved_provider_exit_peers {
             if let Some(observed_expiry) = self.exit_provider_peers.get(peer) {
                 *expires_at_ms = (*expires_at_ms).max(*observed_expiry);
@@ -4701,20 +4720,36 @@ impl DiscoveryRuntime {
         let target_count = (self.exit_provider_peers.len() / 3)
             .max(1)
             .min(self.candidate_limit.max(1));
-        // These endpoints come only from authenticated ConnectionEstablished events, not DHT
-        // provider records. Connectivity is a preference, never signed service authority.
-        let directly_connected = self
+        // Prefer authenticated neighbors and explicit bootstrap contacts as Relay contacts.
+        // Bootstrap configuration is only a scheduling preference, not signed service authority;
+        // including it prevents connection-start order from reserving a known adjacent contact.
+        let mut directly_connected = self
             .observed_endpoints
             .iter()
             .filter_map(|(peer, (endpoint, _))| {
                 (!endpoint.contains("/p2p-circuit")).then_some(*peer)
             })
             .collect::<HashSet<_>>();
+        directly_connected.extend(
+            self.config
+                .network
+                .bootstrap_peers
+                .iter()
+                .filter_map(|address| parse_bootstrap(address).ok())
+                .map(|link| *link.peer_id()),
+        );
         let mut peers = self.exit_provider_peers.keys().copied().collect::<Vec<_>>();
         let has_provider_only_exit = peers.iter().any(|peer| {
             !directly_connected.contains(peer)
                 && self.forwarded_exit_peer_is_eligible(*peer, now_ms)
         });
+        // Relay results can arrive ahead of Exit results. Even a three-peer union must not
+        // turn a first Exit result containing only one or two known neighbors into a sticky
+        // fallback. A non-neighbor Exit is usable immediately; dense fallback needs its full
+        // minimum three-role provider pool in this index as well.
+        if !has_provider_only_exit && self.exit_provider_peers.len() < 3 {
+            return;
+        }
         // Keep existing reservations private even if the topology changed. A newly discovered
         // provider-only Exit can still be reserved when an earlier fallback reserved a neighbor.
         let mut preferred_count = self
@@ -12982,12 +13017,23 @@ fn native_probe_exit_socket_request(
 }
 
 fn native_probe_observed_relay_prefix(underlay_ip: &[u8]) -> Option<ObservationNetworkPrefix> {
+    let address = match underlay_ip.len() {
+        4 => IpAddr::from(<[u8; 4]>::try_from(underlay_ip).ok()?),
+        16 => IpAddr::from(<[u8; 16]>::try_from(underlay_ip).ok()?),
+        _ => return None,
+    };
+    // This is Exit-side Relay-to-Exit evidence, never the Client's local LAN origin.
+    if !is_public_routable_ip(address) {
+        return None;
+    }
     match underlay_ip.len() {
         4 => Some(ObservationNetworkPrefix {
+            scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             address_family: ObservationAddressFamily::Ipv4 as i32,
             network_prefix: underlay_ip[..3].to_vec(),
         }),
         16 => Some(ObservationNetworkPrefix {
+            scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             address_family: ObservationAddressFamily::Ipv6 as i32,
             network_prefix: underlay_ip[..6].to_vec(),
         }),
@@ -13814,6 +13860,47 @@ fn fresh_exit_route_runtime_instance_id() -> Option<[u8; 32]> {
             return Some(instance_id);
         }
     }
+}
+
+fn endpoint_hint_from_observation(
+    binding: &EndpointTraversalBinding,
+    observed: IpAddr,
+    remote: &(String, Option<IpAddr>),
+) -> Option<TraversalEndpointHint> {
+    let bytes = |address: IpAddr| match address {
+        IpAddr::V4(address) => address.octets().to_vec(),
+        IpAddr::V6(address) => address.octets().to_vec(),
+    };
+    let (observed_address, on_link) = if is_public_routable_ip(observed) {
+        (bytes(observed), None)
+    } else {
+        let peer = remote.1?;
+        if remote.0.contains("/p2p-circuit")
+            || !is_local_lan_ip(observed)
+            || !is_local_lan_ip(peer)
+            || observed.is_ipv4() != peer.is_ipv4()
+            || observed == peer
+        {
+            return None;
+        }
+        (
+            Vec::new(),
+            Some(volparossa_routing::OnLinkUnderlayHint {
+                local_address: bytes(observed),
+                peer_address: bytes(peer),
+            }),
+        )
+    };
+    // The permanent transport PeerId stays helper-local. RelayClient's observer_id is the
+    // signed ephemeral session actor; neither this hint nor its interface proof goes to Exit.
+    Some(TraversalEndpointHint {
+        path_id: binding.path_id,
+        role: binding.role as i32,
+        observer_id: binding.observer_id.to_vec(),
+        observer_peer_id: binding.observer_peer_id.to_bytes(),
+        observed_address,
+        on_link,
+    })
 }
 
 fn public_udp_endpoint(
@@ -15413,6 +15500,16 @@ fn convert_advertisement(wire: &WireAdvertisement, now: UnixTime) -> Result<Core
             sample_window_seconds: u16::try_from(capacity.sample_window_seconds).map_err(|_| ())?,
         },
         network: NetworkMetadata {
+            uplink: match volparossa_protocol::AdvertisementUplink::try_from(network.uplink)
+                .map_err(|_| ())?
+            {
+                volparossa_protocol::AdvertisementUplink::IndependentInternet => {
+                    volparossa_core::NetworkUplink::IndependentInternet
+                }
+                volparossa_protocol::AdvertisementUplink::LocalOnly => {
+                    volparossa_core::NetworkUplink::LocalOnly
+                }
+            },
             operator_id: OperatorId::new(network.operator_id.clone()).map_err(|_| ())?,
             region: network.region.clone(),
             country_code: network.country_code.clone(),
@@ -15586,6 +15683,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_local_endpoint_observations_keep_transport_and_actor_bindings() {
+        let mut fixture = fixture(test_client_roles());
+        let observer = *Identity::generate().peer_id();
+        fixture.runtime.observed_endpoints.insert(
+            observer,
+            (
+                "/ip4/192.168.8.2/udp/443/quic-v1".to_owned(),
+                Some("192.168.8.2".parse().unwrap()),
+            ),
+        );
+        fixture.runtime.record_local_endpoint_observation(
+            observer,
+            &"/ip4/192.168.8.1/udp/443/quic-v1".parse().unwrap(),
+        );
+        let binding = EndpointTraversalBinding {
+            path_id: 1,
+            role: WireguardRole::RelayClient,
+            observer_id: [7; 32],
+            observer_peer_id: observer,
+        };
+        let hints = fixture
+            .runtime
+            .exact_endpoint_traversal_hints(vec![binding.clone()])
+            .expect("direct local authenticated observer");
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].observer_id, vec![7; 32]);
+        assert_eq!(hints[0].observer_peer_id, observer.to_bytes());
+        assert!(hints[0].observed_address.is_empty());
+        let local = hints[0].on_link.as_ref().unwrap();
+        assert_eq!(local.local_address, vec![192, 168, 8, 1]);
+        assert_eq!(local.peer_address, vec![192, 168, 8, 2]);
+        fixture
+            .runtime
+            .observed_endpoints
+            .get_mut(&observer)
+            .unwrap()
+            .0
+            .push_str("/p2p-circuit");
+        assert!(
+            fixture
+                .runtime
+                .exact_endpoint_traversal_hints(vec![binding])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(native_probe_observed_relay_prefix(&[192, 168, 8, 2]).is_none());
+        assert!(native_probe_observed_relay_prefix(&[8, 8, 8, 8]).is_some());
+    }
+
+    #[tokio::test]
     async fn traversal_observations_bind_only_the_exact_active_peer_and_path() {
         let mut fixture = fixture(test_client_roles());
         let observer = Identity::generate().peer_id().to_owned();
@@ -15667,6 +15814,7 @@ mod tests {
                 sample_window_seconds: 0,
             },
             origin: AdvertisementNetwork {
+                uplink: volparossa_protocol::AdvertisementUplink::IndependentInternet as i32,
                 region: "test".to_owned(),
                 country_code: "NL".to_owned(),
                 asn: 64_512,
@@ -19732,6 +19880,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_provider_refreshes_live_advertisement_without_duplicate_requests() {
+        let mut fixture = fixture(test_client_roles());
+        let relay_identity = Identity::generate();
+        let now_ms = unix_millis();
+        let control = install_control(&mut fixture, &relay_identity, now_ms);
+        assert!(control.expires_at_ms > now_ms.saturating_add(1_000));
+        assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, HashSet::from([control.peer_id]));
+        assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 1);
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, HashSet::from([control.peer_id]));
+        assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 1);
+    }
+
+    #[tokio::test]
     async fn combined_role_provider_partition_keeps_exit_and_two_relays_in_either_event_order() {
         for (offers_exit, relay_first) in
             [(true, true), (true, false), (false, true), (false, false)]
@@ -19866,6 +20032,64 @@ mod tests {
             assert!(fixture.runtime.direct_relays.is_empty());
             assert!(fixture.runtime.forwarded_exits.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn provider_partition_waits_for_a_usable_pool_across_completed_queries() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        });
+        let neighbors = [
+            *Identity::generate().peer_id(),
+            *Identity::generate().peer_id(),
+        ];
+        for peer in neighbors {
+            fixture
+                .runtime
+                .observed_endpoints
+                .insert(peer, ("/ip4/44.12.34.1/udp/41000/quic-v1".to_owned(), None));
+        }
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, HashSet::from(neighbors));
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Exit, HashSet::from(neighbors));
+        // A first query has fully finished; the next provider is not merely another streamed chunk.
+        assert!(fixture.runtime.provider_queries.is_empty());
+        assert!(fixture.runtime.reserved_provider_exit_peers.is_empty());
+        assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+        let opposite = *Identity::generate().peer_id();
+        // The Relay index may finish ahead of the next Exit query. Its completeness must not
+        // make either already-known neighbor into the permanently reserved Exit.
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, HashSet::from([opposite]));
+        assert!(fixture.runtime.reserved_provider_exit_peers.is_empty());
+        assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Exit, HashSet::from([opposite]));
+        assert_eq!(
+            fixture
+                .runtime
+                .reserved_provider_exit_peers
+                .keys()
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([opposite])
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .relay_advertisement_requests
+                .values()
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from(neighbors)
+        );
     }
 
     #[tokio::test]

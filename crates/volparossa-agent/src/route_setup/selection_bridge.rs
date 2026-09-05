@@ -123,10 +123,11 @@ impl ActorRelayDiversity {
     fn from_snapshot(
         diversity: &DiversitySnapshot,
         address_family: Option<IpFamily>,
+        role: ServiceRole,
     ) -> Result<Self, RouteSetupError> {
         let prefix = diversity.observed_network_prefix;
         if diversity.asn == 0
-            || !prefix.is_public_routable()
+            || !role_allows_observed_prefix(role, prefix)
             || address_family.is_some_and(|family| family != prefix.family())
         {
             return Err(RouteSetupError::Invalid("relay diversity"));
@@ -188,8 +189,11 @@ impl ActorBoundRelayProof {
         evidence_batch_id: EvidenceBatchId,
     ) -> Result<(), RouteSetupError> {
         self.revalidate_at(trusted_now_ms, requirements, evidence_batch_id.0)?;
-        let expected_diversity =
-            ActorRelayDiversity::from_snapshot(diversity, requirements.address_family)?;
+        let expected_diversity = ActorRelayDiversity::from_snapshot(
+            diversity,
+            requirements.address_family,
+            ServiceRole::Relay,
+        )?;
         if self.relay.identity != binding.identity
             || self.forwarded_exit != selected_exit.authority
             || self.diversity != expected_diversity
@@ -266,10 +270,16 @@ impl ActorBoundRelayProof {
     ) -> Result<(), RouteSetupError> {
         self.revalidate_at(trusted_now_ms, requirements, evidence_batch_id)?;
         let identity = &self.relay.identity;
-        let control_diversity =
-            ActorRelayDiversity::from_snapshot(control_diversity, requirements.address_family)?;
-        let exit_diversity =
-            ActorRelayDiversity::from_snapshot(exit_diversity, requirements.address_family)?;
+        let control_diversity = ActorRelayDiversity::from_snapshot(
+            control_diversity,
+            requirements.address_family,
+            ServiceRole::Relay,
+        )?;
+        let exit_diversity = ActorRelayDiversity::from_snapshot(
+            exit_diversity,
+            requirements.address_family,
+            ServiceRole::Exit,
+        )?;
         if setup_expires_at_ms > self.evidence_valid_until_ms
             || setup_expires_at_ms > self.advertisement_expires_at_ms
             || setup_expires_at_ms > identity.expires_at_ms
@@ -2181,7 +2191,7 @@ fn fresh_evidence_batch_from_preselection(
                 && relay_projections[control].is_none()
                 && exit_projection.is_none() =>
             {
-                validate_projection_prefix(upstream_network_prefix, family)?;
+                validate_projection_prefix(upstream_network_prefix, family, ServiceRole::Exit)?;
                 let control_projection = local_projection;
                 // The client observed one complete client-control-exit-control-client exchange.
                 // It is a conservative forwarded-path RTT, never a direct client-to-exit sample.
@@ -2282,7 +2292,9 @@ fn actor_projection(
     trusted_now_ms: u64,
 ) -> Result<ActorFreshnessProjection, SelectionBridgeError> {
     let prefix = transport.observed_network_prefix();
-    validate_projection_prefix(prefix, family)?;
+    // This transport observation always describes a directly authenticated Relay, including the
+    // control Relay for a forwarded Exit receipt; it never describes the upstream Exit itself.
+    validate_projection_prefix(prefix, family, ServiceRole::Relay)?;
     let observed_at_ms = transport.observed_at_ms();
     let round_trip = transport.round_trip();
     if observed_at_ms < attempt_started_at_ms
@@ -2305,11 +2317,16 @@ fn actor_projection(
 fn validate_projection_prefix(
     prefix: ObservedNetworkPrefix,
     family: IpFamily,
+    role: ServiceRole,
 ) -> Result<(), SelectionBridgeError> {
-    if prefix.family() != family || !prefix.is_public_routable() {
+    if prefix.family() != family || !role_allows_observed_prefix(role, prefix) {
         return Err(SelectionBridgeError::EvidenceBinding);
     }
     Ok(())
+}
+
+fn role_allows_observed_prefix(role: ServiceRole, prefix: ObservedNetworkPrefix) -> bool {
+    prefix.is_public_routable() || (role == ServiceRole::Relay && prefix.is_local_lan())
 }
 
 #[allow(
@@ -2550,7 +2567,8 @@ fn validate_fresh_evidence_batch(
     let mut peer_ids = HashSet::with_capacity(evidence.len());
     for fresh in evidence {
         let prefix_is_exact = fresh.observed_network_prefix.is_some_and(|prefix| {
-            prefix.is_public_routable() && fresh.address_family == Some(prefix.family())
+            role_allows_observed_prefix(fresh.role, prefix)
+                && fresh.address_family == Some(prefix.family())
         });
         let role_shape_is_exact = matches!(
             (fresh.role, &fresh.forwarded_control),
@@ -2785,7 +2803,7 @@ fn prospective_diversity_anchors(
     let control_peer_id = PeerId::new(control_identity.peer_id.to_string())
         .map_err(|_| SelectionBridgeError::EvidenceBinding)?;
     Ok([
-        DiversityAnchor::from_observed_prefix(
+        DiversityAnchor::from_direct_relay_prefix(
             control_node_id,
             control_peer_id,
             selected
@@ -3117,6 +3135,7 @@ fn validate_preprobe_peer_binding(
 fn validate_preprobe_peer_evidence(
     evidence: &CandidateEvidence,
     diversity: &DiversitySnapshot,
+    role: ServiceRole,
     scope: &RouteSelectionScope,
     trusted_now_ms: u64,
     prior_diversity: &[&DiversitySnapshot],
@@ -3136,7 +3155,7 @@ fn validate_preprobe_peer_evidence(
         || evidence.observed_network_origin.is_some()
         || !observed_family_matches
         || diversity.asn == 0
-        || !prefix.is_public_routable()
+        || !role_allows_observed_prefix(role, prefix)
         || evidence
             .serious_protocol_fault_until
             .is_some_and(|until| !until.is_expired_at(UnixTime::from_secs(trusted_now_ms / 1_000)))
@@ -3259,6 +3278,7 @@ fn validate_and_allocate_preprobe_plan(
     validate_preprobe_peer_evidence(
         &forwarded_exit.control_peer_evidence,
         &forwarded_exit.control_diversity,
+        ServiceRole::Relay,
         &scope,
         trusted_now_ms,
         &[],
@@ -3293,6 +3313,7 @@ fn validate_and_allocate_preprobe_plan(
     validate_preprobe_peer_evidence(
         &forwarded_exit.exit_peer_evidence,
         &forwarded_exit.exit_diversity,
+        ServiceRole::Exit,
         &scope,
         trusted_now_ms,
         &[&forwarded_exit.control_diversity],
@@ -3346,6 +3367,7 @@ fn validate_and_allocate_preprobe_plan(
         validate_preprobe_peer_evidence(
             &relay.peer_evidence,
             &relay.diversity,
+            ServiceRole::Relay,
             &scope,
             trusted_now_ms,
             &diversity,
@@ -4358,9 +4380,12 @@ fn mint_actor_bound_relay_proof(
     {
         return Err(SelectionBridgeError::EvidenceBinding);
     }
-    let diversity =
-        ActorRelayDiversity::from_snapshot(&record.diversity, requirements.address_family)
-            .map_err(SelectionBridgeError::RouteSetup)?;
+    let diversity = ActorRelayDiversity::from_snapshot(
+        &record.diversity,
+        requirements.address_family,
+        ServiceRole::Relay,
+    )
+    .map_err(SelectionBridgeError::RouteSetup)?;
     let prefix_observed =
         PrefixObservedCandidate::new(&record.candidate, record.diversity.observed_network_prefix)
             .map_err(|reason| SelectionBridgeError::Selection(SelectionError::HardFilter(reason)))?;
@@ -4516,7 +4541,10 @@ fn verify_selection_metadata(
         || !observed_family_matches
         || (fresh.reachable && fresh.rtt_ms.is_none())
         || (!fresh.reachable && fresh.rtt_ms.is_some())
-        || !observed_network_prefix.is_public_routable()
+        || !role_allows_observed_prefix(expected_role, observed_network_prefix)
+        // Local-only Relay advertisements remain honest but need their own unknown-origin
+        // selection policy. Initial LAN consumers use a Relay with an independent WAN uplink.
+        || advertisement.network.uplink != volparossa_core::NetworkUplink::IndependentInternet
         || authenticated.signed_measured_at_ms == 0
         || authenticated.signed_measured_at_ms > authenticated.signed_expires_at_ms
     {
@@ -4980,6 +5008,7 @@ mod tests {
                 sample_window_seconds: 30,
             }),
             network: Some(AdvertisementNetwork {
+                uplink: volparossa_protocol::AdvertisementUplink::IndependentInternet as i32,
                 region: "eu-west".to_owned(),
                 country_code: "NL".to_owned(),
                 asn,
@@ -5043,6 +5072,7 @@ mod tests {
                 sample_window_seconds: 30,
             },
             network: NetworkMetadata {
+                uplink: volparossa_core::NetworkUplink::IndependentInternet,
                 operator_id: OperatorId::new(operator).expect("operator"),
                 region: "eu-west".to_owned(),
                 country_code: "NL".to_owned(),
@@ -6004,6 +6034,91 @@ mod tests {
             FreshEvidenceBatch::for_test(wrong_family, NOW_MS),
             Err(SelectionBridgeError::EvidenceBinding)
         ));
+    }
+
+    #[test]
+    fn scoped_local_lan_relays_reach_preprobe_without_relaxing_exit_scope() {
+        let (snapshot, mut evidence) = snapshot_fixture();
+        for (index, fresh) in evidence.iter_mut().enumerate() {
+            if fresh.role == ServiceRole::Relay {
+                fresh.observed_network_prefix = Some(ObservedNetworkPrefix::local_ipv4_24([
+                    192,
+                    168,
+                    u8::try_from(index).expect("bounded fixture index"),
+                ]));
+            }
+        }
+        let plan = snapshot_route_plan_at(
+            &snapshot,
+            snapshot_parameters(),
+            fresh_batch(evidence.clone()),
+            NOW_MS,
+            &mut OsRng,
+        )
+        .expect("WAN-capable relays reached over scoped local links");
+        let expected = expected_preprobe_continuation(&plan);
+        let continuation = consume_prospective_route_plan_with_minters(
+            plan,
+            preprobe_consume_context(Instant::now()),
+            RouteSessionAuthority::generate,
+            ReservationSession::generate,
+        )
+        .expect("local relay prefixes survive preprobe admission");
+        assert_exact_preprobe_bindings(&continuation, &expected);
+        assert!(
+            continuation
+                .forwarded_exit
+                .control_diversity
+                .observed_network_prefix
+                .is_local_lan()
+        );
+        assert!(
+            continuation
+                .forwarded_exit
+                .exit_diversity
+                .observed_network_prefix
+                .is_public_routable()
+        );
+
+        evidence[1].observed_network_prefix =
+            Some(ObservedNetworkPrefix::local_ipv4_24([192, 168, 100]));
+        assert!(matches!(
+            FreshEvidenceBatch::for_test(evidence, NOW_MS),
+            Err(SelectionBridgeError::EvidenceBinding)
+        ));
+    }
+
+    #[test]
+    fn scoped_local_lan_projection_is_role_and_family_bound() {
+        for (prefix, family) in [
+            (
+                ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]),
+                IpFamily::Ipv4,
+            ),
+            (
+                ObservedNetworkPrefix::local_ipv6_48([0xfd, 1, 2, 3, 4, 5]),
+                IpFamily::Ipv6,
+            ),
+        ] {
+            assert!(validate_projection_prefix(prefix, family, ServiceRole::Relay).is_ok());
+            assert!(validate_projection_prefix(prefix, family, ServiceRole::Exit).is_err());
+        }
+        assert!(
+            validate_projection_prefix(
+                ObservedNetworkPrefix::ipv4_24([192, 168, 1]),
+                IpFamily::Ipv4,
+                ServiceRole::Relay,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_projection_prefix(
+                ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]),
+                IpFamily::Ipv6,
+                ServiceRole::Relay,
+            )
+            .is_err()
+        );
     }
 
     type TestPreselectionFreshnessRecord = (

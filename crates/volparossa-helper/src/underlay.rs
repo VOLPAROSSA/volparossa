@@ -1,14 +1,14 @@
-//! Read-only collection and fail-closed selection of a directly assigned public underlay address.
+//! Read-only collection and fail-closed per-lease selection of public or adjacent LAN underlays.
 //!
-//! The functional-alpha production backend uses this collector before its one-lease mutation. It
-//! performs only bounded `NETLINK_ROUTE` dumps and never changes links, addresses, routes, DNS or
-//! firewall state. Broader multi-path selection remains unavailable.
+//! The functional-alpha backend uses bounded `NETLINK_ROUTE` snapshots and exact route lookups
+//! before preparation, then revalidates LAN bindings before activation. Collection never changes
+//! links, addresses, routes, DNS or firewall state.
 
 mod netlink;
 
-pub(crate) use netlink::collect_consistent_underlay;
+pub(crate) use netlink::{collect_consistent_underlays, revalidate_underlay_bindings};
 
-use std::net::IpAddr;
+use std::{collections::BTreeMap, net::IpAddr};
 use volparossa_routing::{LeasePlan, TraversalEndpointHint, is_public_routable_ip};
 
 /// Evidence attached to an address selected without NAT or reachability inference.
@@ -18,6 +18,8 @@ pub(crate) enum UnderlayEvidence {
     DirectAssigned,
     /// A public IPv4 address observed by every exact control peer in the prepare lineage.
     ObservedUdpPunch,
+    /// The exact authenticated adjacent peer has a kernel-proven connected LAN route.
+    DirectOnLink,
 }
 
 /// Minimal read-only link facts obtained from rtnetlink.
@@ -75,6 +77,129 @@ pub(crate) struct UnderlayCandidate {
     pub(crate) ifindex: u32,
     pub(crate) address: IpAddr,
     pub(crate) evidence: UnderlayEvidence,
+}
+
+pub(crate) type UnderlayBindings = BTreeMap<(u32, i32), UnderlayBinding>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UnderlayBinding {
+    pub(crate) candidate: UnderlayCandidate,
+    pub(crate) on_link: Option<OnLinkBinding>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_field_names)] // Every field describes the remote peer, unlike the local candidate.
+pub(crate) struct OnLinkBinding {
+    pub(crate) peer_address: IpAddr,
+    pub(crate) peer_actor_id: [u8; 32],
+    pub(crate) peer_peer_id: Vec<u8>,
+}
+
+/// A main-table kernel connected route without a gateway or indirect nexthop.
+/// IPv4 reports LINK scope; IPv6 reports universe scope for its connected prefixes.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct ConnectedUnderlayRoute {
+    pub(super) ifindex: u32,
+    pub(super) network: IpAddr,
+    pub(super) prefix_length: u8,
+}
+
+fn prefix_contains(network: IpAddr, prefix: u8, address: IpAddr) -> bool {
+    match (network, address) {
+        (IpAddr::V4(network), IpAddr::V4(address)) if (1..=32).contains(&prefix) => {
+            let mask = u32::MAX << (32 - prefix);
+            u32::from(network) & mask == u32::from(address) & mask
+        }
+        (IpAddr::V6(network), IpAddr::V6(address)) if (1..=128).contains(&prefix) => {
+            let mask = u128::MAX << (128 - prefix);
+            u128::from(network) & mask == u128::from(address) & mask
+        }
+        _ => false,
+    }
+}
+
+fn lan_address(bytes: &[u8]) -> Option<IpAddr> {
+    let address = match bytes.len() {
+        4 => IpAddr::V4(<[u8; 4]>::try_from(bytes).ok()?.into()),
+        16 => IpAddr::V6(<[u8; 16]>::try_from(bytes).ok()?.into()),
+        _ => return None,
+    };
+    volparossa_routing::is_local_lan_ip(address).then_some(address)
+}
+
+pub(super) fn select_on_link_underlay(
+    links: &[UnderlayLink],
+    addresses: &[UnderlayAddress],
+    routes: &[ConnectedUnderlayRoute],
+    local: IpAddr,
+    peer: IpAddr,
+) -> Result<UnderlayCandidate, UnderlaySelectionError> {
+    if !volparossa_routing::is_local_lan_ip(local)
+        || !volparossa_routing::is_local_lan_ip(peer)
+        || local == peer
+        || UnderlayFamily::of(local) != UnderlayFamily::of(peer)
+    {
+        return Err(UnderlaySelectionError::NoCandidate);
+    }
+    let mut candidates = addresses.iter().filter(|address| {
+        address.address == local
+            && !address.tentative
+            && !address.dad_failed
+            && !address.deprecated
+            && !address.broadcast
+            && links
+                .iter()
+                .filter(|link| {
+                    link.ifindex == address.ifindex
+                        && link.ifindex != 0
+                        && link.up
+                        && !link.loopback
+                        && !link.helper_owned
+                })
+                .count()
+                == 1
+    });
+    let address = candidates
+        .next()
+        .ok_or(UnderlaySelectionError::NoCandidate)?;
+    if candidates.next().is_some() {
+        return Err(UnderlaySelectionError::Ambiguous);
+    }
+    // WireGuard's outer UDP socket is not source-bound. An explicit-source route lookup alone
+    // cannot prove which alias that socket would choose, so require one usable family source.
+    if addresses
+        .iter()
+        .filter(|other| {
+            other.ifindex == address.ifindex
+                && UnderlayFamily::of(other.address) == UnderlayFamily::of(local)
+                && !other.tentative
+                && !other.dad_failed
+                && !other.deprecated
+                && !other.broadcast
+        })
+        .count()
+        != 1
+    {
+        return Err(UnderlaySelectionError::Ambiguous);
+    }
+    let mut connected = routes.iter().filter(|route| {
+        prefix_contains(route.network, route.prefix_length, local)
+            && prefix_contains(route.network, route.prefix_length, peer)
+    });
+    let route = connected
+        .next()
+        .ok_or(UnderlaySelectionError::NoCandidate)?;
+    if connected.next().is_some() {
+        return Err(UnderlaySelectionError::Ambiguous);
+    }
+    if route.ifindex != address.ifindex {
+        return Err(UnderlaySelectionError::NoCandidate);
+    }
+    Ok(UnderlayCandidate {
+        ifindex: address.ifindex,
+        address: local,
+        evidence: UnderlayEvidence::DirectOnLink,
+    })
 }
 
 /// Why no safe automatic underlay choice can be made.
@@ -525,6 +650,124 @@ mod tests {
             observer_id: vec![u8::try_from(path_id).expect("path"); 32],
             observer_peer_id: vec![u8::try_from(path_id + 16).expect("path"); 38],
             observed_address: address.to_vec(),
+            on_link: None,
+        }
+    }
+
+    #[test]
+    fn on_link_selection_requires_exact_assigned_source_and_unique_connected_geometry() {
+        for (local, peer, network, prefix) in [
+            ("192.168.42.2", "192.168.42.1", "192.168.42.0", 24),
+            ("fd42::2", "fd42::1", "fd42::", 64),
+        ] {
+            let local: IpAddr = local.parse().expect("local");
+            let peer: IpAddr = peer.parse().expect("peer");
+            let routes = [ConnectedUnderlayRoute {
+                ifindex: 7,
+                network: network.parse().expect("prefix"),
+                prefix_length: prefix,
+            }];
+            let addresses = [address(7, &local.to_string())];
+            let selected = select_on_link_underlay(&[link(7)], &addresses, &routes, local, peer)
+                .expect("LAN needs no default route");
+            assert_eq!(selected.evidence, UnderlayEvidence::DirectOnLink);
+            assert_eq!(selected.address, local);
+            assert!(
+                select_on_link_underlay(
+                    &[UnderlayLink {
+                        helper_owned: true,
+                        ..link(7)
+                    }],
+                    &addresses,
+                    &routes,
+                    local,
+                    peer
+                )
+                .is_err()
+            );
+            assert!(select_on_link_underlay(&[link(7)], &addresses, &[], local, peer).is_err());
+            assert!(
+                select_on_link_underlay(
+                    &[link(7)],
+                    &addresses,
+                    &[routes[0], routes[0]],
+                    local,
+                    peer
+                )
+                .is_err()
+            );
+            assert!(select_on_link_underlay(&[link(7)], &addresses, &routes, peer, local).is_err());
+            assert!(
+                select_on_link_underlay(&[link(7)], &addresses, &routes, local, local).is_err()
+            );
+        }
+        assert!(
+            select_on_link_underlay(
+                &[link(7)],
+                &[address(7, "10.0.0.2")],
+                &[ConnectedUnderlayRoute {
+                    ifindex: 7,
+                    network: "10.0.0.0".parse().expect("IP"),
+                    prefix_length: 24
+                }],
+                "10.0.0.2".parse().expect("IP"),
+                "10.1.0.2".parse().expect("IP")
+            )
+            .is_err()
+        );
+        for disallowed in [
+            "8.8.8.8",
+            "100.64.0.1",
+            "169.254.1.1",
+            "127.0.0.1",
+            "fe80::1",
+            "::ffff:192.168.1.1",
+        ] {
+            let address: IpAddr = disallowed.parse().expect("IP");
+            let bytes = match address {
+                IpAddr::V4(ip) => ip.octets().to_vec(),
+                IpAddr::V6(ip) => ip.octets().to_vec(),
+            };
+            assert!(lan_address(&bytes).is_none());
+        }
+    }
+
+    #[test]
+    fn on_link_rejects_private_or_public_same_family_source_aliases() {
+        for (local, peer, network, prefix, aliases) in [
+            (
+                "192.168.42.2",
+                "192.168.42.1",
+                "192.168.42.0",
+                24,
+                ["192.168.42.3", "8.8.8.8"],
+            ),
+            (
+                "fd42::2",
+                "fd42::1",
+                "fd42::",
+                64,
+                ["fd42::3", "2606:4700:4700::1111"],
+            ),
+        ] {
+            let routes = [ConnectedUnderlayRoute {
+                ifindex: 7,
+                network: network.parse().expect("network"),
+                prefix_length: prefix,
+            }];
+            for alias in aliases {
+                let addresses = [address(7, local), address(7, alias)];
+                assert_eq!(
+                    select_on_link_underlay(
+                        &[link(7)],
+                        &addresses,
+                        &routes,
+                        local.parse().expect("local"),
+                        peer.parse().expect("peer")
+                    ),
+                    Err(UnderlaySelectionError::Ambiguous)
+                );
+            }
         }
     }
 

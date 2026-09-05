@@ -10,7 +10,7 @@ use std::{
 use ipnet::Ipv6Net;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use volparossa_core::is_public_routable_ip;
+use volparossa_core::{is_local_lan_ip, is_public_routable_ip};
 
 /// Maximum relay paths in one v1 route context.
 pub const MAX_PATHS: u8 = 8;
@@ -80,7 +80,7 @@ impl fmt::Debug for WireGuardPublicKey {
     }
 }
 
-/// Public, route-specific UDP endpoint safe for a signed control message.
+/// Route-specific UDP endpoint safe for an explicitly scoped signed control message.
 ///
 /// This is an underlay address used by the remote `WireGuard` peer, not one of
 /// the deterministic private overlay addresses carried inside the tunnel.
@@ -119,6 +119,41 @@ impl PublicWireGuardEndpoint {
             underlay_ip,
             listen_port,
         })
+    }
+
+    /// Construct an explicitly local endpoint after its on-link binding has been verified.
+    ///
+    /// This validates address shape only; the privileged helper separately proves the local
+    /// interface, assigned source and exact peer route. It does not create public reachability.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero keys/ports and addresses outside RFC1918 IPv4 or IPv6 ULA.
+    pub fn new_direct_local_lan(
+        public_key: WireGuardPublicKey,
+        underlay_ip: IpAddr,
+        listen_port: u16,
+    ) -> Result<Self, WireGuardError> {
+        if public_key.as_bytes() == &[0; 32] {
+            return Err(WireGuardError::InvalidTopology);
+        }
+        if !is_local_lan_ip(underlay_ip) {
+            return Err(WireGuardError::InvalidUnderlayAddress);
+        }
+        if listen_port == 0 {
+            return Err(WireGuardError::InvalidListenPort);
+        }
+        Ok(Self {
+            public_key,
+            underlay_ip,
+            listen_port,
+        })
+    }
+
+    /// Whether the endpoint requires explicit local-LAN scope and on-link route proof.
+    #[must_use]
+    pub fn is_local_lan(self) -> bool {
+        is_local_lan_ip(self.underlay_ip)
     }
 
     /// Public key configured on the route-specific interface.
@@ -844,6 +879,39 @@ mod tests {
                 "{address} must fail closed",
             );
         }
+    }
+
+    #[test]
+    fn direct_local_lan_endpoints_remain_distinct_from_public_endpoints() {
+        let key = WireGuardPublicKey::from_bytes([1; 32]);
+        for address in ["10.0.0.2", "172.16.0.2", "192.168.1.2", "fd01::2"] {
+            let address = address.parse().unwrap();
+            assert!(PublicWireGuardEndpoint::new(key, address, 41_002).is_err());
+            let local = PublicWireGuardEndpoint::new_direct_local_lan(key, address, 41_002)
+                .expect("explicit local endpoint");
+            assert!(local.is_local_lan());
+        }
+        for address in [
+            "8.8.8.8",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.0.1",
+            "fe80::1",
+        ] {
+            assert!(
+                PublicWireGuardEndpoint::new_direct_local_lan(
+                    key,
+                    address.parse().unwrap(),
+                    41_002,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            PublicWireGuardEndpoint::new_direct_local_lan(key, "10.0.0.2".parse().unwrap(), 0,)
+                .is_err()
+        );
+        assert!(!endpoint(1, 41_002).is_local_lan());
     }
 
     #[test]

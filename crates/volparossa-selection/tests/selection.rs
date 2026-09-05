@@ -66,6 +66,7 @@ fn candidate(index: u8, role: ServiceRole, measurement_count: u32) -> Candidate 
                 sample_window_seconds: 15,
             },
             network: NetworkMetadata {
+                uplink: volparossa_core::NetworkUplink::IndependentInternet,
                 operator_id: OperatorId::new(format!("operator-{index}")).expect("valid id"),
                 region: "eu-west".to_owned(),
                 country_code: "NL".to_owned(),
@@ -345,6 +346,110 @@ fn prefix_native_prospective_diversity_collides_on_ipv6_48_only() {
             .relays()
             .len(),
         2
+    );
+}
+
+#[test]
+fn scoped_local_lan_relay_selection_preserves_prefix_collisions() {
+    for (first, adjacent, family) in [
+        (
+            ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]),
+            ObservedNetworkPrefix::local_ipv4_24([192, 168, 2]),
+            IpFamily::Ipv4,
+        ),
+        (
+            ObservedNetworkPrefix::local_ipv6_48([0xfd, 1, 2, 3, 4, 5]),
+            ObservedNetworkPrefix::local_ipv6_48([0xfd, 1, 2, 3, 4, 6]),
+            IpFamily::Ipv6,
+        ),
+    ] {
+        assert_eq!(
+            select_two_prefix_native_relays([first, adjacent], family)
+                .expect("distinct scoped LAN relay observations")
+                .relays()
+                .len(),
+            2
+        );
+        assert_eq!(
+            select_two_prefix_native_relays([first, first], family),
+            Err(SelectionError::InsufficientDiversePaths {
+                required: 2,
+                available: 1,
+            })
+        );
+    }
+}
+
+#[test]
+fn scoped_local_lan_anchor_requires_explicit_relay_scope_and_real_asn() {
+    let value = prospective_candidate(1, 10);
+    let local = ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]);
+    let network = &value.advertisement.network;
+    assert!(
+        DiversityAnchor::from_direct_relay_prefix(
+            value.advertisement.node_id.clone(),
+            value.advertisement.peer_id.clone(),
+            network.operator_id.clone(),
+            network.asn.expect("real fixture ASN"),
+            local,
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        DiversityAnchor::from_observed_prefix(
+            value.advertisement.node_id.clone(),
+            value.advertisement.peer_id.clone(),
+            network.operator_id.clone(),
+            network.asn.expect("real fixture ASN"),
+            local,
+        ),
+        Err(SelectionError::InvalidDiversityAnchors)
+    );
+    assert_eq!(
+        DiversityAnchor::from_direct_relay_prefix(
+            value.advertisement.node_id,
+            value.advertisement.peer_id,
+            network.operator_id.clone(),
+            0,
+            local,
+        ),
+        Err(SelectionError::InvalidDiversityAnchors)
+    );
+}
+
+#[test]
+fn scoped_local_lan_projection_rejects_exit_and_unknown_origin_relay() {
+    let local = ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]);
+    let mut relay = prospective_candidate(1, 10);
+    relay.evidence.observed_network_origin = None;
+    let required = requirements(ServiceRole::Relay);
+    assert!(prefix_projection(&relay, local, &required).is_ok());
+    assert!(
+        prefix_projection(
+            &relay,
+            ObservedNetworkPrefix::ipv4_24([192, 168, 1]),
+            &required,
+        )
+        .is_err()
+    );
+
+    relay.advertisement.network.uplink = volparossa_core::NetworkUplink::LocalOnly;
+    relay.advertisement.network.asn = None;
+    relay.advertisement.network.ipv4_prefix_hint = None;
+    relay.advertisement.network.ipv6_prefix_hint = None;
+    assert!(prefix_projection(&relay, local, &required).is_err());
+
+    let mut exit = public_exit_candidate(2, 10);
+    exit.evidence.observed_network_origin = None;
+    let observed = [PrefixObservedCandidate::new(&exit, local).expect("normalized prefix")];
+    assert!(
+        select_exit_with_observed_prefixes(
+            &observed,
+            &requirements(ServiceRole::Exit),
+            SelectionMix::default(),
+            &mut ChaCha8Rng::seed_from_u64(91),
+        )
+        .is_err()
     );
 }
 

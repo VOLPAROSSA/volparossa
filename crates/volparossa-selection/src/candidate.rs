@@ -143,7 +143,7 @@ impl<'a> PrefixObservedCandidate<'a> {
     /// # Errors
     ///
     /// Returns [`HardFilterReason::UnusableNetworkAddress`] when the candidate also retains a
-    /// legacy full observed address. Prefix publicness and family are checked by the canonical hard
+    /// legacy full observed address. Prefix scope and family are checked by the canonical hard
     /// filter in its existing network-validation position.
     pub fn new(
         candidate: &'a Candidate,
@@ -316,7 +316,16 @@ fn hard_filter_core(
         ObservedNetworkInput::Legacy => candidate.evidence.observed_network_origin.is_some(),
         ObservedNetworkInput::Prefix(prefix) => {
             candidate.evidence.observed_network_origin.is_none()
-                && prefix.is_public_routable()
+                && (prefix.is_public_routable()
+                    || (requirements.role == ServiceRole::Relay
+                        && prefix.is_local_lan()
+                        && candidate.advertisement.network.uplink
+                            == volparossa_core::NetworkUplink::IndependentInternet
+                        && candidate
+                            .advertisement
+                            .network
+                            .asn
+                            .is_some_and(|asn| asn != 0)))
                 && requirements
                     .address_family
                     .is_none_or(|family| family == prefix.family())

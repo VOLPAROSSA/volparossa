@@ -2168,7 +2168,8 @@ fn validate_transport_freshness_facts(
     trusted_now_ms: u64,
 ) -> Result<(), PreselectionAttemptError> {
     if facts.observed_network_prefix.family() != family
-        || !facts.observed_network_prefix.is_public_routable()
+        || !(facts.observed_network_prefix.is_public_routable()
+            || facts.observed_network_prefix.is_local_lan())
     {
         return Err(PreselectionAttemptError::Transport);
     }
@@ -3088,6 +3089,7 @@ mod tests {
             exit: request.actor.clone(),
             scope: request.scope.clone(),
             upstream_network_prefix: Some(ObservationNetworkPrefix {
+                scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 network_prefix: vec![8, 8, 8],
             }),

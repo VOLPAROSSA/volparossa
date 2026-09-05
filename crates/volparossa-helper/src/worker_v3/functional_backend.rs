@@ -87,8 +87,11 @@ use crate::{
         DurableManagerAbsentOutcome, DurableOwnershipPrepareHandle, DurablePrepareSettlement,
         DurableWireguardResource,
     },
-    underlay::{UnderlayCandidate, collect_consistent_underlay},
+    underlay::{UnderlayBindings, collect_consistent_underlays, revalidate_underlay_bindings},
 };
+
+#[cfg(test)]
+use crate::underlay::{UnderlayBinding, UnderlayCandidate};
 
 use super::{
     ConfirmedWorkerGenerationAbsent, DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_MAX_TTL,
@@ -313,6 +316,7 @@ struct VerifiedWireguardEndpoint {
     public_key: [u8; 32],
     address: IpAddr,
     port: u16,
+    scope: volparossa_protocol::UnderlayScope,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -335,7 +339,7 @@ struct OpenLeaseEntry {
     durable_prepare_terminal: Option<DurablePrepareTerminalSelector>,
     wireguard: Vec<LiveWireguardLeaseOwner>,
     prepare: PrepareLeases,
-    underlay: UnderlayCandidate,
+    underlays: UnderlayBindings,
     prepared: Vec<PreparedWorkerLease>,
     activated: Vec<ActivatedWorkerLease>,
     phase: OpenLeasePhase,
@@ -532,10 +536,10 @@ impl FunctionalAlphaLeaseBackend {
         let registration =
             DurableIntentRegistration::try_from_wire(binding.lineage.helper_runtime_id, &intent)
                 .map_err(|_| BackendError::Invalid)?;
-        let underlay =
-            collect_consistent_underlay(operation_deadline, &value.leases, &value.traversal_hints)
+        let underlays =
+            collect_consistent_underlays(operation_deadline, &value.leases, &value.traversal_hints)
                 .map_err(|_| BackendError::Unavailable)?;
-        self.reserve_entry(key, context_role, underlay)?;
+        self.reserve_entry(key, context_role, underlays)?;
         {
             let mut state = lock_state(&self.state);
             exact_entry_mut(&mut state, key)?.phase = OpenLeasePhase::DurableHandoffPending;
@@ -660,43 +664,52 @@ impl FunctionalAlphaLeaseBackend {
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
 
-        let (underlay, prepared) = {
+        let (underlays, prepared) = {
             let mut state = lock_state(&self.state);
             let entry = exact_entry_mut(&mut state, key)?;
             entry.prepared = prepared;
             entry.phase = OpenLeasePhase::Prepared;
-            (entry.underlay, entry.prepared.clone())
+            (entry.underlays.clone(), entry.prepared.clone())
         };
         deadline
             .complete(())
             .map_err(|_| BackendError::CleanupIncomplete)?;
-        Ok(prepared
+        prepared
             .into_iter()
-            .map(|lease| PreparedKernelLease {
-                path_id: lease.path_id,
-                role: lease.role,
-                public_key: lease.public_key,
-                public_endpoint: PublicUdpEndpoint {
-                    address: ip_bytes(underlay.address),
-                    port: u32::from(lease.listen_port),
-                },
-                evidence: match underlay.evidence {
-                    crate::underlay::UnderlayEvidence::DirectAssigned => {
-                        RoutingUnderlayEvidence::DirectAssigned
-                    }
-                    crate::underlay::UnderlayEvidence::ObservedUdpPunch => {
-                        RoutingUnderlayEvidence::ObservedUdpPunch
-                    }
-                },
+            .map(|lease| {
+                let underlay = underlays
+                    .get(&(lease.path_id, lease.role))
+                    .ok_or(BackendError::Invalid)?
+                    .candidate;
+                Ok(PreparedKernelLease {
+                    path_id: lease.path_id,
+                    role: lease.role,
+                    public_key: lease.public_key,
+                    public_endpoint: PublicUdpEndpoint {
+                        address: ip_bytes(underlay.address),
+                        port: u32::from(lease.listen_port),
+                    },
+                    evidence: match underlay.evidence {
+                        crate::underlay::UnderlayEvidence::DirectAssigned => {
+                            RoutingUnderlayEvidence::DirectAssigned
+                        }
+                        crate::underlay::UnderlayEvidence::ObservedUdpPunch => {
+                            RoutingUnderlayEvidence::ObservedUdpPunch
+                        }
+                        crate::underlay::UnderlayEvidence::DirectOnLink => {
+                            RoutingUnderlayEvidence::DirectOnLink
+                        }
+                    },
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn reserve_entry(
         &self,
         key: OpenLineageKey,
         context_role: ContextRole,
-        underlay: UnderlayCandidate,
+        underlays: UnderlayBindings,
     ) -> Result<(), BackendError> {
         let mut state = lock_state(&self.state);
         if state.contains_key(&key) {
@@ -720,7 +733,7 @@ impl FunctionalAlphaLeaseBackend {
                     route_context_id: key.context_id.to_vec(),
                     leases: Vec::new(),
                 },
-                underlay,
+                underlays,
                 prepared: Vec::new(),
                 activated: Vec::new(),
                 phase: OpenLeasePhase::Reserved,
@@ -964,6 +977,12 @@ impl FunctionalAlphaLeaseBackend {
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
         let now_ms = unix_milliseconds()?;
+        let underlays = {
+            let state = lock_state(&self.state);
+            exact_entry(&state, key)?.underlays.clone()
+        };
+        revalidate_underlay_bindings(operation_deadline, &underlays)
+            .map_err(|_| BackendError::Unavailable)?;
         let (prepared, plan) = {
             let state = lock_state(&self.state);
             let entry = exact_entry(&state, key)?;
@@ -988,7 +1007,7 @@ impl FunctionalAlphaLeaseBackend {
                     &entry.wireguard,
                     key,
                     &prepared,
-                    entry.underlay,
+                    &entry.underlays,
                     &activations,
                     now_ms,
                 )?,
@@ -3988,7 +4007,7 @@ fn verified_internal_activate_batch_plan(
     resources: &[LiveWireguardLeaseOwner],
     key: OpenLineageKey,
     prepared: &[PreparedWorkerLease],
-    underlay: UnderlayCandidate,
+    underlays: &UnderlayBindings,
     activations: &[volparossa_routing::LeaseActivation],
     now_ms: u64,
 ) -> Result<ActivateLeases, BackendError> {
@@ -3996,6 +4015,10 @@ fn verified_internal_activate_batch_plan(
         || prepared.len() != activations.len()
         || prepared.is_empty()
         || prepared.len() > 8
+        || underlays.len() != prepared.len()
+        || prepared
+            .iter()
+            .any(|lease| !underlays.contains_key(&(lease.path_id, lease.role)))
     {
         return Err(BackendError::Invalid);
     }
@@ -4032,12 +4055,14 @@ fn verified_internal_activate_batch_plan(
             &mut replay_guard,
             &mut replay_keys,
         )?;
-        let endpoints = verified_activation_endpoints(&authority, prepared, underlay, activations)?;
+        let endpoints =
+            verified_activation_endpoints(&authority, prepared, underlays, activations)?;
+        verify_on_link_activation_bindings(&authority, prepared, underlays, &endpoints)?;
         project_internal_activation_batch(
             resources,
             key,
             prepared,
-            underlay,
+            underlays,
             activations,
             &endpoints,
         )
@@ -4565,7 +4590,7 @@ fn same_authorization_exit_scope(
 fn verified_activation_endpoints(
     authority: &VerifiedActivationAuthority,
     prepared: &[PreparedWorkerLease],
-    underlay: UnderlayCandidate,
+    underlays: &UnderlayBindings,
     activations: &[volparossa_routing::LeaseActivation],
 ) -> Result<Vec<VerifiedWireguardEndpoint>, BackendError> {
     match authority.context {
@@ -4601,6 +4626,10 @@ fn verified_activation_endpoints(
                 .iter()
                 .zip(prepared)
                 .map(|(path, prepared)| {
+                    let underlay = underlays
+                        .get(&(prepared.path_id, prepared.role))
+                        .ok_or(BackendError::Invalid)?
+                        .candidate;
                     let (signed_local, relay_exit) = if let Some(chain) = &path.native_exit {
                         (
                             chain.exit_endpoint().endpoint.as_ref(),
@@ -4631,9 +4660,97 @@ fn verified_activation_endpoints(
                 .collect()
         }
         ContextRole::Relay => {
-            verified_relay_activation_endpoints(authority, prepared, underlay, activations)
+            verified_relay_activation_endpoints(authority, prepared, underlays, activations)
         }
         ContextRole::Unspecified => Err(BackendError::Invalid),
+    }
+}
+
+fn verify_on_link_activation_bindings(
+    authority: &VerifiedActivationAuthority,
+    prepared: &[PreparedWorkerLease],
+    underlays: &UnderlayBindings,
+    endpoints: &[VerifiedWireguardEndpoint],
+) -> Result<(), BackendError> {
+    if prepared.len() != endpoints.len() {
+        return Err(BackendError::Invalid);
+    }
+    for (lease, endpoint) in prepared.iter().zip(endpoints) {
+        let binding = underlays
+            .get(&(lease.path_id, lease.role))
+            .ok_or(BackendError::Invalid)?;
+        let Some(on_link) = &binding.on_link else {
+            if binding.candidate.evidence == crate::underlay::UnderlayEvidence::DirectOnLink
+                || endpoint.scope != volparossa_protocol::UnderlayScope::PublicInternet
+            {
+                return Err(BackendError::Invalid);
+            }
+            continue;
+        };
+        let (actor, signed_peer) = signed_activation_peer(authority, lease)?;
+        if binding.candidate.evidence != crate::underlay::UnderlayEvidence::DirectOnLink
+            || !volparossa_routing::is_local_lan_ip(binding.candidate.address)
+            || endpoint.scope != volparossa_protocol::UnderlayScope::DirectLocalLan
+            || endpoint.address != on_link.peer_address
+            || actor != on_link.peer_actor_id
+            || signed_peer.is_some_and(|peer| peer != on_link.peer_peer_id)
+        {
+            return Err(BackendError::Invalid);
+        }
+    }
+    Ok(())
+}
+
+fn signed_activation_peer<'a>(
+    authority: &'a VerifiedActivationAuthority,
+    lease: &PreparedWorkerLease,
+) -> Result<(&'a [u8], Option<&'a [u8]>), BackendError> {
+    let path = authority
+        .paths
+        .iter()
+        .find(|path| path.exit.message().path_id == lease.path_id)
+        .ok_or(BackendError::Invalid)?;
+    match WireguardRole::try_from(lease.role).map_err(|_| BackendError::Invalid)? {
+        WireguardRole::Client | WireguardRole::Exit => {
+            if let Some(chain) = &path.native_exit {
+                let relay = chain
+                    .scope()
+                    .data_relay
+                    .as_ref()
+                    .ok_or(BackendError::Invalid)?;
+                Ok((&relay.node_id, Some(&relay.peer_id)))
+            } else {
+                let relay = path.relay.as_ref().ok_or(BackendError::Invalid)?.message();
+                Ok((&relay.relay_node_id, Some(&relay.relay_peer_id)))
+            }
+        }
+        WireguardRole::RelayExit => {
+            let exit = path.exit.message();
+            Ok((&exit.exit_node_id, Some(&exit.exit_peer_id)))
+        }
+        WireguardRole::RelayClient => {
+            // The permanent authenticated transport peer stays helper-local. The signed Client
+            // authority is ephemeral; its transport/session association is checked by the agent,
+            // not invented by equating a permanent Peer ID with an ephemeral signing key.
+            match authority
+                .client_request
+                .as_ref()
+                .ok_or(BackendError::Invalid)?
+            {
+                VerifiedRelayClientRequest::Reservation { request, .. } => {
+                    Ok((&request.message().client_session_id, None))
+                }
+                VerifiedRelayClientRequest::NativeStart { start, .. } => {
+                    let scope = start
+                        .message()
+                        .scope
+                        .as_ref()
+                        .ok_or(BackendError::Invalid)?;
+                    Ok((&scope.client_session_id, None))
+                }
+            }
+        }
+        WireguardRole::Unspecified => Err(BackendError::Invalid),
     }
 }
 
@@ -4644,12 +4761,20 @@ fn verified_activation_endpoints(
 fn verified_relay_activation_endpoints(
     authority: &VerifiedActivationAuthority,
     prepared: &[PreparedWorkerLease],
-    underlay: UnderlayCandidate,
+    underlays: &UnderlayBindings,
     activations: &[volparossa_routing::LeaseActivation],
 ) -> Result<Vec<VerifiedWireguardEndpoint>, BackendError> {
     let [relay_client, relay_exit] = prepared else {
         return Err(BackendError::Invalid);
     };
+    let client_underlay = underlays
+        .get(&(relay_client.path_id, relay_client.role))
+        .ok_or(BackendError::Invalid)?
+        .candidate;
+    let exit_underlay = underlays
+        .get(&(relay_exit.path_id, relay_exit.role))
+        .ok_or(BackendError::Invalid)?
+        .candidate;
     let [client_activation, exit_activation] = activations else {
         return Err(BackendError::Invalid);
     };
@@ -4724,7 +4849,7 @@ fn verified_relay_activation_endpoints(
         signed_client_local.port,
     ) != (
         relay_client.public_key,
-        underlay.address,
+        client_underlay.address,
         relay_client.listen_port,
     ) || (
         signed_exit_local.public_key,
@@ -4732,7 +4857,7 @@ fn verified_relay_activation_endpoints(
         signed_exit_local.port,
     ) != (
         relay_exit.public_key,
-        underlay.address,
+        exit_underlay.address,
         relay_exit.listen_port,
     ) {
         return Err(BackendError::Invalid);
@@ -4754,7 +4879,7 @@ fn project_internal_activation_batch(
     resources: &[LiveWireguardLeaseOwner],
     key: OpenLineageKey,
     prepared: &[PreparedWorkerLease],
-    underlay: UnderlayCandidate,
+    underlays: &UnderlayBindings,
     activations: &[volparossa_routing::LeaseActivation],
     endpoints: &[VerifiedWireguardEndpoint],
 ) -> Result<ActivateLeases, BackendError> {
@@ -4767,6 +4892,10 @@ fn project_internal_activation_batch(
         .zip(activations)
         .zip(endpoints)
     {
+        let underlay = underlays
+            .get(&(prepared.path_id, prepared.role))
+            .ok_or(BackendError::Invalid)?
+            .candidate;
         let supplied_public_key: [u8; 32] = activation
             .peer_public_key
             .as_slice()
@@ -4969,10 +5098,20 @@ fn verified_wireguard_endpoint(value: &WireguardEndpoint) -> Option<VerifiedWire
         bytes if bytes.len() == 16 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).ok()?)),
         _ => return None,
     };
-    (!address.is_unspecified() && !address.is_multicast()).then_some(VerifiedWireguardEndpoint {
+    let scope = volparossa_protocol::UnderlayScope::try_from(value.underlay_scope).ok()?;
+    let valid_address = match scope {
+        volparossa_protocol::UnderlayScope::PublicInternet => {
+            volparossa_routing::is_public_routable_ip(address)
+        }
+        volparossa_protocol::UnderlayScope::DirectLocalLan => {
+            volparossa_routing::is_local_lan_ip(address)
+        }
+    };
+    valid_address.then_some(VerifiedWireguardEndpoint {
         public_key,
         address,
         port,
+        scope,
     })
 }
 
@@ -5586,6 +5725,28 @@ mod tests {
         },
     };
 
+    fn fixture_underlays(
+        candidate: UnderlayCandidate,
+        identities: impl IntoIterator<Item = (u32, i32)>,
+    ) -> UnderlayBindings {
+        identities
+            .into_iter()
+            .map(|identity| {
+                (
+                    identity,
+                    UnderlayBinding {
+                        candidate,
+                        on_link: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn fixture_client_underlays() -> UnderlayBindings {
+        fixture_underlays(fixture_underlay(), [(1, WireguardRole::Client as i32)])
+    }
+
     fn test_ingress_coordinator() -> WorkerCoordinator {
         WorkerCoordinator::new(WorkerRegistry::new(
             1,
@@ -5797,11 +5958,14 @@ mod tests {
             durable_prepare_terminal: None,
             wireguard: vec![wireguard],
             prepare,
-            underlay: UnderlayCandidate {
-                ifindex: 2,
-                address: "198.51.100.7".parse().expect("fixture address"),
-                evidence: crate::underlay::UnderlayEvidence::DirectAssigned,
-            },
+            underlays: fixture_underlays(
+                UnderlayCandidate {
+                    ifindex: 2,
+                    address: "198.51.100.7".parse().expect("fixture address"),
+                    evidence: crate::underlay::UnderlayEvidence::DirectAssigned,
+                },
+                [(lease.path_id, lease.role)],
+            ),
             prepared: Vec::new(),
             activated: Vec::new(),
             phase: OpenLeasePhase::Reserved,
@@ -5840,7 +6004,10 @@ mod tests {
             birth_may_exist: vec![false; wireguard.len()],
             wireguard,
             prepare,
-            underlay: fixture_underlay(),
+            underlays: fixture_underlays(
+                fixture_underlay(),
+                leases.iter().map(|lease| (lease.path_id, lease.role)),
+            ),
             prepared: Vec::new(),
             activated: Vec::new(),
             phase: OpenLeasePhase::Reserved,
@@ -7312,7 +7479,7 @@ mod tests {
 
         for context in &keys {
             assert_eq!(
-                backend.reserve_entry(*context, ContextRole::Client, fixture_underlay()),
+                backend.reserve_entry(*context, ContextRole::Client, fixture_client_underlays()),
                 Ok(())
             );
         }
@@ -7328,7 +7495,7 @@ mod tests {
         }
 
         assert_eq!(
-            backend.reserve_entry(keys[0], ContextRole::Client, fixture_underlay()),
+            backend.reserve_entry(keys[0], ContextRole::Client, fixture_client_underlays()),
             Err(BackendError::Invalid)
         );
         let overflow = OpenLineageKey {
@@ -7339,14 +7506,14 @@ mod tests {
             ..key()
         };
         assert_eq!(
-            backend.reserve_entry(overflow, ContextRole::Client, fixture_underlay()),
+            backend.reserve_entry(overflow, ContextRole::Client, fixture_client_underlays()),
             Err(BackendError::Capacity)
         );
 
         assert!(remove_exact_entry(&backend.state, keys[0]));
         assert!(exact_entry(&lock_state(&backend.state), keys[1]).is_ok());
         assert_eq!(
-            backend.reserve_entry(overflow, ContextRole::Client, fixture_underlay()),
+            backend.reserve_entry(overflow, ContextRole::Client, fixture_client_underlays()),
             Ok(())
         );
         assert!(!remove_exact_entry(&backend.state, keys[0]));
@@ -8963,7 +9130,7 @@ mod tests {
             &[resource],
             key,
             &[prepared],
-            underlay,
+            &fixture_underlays(underlay, [(prepared.path_id, prepared.role)]),
             &value.leases,
             now_ms,
         )
@@ -8997,10 +9164,95 @@ mod tests {
             &resources,
             key,
             prepared,
-            underlay,
+            &fixture_underlays(
+                underlay,
+                prepared.iter().map(|lease| (lease.path_id, lease.role)),
+            ),
             &value.leases,
             now_ms,
         )
+    }
+
+    #[test]
+    fn on_link_relay_activation_binds_private_client_leg_and_independent_public_exit_leg() {
+        let (key, _, mut value, prepared, public, route) = live_relay_activate_fixture();
+        let request = resign_client_relay_request(&route, |request| {
+            let endpoint = request.client_wireguard_endpoint.as_mut().unwrap();
+            endpoint.underlay_ip = vec![10, 42, 0, 2];
+            endpoint.underlay_scope = volparossa_protocol::UnderlayScope::DirectLocalLan as i32;
+        });
+        let request_hash = relay_reservation_request_sha256(&request).unwrap();
+        let grant = resign_consistent_grant(&route, |relay, _| {
+            let endpoint = relay.relay_client_wireguard_endpoint.as_mut().unwrap();
+            endpoint.underlay_ip = vec![10, 42, 0, 1];
+            endpoint.underlay_scope = volparossa_protocol::UnderlayScope::DirectLocalLan as i32;
+            relay.signed_client_relay_request_sha256 = request_hash.to_vec();
+        });
+        value.leases[0].signed_client_relay_request = request;
+        value.leases[0].peer_endpoint.as_mut().unwrap().address = vec![10, 42, 0, 2];
+        for lease in &mut value.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        let mut underlays = fixture_underlays(
+            public,
+            prepared.iter().map(|lease| (lease.path_id, lease.role)),
+        );
+        let client_identity = (prepared[0].path_id, prepared[0].role);
+        underlays.insert(
+            client_identity,
+            UnderlayBinding {
+                candidate: UnderlayCandidate {
+                    ifindex: 9,
+                    address: "10.42.0.1".parse().unwrap(),
+                    evidence: crate::underlay::UnderlayEvidence::DirectOnLink,
+                },
+                on_link: Some(crate::underlay::OnLinkBinding {
+                    peer_address: "10.42.0.2".parse().unwrap(),
+                    peer_actor_id: route.client_session_id(),
+                    // The permanent transport association stays local and is not a signed Client ID.
+                    peer_peer_id: vec![7; 38],
+                }),
+            },
+        );
+        let resources = prepared
+            .iter()
+            .map(|lease| {
+                process_owned_resource(
+                    key,
+                    &RoutingLeasePlan {
+                        path_id: lease.path_id,
+                        role: lease.role,
+                    },
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let verify = |bindings: &UnderlayBindings| {
+            verified_internal_activate_batch_plan(
+                &Mutex::new(functional_alpha_replay_cache()),
+                &resources,
+                key,
+                &prepared,
+                bindings,
+                &value.leases,
+                unix_milliseconds().unwrap(),
+            )
+        };
+        let activated = verify(&underlays).expect("real signed mixed LAN/WAN authority");
+        assert_eq!(activated.leases.len(), 2);
+        for mutation in 0..4 {
+            let mut substituted = underlays.clone();
+            let local = substituted.get_mut(&client_identity).unwrap();
+            match mutation {
+                0 => local.on_link.as_mut().unwrap().peer_address = "10.42.0.3".parse().unwrap(),
+                1 => local.on_link.as_mut().unwrap().peer_actor_id[0] ^= 1,
+                2 => local.on_link = None,
+                _ => local.candidate.evidence = crate::underlay::UnderlayEvidence::DirectAssigned,
+            }
+            assert!(matches!(verify(&substituted), Err(BackendError::Invalid)));
+        }
+        underlays.remove(&client_identity);
+        assert!(matches!(verify(&underlays), Err(BackendError::Invalid)));
     }
 
     #[test]
@@ -9346,7 +9598,10 @@ mod tests {
             &resources,
             key,
             &prepared,
-            fixture_underlay(),
+            &fixture_underlays(
+                fixture_underlay(),
+                prepared.iter().map(|lease| (lease.path_id, lease.role)),
+            ),
             &activations,
             now_ms,
         )
@@ -9788,6 +10043,7 @@ mod tests {
             .expect("signed exit endpoint")
             .clone();
         let client_endpoint = WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: grant.client_wireguard_public_key.clone(),
             underlay_ip: exit_endpoint.underlay_ip.clone(),
             listen_port: 30_000,
@@ -10340,7 +10596,9 @@ mod tests {
     async fn exit_post_verification_worker_lookup_failure_retains_both_replay_records() {
         let (key, binding, value, prepared, underlay, _) = live_exit_activate_fixture();
         let mut entry = open_entry_for_role(key, WireguardRole::Exit);
-        entry.underlay = underlay;
+        for binding in entry.underlays.values_mut() {
+            binding.candidate = underlay;
+        }
         entry.prepared = vec![prepared];
         entry.phase = OpenLeasePhase::Prepared;
         let backend = backend_with_state(Some(entry));
@@ -10353,7 +10611,9 @@ mod tests {
         assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 2);
 
         let mut retry = open_entry_for_role(key, WireguardRole::Exit);
-        retry.underlay = underlay;
+        for binding in retry.underlays.values_mut() {
+            binding.candidate = underlay;
+        }
         retry.prepared = vec![prepared];
         retry.phase = OpenLeasePhase::Prepared;
         *lock_state(&backend.state) = Some(retry).into();
@@ -10374,7 +10634,9 @@ mod tests {
     async fn relay_post_verification_worker_lookup_failure_retains_all_five_replay_records() {
         let (key, binding, value, prepared, underlay, _) = live_relay_activate_fixture();
         let mut entry = open_relay_entry(key);
-        entry.underlay = underlay;
+        for binding in entry.underlays.values_mut() {
+            binding.candidate = underlay;
+        }
         entry.prepared = prepared.to_vec();
         entry.phase = OpenLeasePhase::Prepared;
         let backend = backend_with_state(Some(entry));
@@ -10387,7 +10649,9 @@ mod tests {
         assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 5);
 
         let mut retry = open_relay_entry(key);
-        retry.underlay = underlay;
+        for binding in retry.underlays.values_mut() {
+            binding.candidate = underlay;
+        }
         retry.prepared = prepared.to_vec();
         retry.phase = OpenLeasePhase::Prepared;
         *lock_state(&backend.state) = Some(retry).into();

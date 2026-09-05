@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use prost::Message;
 use sha2::{Digest, Sha256};
-use volparossa_core::{OperatorId, is_public_routable_ip};
+use volparossa_core::{OperatorId, is_local_lan_ip, is_public_routable_ip};
 
 use crate::envelope::fixed_array;
 use crate::{
@@ -125,6 +125,24 @@ pub struct AdvertisementCapabilities {
 
 /// Signed route-specific `WireGuard` underlay endpoint.
 #[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum UnderlayScope {
+    PublicInternet = 0,
+    DirectLocalLan = 1,
+}
+
+/// Declared available uplink; never a runtime proof of Internet access.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum AdvertisementUplink {
+    IndependentInternet = 0,
+    LocalOnly = 1,
+}
+
+/// Signed route-specific `WireGuard` underlay endpoint.
+#[allow(missing_docs)]
 #[derive(Clone, PartialEq, Message)]
 pub struct WireguardEndpoint {
     #[prost(bytes = "vec", tag = "1")]
@@ -133,20 +151,29 @@ pub struct WireguardEndpoint {
     pub underlay_ip: Vec<u8>,
     #[prost(uint32, tag = "3")]
     pub listen_port: u32,
+    /// Local scope requires separate helper-owned on-link proof for the exact peer and lease.
+    #[prost(enumeration = "UnderlayScope", tag = "4")]
+    pub underlay_scope: i32,
 }
 
 impl WireguardEndpoint {
-    /// Validate the fixed key, publicly routable address and explicit non-zero port.
+    /// Validate the key, explicitly scoped address classification and non-zero port.
     ///
     /// # Errors
     ///
     /// Returns an invalid-field error for a zero/incorrect key, non-canonical
-    /// IP bytes, an IANA special-purpose/non-public address, or invalid port.
+    /// IP bytes, an unknown/mismatched scope, prohibited address, or invalid port. A successful
+    /// local classification does not authorize a network operation or prove on-link adjacency.
     pub fn validate(&self, field: &'static str) -> Result<(), ProtocolError> {
         require_nonzero_length::<KEY_LENGTH>(&self.public_key, field)?;
         let address =
             parse_ip_bytes(&self.underlay_ip).ok_or(ProtocolError::InvalidField(field))?;
-        if !is_public_routable_ip(address) {
+        let allowed = match UnderlayScope::try_from(self.underlay_scope) {
+            Ok(UnderlayScope::PublicInternet) => is_public_routable_ip(address),
+            Ok(UnderlayScope::DirectLocalLan) => is_local_lan_ip(address),
+            Err(_) => false,
+        };
+        if !allowed {
             return Err(ProtocolError::InvalidField(field));
         }
         validate_port(self.listen_port, field)
@@ -201,6 +228,8 @@ pub struct AdvertisementNetwork {
     pub ipv6_prefix_hint: String,
     #[prost(string, tag = "6")]
     pub operator_id: String,
+    #[prost(enumeration = "AdvertisementUplink", tag = "7")]
+    pub uplink: i32,
 }
 
 /// Locally observed quality claims represented in integer parts per million.
@@ -672,6 +701,7 @@ impl ControlPayload for NodeAdvertisement {
             self.network
                 .as_ref()
                 .ok_or(ProtocolError::InvalidField("advertisement.network"))?,
+            roles,
         )?;
         validate_quality(
             self.quality
@@ -1669,7 +1699,22 @@ fn validate_capacity(
     Ok(())
 }
 
-fn validate_network(network: &AdvertisementNetwork) -> Result<(), ProtocolError> {
+fn validate_network(
+    network: &AdvertisementNetwork,
+    roles: &AdvertisementRoles,
+) -> Result<(), ProtocolError> {
+    let uplink = AdvertisementUplink::try_from(network.uplink)
+        .map_err(|_| ProtocolError::InvalidField("advertisement.network.uplink"))?;
+    if uplink == AdvertisementUplink::LocalOnly
+        && (roles.exit
+            || network.asn != 0
+            || !network.ipv4_prefix_hint.is_empty()
+            || !network.ipv6_prefix_hint.is_empty())
+    {
+        return Err(ProtocolError::InvalidField(
+            "advertisement.network.local_only",
+        ));
+    }
     validate_ascii_text(&network.region, 32, "advertisement.network.region")?;
     OperatorId::new(network.operator_id.clone())
         .map_err(|_| ProtocolError::InvalidField("advertisement.network.operator_id"))?;

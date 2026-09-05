@@ -718,6 +718,7 @@ impl SignedRouteFixture {
 }
 fn test_endpoint(public_key: &[u8; 32], listen_port: u16) -> WireguardEndpoint {
     WireguardEndpoint {
+        underlay_scope: 0,
         public_key: public_key.to_vec(),
         underlay_ip: vec![8, 8, 4, 1],
         listen_port: u32::from(listen_port),

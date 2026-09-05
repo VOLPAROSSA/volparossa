@@ -8,13 +8,17 @@ Last updated: 2026-09-05
 
 The detailed historical checklist below has not yet been reconciled with the complete
 vertical runtime. It must not be read as a current measurement of elapsed work.
-The latest retained [Debian 13 KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972373384)
+The retained [Debian 13 KVM datapath run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972373384)
 at `0075033e` passed A01--A07 and A15. A07 completed its 4 MiB HTTP/3 request and
 32 MiB response after one relay was physically removed, with matching application hashes,
 data on both paths before removal, data on the surviving path afterwards, and zero direct
 Client--Exit packets. The run then stopped at `A08_ALLOWED_DNS_UDP_NOT_PROVEN`:
 the generated Python DNS client lacked a shebang and was interpreted as shell code.
-That fixture correction still requires a live rerun; A08--A14 remain unproven in this run.
+The corrected [rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/33975821992)
+at `aaa44d60` stopped earlier at `A01_BOOTSTRAP1_ADVERTISEMENT_STALLED`: the new discovery
+scheduler suppressed refreshing an unexpired advertisement after its Relay restarted.
+Provider-triggered refresh is restored and its focused regression passes; live confirmation
+is still required. This rerun did not reach A08, so A08--A14 remain unproven here.
 `0075033e` also passed
 [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972360525) and
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972358060).
@@ -57,7 +61,14 @@ claiming an MPQUIC path count. Local-only consumers retain the same forwarded-on
 candidate partition as consumers offering all three roles.
 The disposable `reciprocity` scenario now starts four simultaneous participant flows and
 separately verifies application hashes, selected WireGuard legs, exit source addresses and
-unchanged agent processes. Its script/evidence-parser checks pass; live execution is pending.
+unchanged agent processes. Its script/evidence-parser checks pass. The first
+[live attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33976891461) at `27a4e73`
+stopped at `RECIPROCITY_NEIGHBOR_DISCOVERY_UNAVAILABLE` before application traffic; all four
+participants enabled all roles, but the signed candidate pool was incomplete. Startup partitioning
+now waits for a viable provider pool across completed queries, preserving known neighboring
+Relay contacts. Focused ordering checks pass; live confirmation remains pending. Both failed
+KVM runs completely cleaned their owned state and retained unchanged host-state hashes.
+The `27a4e73` [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33976851986) passed.
 The workflow defaults to `datapath` (all A01--A15 without package/release work); `alpha` retains
 the additional package checks, and `reciprocity` emits only its own clearly scoped report.
 The historical scorecard below predates the vertical runtime and this participation revision;
@@ -83,9 +94,21 @@ traffic; spare capacity must be measured and enforced, not inferred from configu
 - [ ] Measured spare-capacity sharing with owner-priority enforcement under competing traffic.
 - [ ] Offline participation, uplink arrival/loss and no recursive overlay-as-exit egress.
 
-mDNS discovery exists, but current public-endpoint, default-route and origin-provenance checks
-do not yet yield a working local-only datapath. No direct-radio or phone-without-SIM support is
-claimed by the existing Debian KVM evidence. See [local-link scope](LOCAL_LINK_NETWORK.md).
+The first implementation now carries explicitly signed RFC1918/ULA endpoint scope through
+authenticated connection provenance, selection, endpoint leases, reservations and helper
+Prepare/Activate. Each WireGuard lease has its own underlay: Client-facing LAN and Exit-facing
+WAN can differ at the same Relay. LAN preparation requires an assigned local address, a unique
+connected route and a read-only exact kernel source-to-peer lookup; activation rechecks that
+binding. Public-IP validation remains unchanged. Focused checks cover scoped canonical encoding,
+local provenance, planner-to-preprobe consumption, mixed-leg signed helper activation and kernel
+route parsing. These checks are not live LAN packet evidence, so the datapath items remain open.
+
+This initial route uses a WAN-capable Relay with truthful ASN metadata; LocalOnly advertisements
+can be signed without invented ASN/public prefixes, but such unknown-ASN nodes are not yet
+selectable as data Relays. Exit-facing origin evidence remains public-only in this slice.
+Direct radio setup, simultaneous WAN+LAN transfer, local-only Relay contribution and owner-priority
+sharing remain unfinished. No direct-radio or phone-without-SIM support is claimed by existing
+Debian KVM evidence. See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
 
