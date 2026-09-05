@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import ipaddress
 import json
+import re
 from pathlib import Path
 import select
 import signal
@@ -37,15 +38,25 @@ FLOWS = {"client": {"exit": "exit", "relays": {"relay0", "relay2"},
 
 def capture(directory, run_id, node):
     sockets = {}
-    for interface in INTERFACES[node]:
+    interfaces = list(INTERFACES[node])
+    mesh_mapping = directory / "wifi-link-interfaces.json"
+    if mesh_mapping.exists() and node in ("client", "relay0"):
+        if mesh_mapping.is_symlink() or mesh_mapping.stat().st_size > 1024:
+            raise ValueError("unsafe exact mesh interface mapping")
+        mesh = json.loads(mesh_mapping.read_text(encoding="ascii"))[node]
+        if not re.fullmatch(r"vw[0-9a-f]{13}", mesh):
+            raise ValueError("invalid runtime-owned mesh interface")
+        interfaces[interfaces.index({"client": "cr0", "relay0": "r0c"}[node])] = mesh
+    for interface in interfaces:
         observer = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
         observer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
         observer.bind((interface, 0))
         observer.setblocking(False)
         sockets[observer] = interface
     markers = {fixture.payload_for(run_id, name): name for name in FLOWS}
-    record = {"node": node, "interfaces": INTERFACES[node], "observed_frames": 0,
+    record = {"node": node, "interfaces": interfaces, "observed_frames": 0,
               "truncated": False, "packet_socket_drops": 0, "wireguard_edges": {},
+              "wireguard_interfaces": {},
               "direct_client_exit_packets": 0, "plaintext_leaks": 0,
               "destination_requests": {name: 0 for name in FLOWS},
               "destination_responses": {name: 0 for name in FLOWS}}
@@ -77,6 +88,8 @@ def capture(directory, run_id, node):
                         fixture.stop()
                         break
                     record["wireguard_edges"][edge] = record["wireguard_edges"].get(edge, 0) + 1
+                    by_interface = record["wireguard_interfaces"].setdefault(sockets[observer], {})
+                    by_interface[edge] = by_interface.get(edge, 0) + 1
                 flow_name = markers.get(packet["payload"])
                 if flow_name is None:
                     continue

@@ -6,6 +6,8 @@ export LC_ALL=C
 umask 077
 
 revision=$1
+stage=${2:-backend}
+case $stage in backend|kernel-only) ;; *) exit 64 ;; esac
 case $revision in ''|*[!0-9a-f]*) exit 64 ;; esac
 [ "${#revision}" -eq 40 ] || [ "${#revision}" -eq 64 ] || exit 64
 [ "$(id -un)" = vpci ]
@@ -39,6 +41,12 @@ if [ "$(uname -r)" != "$kernel" ]; then
     sudo -n grub-reboot "Advanced options for Debian GNU/Linux>Debian GNU/Linux, with Linux $kernel"
     printf '%s\n' "$kernel" >/home/vpci/wifi-mesh-kernel-prepared
     exit 194
+fi
+
+if [ "$stage" = kernel-only ]; then
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends iw kmod
+    exit 0
 fi
 
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update

@@ -17,6 +17,7 @@ on:
           - mixed-link
           - sharing
           - wifi-mesh
+          - wifi-link
   pull_request:
     branches:
       - main
@@ -62,6 +63,7 @@ jobs:
           sh -n tests/integration/kvm-alpha-topology.sh
           sh -n tests/integration/run-alpha-topology-vm.sh
           python3 tests/integration/test-wifi-mesh-smoke.py
+          python3 tests/integration/test-wifi-link-smoke.py
 
       - name: Install official Ubuntu VM tools
         run: |
@@ -208,6 +210,18 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = wifi-link; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/wifi-link-smoke.json"
+            if test -f "$report"; then
+              jq -r '"agent-created Wi-Fi/LocalOnly runtime succeeded: \(.success)",
+                "source revision: \(.source_revision)", "blocker: \(.observed_blocker // "none")",
+                "scope: simulated mesh plus Ethernet, not physical radio or aggregate capacity"' \
+                "$report" >>"$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish Wi-Fi overlay runtime evidence.' >>"$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = wifi-mesh; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/wifi-mesh-smoke.json"
             if test -f "$report"; then
@@ -340,7 +354,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -413,7 +427,7 @@ jobs:
           ' "$report" >/dev/null
 
       - name: Require real local-link runtime evidence
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'local-link'
+        if: always() && (env.VOLPAROSSA_ALPHA_SCENARIO == 'local-link' || env.VOLPAROSSA_ALPHA_SCENARIO == 'wifi-link')
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -547,6 +561,34 @@ jobs:
             .host_state.unchanged == true
           ' "$VOLPAROSSA_ALPHA_OUTPUT/wifi-mesh-smoke.json" >/dev/null
 
+      - name: Require actual agent-created simulated mesh overlay evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'wifi-link'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-wifi-local-link-runtime" and
+            .source_revision == $revision and .success == true and .agent_created_mesh == true and
+            .open_l2_underlay == true and .retained_ethernet_contact == "10.241.12.0/30" and
+            .physical_radio_proven == false and .wifi_only_proven == false and
+            .independent_bandwidth_aggregation_proven == false and
+            .discovery.success == true and .discovery.other_agents_not_started == true and
+            .discovery.mutual_mesh_bootstrap_contacts == 0 and
+            .discovery.authenticated_signed_peers == 2 and .discovery.mdns_remote_peer_records > 0 and
+            (.mesh_nodes | length) == 2 and ([.mesh_nodes[].wiphy] | unique | length) == 2 and
+            all(.mesh_nodes[]; .peer_established == true and .frequency_mhz == 2412 and
+              .same_mesh_after_route_disconnect == true and
+              all(.application_phase_counter_delta[]; . > 0) and
+              all(.wireguard_transport_packets[]; . > 0)) and
+            .mesh_shutdown.remaining_mesh_interfaces == 0 and
+            .mesh_shutdown.agents_stopped_before_helpers == true and
+            .radio_cleanup.hwsim_module_unloaded == true and .radio_cleanup.remaining_radios == 0 and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/wifi-link-smoke.json" >/dev/null
+
       - name: Upload bounded topology diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -557,7 +599,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

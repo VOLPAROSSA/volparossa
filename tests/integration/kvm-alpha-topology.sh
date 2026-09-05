@@ -12,6 +12,7 @@ umask 077
 
 mode=preview
 scenario=alpha
+wifi_link=no
 approval=no
 source_directory=
 binary_directory=
@@ -24,10 +25,24 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|wifi-link]'
 }
 
 print_plan() {
+    if [ "$wifi_link" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA Wi-Fi local-link runtime smoke plan:' \
+            '  require the disposable KVM guest with the exact pinned generic kernel;' \
+            '  create two simulated hwsim radios only in the guest; no physical radio actions;' \
+            '  replace only C-to-R0 Ethernet with agent-created open-L2 mesh; retain C-to-R2 Ethernet;' \
+            '  require mesh mDNS and authenticated signed peers before other agents start;' \
+            '  prove concurrent protected offline consumption and actual LAN relay contribution;' \
+            '  require actual mesh WireGuard payload and peer counter growth during the applications;' \
+            '  preserve mesh across route cleanup, remove it on agent shutdown before helpers stop;' \
+            '  unload the owned simulated radios and compare exact guest-root baseline;' \
+            '  emit wifi-link-smoke.json; no physical-radio, WiFi-only or aggregate-capacity claim.'
+        return
+    fi
     if [ "$scenario" = mixed-link ]; then
         printf '%s\n' \
             'VOLPAROSSA mixed-link genuine Multipath QUIC smoke plan:' \
@@ -123,7 +138,11 @@ while [ "$#" -gt 0 ]; do
             ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
-            case $2 in alpha|reciprocity|local-link|mixed-link|sharing) scenario=$2 ;; *) usage >&2; exit 64 ;; esac
+            case $2 in
+                wifi-link) scenario=local-link; wifi_link=yes ;;
+                alpha|reciprocity|local-link|mixed-link|sharing) scenario=$2; wifi_link=no ;;
+                *) usage >&2; exit 64 ;;
+            esac
             shift
             ;;
         --source)
@@ -216,6 +235,7 @@ if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario
     scenario_fixtures='reciprocity-smoke.sh reciprocity-smoke.py'
     [ "$scenario" != local-link ] || scenario_fixtures="$scenario_fixtures local-link-smoke.sh local-link-smoke.py"
     [ "$scenario" != sharing ] || scenario_fixtures="$scenario_fixtures sharing-smoke.sh sharing-smoke.py"
+    [ "$wifi_link" != yes ] || scenario_fixtures="$scenario_fixtures wifi-link-smoke.sh wifi-link-smoke.py"
     for reciprocity_fixture in $scenario_fixtures; do
         [ -f "$source_directory/tests/integration/$reciprocity_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$reciprocity_fixture" ] \
@@ -929,6 +949,9 @@ cleanup() {
         done
     fi
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
+    if [ "$wifi_link" = yes ]; then
+        wifi_link_agents_stopped || original_status=1
+    fi
     if [ "$scenario" = sharing ]; then
         sharing_verify_cleanup || original_status=1
     fi
@@ -938,6 +961,9 @@ cleanup() {
         "$R2" "$R1" "$R0" "$B2" "$B1" "$CLIENT"; do
         ip netns del "$cleanup_ns" 2>/dev/null || true
     done
+    if [ "$wifi_link" = yes ]; then
+        wifi_link_module_cleanup || original_status=1
+    fi
     if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
         cat "$HOSTS_BACKUP" >/etc/hosts || original_status=1
         HOSTS_BACKUP=
@@ -1127,6 +1153,9 @@ cleanup() {
         sharing_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = local-link ]; then
         local_link_finalize_report "$original_status" || original_status=1
+        if [ "$wifi_link" = yes ]; then
+            wifi_link_finalize_report "$original_status" || original_status=1
+        fi
     elif [ "$scenario" = reciprocity ]; then
         reciprocity_finalize_report "$original_status" || original_status=1
     else
@@ -1161,6 +1190,10 @@ fi
 if [ "$scenario" = local-link ]; then
     # shellcheck source=tests/integration/local-link-smoke.sh
     . "$source_directory/tests/integration/local-link-smoke.sh"
+fi
+if [ "$wifi_link" = yes ]; then
+    # shellcheck source=tests/integration/wifi-link-smoke.sh
+    . "$source_directory/tests/integration/wifi-link-smoke.sh"
 fi
 if [ "$scenario" = sharing ]; then
     # shellcheck source=tests/integration/sharing-smoke.sh
@@ -1379,6 +1412,7 @@ elif [ "$scenario" = sharing ]; then
     sharing_extend_network
 elif [ "$scenario" = local-link ]; then
     local_link_extend_network
+    [ "$wifi_link" != yes ] || wifi_link_prepare
 elif [ "$scenario" = reciprocity ]; then
     reciprocity_extend_network
 fi
@@ -1506,6 +1540,11 @@ write_config() {
         relay_capacity=10; exit_capacity=10
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
+    if [ "$wifi_link" = yes ]; then
+        # Only the absent, not-yet-started Ethernet/WAN contacts remain configured. Neither
+        # mesh peer is preconfigured on the other; the first association must be mDNS-driven.
+        case $node in client|relay0) bootstrap_one=none ;; esac
+    fi
     {
         printf 'runtime_mode: development\nnetwork:\n  name: VOLPAROSSA-alpha-%s\n' "$RUN_ID"
         printf '  protocol_version: 4\n  advertisement_ttl_seconds: 300\n'
@@ -1538,6 +1577,7 @@ write_config() {
             printf 'sharing:\n  enabled: true\n  interface: sharing0\n'
             printf '  total_upload_mbps: 12\n  contribution_upload_ceiling_mbps: 10\n'
         fi
+        [ "$wifi_link" != yes ] || wifi_link_config
         # Request an actual per-path reservation below every signed 32-Mbps Relay/Exit
         # advertisement. The native authorization chain binds this value to both service ledgers.
         printf 'routing:\n  client_minimum_upload_mbps: 8\n'
@@ -1939,10 +1979,18 @@ launch_agent() {
         "$binary_directory/volparossa-agent" >/dev/null
 }
 
+if [ "$wifi_link" = yes ]; then wifi_link_observe_start; fi
 launch_agent client "$CLIENT"
-launch_agent bootstrap1 "$B1"
-launch_agent bootstrap2 "$B2"
+if [ "$wifi_link" != yes ]; then
+    launch_agent bootstrap1 "$B1"
+    launch_agent bootstrap2 "$B2"
+fi
 launch_agent relay0 "$R0"
+if [ "$wifi_link" = yes ]; then
+    wifi_link_wait_mdns
+    launch_agent bootstrap1 "$B1"
+    launch_agent bootstrap2 "$B2"
+fi
 launch_agent relay1 "$R1"
 launch_agent relay2 "$R2"
 launch_agent relay3 "$R3"

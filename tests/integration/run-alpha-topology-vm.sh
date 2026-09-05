@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh.'
 }
 
@@ -43,6 +43,10 @@ print_plan() {
         printf '%s\n' \
             'Alpha scenario: verify/copy the exact candidate Debian package and prove' \
             '  install, doctor, start, upgrade and removal inside the guest first.'
+    elif [ "$scenario" = wifi-link ]; then
+        printf '%s\n' \
+            'Wi-Fi link scenario: exact generic guest kernel and two simulated radios; agent-created mesh;' \
+            '  mDNS bootstrap, protected consume/GIVE plus retained Ethernet; no physical radio or capacity claim.'
     elif [ "$scenario" = wifi-mesh ]; then
         printf '%s\n' \
             'Wi-Fi mesh scenario: install one exact hash-verified official generic guest kernel and reboot once;' \
@@ -78,7 +82,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -312,7 +316,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link) ;; *) exit 64 ;; esac
 cd /home/vpci
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
 if [ "$scenario" = wifi-mesh ]; then
@@ -321,6 +325,10 @@ if [ "$scenario" = wifi-mesh ]; then
     tar -xzf source.tar.gz
     cd source
     exec sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit"
+fi
+if [ "$scenario" = wifi-link ]; then
+    tar -xzf source.tar.gz
+    (cd source && sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit" kernel-only)
 fi
 printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
 [ "$(stat -Lc '%s' volparossa-mpquic)" -le 67108864 ]
@@ -381,7 +389,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|sharing) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|sharing|wifi-link) topology_scenario=$scenario ;; esac
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
     --execute --yes \
@@ -406,7 +414,7 @@ GUEST_DRIVER_SCRIPT
 chmod 0700 "$GUEST_DRIVER"
 
 set -- -no-reboot
-if [ "$scenario" = wifi-mesh ]; then set --; fi
+case $scenario in wifi-mesh|wifi-link) set -- ;; esac
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
@@ -481,8 +489,8 @@ ssh_base /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
     "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
 GUEST_STATUS=$?
 set -e
-if [ "$scenario" = wifi-mesh ] && [ "$GUEST_STATUS" -eq 194 ]; then
-    # Only the wifi-mesh guest stage may request this one exact-kernel reboot.
+if { [ "$scenario" = wifi-mesh ] || [ "$scenario" = wifi-link ]; } && [ "$GUEST_STATUS" -eq 194 ]; then
+    # Only the Wi-Fi guest stage may request this one exact-kernel reboot.
     old_boot=$(ssh_base cat /proc/sys/kernel/random/boot_id)
     ssh_base sudo -n systemctl reboot >/dev/null 2>&1 || true
     reboot_attempt=0

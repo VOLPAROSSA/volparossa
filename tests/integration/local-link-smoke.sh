@@ -140,6 +140,9 @@ local_link_run() {
     RECIPROCITY_PIDS=$local_link_server_pid
     local_link_select_contribution || fail LOCAL_LINK_DATA_CONTRIBUTOR_NOT_SELECTED
     PHASE=local-link-udp
+    if [ "${wifi_link:-no}" = yes ]; then
+        wifi_link_snapshot payload-before || fail WIFI_LINK_PAYLOAD_BASELINE_UNAVAILABLE
+    fi
     local_link_capture_pids=
     for local_link_node in client relay0 relay2 exit; do
         local_link_ns=$(reciprocity_namespace "$local_link_node")
@@ -192,6 +195,7 @@ local_link_run() {
     RECIPROCITY_PIDS=
     python3 "$WORK/bin/local-link-smoke.py" evidence "$WORK" "$RUN_ID" \
         || fail LOCAL_LINK_EVIDENCE_INVALID
+    [ "${wifi_link:-no}" != yes ] || wifi_link_after_payload
     PHASE=local-link-complete
     OBSERVED_BLOCKER=
 }

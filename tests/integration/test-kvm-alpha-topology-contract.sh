@@ -688,4 +688,5 @@ sh -n "$HERE/mixed-link-smoke.sh"
 grep -F 'volparossa-mixed-link-runtime' "$WORKFLOW" >/dev/null
 grep -F 'mixed_link_validate_evidence' "$GUEST" >/dev/null
 python3 -B "$HERE/test-mixed-link-smoke.py"
-printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link and sharing topology static contract passed'
+python3 -B "$HERE/test-wifi-link-smoke.py"
+printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing and wifi-link topology static contract passed'
