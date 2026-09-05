@@ -2534,7 +2534,7 @@ where
         gate,
         source,
         sender,
-        baseline,
+        RemovalBaseline::SameRuntime(baseline),
         custody_name,
         expected_binding,
         custody,
@@ -2565,7 +2565,7 @@ where
         gate,
         source,
         sender,
-        baseline,
+        RemovalBaseline::Restart(baseline),
         custody_name,
         expected_binding,
         custody,
@@ -2574,6 +2574,12 @@ where
     .await
     .map(ExactRemovedInventory::into_restart_proof)
     .map_err(|_| RestartRemovalError)
+}
+
+/// Live owners authorize only their exact pair; restart owns an ordered inventory chain.
+enum RemovalBaseline {
+    SameRuntime(StableStartupInventory),
+    Restart(StableStartupInventory),
 }
 
 #[allow(
@@ -2585,7 +2591,7 @@ async fn remove_and_attest_core<S>(
     gate: &ManagerMutationGate,
     source: &S,
     sender: &NotifySender,
-    baseline: StableStartupInventory,
+    baseline: RemovalBaseline,
     custody_name: CustodyFdName,
     expected_binding: CustodyDescriptorBinding,
     custody: BorrowedCustodyPair<'_>,
@@ -2599,6 +2605,9 @@ where
         .acquire_removal(deadline)
         .await
         .map_err(RemovalFailure::before_send)?;
+    let same_runtime = matches!(baseline, RemovalBaseline::SameRuntime(_));
+    let (RemovalBaseline::SameRuntime(mut baseline) | RemovalBaseline::Restart(mut baseline)) =
+        baseline;
     if source.scope() != &baseline.snapshot.scope {
         return Err(RemovalFailure::before_send(
             FdStoreError::RemovalTargetMismatch,
@@ -2615,9 +2624,26 @@ where
         .validate_service_contract(source.scope())
         .map_err(RemovalFailure::before_send)?;
     if preflight != baseline.snapshot {
-        return Err(RemovalFailure::before_send(invalid_inventory(
-            "removal baseline changed before the send boundary",
-        )));
+        if !same_runtime {
+            return Err(RemovalFailure::before_send(invalid_inventory(
+                "removal baseline changed before the send boundary",
+            )));
+        }
+        // A sibling publication or completed removal does not revoke this live owner's exact
+        // target. Rebase under the same mutation gate, never across the removal send boundary.
+        preflight
+            .validate_removal_target(source.scope(), custody_name, &expected_binding)
+            .map_err(RemovalFailure::before_send)?;
+        let confirmed = within_deadline(deadline, source.snapshot(deadline))
+            .await
+            .map_err(RemovalFailure::before_send)?;
+        confirmed
+            .validate_removal_target(source.scope(), custody_name, &expected_binding)
+            .map_err(RemovalFailure::before_send)?;
+        if preflight != confirmed {
+            return Err(RemovalFailure::before_send(FdStoreError::UnstableInventory));
+        }
+        baseline.snapshot = confirmed;
     }
     let before =
         CustodyDescriptorBinding::from_custody(custody).map_err(RemovalFailure::before_send)?;
@@ -4748,6 +4774,19 @@ mod tests {
     #[tokio::test]
     async fn exact_removal_is_payload_only_barriered_and_preserves_unrelated_inventory_and_owners()
     {
+        prove_exact_removal_with_sibling_change(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn same_runtime_removal_is_independent_of_sibling_publication_and_removal_order() {
+        prove_exact_removal_with_sibling_change(true, false).await;
+        prove_exact_removal_with_sibling_change(false, true).await;
+    }
+
+    async fn prove_exact_removal_with_sibling_change(
+        sibling_published_later: bool,
+        sibling_removed_later: bool,
+    ) {
         let directory = tempdir().expect("notification directory");
         let socket_path = directory.path().join("remove-notify.sock");
         let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
@@ -4771,18 +4810,28 @@ mod tests {
         let mut baseline_entries = Vec::from(exact_pair_entries(target_name, &binding));
         baseline_entries.extend(exact_pair_entries(unrelated_name, &unrelated_binding));
         let baseline_snapshot = snapshot(42, baseline_entries);
+        let mut publication_snapshot = baseline_snapshot.clone();
+        if sibling_published_later {
+            publication_snapshot =
+                snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        }
+        if sibling_removed_later {
+            publication_snapshot.entries.extend(exact_pair_entries(
+                custody_name(69),
+                &CustodyDescriptorBinding([descriptor_identity(780), descriptor_identity(790)]),
+            ));
+            publication_snapshot = snapshot(42, publication_snapshot.entries);
+        }
         let successor_snapshot = snapshot(
             42,
             Vec::from(exact_pair_entries(unrelated_name, &unrelated_binding)),
         );
-        let source = FakeInventorySource::new(
-            42,
-            vec![
-                baseline_snapshot.clone(),
-                successor_snapshot.clone(),
-                successor_snapshot,
-            ],
-        );
+        let mut snapshots = vec![baseline_snapshot.clone()];
+        if sibling_published_later || sibling_removed_later {
+            snapshots.push(baseline_snapshot);
+        }
+        snapshots.extend([successor_snapshot.clone(), successor_snapshot]);
+        let source = FakeInventorySource::new(42, snapshots);
         let gate = ManagerMutationGate::new();
         let expected_removal = fdstore_remove_message(target_name);
         let receiver_thread = thread::spawn(move || {
@@ -4808,7 +4857,7 @@ mod tests {
             &gate,
             &source,
             &sender,
-            stable_inventory(baseline_snapshot, address.clone()),
+            stable_inventory(publication_snapshot, address.clone()),
             target_name,
             binding.clone(),
             custody,
@@ -5190,54 +5239,76 @@ mod tests {
 
     #[tokio::test]
     async fn removal_preflight_drift_is_before_send_and_emits_no_datagram() {
-        let directory = tempdir().expect("notification directory");
-        let socket_path = directory.path().join("preflight-drift.sock");
-        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
-        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
-        let sender = NotifySender::new(&address).expect("removal sender");
-        let pidfd = tempfile().expect("pidfd fixture");
-        let network_namespace = tempfile().expect("network namespace fixture");
-        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
-            .expect("borrow removal pair");
-        let binding = custody_binding(custody);
-        let target_name = custody_name(77);
-        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
-        let unrelated_name = custody_name(78);
-        let unrelated =
-            CustodyDescriptorBinding([descriptor_identity(960), descriptor_identity(970)]);
-        let mut drifted_entries = baseline_snapshot.entries.clone();
-        drifted_entries.extend(exact_pair_entries(unrelated_name, &unrelated));
-        let source = FakeInventorySource::new(42, vec![snapshot(42, drifted_entries)]);
-        let gate = ManagerMutationGate::new();
-
-        let result = remove_and_attest(
-            &gate,
-            &source,
-            &sender,
-            stable_inventory(baseline_snapshot, address),
-            target_name,
-            binding,
-            custody,
-            HardDeadline::after(Duration::from_secs(2)).expect("preflight deadline"),
-        )
-        .await;
-
-        assert!(matches!(
-            result,
-            Err(RemovalFailure::BeforeSend {
-                error: FdStoreError::InvalidInventory(
-                    "removal baseline changed before the send boundary"
+        for restart in [false, true] {
+            let directory = tempdir().expect("notification directory");
+            let socket_path = directory.path().join("preflight-drift.sock");
+            let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+            let address =
+                NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+            let sender = NotifySender::new(&address).expect("removal sender");
+            let pidfd = tempfile().expect("pidfd fixture");
+            let network_namespace = tempfile().expect("network namespace fixture");
+            let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+                .expect("borrow removal pair");
+            let binding = custody_binding(custody);
+            let target_name = custody_name(77);
+            let baseline_snapshot =
+                snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+            let unrelated_name = custody_name(78);
+            let unrelated =
+                CustodyDescriptorBinding([descriptor_identity(960), descriptor_identity(970)]);
+            let mut drifted_entries = baseline_snapshot.entries.clone();
+            drifted_entries.extend(exact_pair_entries(unrelated_name, &unrelated));
+            let source = FakeInventorySource::new(
+                42,
+                vec![snapshot(42, drifted_entries), baseline_snapshot.clone()],
+            );
+            let gate = ManagerMutationGate::new();
+            let baseline = stable_inventory(baseline_snapshot, address);
+            let deadline = HardDeadline::after(Duration::from_secs(2)).expect("preflight deadline");
+            let rejected = if restart {
+                matches!(
+                    remove_restart_and_attest(
+                        &gate,
+                        &source,
+                        &sender,
+                        baseline,
+                        target_name,
+                        binding,
+                        custody,
+                        deadline,
+                    )
+                    .await,
+                    Err(RestartRemovalError)
                 )
-            })
-        ));
-        assert_no_datagram(&receiver);
-        drop(
-            gate.acquire_removal(
-                HardDeadline::after(Duration::from_secs(2)).expect("open gate deadline"),
-            )
-            .await
-            .expect("preflight failure leaves gate open"),
-        );
+            } else {
+                matches!(
+                    remove_and_attest(
+                        &gate,
+                        &source,
+                        &sender,
+                        baseline,
+                        target_name,
+                        binding,
+                        custody,
+                        deadline,
+                    )
+                    .await,
+                    Err(RemovalFailure::BeforeSend {
+                        error: FdStoreError::UnstableInventory
+                    })
+                )
+            };
+            assert!(rejected);
+            assert_no_datagram(&receiver);
+            drop(
+                gate.acquire_removal(
+                    HardDeadline::after(Duration::from_secs(2)).expect("open gate deadline"),
+                )
+                .await
+                .expect("preflight failure leaves gate open"),
+            );
+        }
     }
 
     #[allow(
@@ -6628,7 +6699,8 @@ mod tests {
             1
         );
         assert_eq!(transaction.matches("send_once(BARRIER_MESSAGE").count(), 1);
-        assert_eq!(transaction.matches("source.snapshot(deadline)").count(), 3);
+        // Same-runtime rebasing adds one confirming preflight; the two post-send reads remain.
+        assert_eq!(transaction.matches("source.snapshot(deadline)").count(), 4);
         for forbidden in [
             "FDSTORE_PREFIX",
             "FDPOLL=0",
