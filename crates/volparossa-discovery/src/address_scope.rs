@@ -278,6 +278,47 @@ mod tests {
         assert!(!allowed_in(&circuit, None));
     }
 
+    fn outer_namespace_setup_denied(
+        status_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> bool {
+        status_code == Some(1)
+            && stdout.is_empty()
+            && matches!(
+                stderr,
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+            )
+    }
+
+    #[test]
+    fn private_discovery_scope_namespace_skip_never_hides_child_failure() {
+        for denied in [
+            b"unshare: unshare failed: Operation not permitted\n".as_slice(),
+            b"unshare: write failed /proc/self/uid_map: Operation not permitted\n".as_slice(),
+        ] {
+            assert!(outer_namespace_setup_denied(Some(1), b"", denied));
+            for code in [None, Some(0), Some(2), Some(101), Some(124)] {
+                assert!(!outer_namespace_setup_denied(code, b"", denied));
+            }
+            assert!(!outer_namespace_setup_denied(
+                Some(1),
+                b"running 1 test\n",
+                denied
+            ));
+            let child_started = [b"LAN_SCOPE_CHILD_STARTED\n".as_slice(), denied].concat();
+            assert!(!outer_namespace_setup_denied(Some(1), b"", &child_started));
+            let extra = [denied, b"network operation failed\n".as_slice()].concat();
+            assert!(!outer_namespace_setup_denied(Some(1), b"", &extra));
+        }
+        assert!(!outer_namespace_setup_denied(
+            Some(1),
+            b"",
+            b"RTNETLINK answers: Operation not permitted\n"
+        ));
+    }
+
     #[test]
     #[allow(
         clippy::too_many_lines,
@@ -303,11 +344,7 @@ mod tests {
                 .output()
                 .expect("bounded disposable user/netns test");
             assert_eq!(namespace(), original, "host network namespace unchanged");
-            if !output.status.success()
-                && output
-                    .stderr
-                    .starts_with(b"unshare: unshare failed: Operation not permitted")
-            {
+            if outer_namespace_setup_denied(output.status.code(), &output.stdout, &output.stderr) {
                 eprintln!("SKIP: disposable user/netns is unavailable; no host networking changed");
                 return;
             }
@@ -321,6 +358,8 @@ mod tests {
             print!("{}", String::from_utf8_lossy(&output.stdout));
             return;
         };
+        // A failure after entering this branch is never an outer unshare setup denial.
+        eprintln!("LAN_SCOPE_CHILD_STARTED");
         assert_ne!(original, std::path::Path::new(&parent));
         let ip = |args: &[&str]| {
             assert_ne!(
