@@ -314,6 +314,7 @@ grep -F 'INGRESS_TCP_STREAM_COMPLETED "$WORK/a08-tls-completion-events.txt"' "$G
     )
 )
 printf '%s\n' 'A08 bounded-log rollover and timestamp contract passed'
+python3 -B "$HERE/test-privacy-observer.py"
 grep -F 'denial_baseline_ms=$(client_log_baseline_ms) || return 1' "$GUEST" >/dev/null
 grep -F '"$denial_event" "$WORK/$denial_output-rejection-events.txt"' "$GUEST" >/dev/null
 if grep -F 'tls_policy_event_count' "$GUEST" >/dev/null; then exit 1; fi

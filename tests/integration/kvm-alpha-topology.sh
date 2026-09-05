@@ -2440,7 +2440,9 @@ with open(output_path, "x", encoding="ascii") as output:
     output.write("\n")
 PYTHON
 cat >"$WORK/bin/privacy-observer.py" <<'PYTHON'
+import errno
 import json
+import os
 import select
 import signal
 import socket
@@ -2467,7 +2469,47 @@ counters = {
     "exit_leg_wireguard_data_datagrams": 0,
     "relay1_wireguard_data_datagrams": 0,
     "relay2_wireguard_data_datagrams": 0,
+    "expected_link_down_notifications": 0,
+    "unexpected_outer_tuple_overflow_packets": 0,
 }
+link_down_interfaces = {}
+unexpected_outer_tuples = {}
+expected_down_marker = os.path.join(os.path.dirname(output_path), "a07-privacy-link-down.marker")
+
+
+def receive_frame(capture, interface):
+    try:
+        return capture.recv(65535)
+    except BlockingIOError:
+        return None
+    except OSError as error:
+        # A07 deliberately cycles only these two interfaces. Preserve the packet socket so
+        # the kernel resumes capture on link-up; this is reported downtime, not packet absence.
+        if (
+            error.errno != errno.ENETDOWN
+            or role != "relay1"
+            or interface not in {"r1c", "r1x"}
+            or not os.path.exists(expected_down_marker)
+        ):
+            raise
+        counters["expected_link_down_notifications"] += 1
+        link_down_interfaces[interface] = link_down_interfaces.get(interface, 0) + 1
+        time.sleep(0.05)
+        return None
+
+
+def record_unexpected_outer_tuple(interface, protocol, source, source_port, destination, destination_port):
+    # This disposable fixture uses synthetic endpoints only. Keep bounded header diagnostics,
+    # never payload, and retain the strict unexpected-packet failure even when detail overflows.
+    key = (interface, protocol, source, source_port, destination, destination_port)
+    if key in unexpected_outer_tuples:
+        unexpected_outer_tuples[key] += 1
+    elif len(unexpected_outer_tuples) < 32:
+        unexpected_outer_tuples[key] = 1
+    else:
+        counters["unexpected_outer_tuple_overflow_packets"] += 1
+
+
 sockets = {}
 for interface in interfaces:
     capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
@@ -2499,9 +2541,8 @@ while running and time.monotonic() < deadline:
     readable, _, _ = select.select(list(sockets), [], [], 0.2)
     for capture in readable:
         while True:
-            try:
-                frame = capture.recv(65535)
-            except BlockingIOError:
+            frame = receive_frame(capture, sockets[capture])
+            if frame is None:
                 break
             observed_frames += 1
             if observed_frames > 1048576:
@@ -2641,6 +2682,9 @@ while running and time.monotonic() < deadline:
                     and (source not in allowed or destination not in allowed)
                 ):
                     counters["unexpected_outer_packets"] += 1
+                    record_unexpected_outer_tuple(
+                        interface, protocol, source, source_port, destination, destination_port
+                    )
                 if is_wireguard_data and {source, destination} == {
                     "43.159.1.1",
                     relay_public,
@@ -2679,6 +2723,15 @@ with open(output_path, "x", encoding="ascii") as output:
             "interfaces": interfaces,
             "observed_frames": observed_frames,
             "truncated": truncated,
+            "expected_link_down_interfaces": link_down_interfaces,
+            "unexpected_outer_tuples": [
+                {
+                    "interface": key[0], "protocol": key[1], "source": key[2],
+                    "source_port": key[3], "destination": key[4],
+                    "destination_port": key[5], "packets": count,
+                }
+                for key, count in sorted(unexpected_outer_tuples.items())
+            ],
             **counters,
         },
         output,
@@ -5298,6 +5351,7 @@ kill -0 "$HTTP3_CLIENT_PID" 2>/dev/null \
     || fail A07_HTTP3_FLOW_ENDED_BEFORE_RELAY_REMOVAL
 wait_native_mpquic_paths a07-native-before both \
     || fail A07_NATIVE_PATH_STATUS_UNAVAILABLE
+install -o root -g root -m 0600 /dev/null "$WORK/a07-privacy-link-down.marker"
 ip -n "$R1" link set r1c down
 ip -n "$R1" link set r1x down
 A07_R1C_STATE=$(ip -n "$R1" -j link show dev r1c | jq -er '.[0].operstate')

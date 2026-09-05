@@ -38,6 +38,11 @@ same bounded log window and all payload/source checks. A08--A14 as a complete se
 need a passing live rerun; working DNS/TLS is not reported as a completed acceptance sequence.
 Both [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982300867) and
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982298530) passed at `9da11b81`.
+Retained captures also exposed an A11 observer failure during A07's intentional Relay link-down.
+The observer now reports that explicitly marked downtime and survives it; an actual isolated
+veth packet-socket down/up check passes. Unexpected outer Relay packets remain a separate
+unresolved result, now with bounded header-only tuple diagnostics; the zero-unexpected-packet
+acceptance rule is unchanged.
 `0075033e` also passed
 [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972360525) and
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972358060).
