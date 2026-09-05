@@ -20167,9 +20167,35 @@ mod tests {
             exit_peer,
             refresh_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS),
         );
+        let original_key = ForwardedExitKey {
+            control_relay_peer: original_control.peer_id,
+            exit_peer,
+        };
+        let retained = fixture.runtime.forwarded_exits[&original_key].clone();
+        assert!(fixture.runtime.has_current_forwarded_exit_control(
+            &refreshed_control,
+            exit_peer,
+            refresh_ms.saturating_add(1_000),
+        ));
         fixture.runtime.schedule_exit_advertisement_fetches();
-        assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
-        assert!(fixture.runtime.pending_client_forwards.is_empty());
+        // A current older lineage suppresses its own refresh, not bounded enrollment of a
+        // different authenticated control. The original affine capability must remain exact.
+        let [alternate] = fixture.runtime.automatic_exit_fetch_attempts.as_slice() else {
+            panic!("exactly one alternate control enrollment");
+        };
+        assert_eq!(
+            alternate.key,
+            ForwardedExitKey {
+                control_relay_peer: *other_relay.peer_id(),
+                exit_peer,
+            }
+        );
+        assert_eq!(
+            alternate.request.control_relay_peer_id(),
+            other_relay.peer_id().to_bytes()
+        );
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+        assert_eq!(fixture.runtime.forwarded_exits[&original_key], retained);
     }
 
     #[tokio::test]

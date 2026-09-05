@@ -16,6 +16,11 @@ failed until exact worker-class inventory and the actual SIGKILL/restart sequenc
 All measured remaining objects, worker namespace references and FD-store descriptors were zero,
 and guest-root state hashes matched. `cleanup.complete` is nevertheless false because the A14
 proof did not complete. This is not an all-A01--A15 alpha pass, nor proof of the newer extensions.
+The exact route-versus-ingress worker classifier is now integrated, including real disposable
+veth/WireGuard inventory checks. The [new complete attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33991871530)
+at `590378a9` is pending. Its benchmark selects and records an actual suitable route before
+starting payloads; committed MPTCP paths are reported as Reachable, not fictitious active
+subflows. Kernel subflow and packet evidence remain independently required.
 
 ### Earlier integration evidence and corrections
 
@@ -177,7 +182,8 @@ WAN can differ at the same Relay. LAN preparation requires an assigned local add
 connected route and a read-only exact kernel source-to-peer lookup; activation rechecks that
 binding. Public-IP validation remains unchanged. Focused checks cover scoped canonical encoding,
 local provenance, planner-to-preprobe consumption, mixed-leg signed helper activation and kernel
-route parsing. These checks are not live LAN packet evidence, so the datapath items remain open.
+route parsing. These initial checks were not live LAN packet evidence; the later passing runs
+below now support the two scoped datapath items.
 
 LocalOnly Relays are now selectable using an explicit authenticated LAN prefix and an absent
 ASN, never a fabricated public origin. Unknown origins conservatively collide with one another;
@@ -192,7 +198,7 @@ The local-link scenario now requires two overlapping flows: the offline node con
 a WAN-capable Relay and simultaneously relays another node's traffic over two private links
 to a different WAN-capable Exit. It checks application hashes, both WireGuard legs, Exit source
 addresses, one unchanged offline daemon and the absence of an offline default route. Script
-checks pass; this extended giving-and-taking datapath has no passing live result yet.
+checks passed before the later live giving-and-taking result recorded below.
 The [extended run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982376532) at
 `9da11b81` stopped at `LOCAL_LINK_NEIGHBOR_DISCOVERY_UNAVAILABLE`: the offline consumer's
 three-peer view was ready, but the second consumer's candidate view stayed empty. It never
@@ -270,7 +276,7 @@ concurrently, and verifies replies with the same sequential replay owner. The Ex
 the complete authenticated ordinal/endpoint set before one shared helper Prepare, requiring
 exact local traversal hints for each LAN path. Partial sets expire without helper allocation.
 Nine focused tests, the mixed-plan real helper encoder check and strict agent Clippy pass;
-mixed-path application traffic remains unproven.
+the subsequent `f1881887` run above supplies the mixed-path application proof.
 The [next v1 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33986783919)
 at `f8660814` stopped during A01 selection. Its Exit collector wrongly required identical
 ephemeral Client sessions across paths, although production deliberately creates a distinct
@@ -282,8 +288,7 @@ The disposable `mixed-link` scenario now reuses the real A06 HTTP/3 transfer wit
 LocalOnly LAN Relay and one public Relay to the same Exit. It retains bounded ordinary
 selection draws and requires matching 4/8-MiB payload hashes, two genuine native paths,
 more than 1 MiB on each WireGuard leg, scoped privacy captures and full cleanup. Its five
-focused report/observer checks and shell/workflow contract pass; the
-[live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33987800329) is pending.
+focused report/observer checks and shell/workflow contract passed before its first live attempt.
 It makes no aggregate-bandwidth or real-radio claim.
 The [first mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33987800329)
 failed before transfer: the public data Relay received the Exit's lexicographically first private
@@ -382,7 +387,8 @@ at `f1881887` stopped during fixture configuration, before agent startup: the no
 configuration branch returned the previous shell condition's nonzero status. A direct shell
 regression fails on the old code and passes with explicit success for non-mesh nodes; all five
 Wi-Fi fixture checks pass. Simulated radios were removed and guest-state hashes matched.
-The corrected full-agent mesh run still needs to execute; the backend-only radio pass is unchanged.
+The [corrected full-agent mesh run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33991872480)
+at `590378a9` is pending; the backend-only radio pass is unchanged.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
